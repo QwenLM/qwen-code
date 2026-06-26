@@ -150,19 +150,18 @@ export async function startVoiceServer(
           }
           return;
         }
-        if (!options.isEnabled?.()) {
-          if (disabledCloseTimer) return;
-          const closed = closeVoiceClients(wss);
-          if (closed > 0) {
-            log?.info('voice: closing active clients because voice is disabled');
-            disabledCloseTimer = setTimeout(() => {
-              disabledCloseTimer = undefined;
-              if (!options.isEnabled?.()) {
-                terminateVoiceClients(wss);
-              }
-            }, DISABLED_CLOSE_GRACE_MS);
-            disabledCloseTimer.unref?.();
-          }
+        // Reached only when disabled (the guard above returns when enabled).
+        if (disabledCloseTimer) return;
+        const closed = closeVoiceClients(wss);
+        if (closed > 0) {
+          log?.info('voice: closing active clients because voice is disabled');
+          disabledCloseTimer = setTimeout(() => {
+            disabledCloseTimer = undefined;
+            if (!options.isEnabled?.()) {
+              terminateVoiceClients(wss);
+            }
+          }, DISABLED_CLOSE_GRACE_MS);
+          disabledCloseTimer.unref?.();
         }
       }, 1000)
     : undefined;

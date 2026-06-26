@@ -54,7 +54,6 @@ export interface VoiceStreamDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
-const MAX_SERVER_ERROR_MESSAGE_LENGTH = 200;
 const debugLogger = createScopedLogger(CONSOLE_LOGGER, 'VOICE_STREAM_SESSION');
 
 export function deriveWebSocketBase(baseUrl: string): string {
@@ -75,10 +74,9 @@ export function deriveStreamUrl(baseUrl: string): string {
 
 function formatServerErrorMessage(raw: unknown, apiKey?: string): string {
   const text = typeof raw === 'string' ? raw : 'unknown';
-  return escapeAnsiCtrlCodes(sanitizeResponseDetails(text, apiKey)).slice(
-    0,
-    MAX_SERVER_ERROR_MESSAGE_LENGTH,
-  );
+  // sanitizeResponseDetails already caps length and appends `...`; slicing
+  // again here would clip that indicator off.
+  return escapeAnsiCtrlCodes(sanitizeResponseDetails(text, apiKey));
 }
 
 export function openVoiceStream(

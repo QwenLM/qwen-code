@@ -21,7 +21,6 @@ export interface QwenRealtimeDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
-const MAX_SERVER_ERROR_MESSAGE_LENGTH = 200;
 const debugLogger = createScopedLogger(CONSOLE_LOGGER, 'VOICE_QWEN_REALTIME');
 
 export function deriveQwenRealtimeUrl(baseUrl: string, model: string): string {
@@ -40,10 +39,9 @@ function toError(error: unknown): Error {
 
 function formatServerErrorMessage(raw: unknown, apiKey?: string): string {
   const text = typeof raw === 'string' ? raw : 'Qwen ASR realtime failed.';
-  return escapeAnsiCtrlCodes(sanitizeResponseDetails(text, apiKey)).slice(
-    0,
-    MAX_SERVER_ERROR_MESSAGE_LENGTH,
-  );
+  // sanitizeResponseDetails already caps length and appends `...`; slicing
+  // again here would clip that indicator off.
+  return escapeAnsiCtrlCodes(sanitizeResponseDetails(text, apiKey));
 }
 
 export function openQwenAsrRealtimeStream(
@@ -78,7 +76,7 @@ export function openQwenAsrRealtimeStream(
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let finishedTranscript: string | null = null;
     let terminalError: Error | null = null;
-    let failed = false;
+    let settled = false;
     let backpressureWarned = false;
 
     const sendJson = (body: Record<string, unknown>) => {
@@ -108,8 +106,8 @@ export function openQwenAsrRealtimeStream(
     };
 
     const fail = (error: unknown) => {
-      if (failed) return;
-      failed = true;
+      if (settled) return;
+      settled = true;
       const normalized = toError(error);
       clearConnectTimer();
       clearFinishTimer();
@@ -261,7 +259,7 @@ export function openQwenAsrRealtimeStream(
             );
             break;
           }
-          failed = true;
+          settled = true;
           clearFinishTimer();
           finishedTranscript = lastPartial.trim() || committed.trim();
           finishResolve?.(finishedTranscript);
@@ -290,7 +288,7 @@ export function openQwenAsrRealtimeStream(
     ws.on('close', () => {
       clearConnectTimer();
       clearFinishTimer();
-      if (failed) return;
+      if (settled) return;
       if (!openSettled) {
         openSettled = true;
         reject(new Error('Qwen ASR realtime connection closed.'));

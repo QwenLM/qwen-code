@@ -143,11 +143,15 @@ export function createVoiceConnectionHandler(
   const transcribeBatch = deps.transcribeBatch ?? defaultTranscribeBatch;
   // Shared across all connections from this server (factory closure).
   let activeSessions = 0;
+  let connSeq = 0;
 
   return (ws: WebSocket) => {
+    // Short per-connection id so concurrent sessions (up to
+    // MAX_CONCURRENT_VOICE_SESSIONS) are distinguishable in the logs.
+    const connId = (++connSeq).toString(36);
     if (activeSessions >= MAX_CONCURRENT_VOICE_SESSIONS) {
       log?.warn(
-        `[voice-ws] rejected: activeSessions=${activeSessions} limit=${MAX_CONCURRENT_VOICE_SESSIONS}`,
+        `[voice-ws ${connId}] rejected: activeSessions=${activeSessions} limit=${MAX_CONCURRENT_VOICE_SESSIONS}`,
       );
       try {
         ws.send(
@@ -226,7 +230,7 @@ export function createVoiceConnectionHandler(
 
     function fail(message: string): void {
       if (state === 'closed') return;
-      log?.warn(`[voice-ws] failed: ${message}`);
+      log?.warn(`[voice-ws ${connId}] failed: ${message}`);
       sendJson({ type: 'error', message });
       cleanup();
       releaseSlotWhenIdle();
@@ -301,7 +305,9 @@ export function createVoiceConnectionHandler(
               session = undefined;
             }
           } else {
-            log?.warn('voice: finalize with no active streaming session');
+            log?.warn(
+              `[voice-ws ${connId}] finalize with no active streaming session (bufferedBytes=${bufferedBytes}, pcmChunks=${pcmChunks.length})`,
+            );
           }
         } else if (pcmChunks.length > 0) {
           transcript = await transcribeBatch(
@@ -310,7 +316,9 @@ export function createVoiceConnectionHandler(
             abortController.signal,
           );
         } else {
-          log?.warn('voice: finalize with no batch audio');
+          log?.warn(
+            `[voice-ws ${connId}] finalize with no batch audio (bufferedBytes=${bufferedBytes}, pcmChunks=${pcmChunks.length})`,
+          );
         }
       } catch (error) {
         fail(errMessage(error));
@@ -344,8 +352,13 @@ export function createVoiceConnectionHandler(
         }
         return;
       }
-      const control = parseControl(data.toString('utf8'));
-      if (!control) return;
+      const text = data.toString('utf8');
+      const control = parseControl(text);
+      if (!control) {
+        // Non-JSON or unknown control type — leave a trace for protocol drift.
+        log?.debug(`[voice-ws ${connId}] unrecognized text frame:`, text.slice(0, 80));
+        return;
+      }
       switch (control.type) {
         case 'start':
           await ensureStarted();
@@ -364,7 +377,7 @@ export function createVoiceConnectionHandler(
       if (!isBinary) {
         const control = parseControl(buf.toString('utf8'));
         if (control?.type === 'abort') {
-          log?.debug('voice: abort requested, discarding session state');
+          log?.debug(`[voice-ws ${connId}] abort requested, discarding session state`);
           cleanup();
           try {
             ws.close(1000, 'aborted');
@@ -408,7 +421,7 @@ export function createVoiceConnectionHandler(
         });
     });
     ws.on('close', (code: number, reason: Buffer) => {
-      log?.info('[voice-ws] close', {
+      log?.info(`[voice-ws ${connId}] close`, {
         code,
         reason: reason?.toString(),
         state,
@@ -417,7 +430,7 @@ export function createVoiceConnectionHandler(
       releaseSlotWhenIdle();
     });
     ws.on('error', (error: Error) => {
-      log?.warn(`[voice-ws] socket error: ${error.message}`);
+      log?.warn(`[voice-ws ${connId}] socket error: ${error.message}`);
       if (state !== 'closed') cleanup();
       releaseSlotWhenIdle();
     });

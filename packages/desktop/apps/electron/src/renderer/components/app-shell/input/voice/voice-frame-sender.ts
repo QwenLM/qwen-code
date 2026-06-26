@@ -18,7 +18,9 @@ export function sendVoicePcmFrame(
   }
 
   const nextDroppedFrames = droppedFrames + 1;
-  if (nextDroppedFrames >= MAX_DROPPED_VOICE_FRAMES) {
+  // Fire only as the threshold is first crossed: callers keep streaming ~4
+  // frames/s, so `>=` would re-fire teardown on every later dropped frame.
+  if (nextDroppedFrames === MAX_DROPPED_VOICE_FRAMES) {
     onTooManyDroppedFrames();
   }
   return nextDroppedFrames;

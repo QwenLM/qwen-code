@@ -74,6 +74,62 @@ describe('openVoiceStream', () => {
     await expect(finishPromise).resolves.toBe('hello world')
   })
 
+  it('commits sentences on sentence_end and resets the running partial', async () => {
+    const socket = new FakeSocket()
+    const interims: string[] = []
+    const streamPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      { onInterim: (text) => interims.push(text) },
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('open')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+    )
+    const stream = await streamPromise
+
+    // Interim partial for the first sentence (no sentence_end yet).
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: { event: 'result-generated' },
+        payload: { output: { sentence: { text: 'hel' } } },
+      }),
+    )
+    // sentence_end commits the sentence and clears the running partial.
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: { event: 'result-generated' },
+        payload: { output: { sentence: { text: 'hello', sentence_end: true } } },
+      }),
+    )
+    // A second committed sentence appends to the running transcript.
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: { event: 'result-generated' },
+        payload: { output: { sentence: { text: 'world', sentence_end: true } } },
+      }),
+    )
+
+    const finishPromise = stream.finish()
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-finished' } }),
+    )
+
+    // lastPartial was reset by sentence_end, so the final value comes from the
+    // committed transcript ('hel' would leak through if it were not reset).
+    await expect(finishPromise).resolves.toBe('hello world')
+    expect(interims).toEqual(['hel', 'hello', 'hello world'])
+  })
+
   it('redacts credentials from stream server errors', async () => {
     const socket = new FakeSocket()
     const streamPromise = openVoiceStream(
