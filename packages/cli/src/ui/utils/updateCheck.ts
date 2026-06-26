@@ -19,6 +19,12 @@ export interface UpdateObject {
   update: UpdateInfo;
 }
 
+export type UpdateCheckResult =
+  | { status: 'update'; info: UpdateObject }
+  | { status: 'up-to-date'; currentVersion: string }
+  | { status: 'skipped'; reason: string; currentVersion?: string }
+  | { status: 'error'; error: Error; currentVersion?: string };
+
 /**
  * From a nightly and stable update, determines which is the "best" one to offer.
  * The rule is to always prefer nightly if the base versions are the same.
@@ -42,18 +48,20 @@ function getBestAvailableUpdate(
   return semver.gt(stableVer, nightlyVer) ? stable : nightly;
 }
 
-export async function checkForUpdates(): Promise<UpdateObject | null> {
+export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
+  let currentVersion: string | undefined;
   try {
     // Skip update check when running from source (development mode)
     if (process.env['DEV'] === 'true') {
-      return null;
+      return { status: 'skipped', reason: 'development mode' };
     }
     const packageJson = await getPackageJson();
     if (!packageJson || !packageJson.name || !packageJson.version) {
-      return null;
+      return { status: 'skipped', reason: 'package metadata unavailable' };
     }
 
-    const { name, version: currentVersion } = packageJson;
+    const { name, version } = packageJson;
+    currentVersion = version;
     const isNightly = currentVersion.includes('nightly');
     const createNotifier = (distTag: 'latest' | 'nightly') =>
       updateNotifier({
@@ -80,8 +88,11 @@ export async function checkForUpdates(): Promise<UpdateObject | null> {
       if (bestUpdate && semver.gt(bestUpdate.latest, currentVersion)) {
         const message = `A new version of Qwen Code is available! ${currentVersion} → ${bestUpdate.latest}`;
         return {
-          message,
-          update: { ...bestUpdate, current: currentVersion },
+          status: 'update',
+          info: {
+            message,
+            update: { ...bestUpdate, current: currentVersion },
+          },
         };
       }
     } else {
@@ -90,15 +101,24 @@ export async function checkForUpdates(): Promise<UpdateObject | null> {
       if (updateInfo && semver.gt(updateInfo.latest, currentVersion)) {
         const message = `Qwen Code update available! ${currentVersion} → ${updateInfo.latest}`;
         return {
-          message,
-          update: { ...updateInfo, current: currentVersion },
+          status: 'update',
+          info: {
+            message,
+            update: { ...updateInfo, current: currentVersion },
+          },
         };
       }
     }
 
-    return null;
+    return { status: 'up-to-date', currentVersion };
   } catch (e) {
-    debugLogger.warn('Failed to check for updates: ' + e);
-    return null;
+    const error = e instanceof Error ? e : new Error(String(e));
+    debugLogger.warn('Failed to check for updates: ' + error);
+    return { status: 'error', error, currentVersion };
   }
+}
+
+export async function checkForUpdates(): Promise<UpdateObject | null> {
+  const result = await checkForUpdatesDetailed();
+  return result.status === 'update' ? result.info : null;
 }

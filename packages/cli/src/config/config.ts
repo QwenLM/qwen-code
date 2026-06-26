@@ -1085,7 +1085,7 @@ export async function parseArguments(): Promise<CliArgs> {
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
-    process.exit(0);
+    process.exit(process.exitCode ?? 0);
   }
 
   // Normalize query args: handle both quoted "@path file" and unquoted @path file

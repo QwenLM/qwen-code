@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
-const checkForUpdates = vi.fn();
+const checkForUpdatesDetailed = vi.fn();
 const handleAutoUpdate = vi.fn();
 const getInstallationInfo = vi.fn();
 const resolveUpdateCommand = vi.fn(
@@ -41,17 +41,13 @@ const formatUpdateInstructions = vi.fn(
     return ['Manual update required. Please reinstall Qwen Code.'];
   },
 );
-const getPackageJson = vi.fn();
-
-vi.mock('../utils/updateCheck.js', () => ({ checkForUpdates }));
+vi.mock('../utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
 vi.mock('../../utils/handleAutoUpdate.js', () => ({ handleAutoUpdate }));
 vi.mock('../../utils/installationInfo.js', () => ({
   formatUpdateInstructions,
   getInstallationInfo,
   resolveUpdateCommand,
 }));
-vi.mock('../../utils/package.js', () => ({ getPackageJson }));
-
 const { updateCommand } = await import('./update-command.js');
 
 function context(
@@ -74,9 +70,12 @@ function context(
 describe('updateCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    checkForUpdates.mockResolvedValue({
-      message: 'Update available: 1.2.3',
-      update: { latest: '1.2.3' },
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'update',
+      info: {
+        message: 'Update available: 1.2.3',
+        update: { latest: '1.2.3' },
+      },
     });
     getInstallationInfo.mockReturnValue({
       isStandalone: false,
@@ -182,8 +181,10 @@ describe('updateCommand', () => {
   });
 
   it('returns the current version when no update is available', async () => {
-    checkForUpdates.mockResolvedValue(null);
-    getPackageJson.mockResolvedValue({ version: '1.0.0' });
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'up-to-date',
+      currentVersion: '1.0.0',
+    });
 
     const result = await updateCommand.action!(context('non_interactive'), '');
 
@@ -192,5 +193,21 @@ describe('updateCommand', () => {
       messageType: 'info',
       content: 'Qwen Code 1.0.0 is up to date!',
     });
+  });
+
+  it('returns an error when the update check fails', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error: new Error('registry unavailable'),
+    });
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Failed to check for updates: registry unavailable',
+    });
+    expect(getInstallationInfo).not.toHaveBeenCalled();
   });
 });

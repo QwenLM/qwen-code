@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ArgumentsCamelCase } from 'yargs';
 
 const loadSettings = vi.fn();
-const checkForUpdates = vi.fn();
+const checkForUpdatesDetailed = vi.fn();
 const getInstallationInfo = vi.fn();
 const resolveUpdateCommand = vi.fn(
   (updateCommand: string, latestVersion: string) =>
@@ -47,7 +47,7 @@ const writeStdoutLine = vi.fn();
 const writeStderrLine = vi.fn();
 
 vi.mock('../config/settings.js', () => ({ loadSettings }));
-vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdates }));
+vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
 vi.mock('../utils/installationInfo.js', () => ({
   formatUpdateInstructions,
   getInstallationInfo,
@@ -80,9 +80,12 @@ describe('update command', () => {
     vi.clearAllMocks();
     process.exitCode = undefined;
     loadSettings.mockReturnValue(settings(undefined));
-    checkForUpdates.mockResolvedValue({
-      message: 'Update available: 1.2.3',
-      update: { latest: '1.2.3' },
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'update',
+      info: {
+        message: 'Update available: 1.2.3',
+        update: { latest: '1.2.3' },
+      },
     });
     getInstallationInfo.mockReturnValue({
       isStandalone: false,
@@ -180,14 +183,31 @@ describe('update command', () => {
   });
 
   it('prints the current version when no update is available', async () => {
-    checkForUpdates.mockResolvedValue(null);
-    getPackageJson.mockResolvedValue({ version: '1.0.0' });
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'up-to-date',
+      currentVersion: '1.0.0',
+    });
 
     await updateCommand.handler(updateArgs);
 
     expect(writeStdoutLine).toHaveBeenCalledWith(
       'Qwen Code 1.0.0 is up to date!',
     );
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('sets a non-zero exit code when the update check fails', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error: new Error('registry unavailable'),
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Failed to check for updates: registry unavailable',
+    );
+    expect(process.exitCode).toBe(1);
     expect(getInstallationInfo).not.toHaveBeenCalled();
   });
 });

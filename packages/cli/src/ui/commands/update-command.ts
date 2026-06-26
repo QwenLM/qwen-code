@@ -6,13 +6,6 @@
 
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
-import { checkForUpdates } from '../utils/updateCheck.js';
-import { handleAutoUpdate } from '../../utils/handleAutoUpdate.js';
-import {
-  formatUpdateInstructions,
-  getInstallationInfo,
-} from '../../utils/installationInfo.js';
-import { getPackageJson } from '../../utils/package.js';
 import { t } from '../../i18n/index.js';
 
 export const updateCommand: SlashCommand = {
@@ -23,21 +16,54 @@ export const updateCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context) => {
+    const [
+      { checkForUpdatesDetailed },
+      { handleAutoUpdate },
+      installationInfo,
+    ] = await Promise.all([
+      import('../utils/updateCheck.js'),
+      import('../../utils/handleAutoUpdate.js'),
+      import('../../utils/installationInfo.js'),
+    ]);
+    const { formatUpdateInstructions, getInstallationInfo } = installationInfo;
+
     const settings = context.services.settings;
     const projectRoot = context.services.config?.getProjectRoot();
 
-    const info = await checkForUpdates();
+    const updateCheck = await checkForUpdatesDetailed();
 
-    if (!info) {
-      const pkg = await getPackageJson();
-      const version = pkg?.version || 'unknown';
-      const msg = t('Qwen Code {{version}} is up to date!', { version });
+    if (updateCheck.status === 'up-to-date') {
+      const msg = t('Qwen Code {{version}} is up to date!', {
+        version: updateCheck.currentVersion,
+      });
       return {
         type: 'message' as const,
         messageType: 'info' as const,
         content: msg,
       };
     }
+
+    if (updateCheck.status === 'error') {
+      return {
+        type: 'message' as const,
+        messageType: 'error' as const,
+        content: t('Failed to check for updates: {{error}}', {
+          error: updateCheck.error.message,
+        }),
+      };
+    }
+
+    if (updateCheck.status === 'skipped') {
+      return {
+        type: 'message' as const,
+        messageType: 'error' as const,
+        content: t('Unable to check for updates: {{reason}}', {
+          reason: updateCheck.reason,
+        }),
+      };
+    }
+
+    const info = updateCheck.info;
 
     // In interactive mode (TUI), route through handleAutoUpdate which emits
     // events the TUI already listens to (UpdateNotification, etc.).
@@ -53,14 +79,14 @@ export const updateCommand: SlashCommand = {
       return;
     }
 
-    const installationInfo = getInstallationInfo(
+    const installInfo = getInstallationInfo(
       projectRoot || process.cwd(),
       isAutoUpdateEnabled,
     );
     const lines = [
       info.message,
-      ...formatUpdateInstructions(installationInfo, info.update.latest).map(
-        (line) => t(line),
+      ...formatUpdateInstructions(installInfo, info.update.latest).map((line) =>
+        t(line),
       ),
     ];
 

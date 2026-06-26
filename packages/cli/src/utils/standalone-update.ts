@@ -211,12 +211,16 @@ export function isSafeTarLinkTarget(
   if (path.posix.isAbsolute(linkPath) || path.win32.isAbsolute(linkPath)) {
     return false;
   }
+  const archiveRoot = entryPath.split(/[\\/]+/)[0];
+  if (!archiveRoot) {
+    return false;
+  }
   const linkTarget = path.resolve(
     resolvedDest,
     path.dirname(entryPath),
     linkPath,
   );
-  return isPathInside(resolvedDest, linkTarget);
+  return isPathInside(path.join(resolvedDest, archiveRoot), linkTarget);
 }
 
 export function isSafeTarEntry(
@@ -625,7 +629,8 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
       ensurePathInShellRc(binDir);
     }
   } catch (err) {
-    debugLogger.warn('Failed to create bin wrapper:', err);
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to create bin wrapper: ${detail}`);
   }
 }
 

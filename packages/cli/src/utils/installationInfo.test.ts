@@ -725,4 +725,17 @@ describe('formatUpdateInstructions', () => {
       expect.stringContaining('install-qwen-standalone.'),
     ]);
   });
+
+  it('resolves @latest in updateMessage-only guidance for nightly versions', () => {
+    expect(
+      formatUpdateInstructions(
+        {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateMessage: 'Please run sudo npm i -g @qwen-code/qwen-code@latest',
+        },
+        '1.2.3-nightly.20250101',
+      ),
+    ).toEqual(['Please run sudo npm i -g @qwen-code/qwen-code@nightly']);
+  });
 });

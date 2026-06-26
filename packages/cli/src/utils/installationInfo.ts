@@ -52,7 +52,9 @@ export function formatUpdateInstructions(
   const lines: string[] = [];
 
   if (installationInfo.updateMessage && !installationInfo.updateCommand) {
-    lines.push(installationInfo.updateMessage);
+    lines.push(
+      resolveUpdateCommand(installationInfo.updateMessage, latestVersion),
+    );
   }
 
   if (installationInfo.updateCommand) {

@@ -253,6 +253,19 @@ describe('standalone-update', () => {
         }
       },
     );
+
+    it.skipIf(process.platform === 'win32')(
+      'throws when wrapper creation fails safety validation',
+      () => {
+        const libDir = path.join(tempDir, 'bad\npath', '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(standaloneDir, { recursive: true });
+
+        expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
+          'Failed to create bin wrapper',
+        );
+      },
+    );
   });
 
   describe('performStandaloneUpdate', () => {
@@ -367,6 +380,13 @@ describe('standalone-update', () => {
           'C:\\Windows\\System32',
           dest,
         ),
+      ).toBe(false);
+    });
+
+    it('rejects symlink targets outside the archive root that will be installed', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '../../shared/node', dest),
       ).toBe(false);
     });
   });
