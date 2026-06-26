@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
   LOOP_TASK_FILE_MAX_BYTES,
   readLoopTaskFile,
@@ -49,14 +51,25 @@ const TRUNCATION_WARNING = `> WARNING: loop.md was truncated to ${LOOP_TASK_FILE
 const INTRO =
   'The user configured a loop-tasks file. Work through the tasks defined below; these are the instructions for this tick and every subsequent tick (the reminder on later fires refers back to this message).';
 
-const SHORT_REMINDER: Record<LoopMode, string> = {
-  cron:
-    '# /loop tick — loop.md tasks\n' +
-    'Work the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron fires the next tick automatically — do not call LoopWakeup from this tick.',
+// Body of the unchanged-tick reminder — the H1 is supplied by tickHeading() so
+// the full block and the short reminder share exactly one heading style.
+const SHORT_REMINDER_BODY: Record<LoopMode, string> = {
+  cron: 'Work the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron fires the next tick automatically — do not call LoopWakeup from this tick.',
   dynamic:
-    '# /loop tick — loop.md tasks (dynamic pacing)\n' +
     'Work the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. You scheduled this tick via LoopWakeup (not a recurring cron). To keep the loop alive, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
 };
+
+/**
+ * The single H1 for a tick message. `sourceLabel` (set only on a full-block
+ * delivery) is a relative label like "project loop.md", never the absolute
+ * path — so the resolved file location isn't leaked to the model/API provider.
+ */
+function tickHeading(mode: LoopMode, sourceLabel?: string): string {
+  const base = sourceLabel
+    ? `# /loop tick — loop.md tasks from ${sourceLabel}`
+    : '# /loop tick — loop.md tasks';
+  return mode === 'dynamic' ? `${base} (dynamic pacing)` : base;
+}
 
 const SHORT_ABSENT: Record<LoopMode, string> = {
   cron:
@@ -94,7 +107,20 @@ export class LoopTickResolver {
   // sending a dangling short reminder next time.
   #pendingContent: string | null = null;
 
+  // fs.realpath(projectRoot) is stable for this resolver's lifetime (projectRoot
+  // only changes on /cd, which rebuilds the resolver), so resolve it once and
+  // reuse. On failure resolve to undefined → readLoopTaskFile recomputes inline
+  // and surfaces the real error, preserving per-tick error semantics.
+  #realProjectRoot: Promise<string | undefined> | undefined;
+
   constructor(private readonly deps: LoopTickResolverDeps) {}
+
+  #getRealProjectRoot(): Promise<string | undefined> {
+    this.#realProjectRoot ??= fs
+      .realpath(this.deps.projectRoot)
+      .catch(() => undefined);
+    return this.#realProjectRoot;
+  }
 
   /** Forget the delivered content so the next fire re-delivers the full block
    * — called when the conversation is compacted (fresh context). */
@@ -114,12 +140,16 @@ export class LoopTickResolver {
     const result = await readLoopTaskFile({
       projectRoot: this.deps.projectRoot,
       homeDir: this.deps.homeDir,
+      realProjectRoot: await this.#getRealProjectRoot(),
     });
 
     if (result.status === 'missing') {
-      // Nothing to deliver, so nothing to commit; leave #lastContent untouched
-      // so a later recreate still compares unequal and re-delivers full.
+      // Absence is itself a state change: clear both caches so a later recreate
+      // — even with byte-identical content — re-expands the full block rather
+      // than sending a dangling short reminder that points at a block no longer
+      // guaranteed to be in context.
       this.#pendingContent = null;
+      this.#lastContent = null;
       return { modelText: SHORT_ABSENT[mode], full: false };
     }
 
@@ -130,14 +160,20 @@ export class LoopTickResolver {
 
     if (this.#lastContent === content) {
       return {
-        modelText: SHORT_REMINDER[mode],
+        modelText: `${tickHeading(mode)}\n${SHORT_REMINDER_BODY[mode]}`,
         full: false,
         sourcePath: result.path,
       };
     }
 
+    // Relative label, not result.path (the absolute path) — that would leak the
+    // OS username / dir layout to the API provider. The absolute path still goes
+    // to the caller via sourcePath for local UI use.
+    const projectFile = path.join(this.deps.projectRoot, '.qwen', 'loop.md');
+    const sourceLabel =
+      result.path === projectFile ? 'project loop.md' : 'home loop.md';
     return {
-      modelText: `# /loop tick — tasks from ${result.path}\n${INTRO}\n${content}\n${SHORT_REMINDER[mode]}`,
+      modelText: `${tickHeading(mode, sourceLabel)}\n${INTRO}\n${content}\n${SHORT_REMINDER_BODY[mode]}`,
       full: true,
       sourcePath: result.path,
     };

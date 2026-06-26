@@ -13,11 +13,12 @@ import {
   readLoopTaskFile,
 } from './loop-task-file.js';
 
-// Make only readFile controllable; every other fs call stays real so the
-// temp-dir fixtures keep working. The default impl calls through to actual.
+// Make only open controllable; every other fs call stays real so the temp-dir
+// fixtures keep working. The reader is bounded via fs.open + filehandle.read,
+// so open is the injection point. The default impl calls through to actual.
 vi.mock('node:fs/promises', async (importActual) => {
   const actual = await importActual<typeof import('node:fs/promises')>();
-  return { ...actual, readFile: vi.fn(actual.readFile) };
+  return { ...actual, open: vi.fn(actual.open) };
 });
 
 describe('readLoopTaskFile', () => {
@@ -154,7 +155,7 @@ describe('readLoopTaskFile', () => {
     const eacces = Object.assign(new Error('EACCES: permission denied'), {
       code: 'EACCES',
     });
-    vi.mocked(fs.readFile).mockRejectedValueOnce(eacces);
+    vi.mocked(fs.open).mockRejectedValueOnce(eacces);
 
     await expect(readLoopTaskFile({ projectRoot, homeDir })).rejects.toThrow(
       /EACCES/,
@@ -212,6 +213,26 @@ describe('readLoopTaskFile', () => {
       );
       expect(result.truncated).toBe(true);
     }
+  });
+
+  it('bounds the read for a very large file (reads at most cap + 1 bytes)', async () => {
+    // A multi-MB file must not be fully read/decoded every tick: the bounded
+    // reader caps the buffer, so content stays at the cap and truncated flips.
+    await writeProject('x'.repeat(2_000_000));
+    const openSpy = vi.mocked(fs.open);
+    openSpy.mockClear();
+
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result.status).toBe('found');
+    if (result.status === 'found') {
+      expect(result.truncated).toBe(true);
+      expect(Buffer.byteLength(result.content, 'utf8')).toBe(
+        LOOP_TASK_FILE_MAX_BYTES,
+      );
+    }
+    // Read through a single bounded fs.open handle, not fs.readFile of the whole.
+    expect(openSpy).toHaveBeenCalledTimes(1);
   });
 
   it('does not truncate task files at exactly the byte cap', async () => {

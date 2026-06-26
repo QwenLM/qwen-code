@@ -27,6 +27,47 @@ export type LoopTaskFileResult =
 export interface ReadLoopTaskFileOptions {
   projectRoot: string;
   homeDir: string;
+  /**
+   * Pre-resolved `fs.realpath(projectRoot)`. projectRoot is stable for a
+   * resolver's lifetime, so the resolver resolves it once and passes it here
+   * to avoid a realpath syscall every tick. Omit to resolve inline.
+   */
+  realProjectRoot?: string;
+}
+
+/**
+ * Read at most `LOOP_TASK_FILE_MAX_BYTES + 1` bytes — the one extra byte is the
+ * truncation signal and the only thing we need past the cap, so a huge/malicious
+ * loop.md is never fully read or decoded. Returns `null` for a non-regular node
+ * (e.g. a directory at the loop.md path) so the caller skips to the next
+ * candidate. Symlink/escape filtering is the caller's job and already done.
+ */
+async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    if (!(await handle.stat()).isFile()) {
+      return null;
+    }
+    const cap = LOOP_TASK_FILE_MAX_BYTES + 1;
+    const buffer = Buffer.alloc(cap);
+    let total = 0;
+    // A single read() may return short even before EOF; loop until cap or EOF.
+    while (total < cap) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        total,
+        cap - total,
+        total,
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      total += bytesRead;
+    }
+    return buffer.subarray(0, total);
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -46,16 +87,17 @@ export interface ReadLoopTaskFileOptions {
 export async function readLoopTaskFile({
   projectRoot,
   homeDir,
+  realProjectRoot,
 }: ReadLoopTaskFileOptions): Promise<LoopTaskFileResult> {
   const projectFile = path.join(projectRoot, '.qwen', 'loop.md');
   const homeFile = path.join(homeDir, '.qwen', 'loop.md');
   const checkedPaths = [projectFile, homeFile];
 
   for (const filePath of checkedPaths) {
-    let buffer: Buffer;
+    let buffer: Buffer | null;
     try {
       if (filePath === projectFile) {
-        const realRoot = await fs.realpath(projectRoot);
+        const realRoot = realProjectRoot ?? (await fs.realpath(projectRoot));
         const real = await fs.realpath(filePath);
         if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
           // Skip silently to the next candidate, but leave a debug trail so a
@@ -69,7 +111,7 @@ export async function readLoopTaskFile({
           );
           continue;
         }
-        buffer = await fs.readFile(real);
+        buffer = await readBoundedTaskFile(real);
       } else {
         // lstat (not stat) so a directly symlinked home loop.md is detected
         // rather than followed.
@@ -77,7 +119,7 @@ export async function readLoopTaskFile({
         if (stat.isSymbolicLink()) {
           continue;
         }
-        buffer = await fs.readFile(filePath);
+        buffer = await readBoundedTaskFile(filePath);
       }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -88,6 +130,11 @@ export async function readLoopTaskFile({
         continue;
       }
       throw error;
+    }
+
+    // A non-regular node (e.g. a directory where loop.md was expected) → skip.
+    if (buffer === null) {
+      continue;
     }
 
     // A whitespace-only file is not a task list; fall through to the next path.

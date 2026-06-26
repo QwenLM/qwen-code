@@ -66,14 +66,18 @@ describe('LoopTickResolver', () => {
     const tick = await resolver.resolve('dynamic');
 
     expect(tick.full).toBe(true);
+    // sourcePath keeps the absolute path for local UI; the model text must not.
     expect(tick.sourcePath).toBe(projectFile());
     expect(tick.modelText).toContain(
-      `# /loop tick — tasks from ${projectFile()}`,
+      '# /loop tick — loop.md tasks from project loop.md',
     );
+    expect(tick.modelText).not.toContain(projectFile());
     expect(tick.modelText).toContain('The user configured a loop-tasks file.');
     expect(tick.modelText).toContain('- ship the thing');
     // The full block ends with the same short reminder an unchanged fire emits.
     expect(tick.modelText).toContain('(dynamic pacing)');
+    // Exactly one H1 in the whole message (no duplicated tick heading).
+    expect(tick.modelText.match(/^# /gm)).toHaveLength(1);
   });
 
   it('delivers only the short reminder when content is unchanged', async () => {
@@ -145,6 +149,27 @@ describe('LoopTickResolver', () => {
     expect(tick.modelText).toContain('- recreated tasks');
   });
 
+  it('re-expands after delete→recreate even when the recreated content is identical', async () => {
+    await writeProject('- same tasks');
+    expect((await resolver.resolve('dynamic')).full).toBe(true);
+    resolver.markDelivered();
+    // Unchanged content → short reminder, as expected.
+    expect((await resolver.resolve('dynamic')).full).toBe(false);
+
+    // Delete → the absent tick clears the delivered-content memory.
+    await fs.rm(projectFile());
+    const absent = await resolver.resolve('dynamic');
+    expect(absent.full).toBe(false);
+    expect(absent.modelText).toContain('loop.md is not currently present');
+
+    // Recreate with byte-identical content. Absence was a state change, so the
+    // full block must re-expand rather than collapse to a dangling reminder.
+    await writeProject('- same tasks');
+    const tick = await resolver.resolve('dynamic');
+    expect(tick.full).toBe(true);
+    expect(tick.modelText).toContain('- same tasks');
+  });
+
   it('uses mode-specific reminders; dynamic names the re-arm sentinel', async () => {
     await writeProject('- tasks');
 
@@ -197,8 +222,10 @@ describe('LoopTickResolver', () => {
     expect(second.full).toBe(true);
     expect(second.sourcePath).toBe(homeFile());
     expect(second.modelText).toContain(
-      `# /loop tick — tasks from ${homeFile()}`,
+      '# /loop tick — loop.md tasks from home loop.md',
     );
+    // The absolute home path must not leak into the model-facing text.
+    expect(second.modelText).not.toContain(homeFile());
     expect(second.modelText).toContain('- home tasks');
   });
 });
