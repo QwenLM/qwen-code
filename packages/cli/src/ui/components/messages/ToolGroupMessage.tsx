@@ -270,7 +270,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // Dense panel in both phases with all agents. During live phase
   // LiveAgentPanel below also shows running agents (brief overlap
   // that resolves as agents complete and expire from the panel).
-  if (isPureParallelAgentGroup(toolCalls) && !hasSubagentPendingConfirmation) {
+  // Skipped in transcript full-detail mode (fullDetail) so every agent
+  // falls through to its own full ToolMessage instead of the dense panel.
+  if (
+    !fullDetail &&
+    isPureParallelAgentGroup(toolCalls) &&
+    !hasSubagentPendingConfirmation
+  ) {
     return (
       <InlineParallelAgentsDisplay
         toolCalls={toolCalls}
@@ -297,8 +303,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Memory-only groups get their own compact rendering with read/write
   // counts. Check BEFORE the partition logic so they aren't routed through
-  // the collapsible/non-collapsible split.
+  // the collapsible/non-collapsible split. Skipped in transcript full-detail
+  // mode (fullDetail) so each memory op renders as its own full ToolMessage
+  // rather than collapsing to the "Recalled/Wrote N memories" badge.
   const allMemOpsComplete =
+    !fullDetail &&
     isMemoryOnlyGroup &&
     !hasErrorTool &&
     toolCalls.every((t) => t.status === ToolCallStatus.Success);

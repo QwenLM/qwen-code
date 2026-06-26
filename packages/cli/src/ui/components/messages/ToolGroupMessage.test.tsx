@@ -527,6 +527,46 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
+  // Transcript full-detail mode must NOT be short-circuited by the
+  // memory-only / pure-parallel-agent early returns (which run before the
+  // forceExpandAll computation). Each tool must render in full.
+  describe('fullDetail bypasses compact early returns', () => {
+    it('renders memory ops individually (not the "Recalled N" badge) when fullDetail', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'm1',
+          name: 'SaveMemory',
+          description: 'recall project goals',
+          isMemoryOp: 'read',
+          resultDisplay: 'remembered: ship the transcript view',
+        }),
+        createToolCall({
+          callId: 'm2',
+          name: 'SaveMemory',
+          description: 'recall constraints',
+          isMemoryOp: 'read',
+          resultDisplay: 'remembered: keep main view clean',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          memoryReadCount={2}
+          fullDetail
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // The compact "Recalled N" badge must NOT short-circuit fullDetail:
+      // each memory op renders as its own ToolMessage with forceShowResult.
+      // (ToolMessage is mocked in this suite as `MockTool[id]…[forceShow]`.)
+      expect(frame).not.toContain('Recalled 2 memories');
+      expect(frame).toContain('MockTool[m1]');
+      expect(frame).toContain('MockTool[m2]');
+      expect(frame).toContain('[forceShow]');
+    });
+  });
+
   describe('isUserInitiated', () => {
     it('user-initiated group renders all collapsible tools individually', () => {
       const toolCalls = [
