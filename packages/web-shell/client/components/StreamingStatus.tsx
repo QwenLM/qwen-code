@@ -31,12 +31,20 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   customLoadingPhrasesRef.current = customLoadingPhrases;
   // Prefer the host's custom phrases; fall back to the built-in defaults when
   // the resolver is absent or returns undefined/null. An empty array is honored
-  // as an explicit "hide" signal.
-  const resolvePhrases = useCallback(
-    (lang: string): readonly string[] =>
-      customLoadingPhrasesRef.current?.(lang) ?? getLoadingPhrases(lang),
-    [],
-  );
+  // as an explicit "hide" signal. The resolver is host-supplied, so a throw is
+  // contained here (it would otherwise propagate out of the setInterval tick
+  // below on every cycle and freeze the phrase) and falls back to defaults.
+  const resolvePhrases = useCallback((lang: string): readonly string[] => {
+    try {
+      return customLoadingPhrasesRef.current?.(lang) ?? getLoadingPhrases(lang);
+    } catch (error: unknown) {
+      console.warn(
+        '[web-shell] loadingPhrases resolver threw; using defaults',
+        error,
+      );
+      return getLoadingPhrases(lang);
+    }
+  }, []);
   const [elapsed, setElapsed] = useState(0);
   const startTime = useRef(Date.now());
   const [dotFrame, setDotFrame] = useState(0);

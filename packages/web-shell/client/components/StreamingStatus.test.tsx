@@ -174,4 +174,52 @@ describe('StreamingStatus loading phrases', () => {
       vi.useRealTimers();
     }
   });
+
+  // The PR drops the old `phrases.length === 0` early-return: an empty result no
+  // longer skips the interval, so a resolver that flips from [] (hidden) to a
+  // non-empty set is re-shown on the next tick. Guards against a refactor
+  // re-introducing the early return.
+  it('re-shows the phrase when the resolver switches from empty to non-empty on the next tick', () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      let phrases: readonly string[] = [];
+      const tree = () => (
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider
+            value={{ loadingPhrases: () => phrases }}
+          >
+            <StreamingStatus />
+          </WebShellCustomizationProvider>
+        </I18nProvider>
+      );
+
+      act(() => root.render(tree()));
+      mounted.push({ root, container });
+      expect(labelText(container)).toBeUndefined();
+
+      phrases = ['Now visible'];
+      act(() => {
+        vi.advanceTimersByTime(PHRASE_CHANGE_INTERVAL_MS);
+      });
+      expect(labelText(container)).toBe('Now visible');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('falls back to the built-in defaults when the resolver throws', () => {
+    pinPhraseSelection();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const container = render({
+      loadingPhrases: () => {
+        throw new Error('boom');
+      },
+    });
+    expect(labelText(container)).toBe(getLoadingPhrases('en')[0]);
+    expect(warn).toHaveBeenCalled();
+  });
 });
