@@ -482,15 +482,11 @@ export function getVoiceModel(): string {
   return loadStoredConfig()?.voiceModel ?? 'qwen3-asr-flash';
 }
 
-function loadStoredConfigForVoiceSettings(): StoredConfig | null {
-  return loadStoredConfig();
-}
-
 /**
  * Set the ASR model id used for voice dictation.
  */
 export function setVoiceModel(model: string): void {
-  const config = loadStoredConfigForVoiceSettings();
+  const config = loadStoredConfig();
   if (!config) return;
   config.voiceModel = model;
   saveConfig(config);
@@ -507,7 +503,7 @@ export function getVoiceEnabled(): boolean {
  * Enable or disable voice dictation in the composer.
  */
 export function setVoiceEnabled(enabled: boolean): void {
-  const config = loadStoredConfigForVoiceSettings();
+  const config = loadStoredConfig();
   if (!config) return;
   config.voiceEnabled = enabled;
   saveConfig(config);

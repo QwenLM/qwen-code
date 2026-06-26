@@ -1,7 +1,10 @@
 import { setTimeout as delay } from 'node:timers/promises'
+import { connect as netConnect } from 'node:net'
 import { describe, expect, it } from 'bun:test'
 import WebSocket from 'ws'
+import type { Logger } from '../runtime/platform'
 import {
+  classifyVoiceUpgrade,
   closeVoiceClients,
   closeVoiceServerResources,
   isAllowedVoiceOrigin,
@@ -117,6 +120,162 @@ describe('closeVoiceClients', () => {
 
     expect(count).toBe(1)
     expect(closes).toEqual([{ code: 1000, reason: 'voice disabled' }])
+  })
+})
+
+describe('classifyVoiceUpgrade', () => {
+  const base = {
+    pathname: '/voice/stream',
+    token: 'voice-token',
+    origin: undefined,
+    expectedToken: 'voice-token',
+    isEnabled: () => true,
+    allowedOrigins: [] as readonly string[],
+  }
+
+  it('rejects a wrong path with 404 before any other guard', () => {
+    expect(
+      classifyVoiceUpgrade({ ...base, pathname: '/nope', token: 'wrong' }),
+    ).toEqual({ status: 404, statusText: 'Not Found', reason: 'bad-path' })
+  })
+
+  it('rejects a disabled server with 403', () => {
+    expect(
+      classifyVoiceUpgrade({ ...base, isEnabled: () => false }),
+    ).toEqual({ status: 403, statusText: 'Forbidden', reason: 'disabled' })
+  })
+
+  it('rejects a disallowed origin with 403', () => {
+    expect(
+      classifyVoiceUpgrade({ ...base, origin: 'https://evil.example' }),
+    ).toEqual({ status: 403, statusText: 'Forbidden', reason: 'bad-origin' })
+  })
+
+  it('rejects a bad/missing token with 401', () => {
+    expect(classifyVoiceUpgrade({ ...base, token: 'wrong' })).toEqual({
+      status: 401,
+      statusText: 'Unauthorized',
+      reason: 'bad-token',
+    })
+    expect(classifyVoiceUpgrade({ ...base, token: null })).toEqual({
+      status: 401,
+      statusText: 'Unauthorized',
+      reason: 'bad-token',
+    })
+  })
+
+  it('allows a valid upgrade (returns null)', () => {
+    expect(classifyVoiceUpgrade(base)).toBeNull()
+  })
+})
+
+interface FakeLogger extends Logger {
+  warnings: string[]
+}
+
+function createFakeLogger(): FakeLogger {
+  const warnings: string[] = []
+  return {
+    warnings,
+    info: () => {},
+    warn: (...args: unknown[]) => warnings.push(args.map(String).join(' ')),
+    error: () => {},
+    debug: () => {},
+  }
+}
+
+// Drive a real upgrade over a raw TCP socket (so we control the Origin header,
+// which Bun's bundled ws client drops) and report whether the server upgraded.
+// The accept path flushes a `101 Switching Protocols` line; rejections write an
+// HTTP status then `socket.destroy()` whose body the client never sees — so we
+// assert upgrade-vs-reject here and the exact status via classifyVoiceUpgrade.
+function attemptOpen(opts: {
+  port: number
+  path: string
+  origin?: string
+}): Promise<'open' | 'rejected'> {
+  return new Promise((resolve) => {
+    const lines = [
+      `GET ${opts.path} HTTP/1.1`,
+      `Host: 127.0.0.1:${opts.port}`,
+      'Connection: Upgrade',
+      'Upgrade: websocket',
+      'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+      'Sec-WebSocket-Version: 13',
+    ]
+    if (opts.origin) lines.push(`Origin: ${opts.origin}`)
+    const socket = netConnect({ host: '127.0.0.1', port: opts.port }, () => {
+      socket.write(`${lines.join('\r\n')}\r\n\r\n`)
+    })
+    socket.setTimeout(5000)
+    let raw = ''
+    let settled = false
+    const done = (outcome: 'open' | 'rejected') => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve(outcome)
+    }
+    socket.on('data', (chunk) => {
+      raw += chunk.toString('utf8')
+      if (/^HTTP\/1\.1 101/.test(raw)) done('open')
+      else if (raw.includes('\r\n')) done('rejected')
+    })
+    socket.on('error', () => done('rejected'))
+    socket.on('close', () => done('rejected'))
+    socket.on('timeout', () => done('rejected'))
+  })
+}
+
+describe('startVoiceServer upgrade rejection guards (integration)', () => {
+  it('rejects each guard without upgrading, logging the matching guard', async () => {
+    let enabled = true
+    const logger = createFakeLogger()
+    const server = await startVoiceServer({
+      token: 'voice-token',
+      isEnabled: () => enabled,
+      allowedOrigins: [],
+      logger,
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    })
+    const validPath = '/voice/stream?token=voice-token'
+    try {
+      // Positive control: a valid request upgrades (proves attemptOpen detects it).
+      expect(await attemptOpen({ port: server.port, path: validPath })).toBe('open')
+
+      // Wrong path -> rejected (404).
+      expect(
+        await attemptOpen({ port: server.port, path: '/nope?token=voice-token' }),
+      ).toBe('rejected')
+      expect(logger.warnings.some((w) => w.includes('rejected upgrade for path'))).toBe(true)
+
+      // Disallowed origin -> rejected (403).
+      expect(
+        await attemptOpen({
+          port: server.port,
+          path: validPath,
+          origin: 'https://evil.example',
+        }),
+      ).toBe('rejected')
+      expect(logger.warnings.some((w) => w.includes('rejected upgrade with origin'))).toBe(true)
+
+      // Bad token -> rejected (401).
+      expect(
+        await attemptOpen({ port: server.port, path: '/voice/stream?token=wrong' }),
+      ).toBe('rejected')
+      expect(logger.warnings.some((w) => w.includes('rejected upgrade with invalid token'))).toBe(true)
+
+      // Disabled -> rejected (403).
+      enabled = false
+      expect(await attemptOpen({ port: server.port, path: validPath })).toBe('rejected')
+      expect(logger.warnings.some((w) => w.includes('rejected upgrade while disabled'))).toBe(true)
+      enabled = true
+    } finally {
+      await server.close()
+    }
   })
 })
 

@@ -21,6 +21,8 @@ export interface QwenRealtimeDeps {
 const CONNECT_TIMEOUT_MS = 8000;
 const FINISH_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_AUDIO_BYTES = 1024 * 1024;
+const CONNECTION_CLOSED_MESSAGE =
+  'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.';
 const debugLogger = createScopedLogger(CONSOLE_LOGGER, 'VOICE_QWEN_REALTIME');
 
 export function deriveQwenRealtimeUrl(baseUrl: string, model: string): string {
@@ -295,17 +297,11 @@ export function openQwenAsrRealtimeStream(
         return;
       }
       if (finishReject) {
-        finishReject(
-          new Error(
-            'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.',
-          ),
-        );
+        finishReject(new Error(CONNECTION_CLOSED_MESSAGE));
         finishResolve = null;
         finishReject = null;
       } else {
-        const error = new Error(
-          'Qwen ASR realtime connection closed unexpectedly. Transcript may be incomplete.',
-        );
+        const error = new Error(CONNECTION_CLOSED_MESSAGE);
         terminalError ??= error;
         callbacks.onError?.(terminalError);
       }

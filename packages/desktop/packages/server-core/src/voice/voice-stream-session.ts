@@ -341,6 +341,9 @@ export function openVoiceStream(
       } else if (!started) {
         fail(new Error('Voice stream closed before it started.'));
       } else {
+        // Match the other terminal branches: mark settled so a late error/close
+        // can't re-enter and double-fire onError.
+        settled = true;
         const err = new Error(
           'Voice stream connection closed unexpectedly. Transcript may be incomplete.',
         );

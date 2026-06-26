@@ -390,6 +390,12 @@ export function useVoiceCapture(
           // The following close event carries the useful code/reason.
         };
         ws.onclose = (event) => {
+          // The server closes 1000 only on normal completion ('done' after the
+          // final transcript, or 'aborted'); errors use 1011/1013 and drops are
+          // 1006. A graceful 1000 normally arrives after the `final` message has
+          // already detached this handler, but guard the code here too so a bare
+          // 1000 close can't surface a normal finish as a spurious error.
+          if (event.code === 1000) return;
           if (
             mountedRef.current &&
             (statusRef.current === 'recording' ||

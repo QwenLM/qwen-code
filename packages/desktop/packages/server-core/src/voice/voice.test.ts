@@ -240,4 +240,15 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
     await assertVoiceBaseUrlNetworkAllowed('https://127.0.0.1:8080', 'm', lookup)
     expect(called).toBe(false)
   })
+
+  it('rejects when the DNS lookup fails (cannot verify network safety)', async () => {
+    const lookup = async () => {
+      throw new Error('ENOTFOUND voice.example')
+    }
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed('https://voice.example', 'm', lookup),
+    ).rejects.toThrow(
+      "Voice model 'm': DNS lookup failed for voice.example. Cannot verify network safety.",
+    )
+  })
 })

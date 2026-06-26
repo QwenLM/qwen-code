@@ -61,6 +61,47 @@ interface ClosableHttpServer {
   closeAllConnections?: () => void;
 }
 
+/** Why an upgrade was rejected; drives both the HTTP status and the warn log. */
+export type VoiceUpgradeRejectionReason =
+  | 'bad-path'
+  | 'disabled'
+  | 'bad-origin'
+  | 'bad-token';
+
+export interface VoiceUpgradeRejection {
+  status: number;
+  statusText: string;
+  reason: VoiceUpgradeRejectionReason;
+}
+
+/**
+ * Decide whether a voice upgrade request must be rejected, in guard order
+ * (path → disabled → origin → token). Returns `null` to allow the upgrade.
+ * Pure so the guards are testable without going over the wire.
+ */
+export function classifyVoiceUpgrade(args: {
+  pathname: string;
+  token: string | null;
+  origin: string | undefined;
+  expectedToken: string;
+  isEnabled?: () => boolean;
+  allowedOrigins?: readonly string[];
+}): VoiceUpgradeRejection | null {
+  if (args.pathname !== '/voice/stream') {
+    return { status: 404, statusText: 'Not Found', reason: 'bad-path' };
+  }
+  if (args.isEnabled && !args.isEnabled()) {
+    return { status: 403, statusText: 'Forbidden', reason: 'disabled' };
+  }
+  if (!isAllowedVoiceOrigin(args.origin, args.allowedOrigins)) {
+    return { status: 403, statusText: 'Forbidden', reason: 'bad-origin' };
+  }
+  if (!tokenMatches(args.token, args.expectedToken)) {
+    return { status: 401, statusText: 'Unauthorized', reason: 'bad-token' };
+  }
+  return null;
+}
+
 export function isAllowedVoiceOrigin(
   origin: string | undefined,
   allowedOrigins: readonly string[] = [],
@@ -183,27 +224,32 @@ export async function startVoiceServer(
       socket.destroy();
       return;
     }
-    if (url.pathname !== '/voice/stream') {
-      log?.warn('voice: rejected upgrade for path:', url.pathname);
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    if (options.isEnabled && !options.isEnabled()) {
-      log?.warn('voice: rejected upgrade while disabled');
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    if (!isAllowedVoiceOrigin(req.headers.origin, options.allowedOrigins)) {
-      log?.warn('voice: rejected upgrade with origin:', req.headers.origin);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    if (!tokenMatches(url.searchParams.get('token'), options.token)) {
-      log?.warn('voice: rejected upgrade with invalid token');
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    const rejection = classifyVoiceUpgrade({
+      pathname: url.pathname,
+      token: url.searchParams.get('token'),
+      origin: req.headers.origin,
+      expectedToken: options.token,
+      isEnabled: options.isEnabled,
+      allowedOrigins: options.allowedOrigins,
+    });
+    if (rejection) {
+      switch (rejection.reason) {
+        case 'bad-path':
+          log?.warn('voice: rejected upgrade for path:', url.pathname);
+          break;
+        case 'disabled':
+          log?.warn('voice: rejected upgrade while disabled');
+          break;
+        case 'bad-origin':
+          log?.warn('voice: rejected upgrade with origin:', req.headers.origin);
+          break;
+        case 'bad-token':
+          log?.warn('voice: rejected upgrade with invalid token');
+          break;
+      }
+      socket.write(
+        `HTTP/1.1 ${rejection.status} ${rejection.statusText}\r\n\r\n`,
+      );
       socket.destroy();
       return;
     }
