@@ -495,6 +495,25 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('GETs /workspace/mcp/:server/resources with URL encoding', async () => {
+      const resourcesStatus = {
+        v: 1,
+        serverName: 'my server',
+        resources: [{ uri: 'file:///intro.md', name: 'Intro' }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, resourcesStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcpResources('my server')).resolves.toEqual(
+        resourcesStatus,
+      );
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp/my%20server/resources'],
+      ]);
+    });
+
     it('GETs /workspace/tools and returns the tools envelope', async () => {
       const toolsStatus = {
         v: 1,

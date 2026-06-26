@@ -419,6 +419,8 @@ export type {
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourceStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
