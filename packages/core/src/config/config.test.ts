@@ -54,6 +54,7 @@ import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { rebuildTeamAutoMemoryIndex } from '../memory/indexer.js';
+import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
@@ -156,6 +157,9 @@ vi.mock('../memory/team-memory-sync.js', () => ({
   syncTeamMemory: vi
     .fn()
     .mockResolvedValue({ committed: false, pulled: false, pushed: false }),
+}));
+vi.mock('../memory/team-memory-git-status.js', () => ({
+  getTeamMemoryShareabilityWarning: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('../hooks/index.js', () => {
@@ -1960,6 +1964,33 @@ describe('Server Config (config.ts)', () => {
 
     expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).not.toContain('Team Memory');
+    // The shareability check is gated on the active tier, so an inactive
+    // (untrusted) tier must never probe git.
+    expect(getTeamMemoryShareabilityWarning).not.toHaveBeenCalled();
+  });
+
+  it('refreshHierarchicalMemory surfaces a one-time warning when team memory is not git-shareable', async () => {
+    const config = new Config({ ...baseParams, enableTeamMemory: true });
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(getTeamMemoryShareabilityWarning).mockReturnValue(
+      'Team memory is enabled, but /tmp/.qwen/team-memory is git-ignored',
+    );
+
+    await config.refreshHierarchicalMemory();
+    // A second refresh must not re-emit the warning (latched once per process).
+    await config.refreshHierarchicalMemory();
+
+    expect(getTeamMemoryShareabilityWarning).toHaveBeenCalledTimes(1);
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('is git-ignored'),
+    );
   });
 
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {

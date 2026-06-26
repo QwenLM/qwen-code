@@ -191,6 +191,7 @@ import {
 } from '../memory/store.js';
 import { rebuildTeamAutoMemoryIndex } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
+import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -1393,6 +1394,9 @@ export class Config {
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
   private readonly enableTeamMemory: boolean;
+  // Latch so the "team memory enabled but not shareable" warning is emitted at
+  // most once per process, even though refreshHierarchicalMemory may re-run.
+  private teamMemoryShareabilityChecked = false;
   private readonly enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
@@ -2233,6 +2237,19 @@ export class Config {
         this.debugLogger.debug(
           'Team memory enabled but inactive: workspace is not trusted.',
         );
+      }
+      // When the tier is active, warn (once) if its directory is not actually
+      // git-shareable — no git root, or a directory-form .gitignore swallowing
+      // it — so the tier never silently shares nothing.
+      if (teamMemoryEnabled && !this.teamMemoryShareabilityChecked) {
+        this.teamMemoryShareabilityChecked = true;
+        const shareabilityWarning = getTeamMemoryShareabilityWarning(
+          this.getProjectRoot(),
+        );
+        if (shareabilityWarning) {
+          this.warnings.push(shareabilityWarning);
+          this.debugLogger.warn(shareabilityWarning);
+        }
       }
       // Best-effort git sync of team memory before reading it, when opted in:
       // pulls collaborators' updates (and pushes local ones) so the rebuilt
