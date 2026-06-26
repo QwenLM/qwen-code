@@ -2219,7 +2219,7 @@ const ZH: Messages = {
   'tool.showFullLines': '▼ 显示完整行',
   'tool.linesTotal': (v) => `▼ 共 ${v?.count ?? 0} 行`,
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
-  'toolGroup.summary': (v) => `执行了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
     `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
