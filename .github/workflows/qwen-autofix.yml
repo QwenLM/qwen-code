@@ -374,9 +374,10 @@ jobs:
                on that basis alone.
 
             Pick AT MOST ONE issue to fix — the one with the highest
-            confidence, not simply the oldest. When several are clearly
-            actionable with comparable confidence, prefer the most recently
-            reported. It is fine to pick none.
+            confidence, not simply the oldest. Apply the tier preference
+            above first; then, among issues of the same tier that are
+            clearly actionable with comparable confidence, prefer the most
+            recently reported. It is fine to pick none.
 
             ## Output
 
