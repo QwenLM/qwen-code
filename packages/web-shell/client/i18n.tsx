@@ -738,7 +738,8 @@ const EN: Messages = {
   'mcp.resource.nameLabel': 'Name:',
   'mcp.resource.mimeTypeLabel': 'MIME Type:',
   'mcp.resource.sizeLabel': 'Size:',
-  'mcp.resource.bytes': (v) => `${v?.count ?? 0} bytes`,
+  'mcp.resource.bytes': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'byte' : 'bytes'}`,
   'mcp.resource.reference': 'Reference in chat',
   'mcp.scrollPosition': (v) => `${v?.current ?? 0}/${v?.total ?? 0}`,
   'mcp.shortcut.back': 'Esc to back',

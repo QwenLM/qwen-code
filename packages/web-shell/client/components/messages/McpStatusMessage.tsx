@@ -39,10 +39,11 @@ interface SerializedMcpStatusMessage {
   toolsByServer: Record<string, DaemonWorkspaceMcpToolsStatus>;
   /**
    * Per-server MCP resources, preloaded alongside tools so the dialog can
-   * browse them offline. Keyed by server name. May be absent on messages
-   * serialized by older clients — read defensively (`?? {}`).
+   * browse them offline. Keyed by server name. Optional because messages
+   * serialized by older clients omit it — consumers must read defensively
+   * (`?? {}`), and the optional type forces that at compile time.
    */
-  resourcesByServer: Record<string, DaemonWorkspaceMcpResourcesStatus>;
+  resourcesByServer?: Record<string, DaemonWorkspaceMcpResourcesStatus>;
   showDescriptions: boolean;
   showSchema: boolean;
   showTips: boolean;
