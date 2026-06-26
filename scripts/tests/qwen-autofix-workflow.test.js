@@ -34,4 +34,16 @@ describe('qwen-autofix workflow', () => {
       'printf \'%s\\n\' "${issue}" >> "${ndjson}"',
     );
   });
+
+  it('keeps candidate tiering and age-window guards covered', () => {
+    expect(workflow).toContain('MIN_ISSUE_AGE_DAYS');
+    expect(workflow).toContain('MAX_ISSUE_AGE_DAYS');
+    expect(workflow).toContain('created:${MAX_CREATED}..${MIN_CREATED}');
+    expect(workflow).toContain('autofixTier: 0');
+    expect(workflow).toContain('autofixTier: 1');
+    expect(workflow).toContain('autofixTier: 2');
+    expect(workflow).toContain('.[0] as $tier1 | .[1] as $tier2');
+    expect(workflow).toContain('.[0:(10 - ($selected | length))]');
+    expect(workflow).toContain('del(.comments)');
+  });
 });
