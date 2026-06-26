@@ -30,6 +30,10 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '::warning::Failed to assemble refreshed comments',
     );
+    expect(refreshIssueComments).toContain(
+      'Comment refresh: ${succeeded}/${total} issues succeeded',
+    );
+    expect(refreshIssueComments).toContain('total - succeeded');
     expect(tier2Scan).toContain(
       '--limit 30 --json number,title,body,labels,createdAt,url \\',
     );

@@ -231,6 +231,12 @@ jobs:
               done < <(jq -c '.[]' "${input_file}")
 
               jq -s -c '.' "${ndjson}" > "${output_file}"
+              local total succeeded
+              total="$(jq length "${input_file}" 2>/dev/null || echo 0)"
+              succeeded="$(jq length "${output_file}" 2>/dev/null || echo 0)"
+              if [[ "${succeeded}" -lt "${total}" ]]; then
+                echo "  Comment refresh: ${succeeded}/${total} issues succeeded ($(( total - succeeded )) dropped)."
+              fi
             }
 
             # Tier 1: explicitly triaged bugs (status/ready-for-agent). Highest
