@@ -25,6 +25,7 @@ import {
   LoopType,
   CronScheduler,
   LOOP_SENTINEL_CRON,
+  LOOP_SENTINEL_DYNAMIC,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import {
@@ -86,6 +87,21 @@ describe('skipHeadlessLoopSentinel', () => {
     // hangs. Skipping the sentinel must delete the job, not just no-op the tick.
     const scheduler = new CronScheduler();
     const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_CRON, true);
+    expect(scheduler.sessionSize).toBe(1);
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(scheduler.sessionSize).toBe(0);
+    expect(scheduler.list()).toHaveLength(0);
+  });
+
+  it('also cleans up a recurring session job for the dynamic sentinel', () => {
+    // Mirror of the cron case for `<<loop.md-dynamic>>`. skipHeadlessLoopSentinel
+    // must route through detectLoopSentinel (which matches BOTH sentinels), not a
+    // `=== LOOP_SENTINEL_CRON` comparison — otherwise a dynamic loop.md job would
+    // pin sessionSize > 0 and hang the headless run.
+    const scheduler = new CronScheduler();
+    const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_DYNAMIC, true);
     expect(scheduler.sessionSize).toBe(1);
 
     expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);

@@ -150,6 +150,25 @@ describe('LoopTickResolver', () => {
     expect((await resolver.resolve('dynamic')).full).toBe(false);
   });
 
+  it('re-delivers the full NEW block when an undelivered tick is followed by an edit', async () => {
+    // First tick resolved but ABORTED before delivery (no markDelivered), then the
+    // file is edited. Delivered content (#lastContent) is still null, so the second
+    // resolve must emit the FULL block with the NEW content — this is the
+    // #pendingContent-vs-#lastContent divergence path. If #pendingContent were
+    // committed eagerly on resolve(), the first tick would collapse to a short
+    // reminder (full=false), pointing the model at a block it never received.
+    await writeProject('- v1 tasks');
+    expect((await resolver.resolve('dynamic')).full).toBe(true);
+    // No markDelivered() — the first tick never reached the model.
+
+    await writeProject('- v2 edited tasks');
+    const tick = await resolver.resolve('dynamic');
+
+    expect(tick.full).toBe(true);
+    expect(tick.modelText).toContain('The user configured a loop-tasks file.');
+    expect(tick.modelText).toContain('- v2 edited tasks');
+  });
+
   it('re-delivers the full block when loop.md is edited', async () => {
     await writeProject('- v1');
     await resolver.resolve('dynamic');

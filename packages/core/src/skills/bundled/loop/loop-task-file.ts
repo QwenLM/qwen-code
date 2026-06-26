@@ -36,7 +36,12 @@ export interface ReadLoopTaskFileOptions {
    * When false, the project `.qwen/loop.md` candidate is skipped entirely — it
    * is repo-controlled, so an untrusted workspace must not read it and feed it
    * to the model (mirrors the folder-trust gate on project hooks). The
-   * home/global `~/.qwen/loop.md` is user-owned and always allowed. Default true.
+   * home/global `~/.qwen/loop.md` is user-owned and always allowed.
+   *
+   * Defaults to false (fail-secure): this function is re-exported from the core
+   * barrel, so a caller that omits the option must NOT silently read an
+   * untrusted workspace's repo-controlled file — callers opt IN by passing the
+   * trust-derived value explicitly.
    */
   allowProjectFile?: boolean;
 }
@@ -122,7 +127,7 @@ async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
 export async function readLoopTaskFile({
   projectRoot,
   homeDir,
-  allowProjectFile = true,
+  allowProjectFile = false,
 }: ReadLoopTaskFileOptions): Promise<LoopTaskFileResult> {
   if (!allowProjectFile) {
     // Repo-controlled file in an untrusted folder — never read it (the
@@ -168,7 +173,14 @@ export async function readLoopTaskFile({
         // canonical path to the workspace root before reading.
         const realRoot = await resolveRealProjectRoot(projectRoot);
         const real = await fs.realpath(filePath);
-        if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+        // Don't double-append the separator: at a filesystem root realRoot is
+        // already `/` (or `C:\`), so `realRoot + path.sep` would be `//` / `C:\\`
+        // — which no descendant startsWith, wrongly refusing every project
+        // loop.md when the CLI runs from the root. Allow real === realRoot too.
+        const prefix = realRoot.endsWith(path.sep)
+          ? realRoot
+          : realRoot + path.sep;
+        if (real !== realRoot && !real.startsWith(prefix)) {
           debugLogger.debug(
             'skipping project loop.md that escapes the workspace',
             {

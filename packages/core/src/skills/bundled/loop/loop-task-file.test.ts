@@ -82,7 +82,11 @@ describe('readLoopTaskFile', () => {
     await writeProject('project tasks');
     await writeHome('user tasks');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -96,7 +100,11 @@ describe('readLoopTaskFile', () => {
   it('falls back to the user loop task file', async () => {
     await writeHome('user tasks');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -114,7 +122,11 @@ describe('readLoopTaskFile', () => {
     await fs.symlink(outside, path.join(projectRoot, '.qwen', 'loop.md'));
     await writeHome('user tasks');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -134,7 +146,11 @@ describe('readLoopTaskFile', () => {
     await fs.symlink(outside, path.join(projectRoot, '.qwen'));
     await writeHome('user tasks');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -159,7 +175,11 @@ describe('readLoopTaskFile', () => {
     );
     await writeHome('user tasks');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -167,6 +187,37 @@ describe('readLoopTaskFile', () => {
       source: 'home',
       content: 'user tasks',
       truncated: false,
+    });
+  });
+
+  it('does not falsely refuse a project loop.md when the workspace root is a filesystem root', async () => {
+    // When the CLI runs from a filesystem root, realRoot is `/` (or `C:\`), so the
+    // old `realRoot + path.sep` prefix became `//` (`C:\\`) — which no descendant
+    // startsWith, wrongly refusing every project loop.md. Drive realRoot to the
+    // filesystem root via a realpath mock; the real loop.md still resolves to a
+    // normal absolute path (a descendant of the root) and must be read, not refused.
+    await writeProject('- root-level tasks');
+    const root = path.parse(projectRoot).root; // '/' on POSIX, e.g. 'C:\\' on Windows
+    const actual =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    vi.spyOn(fs, 'realpath').mockImplementation((p) =>
+      String(p) === projectRoot
+        ? Promise.resolve(root)
+        : actual.realpath(p as string),
+    );
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result).toMatchObject({
+      status: 'found',
+      source: 'project',
+      content: '- root-level tasks',
     });
   });
 
@@ -193,7 +244,11 @@ describe('readLoopTaskFile', () => {
     const openSpy = vi.mocked(fs.open);
     openSpy.mockClear();
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toMatchObject({ source: 'home', content: 'user tasks' });
     // The project FIFO path is never opened — proof there is no blocking open().
@@ -210,13 +265,35 @@ describe('readLoopTaskFile', () => {
     await fs.writeFile(target, 'symlinked user tasks');
     await fs.symlink(target, path.join(homeDir, '.qwen', 'loop.md'));
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
       path: path.join(homeDir, '.qwen', 'loop.md'),
       source: 'home',
       content: 'symlinked user tasks',
+      truncated: false,
+    });
+  });
+
+  it('defaults to fail-secure: omitting allowProjectFile skips the project file', async () => {
+    // This function is re-exported from the core barrel; an external caller that
+    // forgets the option must NOT read the repo-controlled project loop.md from
+    // an untrusted workspace. The default is false — callers opt IN to trust.
+    await writeProject('repo-controlled tasks');
+    await writeHome('user tasks');
+
+    const result = await readLoopTaskFile({ projectRoot, homeDir });
+
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
+      content: 'user tasks',
       truncated: false,
     });
   });
@@ -261,7 +338,11 @@ describe('readLoopTaskFile', () => {
     await fs.writeFile(path.join(projectRoot, '.qwen'), 'not a dir');
     await writeHome('user tasks');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -279,7 +360,11 @@ describe('readLoopTaskFile', () => {
     });
     await writeHome('user tasks');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -299,9 +384,9 @@ describe('readLoopTaskFile', () => {
     });
     vi.mocked(fs.open).mockRejectedValueOnce(eacces);
 
-    await expect(readLoopTaskFile({ projectRoot, homeDir })).rejects.toThrow(
-      /EACCES/,
-    );
+    await expect(
+      readLoopTaskFile({ projectRoot, homeDir, allowProjectFile: true }),
+    ).rejects.toThrow(/EACCES/);
   });
 
   it('evicts the cached project-root realpath after a transient failure and retries on the next tick', async () => {
@@ -325,13 +410,17 @@ describe('readLoopTaskFile', () => {
     realpathSpy.mockImplementation((p) => actual.realpath(p as string));
 
     // First tick: the transient error surfaces (current per-tick semantics).
-    await expect(readLoopTaskFile({ projectRoot, homeDir })).rejects.toThrow(
-      /EACCES/,
-    );
+    await expect(
+      readLoopTaskFile({ projectRoot, homeDir, allowProjectFile: true }),
+    ).rejects.toThrow(/EACCES/);
 
     // Second tick: the poisoned entry was evicted, so realpath is retried and
     // the project loop.md resolves — proving the rejection was not cached.
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -349,7 +438,11 @@ describe('readLoopTaskFile', () => {
     await writeProject('   \n\t  \n');
     await writeHome('user tasks');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'found',
@@ -364,7 +457,11 @@ describe('readLoopTaskFile', () => {
     await writeProject('');
     await writeHome('\n  \n');
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toEqual({
       status: 'missing',
@@ -376,7 +473,9 @@ describe('readLoopTaskFile', () => {
   });
 
   it('returns a missing result when no task file exists', async () => {
-    await expect(readLoopTaskFile({ projectRoot, homeDir })).resolves.toEqual({
+    await expect(
+      readLoopTaskFile({ projectRoot, homeDir, allowProjectFile: true }),
+    ).resolves.toEqual({
       status: 'missing',
       checkedPaths: [
         path.join(projectRoot, '.qwen', 'loop.md'),
@@ -388,7 +487,11 @@ describe('readLoopTaskFile', () => {
   it('byte-caps task files above the cap and flags them truncated', async () => {
     await writeProject('x'.repeat(LOOP_TASK_FILE_MAX_BYTES + 5));
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result.status).toBe('found');
     if (result.status === 'found') {
@@ -410,7 +513,11 @@ describe('readLoopTaskFile', () => {
     openSpy.mockClear();
     const readLengths = await recordHandleReadLengths();
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result.status).toBe('found');
     if (result.status === 'found') {
@@ -437,7 +544,11 @@ describe('readLoopTaskFile', () => {
     const cap = LOOP_TASK_FILE_MAX_BYTES + 1;
     const readLengths = await recordHandleReadLengths();
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result).toMatchObject({
       status: 'found',
@@ -453,7 +564,11 @@ describe('readLoopTaskFile', () => {
   it('does not truncate task files at exactly the byte cap', async () => {
     await writeProject('x'.repeat(LOOP_TASK_FILE_MAX_BYTES));
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result.status).toBe('found');
     if (result.status === 'found') {
@@ -468,7 +583,11 @@ describe('readLoopTaskFile', () => {
     // 3-byte chars make the raw byte cap land mid-character.
     await writeProject('一'.repeat(LOOP_TASK_FILE_MAX_BYTES));
 
-    const result = await readLoopTaskFile({ projectRoot, homeDir });
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
 
     expect(result.status).toBe('found');
     if (result.status === 'found') {
