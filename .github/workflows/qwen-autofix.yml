@@ -209,11 +209,6 @@ jobs:
               local input_file="$1"
               local output_file="$2"
               local ndjson="${WORKDIR}/tier2-with-comments.ndjson"
-              # Cap issues we hit the comments API for: filter_unattended_candidates
-              # runs after this and drops attended ones, only ~10 are ever selected,
-              # and refreshing the full scan risks GitHub secondary rate limits.
-              local refresh_input="${WORKDIR}/tier2-refresh-input.json"
-              jq -c '.[0:15]' "${input_file}" > "${refresh_input}"
 
               : > "${ndjson}"
               while IFS= read -r issue; do
@@ -222,6 +217,8 @@ jobs:
                 number="$(jq -r '.number' <<< "${issue}")"
                 comments_file="${WORKDIR}/issue-${number}-comments.ndjson"
 
+                # per_page=100 bounds pages-per-issue (fewer API calls) to keep
+                # the full-scan refresh under GitHub's secondary rate limits.
                 if gh api --paginate \
                   "repos/${REPO}/issues/${number}/comments?per_page=100" \
                   --jq '.[] | {authorAssociation: .author_association, author: {login: (.user.login // "")}}' \
@@ -233,11 +230,11 @@ jobs:
                 else
                   echo "::warning::Failed to refresh comments for issue #${number}; skipping tier-2 issue."
                 fi
-              done < <(jq -c '.[]' "${refresh_input}")
+              done < <(jq -c '.[]' "${input_file}")
 
               jq -s -c '.' "${ndjson}" > "${output_file}"
               local total succeeded
-              total="$(jq length "${refresh_input}" 2>/dev/null || echo 0)"
+              total="$(jq length "${input_file}" 2>/dev/null || echo 0)"
               succeeded="$(jq length "${output_file}" 2>/dev/null || echo 0)"
               if [[ "${succeeded}" -lt "${total}" ]]; then
                 echo "  Comment refresh: ${succeeded}/${total} issues succeeded ($(( total - succeeded )) dropped)."
