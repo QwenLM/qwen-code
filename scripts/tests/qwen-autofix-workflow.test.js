@@ -55,6 +55,12 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('.[0] as $tier1 | .[1] as $tier2');
     expect(workflow).toContain('.[0:(10 - ($selected | length))]');
     expect(workflow).toContain('del(.comments)');
+    // Forced issues must still honor the autofix skip/in-progress exclusion.
+    expect(workflow).toContain(
+      'any(. == "autofix/skip" or . == "autofix/in-progress")',
+    );
+    // Tier-2 must exclude ready-for-agent bugs so they only flow through tier 1.
+    expect(workflow).toContain('-label:${READY_FOR_AGENT_LABEL}');
   });
 
   it('checks unattended filtering uses maintainer association gates', () => {
