@@ -20,6 +20,7 @@ describe('scanForSecrets', () => {
     ['aws-access-token', 'AKIAIOSFODNN7EXAMPLE'],
     ['alibaba-cloud-access-key', `LTAI${'a'.repeat(16)}`],
     ['gcp-api-key', `AIza${'a'.repeat(35)}`],
+    ['gcp-oauth-client-secret', `GOCSPX-${'a'.repeat(24)}`],
     ['digitalocean-pat', `dop_v1_${'a'.repeat(64)}`],
     ['anthropic-api-key', `sk-ant-api03-${'a'.repeat(30)}`],
     ['openai-api-key', `sk-proj-${'a'.repeat(48)}`],
@@ -31,6 +32,7 @@ describe('scanForSecrets', () => {
     ['gitlab-pat', `glpat-${'a'.repeat(20)}`],
     ['slack-bot-token', `xoxb-${'1'.repeat(12)}-${'1'.repeat(12)}abcd`],
     ['slack-app-token', 'xapp-1-ABC123-1234567890-abcdef'],
+    ['sendgrid-api-token', `SG.${'a'.repeat(22)}.${'b'.repeat(43)}`],
     ['npm-access-token', `npm_${'a'.repeat(36)}`],
     ['stripe-access-token', `sk_live_${'a'.repeat(24)}`],
   ])('detects %s', (ruleId, sample) => {

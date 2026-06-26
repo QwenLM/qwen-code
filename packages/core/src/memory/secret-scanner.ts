@@ -52,6 +52,11 @@ const SECRET_RULES: readonly SecretRule[] = [
     source: 'AIza[\\w-]{35}',
   },
   {
+    // Google OAuth client secret (GOCSPX- prefix + 24 base64url chars).
+    id: 'gcp-oauth-client-secret',
+    source: 'GOCSPX-[\\w-]{24}',
+  },
+  {
     id: 'digitalocean-pat',
     source: 'dop_v1_[a-f0-9]{64}',
   },
@@ -89,6 +94,11 @@ const SECRET_RULES: readonly SecretRule[] = [
     id: 'slack-app-token',
     source: 'xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+',
     flags: 'i',
+  },
+  {
+    // SendGrid API key: SG. + 22-char id . + 43-char secret (gitleaks).
+    id: 'sendgrid-api-token',
+    source: 'SG\\.[\\w-]{22}\\.[\\w-]{43}',
   },
 
   // Dev tooling
@@ -130,6 +140,7 @@ const LABEL_SPECIAL_CASE: Record<string, string> = {
   digitalocean: 'DigitalOcean',
   huggingface: 'HuggingFace',
   alibaba: 'Alibaba',
+  sendgrid: 'SendGrid',
 };
 
 /** Convert a kebab-case rule ID to a readable label (e.g. "github-pat" → "GitHub PAT"). */
