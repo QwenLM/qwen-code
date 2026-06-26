@@ -157,9 +157,15 @@ reachable, so they ship together:
   client's cursor, so advancing the cursor past the buffer would **silently drop
   it**. Letting the ring own all bus events delivers each exactly once with no
   gap. Id-_less_ frames (JSON-RPC replies routed via `replySession`) are not ring
-  events, so they are still flushed from the buffer — their only delivery path.
+  events, so the ring won't redeliver them — but they must not be flushed at
+  attach either: a buffered `session/prompt` _result_ flushed before replay would
+  arrive ahead of the content chunks that preceded it (client sees "done" before
+  the body — the exact truncated-body failure §1.8 fixes). So on resume the
+  id-less frames are **deferred**: left in the buffer, and the event pump releases
+  them (`flushBufferedSessionFrames`) once the replay boundary passes
+  (`replay_complete` / `state_resync_required`), preserving original stream order.
   (A fresh connect with no `Last-Event-ID` has no ring anchor, so it flushes the
-  whole buffer as before.)
+  whole buffer immediately, in order, as before.)
 - **Idempotent `permission_request` under replay.** A `permission_request` is
   an id-bearing ring event, so a reconnect whose cursor precedes a still-
   unanswered permission replays it. `translateEvent` now reuses the existing

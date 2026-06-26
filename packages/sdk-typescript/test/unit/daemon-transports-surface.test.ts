@@ -61,8 +61,9 @@ describe('@qwen-code/sdk/daemon/transports — opt-in transport surface', () => 
     };
     const entry = pkg.exports['./daemon/transports'];
     expect(entry).toBeDefined();
-    expect(entry.types).toBe('./dist/daemon/transports.d.ts');
-    expect(entry.import).toBe('./dist/daemon/transports.js');
-    expect(entry.require).toBe('./dist/daemon/transports.cjs');
+    // Bracket access: `entry` is typed via an index signature.
+    expect(entry['types']).toBe('./dist/daemon/transports.d.ts');
+    expect(entry['import']).toBe('./dist/daemon/transports.js');
+    expect(entry['require']).toBe('./dist/daemon/transports.cjs');
   });
 });

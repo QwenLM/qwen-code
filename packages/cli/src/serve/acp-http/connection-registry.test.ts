@@ -133,13 +133,15 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
-  it('on resume, skips flushing id-bearing buffered frames (ring replay owns them) but still flushes id-less JSON-RPC replies', () => {
-    // Regression for the silent-frame-loss bug: a frame sent to the dead socket
-    // (id below the buffer's ids, above the client cursor) must be recoverable
-    // via the ring replay. Advancing the cursor past the buffer would drop it;
-    // so on resume the buffer must NOT flush its bus events — the pump's ring
-    // replay (cursor = Last-Event-ID) redelivers each exactly once. Id-less
-    // frames (JSON-RPC replies) have no ring path and are still flushed.
+  it('on resume, skips id-bearing buffered frames (ring owns them) AND defers id-less replies until flushBufferedSessionFrames (post-replay order)', () => {
+    // Two regressions in one path:
+    //  (1) silent-frame-loss: a frame sent to the dead socket (id below the
+    //      buffer's ids, above the client cursor) must come back via ring
+    //      replay — so the buffer must NOT flush bus events on resume.
+    //  (2) out-of-order completion: an id-less `session/prompt` result buffered
+    //      during the gap must NOT be flushed at attach (it would arrive BEFORE
+    //      the ring replays the content chunks that preceded it). It's deferred
+    //      and released by the pump after `replay_complete`.
     const registry = new ConnectionRegistry();
     try {
       const conn = registry.create(true);
@@ -155,14 +157,56 @@ describe('ConnectionRegistry.getSnapshot', () => {
       // Client resumes from id 3 (it never saw frame 4, lost in-flight).
       conn.attachSessionStream('sess-1', stream, new AbortController(), 3);
 
-      // ONLY the id-less reply is flushed; the bus events (6, 7) are left for
-      // the ring replay so frame 4 — between cursor 3 and buffer id 6 — isn't
-      // skipped.
+      // At attach: NOTHING is sent. Bus events (6,7) belong to the ring replay;
+      // the id-less reply is deferred so it can't jump ahead of replayed content.
+      expect(stream.sent).toEqual([]);
+
+      // The pump calls this once the replay boundary passes → the deferred
+      // reply is released, after the (replayed) content chunks.
+      conn.flushBufferedSessionFrames('sess-1');
       expect(stream.sent).toEqual([
         { message: { reply: true }, id: undefined },
       ]);
     } finally {
       registry.dispose();
+    }
+  });
+
+  it('detachSessionStream is a no-op for a stale stream after reclaim (identity guard)', () => {
+    // The CONTRACT at the attach site marks this guard load-bearing: once a
+    // reclaim installs s2, the OLD stream s1 closing must NOT tear down or
+    // re-arm grace on the fresh binding — that would be frame loss
+    // indistinguishable from a network drop.
+    vi.useFakeTimers();
+    const detached: string[] = [];
+    const registry = new ConnectionRegistry(undefined, (sid) =>
+      detached.push(sid),
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const s1 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s1, new AbortController());
+      conn.detachSessionStream('sess-1', s1, 10_000); // grace armed for s1
+      const s2 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s2, new AbortController()); // reclaim
+      const graceAfterReclaim = conn.sessions.get('sess-1')?.graceTimer;
+      expect(graceAfterReclaim).toBeUndefined(); // reclaim cleared the timer
+
+      // The stale s1 close arrives late — must be a pure no-op.
+      conn.detachSessionStream('sess-1', s1, 10_000);
+      expect(conn.sessions.get('sess-1')?.stream).toBe(s2); // s2 still bound
+      expect(conn.sessions.get('sess-1')?.graceTimer).toBeUndefined(); // no re-arm
+      expect(conn.ownsSession('sess-1')).toBe(true);
+
+      // And no teardown fires from the stale close.
+      vi.advanceTimersByTime(20_000);
+      expect(detached).not.toContain('sess-1');
+      expect(conn.sessions.get('sess-1')?.stream).toBe(s2);
+    } finally {
+      registry.dispose();
+      vi.useRealTimers();
     }
   });
 

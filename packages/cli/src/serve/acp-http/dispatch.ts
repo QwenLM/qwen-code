@@ -2733,13 +2733,34 @@ export class AcpDispatcher {
         signal,
         ...(lastEventId !== undefined ? { lastEventId } : {}),
       });
+      // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
+      // `session/prompt` result produced during the detach gap) so they land
+      // AFTER the ring replays the content chunks that preceded them. Release
+      // them once the replay boundary passes — `replay_complete` (caught up) or
+      // `state_resync_required` (ring couldn't replay; client reloads, but the
+      // pending request still needs its reply). Once-guarded.
+      let deferredFlushed = false;
+      const flushDeferred = () => {
+        if (deferredFlushed) return;
+        deferredFlushed = true;
+        conn.flushBufferedSessionFrames(sessionId);
+      };
       for await (const event of iterable) {
         if (signal.aborted) break;
         // Count event delivery as connection activity so a long, quiet prompt
         // (no inbound HTTP) isn't reaped by the idle-TTL sweep.
         conn.touch();
         this.translateEvent(conn, sessionId, event);
+        if (
+          event.type === 'replay_complete' ||
+          event.type === 'state_resync_required'
+        ) {
+          flushDeferred();
+        }
       }
+      // Safety: a live-only subscription (no cursor → no replay boundary) or a
+      // clean end without a boundary frame still releases anything deferred.
+      flushDeferred();
     } catch (err) {
       // Symmetric for the SYNC `subscribeEvents` throw and a MID-STREAM
       // iterator error: surface a `stream_error` to the client, then re-throw
@@ -2794,6 +2815,22 @@ export class AcpDispatcher {
         // there is none, cancel (deny-safe) rather than register+stall.
         const binding = conn.sessions.get(sessionId);
         if (!binding?.stream || binding.stream.isClosed) {
+          // KNOWN GAP (tracked as the §1.7 cross-connection permission
+          // follow-up): when this fires DURING a reconnect grace window
+          // (`binding.graceTimer` set), the prompt is intentionally kept alive,
+          // but the permission is still cancel-denied here — so a client
+          // reconnecting within grace can't vote on it (ring replay re-delivers
+          // the request, but the mediator already resolved it cancelled). Log a
+          // breadcrumb so an operator can correlate an auto-denied permission
+          // with a transient disconnect. The structural fix (defer the
+          // permission across grace) belongs with the permission-coordination
+          // follow-up, not this content-stream PR.
+          if (binding?.graceTimer) {
+            writeStderrLine(
+              `qwen serve: /acp permission cancel during reconnect grace ` +
+                `(${logSafe(sessionId)}); vote not deferred (see §1.7 follow-up)`,
+            );
+          }
           const cancelled = this.cancelAbandonedPermission(
             { sessionId, bridgeRequestId: data.requestId },
             // Pass the bridge-stamped clientId when the binding still exists
@@ -2840,6 +2877,12 @@ export class AcpDispatcher {
             kind: 'permission',
           });
         }
+        // INVARIANT: this sends straight to `binding.stream` (not via
+        // `conn.sendSession`) and is safe ONLY because `translateEvent` runs
+        // synchronously from the pump — `binding.stream` was checked non-null
+        // above and cannot be detached mid-call. Do NOT introduce an `await`
+        // between that check and this send: a detach during the gap would set
+        // `binding.stream = undefined` and this would throw `TypeError`.
         void binding.stream.send(
           request(id, 'session/request_permission', {
             sessionId: data.sessionId,

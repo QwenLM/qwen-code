@@ -35,6 +35,11 @@ const rootDir = join(__dirname, '..');
 // Bumped from 127KB to 130KB for daemon workspace voice, trust, permissions,
 // session LSP helper APIs, and the full daemon route table.
 const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 130 * 1024;
+// The opt-in `daemon/transports` browser bundle legitimately ships the concrete
+// ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
+// it's larger than the default barrel — but still budgeted so a future PR can't
+// silently bloat what browser consumers (agent-web) pull in. Current size ~29KB.
+const MAX_TRANSPORTS_BROWSER_BUNDLE_BYTES = 48 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
@@ -161,10 +166,7 @@ await esbuild.build({
   treeShaking: true,
 });
 
-assertNoNodeBuiltins(
-  join(rootDir, 'dist', 'daemon', 'transports.js'),
-  'Browser daemon transports bundle',
-);
+assertTransportsBundle(join(rootDir, 'dist', 'daemon', 'transports.js'));
 
 await esbuild.build({
   entryPoints: [join(rootDir, 'src', 'daemon', 'transports.ts')],
@@ -215,6 +217,19 @@ function assertBrowserSafeBundle(filePath) {
     );
   }
   assertNoNodeBuiltins(filePath, 'Browser daemon SDK bundle');
+}
+
+// Browser-safety + size budget for the opt-in `daemon/transports` bundle.
+// Larger budget than the default barrel (it ships the concrete transports), but
+// still bounded so a future PR can't silently bloat what browser consumers pull.
+function assertTransportsBundle(filePath) {
+  const size = statSync(filePath).size;
+  if (size > MAX_TRANSPORTS_BROWSER_BUNDLE_BYTES) {
+    throw new Error(
+      `Browser daemon transports bundle is ${size} bytes; expected <= ${MAX_TRANSPORTS_BROWSER_BUNDLE_BYTES}`,
+    );
+  }
+  assertNoNodeBuiltins(filePath, 'Browser daemon transports bundle');
 }
 
 // Node-builtin guard, shared by the budget-checked default daemon barrel and

@@ -361,24 +361,53 @@ export class AcpConnection {
     }
     // Flush buffered pre-attach frames produced during the detach gap.
     //
-    // When the client is RESUMING (`resumeFromEventId !== undefined`, i.e. it
-    // sent a `Last-Event-ID`), the ring replay that the event pump starts at
-    // that cursor already redelivers every BUS event (`id !== undefined`) after
-    // the cursor — including frames lost in-flight to the dead socket. So we do
-    // NOT flush id-bearing frames here: doing so would either double-deliver
-    // them (flush + replay) or, if we advanced the cursor past them to dedupe,
-    // SILENTLY DROP an in-flight-lost frame whose id sits BELOW the buffer's ids
-    // but ABOVE the client's cursor. Letting the ring replay own all bus events
-    // delivers each exactly once with no gap.
+    // FRESH CONNECT (`resumeFromEventId === undefined`, no `Last-Event-ID`):
+    // there's no ring replay, so the buffer is the only delivery path — flush
+    // everything now, in order.
     //
-    // We still flush id-LESS frames unconditionally: those are JSON-RPC replies
-    // routed on the session stream (`replySession`), which are NOT ring events
-    // and so have no other delivery path.
-    for (const { frame, id } of binding.buffer.splice(0)) {
-      if (resumeFromEventId !== undefined && id !== undefined) continue;
-      void stream.send(frame, id);
+    // RESUME (`resumeFromEventId !== undefined`): the ring replay the event pump
+    // starts at that cursor already redelivers every BUS event (`id !==
+    // undefined`) after the cursor — including frames lost in-flight to the dead
+    // socket — so we do NOT flush id-bearing frames here (flushing would
+    // double-deliver, and advancing a cursor past them to dedupe would silently
+    // drop an in-flight-lost frame whose id sits below the buffer's ids).
+    //
+    // Id-LESS frames are JSON-RPC replies (`replySession`), NOT ring events, so
+    // the ring won't redeliver them. But flushing them HERE — before replay —
+    // would deliver e.g. a `session/prompt` result BEFORE the ring replays the
+    // content chunks that preceded it, so the client would see "prompt complete"
+    // ahead of the body (the exact truncated-body failure §1.8 fixes). So on
+    // resume we DEFER id-less frames: leave them in the buffer for the pump to
+    // flush after `replay_complete` (`flushBufferedSessionFrames`), preserving
+    // original stream order.
+    for (const entry of binding.buffer.splice(0)) {
+      if (resumeFromEventId === undefined) {
+        void stream.send(entry.frame, entry.id); // fresh connect: flush all now
+      } else if (entry.id !== undefined) {
+        continue; // resume: ring replay owns bus events
+      } else {
+        binding.buffer.push(entry); // resume: defer id-less past replay
+      }
     }
     return binding;
+  }
+
+  /**
+   * Flush any frames still buffered for a session to its live stream, in order.
+   * On resume, `attachSessionStream` defers id-less JSON-RPC replies (e.g. a
+   * `session/prompt` result that landed during the detach gap) into the buffer;
+   * the event pump calls this once the ring replay boundary
+   * (`replay_complete` / `state_resync_required`) has passed, so those replies
+   * are delivered AFTER the content chunks they followed in the original stream.
+   * No-op if the session has no live stream (the frames stay buffered for the
+   * next attach).
+   */
+  flushBufferedSessionFrames(sessionId: string): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding?.stream || binding.buffer.length === 0) return;
+    for (const { frame, id } of binding.buffer.splice(0)) {
+      void binding.stream.send(frame, id);
+    }
   }
 
   /**
@@ -406,7 +435,13 @@ export class AcpConnection {
     if (binding.graceTimer) clearTimeout(binding.graceTimer);
     binding.graceTimer = setTimeout(() => {
       // Grace expired with no reconnect → full teardown (aborts the prompt,
-      // releases ownership, detaches the bridge client).
+      // releases ownership, detaches the bridge client). Log it so an operator
+      // debugging a vanished session can tell grace-expiry teardown apart from
+      // an explicit `session/close` or connection drop.
+      writeStderrLine(
+        `qwen serve: /acp session grace expired (${logSafe(sessionId)}), ` +
+          `no reconnect within ${graceMs}ms — tearing down`,
+      );
       this.closeSessionStream(sessionId);
     }, graceMs);
     binding.graceTimer.unref?.();
