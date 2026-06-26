@@ -4,7 +4,7 @@ import { QQChannel } from './QQChannel.js';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 
 export const plugin: ChannelPlugin = {
-  channelType: 'qq-dev',
+  channelType: 'qq',
   displayName: 'QQ',
   // Both appID and appSecret are optional at config level because
   // fetchToken() resolves them via a fallback chain:
