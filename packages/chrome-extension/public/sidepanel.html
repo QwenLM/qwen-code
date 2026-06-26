@@ -190,43 +190,24 @@
           monospace;
         color: var(--faint);
       }
-      .term__copy {
-        margin-left: auto;
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        padding: 4px 9px;
-        font:
-          600 11px/1 ui-sans-serif,
-          system-ui,
-          sans-serif;
-        color: var(--muted);
-        background: transparent;
-        border: 1px solid var(--border);
-        border-radius: 7px;
-        cursor: pointer;
-        transition:
-          color 0.15s,
-          border-color 0.15s,
-          background 0.15s;
-      }
-      .term__copy:hover {
-        color: var(--accent);
-        border-color: var(--accent);
-        background: var(--accent-soft);
-      }
-      .term__copy svg {
-        width: 12px;
-        height: 12px;
-      }
+      /* command row — click anywhere on it to copy */
       .term__body {
         display: flex;
         gap: 9px;
-        padding: 15px 14px 17px;
+        padding: 15px 14px 16px;
         font:
           12.5px/1.6 ui-monospace,
           SFMono-Regular,
           monospace;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .term__body:hover {
+        background: var(--accent-soft);
+      }
+      .term__body:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
       }
       .term__prompt {
         color: var(--accent);
@@ -246,6 +227,47 @@
         margin-top: 1px;
         background: var(--accent);
         animation: blink 1.1s steps(1) infinite;
+      }
+      /* centered copy action at the foot of the card */
+      .term__copy {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        width: 100%;
+        padding: 11px;
+        font:
+          600 12px/1 ui-sans-serif,
+          system-ui,
+          sans-serif;
+        color: var(--muted);
+        background: var(--panel-bar);
+        border: 0;
+        border-top: 1px solid var(--border);
+        cursor: pointer;
+        transition:
+          color 0.15s,
+          background 0.15s;
+      }
+      .term__copy:hover {
+        color: var(--accent);
+        background: var(--accent-soft);
+      }
+      .term__copy svg {
+        width: 13px;
+        height: 13px;
+      }
+      .term__copy .ic-check {
+        display: none;
+      }
+      .term__copy.copied {
+        color: var(--accent);
+      }
+      .term__copy.copied .ic-copy {
+        display: none;
+      }
+      .term__copy.copied .ic-check {
+        display: inline;
       }
 
       /* ---- live status ---- */
@@ -351,40 +373,56 @@
             <span class="term__dot" aria-hidden="true"></span>
             <span class="term__dot" aria-hidden="true"></span>
             <span class="term__label">qwen serve</span>
-            <button
-              id="copy"
-              class="term__copy"
-              type="button"
-              title="Copy command"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                aria-hidden="true"
-              >
-                <rect
-                  x="9"
-                  y="9"
-                  width="11"
-                  height="11"
-                  rx="2.2"
-                  stroke-width="2"
-                />
-                <path
-                  d="M5 15V6a2 2 0 0 1 2-2h8"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                />
-              </svg>
-              <span id="copy-label">Copy</span>
-            </button>
           </div>
-          <div class="term__body">
+          <div
+            id="cmd-row"
+            class="term__body"
+            role="button"
+            tabindex="0"
+            title="Click to copy"
+          >
             <span class="term__prompt" aria-hidden="true">$</span>
             <code id="cmd"></code>
             <span class="term__cursor" aria-hidden="true"></span>
           </div>
+          <button id="copy" class="term__copy" type="button">
+            <svg
+              class="ic-copy"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <rect
+                x="9"
+                y="9"
+                width="11"
+                height="11"
+                rx="2.2"
+                stroke-width="2"
+              />
+              <path
+                d="M5 15V6a2 2 0 0 1 2-2h8"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </svg>
+            <svg
+              class="ic-check"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                d="M5 12.5l4.5 4.5L19 7.5"
+                stroke-width="2.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span id="copy-label">Copy command</span>
+          </button>
         </figure>
       </div>
 

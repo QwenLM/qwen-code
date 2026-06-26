@@ -31,6 +31,7 @@ const els = {
   title: document.getElementById('welcome-title'),
   desc: document.getElementById('welcome-desc'),
   cmd: document.getElementById('cmd'),
+  cmdRow: document.getElementById('cmd-row'),
   copy: document.getElementById('copy'),
   copyLabel: document.getElementById('copy-label'),
 };
@@ -126,16 +127,32 @@ async function tick() {
   }
 }
 
-els.copy.addEventListener('click', async () => {
+let copyResetTimer = null;
+/** Copy the command and flash a check-mark confirmation on the footer button. */
+async function copyCommand() {
   try {
     await navigator.clipboard.writeText(els.cmd.textContent || '');
+    els.copy.classList.add('copied');
     els.copyLabel.textContent = 'Copied';
-    setTimeout(() => {
-      els.copyLabel.textContent = 'Copy';
-    }, 1500);
   } catch {
     // Clipboard write can be blocked; the command stays selectable as fallback.
-    els.copyLabel.textContent = 'Failed';
+    els.copyLabel.textContent = 'Copy failed';
+  }
+  clearTimeout(copyResetTimer);
+  copyResetTimer = setTimeout(() => {
+    els.copy.classList.remove('copied');
+    els.copyLabel.textContent = 'Copy command';
+  }, 1600);
+}
+
+// Both the footer button and the command row itself copy; the row is a
+// keyboard-reachable button (Enter/Space) for parity with a mouse click.
+els.copy.addEventListener('click', copyCommand);
+els.cmdRow.addEventListener('click', copyCommand);
+els.cmdRow.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    copyCommand();
   }
 });
 
