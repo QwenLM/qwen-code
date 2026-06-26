@@ -147,7 +147,7 @@ export interface CompactionThresholds {
  *
  * Each tier is `max(proportional, absolute)`:
  *   auto = max(pct * window,                               effectiveWindow - AUTOCOMPACT_BUFFER)
- *   warn = max((pct - WARN_PCT_OFFSET) * window,           auto - WARN_BUFFER)
+ *   warn = max(0, max((pct - WARN_PCT_OFFSET) * window,    auto - WARN_BUFFER))
  *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
  *
  * `pct` defaults to DEFAULT_PCT when not provided. Small windows (where
