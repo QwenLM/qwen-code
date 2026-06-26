@@ -55,6 +55,7 @@ function waitFor(predicate: () => boolean): Promise<void> {
 function buildBridgeStub(opts: {
   knownIds?: Iterable<string>;
   available?: boolean;
+  availableImpl?: () => Promise<boolean>;
   rememberImpl?: (
     req: BridgeWorkspaceMemoryRememberRequest,
   ) => Promise<BridgeWorkspaceMemoryRememberResult>;
@@ -89,6 +90,7 @@ function buildBridgeStub(opts: {
       return rememberImpl(req);
     },
     async isWorkspaceMemoryRememberAvailable() {
+      if (opts.availableImpl) return opts.availableImpl();
       return opts.available ?? true;
     },
     spawnOrAttach: () => {
@@ -366,6 +368,21 @@ describe('workspace memory remember routes', () => {
       .expect(409)
       .expect((res) => {
         expect(res.body.code).toBe('managed_memory_unavailable');
+      });
+    expect(bridge.rememberCalls).toHaveLength(0);
+  });
+
+  it('returns remember_failed when the availability check throws', async () => {
+    const bridge = buildBridgeStub({
+      availableImpl: vi.fn().mockRejectedValue(new Error('bridge closed')),
+    });
+    const app = buildApp(bridge);
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .expect(500)
+      .expect((res) => {
+        expect(res.body.code).toBe('remember_failed');
       });
     expect(bridge.rememberCalls).toHaveLength(0);
   });

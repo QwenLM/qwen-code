@@ -73,14 +73,31 @@ function isAllowedMemoryPath(
   const isAllowed = (candidate: string): boolean =>
     isWithinRoot(candidate, projectMemoryRoot) ||
     (opts.includeUserMemory && isWithinRoot(candidate, userMemoryRoot));
+  const resolved = realpathExistingOrNew(filePath);
+  return !!resolved && isAllowed(resolved);
+}
+
+function realpathExistingOrNew(filePath: string): string | undefined {
   try {
-    return isAllowed(fs.realpathSync(filePath));
+    return fs.realpathSync(filePath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
+    return realpathNewPath(filePath);
+  }
+}
+
+function realpathNewPath(filePath: string): string | undefined {
+  let current = path.dirname(path.resolve(filePath));
+  let remainder = path.basename(filePath);
+  while (true) {
     try {
-      return isAllowed(fs.realpathSync(path.dirname(filePath)));
-    } catch {
-      return false;
+      return path.join(fs.realpathSync(current), remainder);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
+      const parent = path.dirname(current);
+      if (parent === current) return undefined;
+      remainder = path.join(path.basename(current), remainder);
+      current = parent;
     }
   }
 }

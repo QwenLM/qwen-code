@@ -3440,12 +3440,15 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
 
       await expect(
-        client.getWorkspaceMemoryRememberTask('remember/a b'),
+        client.getWorkspaceMemoryRememberTask('remember/a b', {
+          clientId: 'client-7',
+        }),
       ).resolves.toEqual(reply);
       expect(calls[0]).toMatchObject({
         method: 'GET',
         url: 'http://daemon/workspace/memory/remember/remember%2Fa%20b',
       });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
     });
 
     it('GETs /workspace/agents (list) and /workspace/agents/:id (detail)', async () => {

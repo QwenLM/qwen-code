@@ -1062,20 +1062,12 @@ export class DaemonClient {
 
   async getWorkspaceMemoryRememberTask(
     taskId: string,
+    opts?: { clientId?: string },
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
-    const encodedTaskId = encodeURIComponent(taskId);
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/memory/remember/${encodedTaskId}`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(
-            res,
-            'GET /workspace/memory/remember/:taskId',
-          );
-        }
-        return (await res.json()) as DaemonWorkspaceMemoryRememberTask;
-      },
+    return await this.jsonRequest(
+      `/workspace/memory/remember/${encodeURIComponent(taskId)}`,
+      'GET /workspace/memory/remember/:taskId',
+      { clientId: opts?.clientId },
     );
   }
 

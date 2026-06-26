@@ -110,6 +110,35 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
   });
 
+  it('allows creating new nested topic files inside memory roots', async () => {
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(
+          getAutoMemoryRoot(projectRoot),
+          'project',
+          'new-topic',
+          'fact.md',
+        ),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(
+          getUserAutoMemoryRoot(),
+          'user',
+          'new-topic',
+          'fact.md',
+        ),
+      }),
+    ).resolves.toBe('allow');
+  });
+
   it('denies memory-root symlinks that resolve outside memory', async () => {
     const outsideDir = path.join(tempDir, 'outside');
     await fs.mkdir(outsideDir, { recursive: true });
