@@ -264,7 +264,15 @@ function copyRuntimeAssets(packageRoot, outDir) {
   fs.mkdirSync(libDir, { recursive: true });
 
   for (const entry of fs.readdirSync(distDir)) {
-    if (entry === skippedDistEntry || entry === '.DS_Store') {
+    // prepare-package.js stages the audio-capture addon into dist/node_modules
+    // for the npm package, but standalone rebuilds a clean, target-trimmed
+    // lib/node_modules via copyNativeAddon(). Copying dist/node_modules here
+    // would drag in every platform's prebuild and collide with that — skip it.
+    if (
+      entry === skippedDistEntry ||
+      entry === '.DS_Store' ||
+      entry === 'node_modules'
+    ) {
       continue;
     }
     if (!isAllowedDistEntry(entry)) {

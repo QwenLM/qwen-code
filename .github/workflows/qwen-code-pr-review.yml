@@ -326,12 +326,20 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     steps:
-      # Self-hosted runners reuse the workspace, so an interrupted review can
-      # leave a stale `.qwen/tmp/review-pr-*` worktree or `qwen-review/*` branch
-      # that trips the checkout below. Prune defensively; never fail the job.
-      - name: 'Clean stale review worktrees'
+      # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
+      # can bleed into this one: its agent session/memory (under QWEN_HOME),
+      # leftover draft comments (/tmp/stage-*.md, which survive `git clean`), or
+      # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from an
+      # interrupted review. Reset all three per run; never fail the job.
+      - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
+          # Fresh per-run agent home (must match QWEN_HOME on the Qwen step
+          # below) + drop any leftover stage drafts.
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
+          rm -rf "$QWEN_HOME" 2>/dev/null || true
+          mkdir -p "$QWEN_HOME"
+          rm -f /tmp/stage-*.md 2>/dev/null || true
           # `.git` is a directory in a normal checkout but a gitlink file in a
           # worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
@@ -409,6 +417,10 @@ jobs:
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
+          # Per-run agent home so this review's session/memory cannot leak into
+          # the next on the reused self-hosted workspace (reset in "Clean stale
+          # agent state"). Must match the QWEN_HOME computed there.
+          QWEN_HOME: '${{ runner.temp }}/qwen-home'
         run: |-
           set -euo pipefail
           fail() {
