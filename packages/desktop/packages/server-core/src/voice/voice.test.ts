@@ -58,6 +58,7 @@ describe('net-guard host classification', () => {
     expect(isLoopbackHost('localhost')).toBe(true)
     expect(isLoopbackHost('127.0.0.1')).toBe(true)
     expect(isLoopbackHost('::1')).toBe(true)
+    expect(isLoopbackHost('::ffff:127.0.0.1')).toBe(true)
     expect(isLoopbackHost('dashscope.aliyuncs.com')).toBe(false)
   })
 
@@ -212,6 +213,12 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
     await expect(
       assertVoiceBaseUrlNetworkAllowed('https://evil.example', 'm', async () => [
         { address: '127.0.0.1' },
+      ]),
+    ).rejects.toThrow(/private-network/)
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed('https://evil.example', 'm', async () => [
+        { address: '::ffff:127.0.0.1' },
       ]),
     ).rejects.toThrow(/private-network/)
   })

@@ -1,6 +1,6 @@
 /**
  * Renderer-side voice capture for the desktop composer. Captures the microphone
- * via `getUserMedia`, downsamples to 16 kHz mono s16le PCM in a ScriptProcessor,
+ * via `getUserMedia`, resamples to 16 kHz mono s16le PCM in a ScriptProcessor,
  * and streams the raw frames to the main process's loopback `/voice/stream`
  * WebSocket. Transcription runs in the main process (credentials never reach the
  * renderer) and the final transcript comes back for the user to review.
@@ -77,6 +77,30 @@ function floatToPcm16(input: Float32Array): { pcm: ArrayBuffer; level: number } 
     pcm: pcm.buffer,
     level: input.length ? Math.sqrt(sumSquares / input.length) : 0,
   };
+}
+
+export function resampleToSampleRate(
+  input: Float32Array,
+  inputSampleRate: number,
+  outputSampleRate = SAMPLE_RATE,
+): Float32Array {
+  if (inputSampleRate === outputSampleRate) return input;
+  const outputLength = Math.max(
+    1,
+    Math.round((input.length * outputSampleRate) / inputSampleRate),
+  );
+  const output = new Float32Array(outputLength);
+  const ratio = inputSampleRate / outputSampleRate;
+
+  for (let i = 0; i < output.length; i++) {
+    const sourceIndex = i * ratio;
+    const low = Math.floor(sourceIndex);
+    const high = Math.min(low + 1, input.length - 1);
+    const frac = sourceIndex - low;
+    output[i] = input[low]! + (input[high]! - input[low]!) * frac;
+  }
+
+  return output;
 }
 
 interface CaptureResources {
@@ -253,13 +277,6 @@ export function useVoiceCapture(
         resourcesRef.current.stream = stream;
 
         const context = new AudioContext({ sampleRate: SAMPLE_RATE });
-        if (context.sampleRate !== SAMPLE_RATE) {
-          stream.getTracks().forEach((track) => track.stop());
-          void context.close().catch(() => {});
-          throw new Error(
-            `Browser audio rate ${context.sampleRate} Hz is not the required ${SAMPLE_RATE} Hz.`,
-          );
-        }
         resourcesRef.current.context = context;
         if (context.state === 'suspended') await context.resume();
         if (isStale()) {
@@ -285,9 +302,11 @@ export function useVoiceCapture(
         let lastLevelUpdate = 0;
         let droppedFrames = 0;
         processor.onaudioprocess = (event: AudioProcessingEvent) => {
-          const { pcm, level } = floatToPcm16(
+          const input = resampleToSampleRate(
             event.inputBuffer.getChannelData(0),
+            context.sampleRate,
           );
+          const { pcm, level } = floatToPcm16(input);
           const now = performance.now();
           if (mountedRef.current && now - lastLevelUpdate >= 100) {
             lastLevelUpdate = now;

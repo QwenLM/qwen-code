@@ -20,6 +20,11 @@ describe('isAllowedVoiceOrigin', () => {
     expect(isAllowedVoiceOrigin(undefined)).toBe(true)
     expect(isAllowedVoiceOrigin('file://')).toBe(true)
     expect(isAllowedVoiceOrigin('qwen://app')).toBe(true)
+    expect(
+      isAllowedVoiceOrigin('http://localhost:5173', [
+        'http://localhost:5173',
+      ]),
+    ).toBe(true)
     expect(isAllowedVoiceOrigin('https://evil.example')).toBe(false)
   })
 })

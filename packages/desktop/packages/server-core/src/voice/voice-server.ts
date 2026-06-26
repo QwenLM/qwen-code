@@ -23,6 +23,8 @@ export interface VoiceServerOptions extends VoiceHandlerDeps {
   /** Voice-scoped token validated per upgrade. */
   token: string;
   host?: string;
+  allowedOrigins?: readonly string[];
+  isEnabled?: () => boolean;
 }
 
 export interface VoiceServer {
@@ -57,11 +59,15 @@ interface ClosableHttpServer {
   closeAllConnections?: () => void;
 }
 
-export function isAllowedVoiceOrigin(origin: string | undefined): boolean {
+export function isAllowedVoiceOrigin(
+  origin: string | undefined,
+  allowedOrigins: readonly string[] = [],
+): boolean {
   return (
     !origin ||
     origin.startsWith('file://') ||
-    origin.startsWith('qwen://')
+    origin.startsWith('qwen://') ||
+    allowedOrigins.includes(origin)
   );
 }
 
@@ -75,6 +81,7 @@ export function closeVoiceServerResources(
     const finish = () => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       resolve();
     };
     const timer = setTimeout(finish, timeoutMs);
@@ -121,16 +128,25 @@ export async function startVoiceServer(
       return;
     }
     if (url.pathname !== '/voice/stream') {
+      log?.warn('voice: rejected upgrade for path:', url.pathname);
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();
       return;
     }
-    if (!isAllowedVoiceOrigin(req.headers.origin)) {
+    if (options.isEnabled && !options.isEnabled()) {
+      log?.warn('voice: rejected upgrade while disabled');
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    if (!isAllowedVoiceOrigin(req.headers.origin, options.allowedOrigins)) {
+      log?.warn('voice: rejected upgrade with origin:', req.headers.origin);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }
     if (!tokenMatches(url.searchParams.get('token'), options.token)) {
+      log?.warn('voice: rejected upgrade with invalid token');
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;

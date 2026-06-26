@@ -20,7 +20,13 @@ function normalizeHostname(hostname: string): string {
 
 export function isLoopbackHost(hostname: string): boolean {
   const host = normalizeHostname(hostname);
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  const ipv4Mapped = host.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  return (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    (ipv4Mapped ? isLoopbackHost(ipv4Mapped[1]!) : false)
+  );
 }
 
 /** IP-literal private-network check; hostname resolution is handled separately. */

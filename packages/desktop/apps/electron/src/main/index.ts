@@ -97,7 +97,7 @@ import { setSearchPlatform, setImageProcessor } from '@craft-agent/server-core/s
 import { createApplicationMenu } from './menu'
 import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
-import { ensureDefaultConversationWorkspace, getWorkspaces, getWorkspaceByNameOrId, isProtectedWorkspace } from '@craft-agent/shared/config'
+import { ensureDefaultConversationWorkspace, getVoiceEnabled, getWorkspaces, getWorkspaceByNameOrId, isProtectedWorkspace } from '@craft-agent/shared/config'
 import { initializeDocs } from '@craft-agent/shared/docs'
 import { initializeReleaseNotes } from '@craft-agent/shared/release-notes'
 import { ensureDefaultPermissions } from '@craft-agent/shared/agent/permissions-config'
@@ -198,6 +198,16 @@ let moduleSink: EventSink | null = null
 let moduleClientResolver: ((webContentsId: number) => string | undefined) | null = null
 let voiceServer: VoiceServer | null = null
 let voiceStreamUrl: string | null = null
+
+function getRendererDevOrigin(): string | undefined {
+  const devUrl = process.env.VITE_DEV_SERVER_URL
+  if (!devUrl) return undefined
+  try {
+    return new URL(devUrl).origin
+  } catch {
+    return undefined
+  }
+}
 
 // Messaging gateway: the bootstrap handle is created once sessionManager is
 // available (inside createHandlerDeps) and populated with the WS publisher
@@ -411,14 +421,28 @@ app.whenReady().then(async () => {
   // grant to mic/media only — do NOT broaden the default session to every
   // permission (geolocation, HID, serial, …).
   const VOICE_PERMISSIONS = new Set(['media', 'audioCapture'])
+  const getMediaTypes = (details: unknown): string[] => {
+    if (!details || typeof details !== 'object') return []
+    const mediaDetails = details as {
+      mediaTypes?: unknown
+      mediaType?: unknown
+    }
+    if (Array.isArray(mediaDetails.mediaTypes)) {
+      return mediaDetails.mediaTypes.filter(
+        (mediaType): mediaType is string => typeof mediaType === 'string',
+      )
+    }
+    return typeof mediaDetails.mediaType === 'string'
+      ? [mediaDetails.mediaType]
+      : []
+  }
   const isAudioOnlyMediaRequest = (
     permission: string,
-    details?: { mediaTypes?: readonly string[]; mediaType?: string },
+    details?: unknown,
   ) => {
     if (permission === 'audioCapture') return true
     if (permission !== 'media') return false
-    const mediaTypes =
-      details?.mediaTypes ?? (details?.mediaType ? [details.mediaType] : [])
+    const mediaTypes = getMediaTypes(details)
     return (
       mediaTypes.length > 0 &&
       mediaTypes.every((mediaType) => mediaType === 'audio')
@@ -427,7 +451,7 @@ app.whenReady().then(async () => {
   const canUseVoicePermission = (
     wc: { id: number } | null | undefined,
     permission: string,
-    details?: { mediaTypes?: readonly string[]; mediaType?: string },
+    details?: unknown,
   ) => Boolean(
     wc &&
     VOICE_PERMISSIONS.has(permission) &&
@@ -777,6 +801,10 @@ app.whenReady().then(async () => {
         voiceServer = await startVoiceServer({
           token: voiceToken,
           resolveConfig: resolveDesktopVoiceConfig,
+          allowedOrigins: [getRendererDevOrigin()].filter(
+            (origin): origin is string => Boolean(origin),
+          ),
+          isEnabled: getVoiceEnabled,
           logger: platform.logger,
         })
         voiceStreamUrl = `${voiceServer.url}?token=${encodeURIComponent(voiceToken)}`
@@ -981,7 +1009,7 @@ app.whenReady().then(async () => {
         e.returnValue = instance.token
       })
       ipcMain.on('__get-voice-stream-url', (e) => {
-        e.returnValue = voiceStreamUrl
+        e.returnValue = getVoiceEnabled() ? voiceStreamUrl : null
       })
       ipcMain.on('__get-workspace-remote-config', (e) => {
         const wsId = windowManager?.getWorkspaceForWindow(e.sender.id)

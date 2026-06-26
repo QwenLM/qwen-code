@@ -855,6 +855,7 @@ export function FreeFormInput({
   const [spellCheck, setSpellCheck] = React.useState(false);
   const [voiceModel, setVoiceModel] = React.useState(DEFAULT_VOICE_MODEL);
   const [voiceEnabled, setVoiceEnabled] = React.useState(true);
+  const voiceActiveRef = React.useRef(false);
 
   // Load input settings on mount
   React.useEffect(() => {
@@ -1780,7 +1781,7 @@ export function FreeFormInput({
 
   // Submit message - backend handles queueing and interruption
   const submitMessage = React.useCallback(() => {
-    if (voice.isActive) return false;
+    if (voiceActiveRef.current) return false;
     const hasContent =
       input.trim() || attachments.length > 0 || followUpItems.length > 0;
     if (!hasContent || disabled) return false;
@@ -1835,7 +1836,6 @@ export function FreeFormInput({
     optimisticSourceSlugs,
     onSourcesChange,
     richInputRef,
-    voice.isActive,
   ]);
 
   // Listen for craft:submit-input events (simulate pressing the Send button)
@@ -2052,6 +2052,7 @@ export function FreeFormInput({
   );
 
   const voice = useVoiceDictation({ onInsert: insertTranscript });
+  voiceActiveRef.current = voice.isActive;
 
   // Handle input with cursor position (for menu detection)
   const handleRichInput = React.useCallback(
