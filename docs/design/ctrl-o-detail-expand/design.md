@@ -14,8 +14,8 @@
 > | `fullDetail` 不被 `ToolGroupMessage` 两个 early return 绕过（纯并行/ memory-only 守 `!fullDetail`） | ✅ 已实现 + 回归测试 |
 > | `TranscriptView` + alt-screen 接入（Ctrl+O 开关、Esc/q/Ctrl+C 关闭、双段冻结、退出重绘、后台确认自动关闭、消息队列守卫） | ✅ 已实现 |
 > | 基于 #5661 type-based partition 的 rebase（已合入 main） | ✅ 已实现 |
-> | `AlternateScreen` 的 `process.stdout.isTTY` guard（§4.2） | ⏳ 待补 + 测试 |
-> | i18n 旧 compact 文案清理（9 语言）+ KeyboardShortcuts/Help 文案（§5/commit 5） | ⏳ 待补 |
+> | `AlternateScreen` 的 `process.stdout.isTTY` guard（§4.2） | ✅ 已实现 + 测试 |
+> | i18n 旧 compact 文案清理（9 语言）+ KeyboardShortcuts `ctrl+o → view transcript` 文案（§5） | ✅ 已实现 |
 > | **鼠标点击工具 block 就地展开（§4.8 / commit 4）** | ⏭️ **follow-up（独立 PR，不在本 PR）**——理由见 §4.8：type-based 下无 per-tool 点击目标、~250–400 行、SGR 选区风险 |
 
 ---
