@@ -24,6 +24,7 @@ import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   QwenLogger,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
@@ -672,6 +673,255 @@ describe('Server Config (config.ts)', () => {
       // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('MCP hot-reload (sub-task 3)', () => {
+    const srvA: MCPServerConfig = { command: 'a' };
+    const srvB: MCPServerConfig = { command: 'b' };
+
+    it('setMcpServers REPLACES (not merges) and works post-init', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA },
+      });
+      await config.initialize();
+
+      // addMcpServers would throw post-init; setMcpServers must not.
+      config.setMcpServers({ b: srvB });
+
+      const settingsLayer = config.getSettingsMcpServers();
+      expect(settingsLayer).toEqual({ b: srvB });
+      expect(settingsLayer).not.toHaveProperty('a');
+    });
+
+    it('reinitializeMcpServers is a safe no-op before initialize()', async () => {
+      const config = new Config({ ...baseParams });
+      // No tool registry yet — must not throw and must not connect.
+      await expect(
+        config.reinitializeMcpServers({ a: srvA }),
+      ).resolves.toBeUndefined();
+      expect(config.getSettingsMcpServers()).toEqual({ a: srvA });
+    });
+
+    it('records MCP servers removed by a reconcile and self-heals on re-add', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB },
+      });
+
+      // Drop `a` → tracked as recently removed.
+      await config.reinitializeMcpServers({ b: srvB });
+      expect(config.getRecentlyRemovedMcpServers()).toEqual(['a']);
+
+      // Drop `b` too → both tracked.
+      await config.reinitializeMcpServers({});
+      expect(config.getRecentlyRemovedMcpServers().sort()).toEqual(['a', 'b']);
+
+      // Re-add `a` → it self-heals out of the set; `b` stays removed.
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(config.getRecentlyRemovedMcpServers()).toEqual(['b']);
+    });
+
+    it('classifies a server filtered by a narrowed allow-list as not_allowed (not removed)', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB },
+      });
+      await config.reinitializeMcpServers({ a: srvA, b: srvB });
+
+      // Narrow the allow-list to just `a` (mirrors editing mcp.allowed). `b` is
+      // still configured (merged map) but filtered out of the effective map.
+      config.setAllowedMcpServers(['a']);
+
+      // `b` is NOT "removed" — it's still in config, just not allowed. The
+      // tool-not-found path can still explain it precisely, with the right
+      // recovery action (adjust mcp.allowed, not "re-add the server").
+      expect(config.getRecentlyRemovedMcpServers()).not.toContain('b');
+      expect(config.getMcpServerUnavailableReason('b')).toBe('not_allowed');
+      expect(config.getMcpServerUnavailableReason('a')).toBeUndefined();
+    });
+
+    it('classifies excluded / pending / removed servers with the right reason', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { a: srvA, b: srvB, c: srvA },
+      });
+      await config.reinitializeMcpServers({ a: srvA, b: srvB, c: srvA });
+
+      config.setExcludedMcpServers(['b']);
+      config.setPendingMcpServers(['c']);
+      expect(config.getMcpServerUnavailableReason('b')).toBe('excluded');
+      expect(config.getMcpServerUnavailableReason('c')).toBe(
+        'pending_approval',
+      );
+
+      // Delete `a` from config → removed this session.
+      await config.reinitializeMcpServers({ b: srvB, c: srvA });
+      expect(config.getMcpServerUnavailableReason('a')).toBe('removed');
+      // A never-configured name has no reason (falls through to generic).
+      expect(config.getMcpServerUnavailableReason('ghost')).toBeUndefined();
+    });
+
+    it('reinitializeMcpServers replaces config then drives incremental reconcile', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      await config.reinitializeMcpServers({ b: srvB });
+
+      expect(config.getSettingsMcpServers()).toEqual({ b: srvB });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(
+        config,
+      );
+    });
+
+    it('coalesces a reconcile request that arrives mid-flight into one extra pass', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Make the first pass hang until we release it, so the second call
+      // arrives while the first is in flight.
+      let release!: () => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      const first = config.reinitializeMcpServers({ b: srvB });
+      // Second call lands mid-flight → coalesced, not a third pass.
+      const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
+      release();
+      await Promise.all([first, second]);
+
+      // One in-flight pass + one drained follow-up = exactly 2 passes.
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('rethrows a failed reconcile and resets the in-progress guard so the next call still runs', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // First pass fails — reinitialize must surface the error.
+      manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+        new Error('reconcile boom'),
+      );
+      await expect(config.reinitializeMcpServers({ b: srvB })).rejects.toThrow(
+        'reconcile boom',
+      );
+
+      // Guard must have been reset in `finally`; a subsequent call must not be
+      // silently coalesced/dropped — it runs a fresh pass.
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the coalesce flag when a reconcile throws, so the next call runs exactly one pass', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Pass 1 hangs until we reject it; while it is in flight a second call
+      // arrives and is coalesced (sets the pending flag).
+      let reject!: (e: Error) => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((_, rej) => {
+            reject = rej;
+          }),
+      );
+      const first = config.reinitializeMcpServers({ b: srvB });
+      const second = config.reinitializeMcpServers({ a: srvA, b: srvB });
+      reject(new Error('reconcile boom'));
+      await expect(first).rejects.toThrow('reconcile boom');
+      // The coalesced caller awaits the shared in-flight pass, so it observes
+      // the SAME failure rather than resolving before its change was applied.
+      await expect(second).rejects.toThrow('reconcile boom');
+
+      // The throw must have cleared the pending flag too. A subsequent
+      // unrelated reconcile must run EXACTLY ONE pass — not an extra stale
+      // drain pass left over from the coalesced-then-aborted request.
+      manager.discoverAllMcpToolsIncremental.mockClear();
+      await config.reinitializeMcpServers({ a: srvA });
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(1);
+    });
+
+    it('a coalesced reconcile awaits the in-flight pass + its drain (does not resolve early)', async () => {
+      const config = new Config({ ...baseParams, mcpServers: { a: srvA } });
+      await config.initialize();
+      const manager = (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+      manager.discoverAllMcpToolsIncremental.mockClear();
+
+      // Pass 1 hangs until released; the second call lands mid-flight.
+      let release!: () => void;
+      manager.discoverAllMcpToolsIncremental.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      let secondResolved = false;
+      const first = config.reinitializeMcpServers({ b: srvB });
+      const second = config
+        .reinitializeMcpServers({ a: srvA, b: srvB })
+        .then(() => {
+          secondResolved = true;
+        });
+
+      // While pass 1 is still in flight the coalesced caller must NOT have
+      // resolved — it is chained onto the shared in-flight reconcile, so its
+      // change has not been applied yet.
+      await Promise.resolve();
+      expect(secondResolved).toBe(false);
+
+      release();
+      await Promise.all([first, second]);
+      expect(secondResolved).toBe(true);
+      // pass 1 + exactly one drain (for the coalesced change) = 2 passes.
+      expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledTimes(2);
+    });
+
+    it('admission-list setters and getMcpGating round-trip', () => {
+      const config = new Config({ ...baseParams });
+      config.setExcludedMcpServers(['x']);
+      config.setAllowedMcpServers(['y']);
+      config.setPendingMcpServers(['z']);
+      expect(config.getMcpGating()).toEqual({
+        excluded: ['x'],
+        allowed: ['y'],
+        pending: ['z'],
+      });
+      expect(config.getAllowedMcpServers()).toEqual(['y']);
     });
   });
 
@@ -2083,7 +2333,7 @@ describe('Server Config (config.ts)', () => {
   it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
     const config = new Config({
       ...baseParams,
-      enableManagedAutoMemory: false,
+      bareMode: true,
       generationConfig: { contextWindowSize: 1000 },
     });
 
@@ -2493,6 +2743,27 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).not.toContain('# auto memory');
   });
 
+  describe('isManagedMemoryAvailable', () => {
+    it('returns true when bareMode is false', () => {
+      const config = new Config({ ...baseParams, bareMode: false });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+
+    it('returns false when bareMode is true', () => {
+      const config = new Config({ ...baseParams, bareMode: true });
+      expect(config.isManagedMemoryAvailable()).toBe(false);
+    });
+
+    it('returns true even when enableManagedAutoMemory is false', () => {
+      const config = new Config({
+        ...baseParams,
+        enableManagedAutoMemory: false,
+        bareMode: false,
+      });
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+  });
+
   it('refreshHierarchicalMemory should exclude implicit cwd from bare include-directories', async () => {
     const explicitDir = '/tmp/explicit';
     const config = new Config({
@@ -2874,6 +3145,62 @@ describe('Server Config (config.ts)', () => {
       expect(
         configWithoutTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
       ).toBe(false);
+    });
+
+    it('should return provided sensitiveSpanAttributeMaxLength setting', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: {
+          enabled: true,
+          sensitiveSpanAttributeMaxLength: 65_536,
+        },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(65_536);
+    });
+
+    it('should default sensitiveSpanAttributeMaxLength to 1MiB', () => {
+      const configWithTelemetry = new Config({
+        ...baseParams,
+        telemetry: { enabled: true },
+      });
+      expect(
+        configWithTelemetry.getTelemetrySensitiveSpanAttributeMaxLength(),
+      ).toBe(1024 * 1024);
+
+      const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
+      delete paramsWithoutTelemetry.telemetry;
+      const configWithoutTelemetry = new Config(paramsWithoutTelemetry);
+      expect(
+        configWithoutTelemetry.getTelemetrySensitiveSpanAttributeMaxLength(),
+      ).toBe(1024 * 1024);
+    });
+
+    it('should reject invalid sensitiveSpanAttributeMaxLength values', () => {
+      for (const [value, label] of [
+        [0, '0'],
+        [Number.NaN, 'NaN'],
+        [Number.POSITIVE_INFINITY, 'Infinity'],
+        [
+          SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1,
+          String(SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT + 1),
+        ],
+      ] as const) {
+        expect(
+          () =>
+            new Config({
+              ...baseParams,
+              telemetry: {
+                enabled: true,
+                sensitiveSpanAttributeMaxLength: value,
+              },
+            }),
+        ).toThrow(
+          new RegExp(
+            `Invalid telemetry\\.sensitiveSpanAttributeMaxLength.*got ${label}`,
+          ),
+        );
+      }
     });
 
     it('should return default telemetry target if telemetry object is not provided', () => {
@@ -5018,6 +5345,27 @@ describe('Model Switching and Config Updates', () => {
       // getModel() returns 'some-model', getModelDisplayName returns it as-is
       // because currentAuthType is falsy
       expect(config.getModelDisplayName()).toBe('some-model');
+    });
+  });
+
+  describe('getAutoSkillConfirmEnabled', () => {
+    it('defaults to true when autoSkillConfirm is unset', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+    });
+
+    it('returns false when autoSkillConfirm is explicitly disabled', () => {
+      const config = new Config({ ...baseParams, autoSkillConfirm: false });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    });
+
+    it('is forced false in bare mode even when autoSkillConfirm is true', () => {
+      const config = new Config({
+        ...baseParams,
+        autoSkillConfirm: true,
+        bareMode: true,
+      });
+      expect(config.getAutoSkillConfirmEnabled()).toBe(false);
     });
   });
 });

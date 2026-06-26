@@ -1513,10 +1513,20 @@ export async function runQwenServe(
       );
     }
     const daemonWorkspaceHash = core.hashDaemonWorkspace(boundWorkspace);
-    const daemonTelemetrySettings = await core.resolveTelemetrySettings({
-      env: process.env,
-      settings: runtimeBootSettings?.merged.telemetry,
-    });
+    let daemonTelemetrySettings: TelemetrySettings;
+    try {
+      daemonTelemetrySettings = await core.resolveTelemetrySettings({
+        env: process.env,
+        settings: runtimeBootSettings?.merged.telemetry,
+      });
+    } catch (err) {
+      if (err instanceof core.FatalConfigError) {
+        throw new core.FatalConfigError(
+          `Invalid telemetry configuration: ${err.message}.`,
+        );
+      }
+      throw err;
+    }
     core.initializeTelemetry(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,

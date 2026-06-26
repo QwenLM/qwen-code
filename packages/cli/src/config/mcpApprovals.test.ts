@@ -12,6 +12,7 @@ import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import {
   loadMcpApprovals,
   getPendingGatedMcpServers,
+  getPromptableMcpServers,
   resetMcpApprovalsForTesting,
   MCP_APPROVALS_FILENAME,
 } from './mcpApprovals.js';
@@ -229,6 +230,68 @@ describe('mcpApprovals (hash-bound approval store)', () => {
         projectRoot,
       );
       expect(pending).toEqual(['ws']);
+    });
+  });
+
+  describe('getPromptableMcpServers (strict-pending, drives the dialog)', () => {
+    const workspaceServer: MCPServerConfig = {
+      command: 'node',
+      args: ['ws.js'],
+      scope: 'workspace',
+    };
+    const userServer: MCPServerConfig = { command: 'node', args: ['user.js'] };
+
+    it('prompts gated servers with no stored decision, ignores user scope', () => {
+      const promptable = getPromptableMcpServers(
+        { proj: server, ws: workspaceServer, usr: userServer },
+        projectRoot,
+      );
+      expect(promptable.sort()).toEqual(['proj', 'ws']);
+    });
+
+    it('does NOT prompt a rejected server (unlike getPendingGatedMcpServers)', async () => {
+      await loadMcpApprovals().setState(
+        projectRoot,
+        'ws',
+        workspaceServer,
+        'rejected',
+      );
+      // Same config hash as the rejection ⇒ stays rejected ⇒ not promptable,
+      // yet still in the gating skip set.
+      expect(
+        getPromptableMcpServers({ ws: workspaceServer }, projectRoot),
+      ).toEqual([]);
+      expect(
+        getPendingGatedMcpServers({ ws: workspaceServer }, projectRoot),
+      ).toEqual(['ws']);
+    });
+
+    it('re-prompts a rejected server once an edit changes its config hash', async () => {
+      await loadMcpApprovals().setState(
+        projectRoot,
+        'ws',
+        workspaceServer,
+        'rejected',
+      );
+      const edited: MCPServerConfig = {
+        ...workspaceServer,
+        args: ['ws-v2.js'],
+      };
+      expect(getPromptableMcpServers({ ws: edited }, projectRoot)).toEqual([
+        'ws',
+      ]);
+    });
+
+    it('does NOT prompt an approved server', async () => {
+      await loadMcpApprovals().setState(
+        projectRoot,
+        'ws',
+        workspaceServer,
+        'approved',
+      );
+      expect(
+        getPromptableMcpServers({ ws: workspaceServer }, projectRoot),
+      ).toEqual([]);
     });
   });
 });

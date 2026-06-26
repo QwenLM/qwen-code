@@ -9,7 +9,12 @@ import type {
   ServerGeminiToolCallRequestEvent,
   ServerGeminiErrorEvent,
 } from './turn.js';
-import { CompressionStatus, Turn, GeminiEventType } from './turn.js';
+import {
+  CompressionStatus,
+  Turn,
+  GeminiEventType,
+  findRepeatedDuplicateProviderToolCall,
+} from './turn.js';
 import type { GenerateContentResponse, Part, Content } from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
@@ -36,6 +41,54 @@ vi.mock('@google/genai', async (importOriginal) => {
 vi.mock('../utils/errorReporting', () => ({
   reportError: vi.fn(),
 }));
+
+describe('findRepeatedDuplicateProviderToolCall', () => {
+  const getProviderCallId = (item: { providerCallId?: string }) =>
+    item.providerCallId;
+
+  it('finds a handled provider id that already received a synthetic response', () => {
+    const items = [{ providerCallId: 'fresh' }, { providerCallId: 'handled' }];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set(['handled']),
+      ),
+    ).toBe(items[1]);
+  });
+
+  it('finds a handled provider id repeated within the same batch', () => {
+    const items = [
+      { providerCallId: 'handled' },
+      { providerCallId: 'fresh' },
+      { providerCallId: 'handled' },
+    ];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set<string>(),
+      ),
+    ).toBe(items[0]);
+  });
+
+  it('ignores unhandled repeated ids', () => {
+    const items = [{ providerCallId: 'fresh' }, { providerCallId: 'fresh' }];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set<string>(),
+      ),
+    ).toBeUndefined();
+  });
+});
 
 describe('Turn', () => {
   let turn: Turn;

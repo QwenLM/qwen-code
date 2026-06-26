@@ -125,14 +125,14 @@ export class LoopWakeupTool extends BaseDeclarativeTool<
     super(
       LoopWakeupTool.Name,
       ToolDisplayNames.LOOP_WAKEUP,
-      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur. A self-paced wakeup chain may run for at most 24h.',
+      'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. Session-only and one-shot — it does not persist or recur. A self-paced wakeup chain may run for at most 24h. When a background task you started will wake you on its own — a backgrounded agent or a Monitor sends a terminal `<task-notification>` on exit, failure, cancellation, or monitor auto-stop — keep this wakeup as a long fallback heartbeat rather than a poll; see `delaySeconds`.',
       Kind.Other,
       {
         type: 'object',
         properties: {
           delaySeconds: {
             type: 'number',
-            description: `Seconds from now to wake up. Clamped to [${WAKEUP_MIN_SECONDS}, ${WAKEUP_MAX_SECONDS}]. Prefer 60-270s for fast-changing state, 1200s+ when there is no reason to check sooner.`,
+            description: `Seconds from now to wake up. Clamped to [${WAKEUP_MIN_SECONDS}, ${WAKEUP_MAX_SECONDS}]. Use 60-270s only when actively polling external state that nothing else reports (a CI run, a remote queue) — staying inside the ~5-min prompt-cache window. When a background task you started will wake you via a \`<task-notification>\` once it finishes, that is the real wake signal — use 1200-1800s here as a fallback for when it never arrives (the task hangs, a Monitor auto-stops on idle or max-events, or another agent owns it). With no specific signal to watch, default to 1200s+.`,
           },
           prompt: {
             type: 'string',

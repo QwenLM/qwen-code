@@ -1211,6 +1211,99 @@ export const AppContainer = (props: AppContainerProps) => {
     setIsDiffDialogOpen(false);
   }, []);
 
+  // Skill-review dialog: confirms auto-generated skills before they enter the
+  // skill library. This state is populated by the skill-review subscription
+  // effect below; the dialog component itself lives in SkillReviewDialog.tsx.
+  const [isSkillReviewDialogOpen, setIsSkillReviewDialogOpen] = useState(false);
+  const [skillReviewPending, setSkillReviewPending] =
+    useState<UIState['skillReviewPending']>(null);
+  // Batches the user dismissed via Esc ("decide later"), so the idle effect
+  // doesn't immediately reopen them. A Set (not a single value) so dismissing
+  // batch B can't accidentally re-arm a still-dismissed batch A.
+  const skillReviewDismissedTaskIdsRef = useRef<Set<string>>(new Set());
+  // Esc: defer the current batch — record it and close.
+  const dismissSkillReviewDialog = useCallback(() => {
+    if (skillReviewPending) {
+      skillReviewDismissedTaskIdsRef.current.add(skillReviewPending.taskId);
+    }
+    setIsSkillReviewDialogOpen(false);
+  }, [skillReviewPending]);
+  // Worked through the batch (keep/discard/all): close WITHOUT marking it
+  // dismissed, so if some accepts failed the unresolved skills can reopen.
+  const closeSkillReviewDialog = useCallback(
+    () => setIsSkillReviewDialogOpen(false),
+    [],
+  );
+  const acceptPendingSkill = useCallback(
+    (skillName: string) => {
+      if (!skillReviewPending) return;
+      void config
+        .getMemoryManager()
+        .acceptPendingSkillFromTask(skillReviewPending.taskId, skillName)
+        .catch(() => {
+          // Failure is logged in the manager; swallow here so an unhandled
+          // rejection doesn't surface in the UI. The skill stays pending.
+        });
+    },
+    [config, skillReviewPending],
+  );
+  const rejectPendingSkill = useCallback(
+    (skillName: string) => {
+      if (!skillReviewPending) return;
+      void config
+        .getMemoryManager()
+        .rejectPendingSkillFromTask(skillReviewPending.taskId, skillName)
+        .catch(() => {
+          // Failure is logged in the manager; swallow here so an unhandled
+          // rejection doesn't surface in the UI. The skill stays pending.
+        });
+    },
+    [config, skillReviewPending],
+  );
+
+  // Subscribe to skill-review task changes and keep skillReviewPending in sync.
+  useEffect(() => {
+    const mgr = config.getMemoryManager();
+    const projectRoot = config.getProjectRoot();
+    // Skip the state update (and the re-render of every UIState consumer) when
+    // the pending set hasn't actually changed — skill-review notifications fire
+    // for unrelated transitions too.
+    let lastSig = '';
+    const refresh = () => {
+      const tasks = mgr.listTasksByType('skill-review', projectRoot);
+      const withPending = tasks.find((tk) => {
+        const p = tk.metadata?.['pendingSkills'];
+        return Array.isArray(p) && p.length > 0;
+      });
+      if (!withPending) {
+        if (lastSig !== '') {
+          lastSig = '';
+          setSkillReviewPending(null);
+        }
+        return;
+      }
+      const pendingSkills = withPending.metadata!['pendingSkills'] as Array<{
+        name: string;
+        description: string;
+      }>;
+      const sig = `${withPending.id}|${pendingSkills
+        .map((p) => p.name)
+        .join(' ')}`;
+      if (sig === lastSig) return;
+      lastSig = sig;
+      setSkillReviewPending({
+        taskId: withPending.id,
+        skills: pendingSkills.map((p) => ({
+          name: p.name,
+          description: p.description,
+        })),
+      });
+    };
+    const unsub = mgr.subscribe(refresh, { taskType: 'skill-review' });
+    refresh();
+    return unsub;
+  }, [config]);
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -1558,6 +1651,18 @@ export const AppContainer = (props: AppContainerProps) => {
       setWorkflowKeywordActive(false);
     }
   }, [streamingState]);
+
+  // Auto-open the skill-review dialog when idle and there are pending skills.
+  useEffect(() => {
+    if (
+      skillReviewPending &&
+      skillReviewPending.skills.length > 0 &&
+      streamingState === StreamingState.Idle &&
+      !skillReviewDismissedTaskIdsRef.current.has(skillReviewPending.taskId)
+    ) {
+      setIsSkillReviewDialogOpen(true);
+    }
+  }, [skillReviewPending, streamingState]);
 
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
@@ -2001,9 +2106,10 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager.history, pendingHistoryItems],
   );
   const stickyTodos = useStableStickyTodos(rawStickyTodos);
+  const hasExecutingTool = isToolExecuting(pendingHistoryItems);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
-  useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
+  useTerminalProgress(streamingState, hasExecutingTool);
 
   cancelHandlerRef.current = useCallback(
     (info?: CancelSubmitInfo) => {
@@ -2521,6 +2627,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
     isDiffDialogOpen ||
+    isSkillReviewDialogOpen ||
     bgTasksDialogOpen ||
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
@@ -2978,6 +3085,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings.merged.ui?.customWittyPhrases,
     responseCandidateTokens,
     streamingResponseLengthRef.current,
+    hasExecutingTool,
   );
 
   useAttentionNotifications({
@@ -3037,6 +3145,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackClose,
     isHelpDialogOpen,
     closeHelpDialog,
+    isSkillReviewDialogOpen,
+    dismissSkillReviewDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
     isDiffDialogOpen,
@@ -3513,6 +3623,8 @@ export const AppContainer = (props: AppContainerProps) => {
       statusLineSettingsVersion,
       statusLineConfigOverride,
       isMemoryDialogOpen,
+      isSkillReviewDialogOpen,
+      skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
@@ -3650,6 +3762,8 @@ export const AppContainer = (props: AppContainerProps) => {
       statusLineSettingsVersion,
       statusLineConfigOverride,
       isMemoryDialogOpen,
+      isSkillReviewDialogOpen,
+      skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
@@ -3781,6 +3895,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      dismissSkillReviewDialog,
+      closeSkillReviewDialog,
+      acceptPendingSkill,
+      rejectPendingSkill,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -3867,6 +3985,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      dismissSkillReviewDialog,
+      closeSkillReviewDialog,
+      acceptPendingSkill,
+      rejectPendingSkill,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,

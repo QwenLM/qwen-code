@@ -53,6 +53,7 @@ import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { SkillReviewDialog } from './SkillReviewDialog.js';
 import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
@@ -546,6 +547,19 @@ export const DialogManager = ({
         fileHistoryService={config.getFileHistoryService()}
         fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
         onClose={uiActions.closeDiffDialog}
+      />
+    );
+  }
+
+  if (uiState.isSkillReviewDialogOpen && uiState.skillReviewPending) {
+    return (
+      <SkillReviewDialog
+        key={uiState.skillReviewPending.taskId}
+        skills={uiState.skillReviewPending.skills}
+        onAccept={uiActions.acceptPendingSkill}
+        onReject={uiActions.rejectPendingSkill}
+        onClose={uiActions.closeSkillReviewDialog}
+        onDismiss={uiActions.dismissSkillReviewDialog}
       />
     );
   }
