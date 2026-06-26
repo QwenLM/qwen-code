@@ -37,6 +37,7 @@ import {
   type CdpOutboundFrame,
 } from '../cdp-tunnel/cdp-reverse-link.js';
 import { attachCdpClient } from '../cdp-tunnel/cdp-ws.js';
+import { isServeDebugMode } from '../debug-mode.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
@@ -836,7 +837,7 @@ export function mountAcpHttp(
                   )
                 : opts.clientMcpProvider;
               clientMcp = new ClientMcpWsConnection(
-                (frame) => safeWsSend(ws, JSON.stringify(frame)),
+                (frame) => safeWsSend(ws, JSON.stringify(frame), 'client-MCP'),
                 provider,
               );
             }
@@ -855,6 +856,7 @@ export function mountAcpHttp(
                     server: result.server,
                     toolCount: result.toolCount,
                   }),
+                  'client-MCP',
                 );
               } else if (result.kind === 'unregistered') {
                 safeWsSend(
@@ -863,6 +865,7 @@ export function mountAcpHttp(
                     type: 'mcp_unregistered',
                     server: result.server,
                   }),
+                  'client-MCP',
                 );
               } else if (result.kind === 'error') {
                 safeWsSend(
@@ -872,6 +875,7 @@ export function mountAcpHttp(
                     code: result.code,
                     message: result.message,
                   }),
+                  'client-MCP',
                 );
               }
             };
@@ -1012,7 +1016,7 @@ export function mountAcpHttp(
               cdpEndpoint = {
                 connectionId: conn.connectionId,
                 send: (frame: CdpOutboundFrame) =>
-                  safeWsSend(ws, JSON.stringify(frame)),
+                  safeWsSend(ws, JSON.stringify(frame), 'CDP'),
                 routeInbound: () => false,
               };
               cdpBridgeUnregister =
@@ -1156,9 +1160,21 @@ function headerOf(req: Request, name: string): string | undefined {
  * `ws.send()` on a CLOSED/CLOSING socket throws, and (unguarded, outside the
  * message handler's try/catch) that rejection can take the daemon down. Match
  * `WsStream`'s instance-level `OPEN` check so a late send is a silent no-op.
+ *
+ * `context` labels the dropped frame's surface (e.g. `CDP`, `client-MCP`) so a
+ * tunnel that's been quietly cut shows up in the logs under `QWEN_SERVE_DEBUG`
+ * instead of disappearing without a trace.
  */
-function safeWsSend(ws: WebSocket, payload: string): void {
-  if (ws.readyState === ws.OPEN) ws.send(payload);
+function safeWsSend(ws: WebSocket, payload: string, context = 'frame'): void {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(payload);
+    return;
+  }
+  if (isServeDebugMode()) {
+    writeStderrLine(
+      `qwen serve: dropped ${context} frame on non-OPEN /acp socket (readyState=${ws.readyState})`,
+    );
+  }
 }
 
 /**

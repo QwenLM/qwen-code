@@ -57,6 +57,20 @@ export function attachCdpClient(
     return;
   }
 
+  // Single puppeteer client by design (one daemon = one browser). A second
+  // overlapping `/cdp` connection would clobber the first's inbound routing,
+  // silently corrupting both — reject it instead so the first keeps working.
+  if (bridge.cdpBound) {
+    log('qwen serve: /cdp rejected — a puppeteer client is already bound');
+    try {
+      ws.close(CLOSE_NO_BRIDGE, 'A CDP client is already connected');
+    } catch {
+      // socket already gone
+    }
+    return;
+  }
+  bridge.cdpBound = true;
+
   // Reverse link forwards page-domain commands to the extension's tab.
   const link = new CdpReverseLink((frame) => bridge.send(frame));
 
@@ -103,6 +117,21 @@ export function attachCdpClient(
     // and stray extension frames don't route into a dead link.
     if (registry.getActive() === bridge) {
       bridge.routeInbound = () => false;
+      bridge.cdpBound = false;
+      bridge.onExtensionGone = undefined;
+    }
+  };
+
+  // Extension `/acp` socket dropped (bridge unregistered): the extension can no
+  // longer answer page-domain commands, so close the puppeteer socket. Without
+  // this, puppeteer hangs until the ~170s CDP command timeout.
+  bridge.onExtensionGone = () => {
+    log('qwen serve: extension /acp dropped; closing puppeteer /cdp socket');
+    dispose('extension /acp disconnected');
+    try {
+      ws.close(CLOSE_NORMAL, 'extension disconnected');
+    } catch {
+      // already closing
     }
   };
 

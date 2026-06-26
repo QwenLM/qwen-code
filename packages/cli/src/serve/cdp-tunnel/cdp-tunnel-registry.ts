@@ -28,6 +28,18 @@ export interface CdpBridgeEndpoint {
    * a puppeteer client binds; reset to a no-op when it disconnects.
    */
   routeInbound(frame: Record<string, unknown>): boolean;
+  /**
+   * True while a `/cdp` puppeteer client is bound to this bridge. Set by the
+   * `/cdp` glue on bind, cleared on its disconnect. Lets the glue reject a
+   * second concurrent `/cdp` client instead of silently clobbering the first.
+   */
+  cdpBound?: boolean;
+  /**
+   * Set by the `/cdp` glue when a puppeteer client binds: invoked once the
+   * extension `/acp` connection drops so the bound puppeteer socket can fail
+   * fast instead of hanging until the ~170s CDP command timeout.
+   */
+  onExtensionGone?: () => void;
 }
 
 /**
@@ -44,8 +56,14 @@ export class CdpTunnelRegistry {
    */
   register(endpoint: CdpBridgeEndpoint): () => void {
     this.active = endpoint;
+    let unregistered = false;
     return () => {
+      if (unregistered) return;
+      unregistered = true;
       if (this.active === endpoint) this.active = undefined;
+      // The extension `/acp` socket dropped: tell the bound `/cdp` puppeteer
+      // socket so it fails fast instead of hanging on the CDP command timeout.
+      endpoint.onExtensionGone?.();
     };
   }
 
