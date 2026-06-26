@@ -19,11 +19,6 @@ import { InsightReady } from './InsightReady';
 interface MessageItemProps {
   message: Message;
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   workspaceCwd?: string;
@@ -39,7 +34,6 @@ interface MessageItemProps {
 export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
-  onConfirm,
   onShowContextDetail,
   workspaceCwd,
   isLatest = false,
@@ -80,7 +74,6 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             pendingApproval={pendingApproval}
-            onConfirm={onConfirm}
             workspaceCwd={workspaceCwd}
             shellOutputMaxLines={shellOutputMaxLines}
           />
@@ -163,7 +156,6 @@ function areMessageItemPropsEqual(
   next: MessageItemProps,
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
-  if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
