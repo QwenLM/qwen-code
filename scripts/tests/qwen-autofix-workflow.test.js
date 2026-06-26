@@ -12,6 +12,10 @@ const refreshIssueComments =
   workflow.match(/refresh_issue_comments\(\) \{[\s\S]*?\n[ ]{12}\}/)?.[0] ?? '';
 const tier2Scan =
   workflow.match(/Tier 2:[\s\S]*?tier2-scan\.json"; then/)?.[0] ?? '';
+const filterUnattendedCandidates =
+  workflow.match(
+    /filter_unattended_candidates\(\) \{[\s\S]*?\n[ ]{12}\}/,
+  )?.[0] ?? '';
 
 describe('qwen-autofix workflow', () => {
   it('does not classify tier-2 issues with incomplete fallback comments', () => {
@@ -20,6 +24,8 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('TRUSTED_ASSOC');
     expect(workflow).toContain('KNOWN_BOTS');
     expect(workflow).toContain('autofixTier');
+    expect(refreshIssueComments.length).toBeGreaterThan(0);
+    expect(tier2Scan.length).toBeGreaterThan(0);
     expect(workflow).toContain('::warning::Failed to refresh comments');
     expect(workflow).toContain(
       '::warning::Failed to assemble refreshed comments',
@@ -45,5 +51,15 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('.[0] as $tier1 | .[1] as $tier2');
     expect(workflow).toContain('.[0:(10 - ($selected | length))]');
     expect(workflow).toContain('del(.comments)');
+  });
+
+  it('checks unattended filtering uses maintainer association gates', () => {
+    expect(filterUnattendedCandidates.length).toBeGreaterThan(0);
+    expect(filterUnattendedCandidates).toContain('authorAssociation');
+    expect(filterUnattendedCandidates).toContain('IN($trust[])');
+    expect(filterUnattendedCandidates).toContain('IN($bots[])');
+    expect(filterUnattendedCandidates).not.toContain(
+      '.author.login] | map(select',
+    );
   });
 });
