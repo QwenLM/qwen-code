@@ -6,13 +6,13 @@
 }
 
 .muted {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
 }
 
 .notice {
   padding: 8px 12px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--warning-color);
 }
@@ -31,7 +31,7 @@
 }
 
 .groupTitle {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   padding: 0 8px 2px;
 }
@@ -48,7 +48,7 @@
 }
 
 .serverCardExpanded {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
   padding-bottom: 8px;
 }
 
@@ -61,7 +61,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--foreground);
   cursor: pointer;
   font: inherit;
   padding: 5px 8px;
@@ -70,7 +70,7 @@
 
 .row:hover,
 .expandedRow {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .serverRow {
@@ -100,7 +100,7 @@
   height: 14px;
   border: 1.5px solid currentColor;
   border-radius: 4px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .rowIcon::before,
@@ -129,12 +129,12 @@
   justify-content: center;
   width: 20px;
   height: 20px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .toolRow {
   min-height: 28px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
 }
 
@@ -142,7 +142,7 @@
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   stroke-width: 1.8;
   transition: transform 120ms ease;
 }
@@ -170,14 +170,14 @@
 .status,
 .badge {
   flex: 0 0 auto;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   white-space: nowrap;
 }
 
 .status {
   border-radius: 4px;
-  background: var(--bg-secondary);
+  background: var(--muted);
   line-height: 18px;
   padding: 0 6px;
 }
@@ -206,7 +206,7 @@
   margin: 8px;
   padding: 8px;
   border-radius: 6px;
-  background: var(--bg-primary);
+  background: var(--background);
 }
 
 .serverDetailHeader {
@@ -230,7 +230,7 @@
 }
 
 .label {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   font-weight: 500;
 }
@@ -241,10 +241,10 @@
 }
 
 .button {
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 5px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
+  background: var(--muted);
+  color: var(--foreground);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
@@ -252,7 +252,7 @@
 }
 
 .button:hover:not(:disabled) {
-  border-color: var(--accent-color);
+  border-color: var(--agent-blue-500);
 }
 
 .button:disabled {
@@ -265,8 +265,8 @@
   margin: 0;
   overflow: auto;
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
+  background: var(--background);
+  color: var(--muted-foreground);
   font-size: 12px;
   padding: 8px 10px;
   white-space: pre-wrap;
@@ -290,7 +290,7 @@
   margin: 8px;
   padding: 8px;
   border-radius: 6px;
-  background: var(--bg-primary);
+  background: var(--background);
 }
 
 .section {
@@ -301,26 +301,26 @@
 }
 
 .sectionTitle {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   font-weight: 500;
 }
 
 .description {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   white-space: pre-wrap;
 }
 
 .parameter {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   white-space: pre-wrap;
 }
 
 .empty,
 .emptyTools {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   padding: 12px 8px;
 }
 

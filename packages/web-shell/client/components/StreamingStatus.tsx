@@ -13,6 +13,8 @@ interface StreamingStatusProps {
   startedAt?: number;
 }
 
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
@@ -62,15 +64,14 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   useEffect(() => {
     if (streamingState === 'idle') return;
     const interval = setInterval(() => {
-      setDotFrame((f) => (f + 1) % 4);
+      setDotFrame((f) => (f + 1) % SPINNER_FRAMES.length);
     }, 250);
     return () => clearInterval(interval);
   }, [streamingState]);
 
   if (streamingState === 'idle') return null;
 
-  const dots = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  const spinnerChar = dots[dotFrame % dots.length];
+  const spinnerChar = SPINNER_FRAMES[dotFrame % SPINNER_FRAMES.length];
   const arrow = isReceivingContent ? '↓' : '↑';
   const timeStr = elapsed < 60 ? `${elapsed}s` : formatDuration(elapsed * 1000);
   const tokenStr =

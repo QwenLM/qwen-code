@@ -2,17 +2,17 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
+  color: var(--foreground);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px 14px;
   max-width: min(var(--chat-regular-content-width, 1000px), calc(100vw - 64px));
-  background: var(--command-panel-bg);
+  background: var(--background);
 }
 
 .title {
   font-weight: 700;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .header {
@@ -27,7 +27,7 @@
 
 .note,
 .secondary {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .server {
@@ -46,17 +46,17 @@
 }
 
 .selected {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .disabled {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .pointer {
   display: inline-block;
   width: 2ch;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .nameCell {
@@ -73,7 +73,7 @@
 }
 
 .separator {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .sectionTitle,
@@ -106,12 +106,12 @@
 }
 
 .description {
-  color: var(--text-primary);
+  color: var(--foreground);
   white-space: pre-wrap;
 }
 
 .schema {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   margin: 2px 0 0;
   white-space: pre-wrap;
   overflow: auto;
@@ -125,12 +125,12 @@
 }
 
 .accent {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .shortcuts {
-  color: var(--text-dimmed);
-  border-top: 1px solid var(--border-color);
+  color: var(--muted-foreground);
+  border-top: 1px solid var(--border);
   padding-top: 8px;
 }
 
@@ -154,7 +154,7 @@
 }
 
 .serverFieldLabel {
-  color: var(--text-primary);
+  color: var(--foreground);
 }
 
 .detailBlock,
@@ -170,12 +170,12 @@
 }
 
 .parameterRow {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   white-space: pre-wrap;
 }
 
 .actionMessage {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   margin: 0;
   white-space: pre-wrap;
 }
@@ -187,5 +187,5 @@
 }
 
 .scrollHint {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }

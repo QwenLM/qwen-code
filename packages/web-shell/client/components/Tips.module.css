@@ -3,13 +3,13 @@
   padding: 4px 0;
   padding-left: 2ch;
   font-size: 14px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .label {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .text {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }

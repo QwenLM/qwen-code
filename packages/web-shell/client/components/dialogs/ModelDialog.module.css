@@ -23,7 +23,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--foreground);
   cursor: pointer;
   font: inherit;
   text-align: left;
@@ -31,29 +31,29 @@
 
 .row:hover,
 .selected {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .selected .label {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .divider {
   flex: 0 0 auto;
   height: 1px;
   margin: 6px 8px 0;
-  background: var(--border-color);
+  background: var(--border);
 }
 
 .number {
   min-width: 28px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   text-align: right;
 }
 
 .provider {
   flex: 0 0 auto;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -61,14 +61,14 @@
 .label {
   min-width: 0;
   overflow: hidden;
-  color: var(--text-primary);
+  color: var(--foreground);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .badge {
   flex: 0 0 auto;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
 }
 
@@ -80,8 +80,8 @@
   margin: 8px;
   padding: 8px;
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--background);
+  color: var(--foreground);
 }
 
 .detailRow {
@@ -94,7 +94,7 @@
 .detailLabel {
   min-width: 12ch;
   flex-shrink: 0;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .detailValue {
@@ -104,5 +104,5 @@
 
 .empty {
   padding: 14px 0;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
