@@ -242,3 +242,24 @@ MCP `instructions`（`protocol.rs:191` "Prefer element_index … over pixel coor
 - `crates/cua-driver/src/serve.rs`（daemon list 两处 gated 改写）
 - `crates/cua-driver/src/main.rs`（env 种子）
 - **未动任何 platform crate 的 click/drag/zoom** —— 上游更新冲突面≈0
+
+---
+
+## 迁移方式 & 上游跟进
+
+**怎么 vendor 进来的**：把 trycua/cua 的 `libs/cua-driver/`（tag `cua-driver-rs-v0.6.7`）
+**整体拷贝**到 `packages/cua-driver/`，作为普通 commit。**不是 git subtree** —— 跟上游仓库
+没有 git 层面的关联。当前锁定版本记在 `packages/cua-driver/.vendored-from`。
+
+**为什么不用 git subtree**：实测 `git subtree split --prefix=libs/cua-driver` 在 trycua/cua
+历史里某个 commit 处**稳定卡死**（hang，非慢），所以 subtree 的 add / pull 工作流对这个仓库
+**不可用**（而且 pull 每次都要重新 split → 每次都会卡）。
+
+**怎么跟进上游更新**：用 `scripts/sync-from-upstream.sh <新ref> [cua仓库路径]`。它只 `git diff`
+上游两个 ref（从不遍历全历史，避开了卡死点），把 `libs/cua-driver/` 的增量 reprefix 成
+`packages/cua-driver/` 后 `git apply --reject` 叠加到我们的改动上。我们的改动隔离得好
+（坐标集中在 core+bin，重命名是机械替换），冲突面小（实测 0.6.7→0.6.8 仅 2/12 文件需手动
+处理 `.rej`）。跑完更新 `.vendored-from`、解决 `.rej`、提交即可。
+
+> 若以后想要真正的 `git subtree pull`，需先把本 fork **抽成独立干净仓库**（无 cua 大仓历史
+> 包袱，subtree split 才不会卡），再由 qwen-code 以 subtree/submodule 引用 —— 见上方 TODO。
