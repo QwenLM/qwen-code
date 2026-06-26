@@ -246,33 +246,6 @@
   border-bottom-color: var(--agent-blue-500);
 }
 
-.submitTab {
-  margin-top: 0;
-}
-
-.summary {
-  margin-bottom: 14px;
-  padding: 12px 14px;
-  border-radius: 8px;
-  background: var(--secondary);
-}
-
-.summaryRow {
-  display: flex;
-  gap: 8px;
-  padding: 3px 0;
-}
-
-.summaryLabel {
-  color: var(--muted-foreground);
-  flex-shrink: 0;
-}
-
-.summaryValue {
-  color: var(--foreground);
-  font-weight: 600;
-}
-
 .actions {
   display: flex;
   justify-content: flex-end;

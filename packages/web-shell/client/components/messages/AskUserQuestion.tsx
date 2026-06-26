@@ -44,8 +44,6 @@ export function AskUserQuestion({
   const [customFocused, setCustomFocused] = useState(false);
   const submittedRef = useRef(false);
 
-  const isOnSubmitTab = currentIdx === questions.length;
-
   useEffect(() => {
     const firstQuestion = questions[0];
     submittedRef.current = false;
@@ -65,7 +63,7 @@ export function AskUserQuestion({
     setCustomFocused(false);
   }, [questions, request.id]);
 
-  const current = isOnSubmitTab ? undefined : questions[currentIdx];
+  const current = questions[currentIdx];
   const isMulti = current?.multiSelect ?? false;
 
   const buildResult = useCallback((): Record<string, string> => {
@@ -123,14 +121,6 @@ export function AskUserQuestion({
 
   const handleSelectOption = useCallback(
     (idx: number) => {
-      if (isOnSubmitTab) {
-        if (idx === 0) {
-          handleSubmit();
-        } else {
-          handleCancel();
-        }
-        return;
-      }
       if (!current) return;
       const isOther = idx === current.options.length;
       if (isOther) {
@@ -155,22 +145,12 @@ export function AskUserQuestion({
         });
       }
     },
-    [
-      isOnSubmitTab,
-      current,
-      currentIdx,
-      isMulti,
-      selectedMulti,
-      answers,
-      handleSubmit,
-      handleCancel,
-      focusCustomInput,
-    ],
+    [current, currentIdx, isMulti, selectedMulti, answers, focusCustomInput],
   );
 
   const handleToggle = useCallback(
     (idx: number) => {
-      if (isOnSubmitTab || !current || !isMulti) return;
+      if (!current || !isMulti) return;
       if (idx === current.options.length) {
         focusCustomInput();
         return;
@@ -182,14 +162,7 @@ export function AskUserQuestion({
         : [...prev, label];
       setSelectedMulti({ ...selectedMulti, [currentIdx]: next });
     },
-    [
-      isOnSubmitTab,
-      current,
-      isMulti,
-      selectedMulti,
-      currentIdx,
-      focusCustomInput,
-    ],
+    [current, isMulti, selectedMulti, currentIdx, focusCustomInput],
   );
 
   if (questions.length === 0) return null;
@@ -202,18 +175,6 @@ export function AskUserQuestion({
       return (selectedMulti[i] || []).length > 0 || !!customInputs[i];
     }
     return !!answers[i] || !!customInputs[i];
-  };
-
-  const getAnswerText = (i: number): string => {
-    const q = questions[i];
-    if (!q) return '';
-    if (q.multiSelect) {
-      const multi = selectedMulti[i] || [];
-      const custom = customInputs[i];
-      const all = custom ? [...multi, custom] : multi;
-      return all.join(', ');
-    }
-    return answers[i] || customInputs[i] || '';
   };
 
   const canSubmit = questions.every((_, i) => hasAnswer(i));
@@ -283,56 +244,7 @@ export function AskUserQuestion({
         ))}
       </div>
 
-      {isOnSubmitTab ? (
-        /* Submit confirmation tab */
-        <div className={styles.submitTab}>
-          <div className={styles.header}>{t('askUser.confirmTitle')}</div>
-          <div className={styles.summary}>
-            {questions.map((q, i) => (
-              <div key={i} className={styles.summaryRow}>
-                <span className={styles.summaryLabel}>{q.header}:</span>
-                <span className={styles.summaryValue}>
-                  {getAnswerText(i) || '—'}
-                </span>
-              </div>
-            ))}
-          </div>
-          <div className={styles.text}>{t('askUser.confirmPrompt')}</div>
-          <div
-            className={styles.options}
-            onMouseLeave={() => setSelectedIdx(null)}
-          >
-            <div
-              className={`${styles.option} ${
-                selectedIdx === 0 ? styles.optionActive : ''
-              }`}
-              onClick={handleSubmit}
-              onMouseEnter={() => setSelectedIdx(0)}
-            >
-              <span className={styles.pointer}>
-                {selectedIdx === 0 ? '›' : ' '}
-              </span>
-              <span className={styles.optionNum}>1</span>
-              <span className={styles.optionLabel}>
-                {t('askUser.submitAnswers')}
-              </span>
-            </div>
-            <div
-              className={`${styles.option} ${
-                selectedIdx === 1 ? styles.optionActive : ''
-              }`}
-              onClick={handleCancel}
-              onMouseEnter={() => setSelectedIdx(1)}
-            >
-              <span className={styles.pointer}>
-                {selectedIdx === 1 ? '›' : ' '}
-              </span>
-              <span className={styles.optionNum}>2</span>
-              <span className={styles.optionLabel}>{t('askUser.cancel')}</span>
-            </div>
-          </div>
-        </div>
-      ) : current ? (
+      {current ? (
         /* Question content */
         <>
           {/* Question text */}

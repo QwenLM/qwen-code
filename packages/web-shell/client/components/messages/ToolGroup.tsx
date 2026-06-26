@@ -11,7 +11,6 @@ import { isSubAgentToolCall } from '../../adapters/toolClassification';
 // other's exports at render time — never in top-level code.
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { DiffView } from './tools/DiffView';
-import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
 import {
   extractTodosFromToolCall,
@@ -53,11 +52,6 @@ import styles from './tools/ToolChrome.module.css';
 interface ToolGroupProps {
   tools: ACPToolCall[];
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   workspaceCwd?: string;
   shellOutputMaxLines?: number;
 }
@@ -368,7 +362,6 @@ function TodoToolBody({
 interface ToolLineProps {
   tool: ACPToolCall;
   approval?: PermissionRequest | null;
-  onConfirm?: (id: string, selectedOption: string) => void;
   workspaceCwd?: string;
   shellOutputMaxLines?: number;
 }
@@ -768,7 +761,6 @@ function areToolLinePropsEqual(
   next: ToolLineProps,
 ): boolean {
   if (prev.approval?.id !== next.approval?.id) return false;
-  if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   const a = prev.tool;
@@ -817,7 +809,6 @@ function areSubToolsEqual(
 export const ToolLine = memo(function ToolLine({
   tool,
   approval,
-  onConfirm,
   workspaceCwd,
   shellOutputMaxLines = DEFAULT_SHELL_OUTPUT_MAX_LINES,
 }: ToolLineProps) {
@@ -863,7 +854,7 @@ export const ToolLine = memo(function ToolLine({
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
     const displayName = info.explicitAgentType
-      ? `${t('agent.label')}（${info.explicitAgentType}）`
+      ? `${t('agent.label')} (${info.explicitAgentType})`
       : t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
     const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
@@ -937,14 +928,6 @@ export const ToolLine = memo(function ToolLine({
   // not (e.g. grep/glob/web_fetch with a long description), keep the result
   // summary visible instead of replacing it with an empty detail area.
   const detailView = hasDetailView(tool);
-
-  if (hasApproval && onConfirm) {
-    return (
-      <div className={styles.line}>
-        <ToolApproval request={approval} onConfirm={onConfirm} />
-      </div>
-    );
-  }
 
   return (
     <div className={styles.line}>
@@ -1040,7 +1023,6 @@ export const ToolLine = memo(function ToolLine({
 export const ToolGroup = memo(function ToolGroup({
   tools,
   pendingApproval,
-  onConfirm,
   workspaceCwd,
   shellOutputMaxLines,
 }: ToolGroupProps) {
@@ -1052,9 +1034,6 @@ export const ToolGroup = memo(function ToolGroup({
   const summaryIconTool = tools[0] ?? activeTool;
   const liveStartedAtRef = useRef(Date.now());
   const summaryNow = useSharedNow(hasRunningTool);
-  const directApprovalTool =
-    pendingApproval?.toolCallId &&
-    tools.find((t) => t.callId === pendingApproval.toolCallId);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
@@ -1067,15 +1046,6 @@ export const ToolGroup = memo(function ToolGroup({
     if (!hasRunningTool) return;
     liveStartedAtRef.current = Date.now();
   }, [hasRunningTool, activeTool?.callId]);
-
-  if (
-    directApprovalTool &&
-    !isSubAgentToolCall(directApprovalTool) &&
-    tools.length === 1 &&
-    onConfirm
-  ) {
-    return <ToolApproval request={pendingApproval} onConfirm={onConfirm} />;
-  }
 
   if (showCompact) {
     return <CompactToolGroup tools={tools} workspaceCwd={workspaceCwd} />;
@@ -1128,7 +1098,6 @@ export const ToolGroup = memo(function ToolGroup({
                   key={tool.callId}
                   tool={tool}
                   approval={pendingApproval}
-                  onConfirm={onConfirm}
                   workspaceCwd={workspaceCwd}
                   shellOutputMaxLines={shellOutputMaxLines}
                 />
@@ -1147,7 +1116,6 @@ export const ToolGroup = memo(function ToolGroup({
           key={tool.callId}
           tool={tool}
           approval={pendingApproval}
-          onConfirm={onConfirm}
           workspaceCwd={workspaceCwd}
           shellOutputMaxLines={shellOutputMaxLines}
         />

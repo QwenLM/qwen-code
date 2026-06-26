@@ -1,10 +1,9 @@
-import type { CSSProperties } from 'react';
-
 import autoIconUrl from '../assets/icons/auto.svg';
 import defaultIconUrl from '../assets/icons/default.svg';
 import editIconUrl from '../assets/icons/edit.svg';
 import planIconUrl from '../assets/icons/plan.svg';
 import yoloIconUrl from '../assets/icons/yolo.svg';
+import { cssUrlVar } from '../utils/cssUrlVar';
 import styles from './ModeIcon.module.css';
 
 const modeIconUrls: Record<string, string> = {
@@ -15,16 +14,6 @@ const modeIconUrls: Record<string, string> = {
   yolo: yoloIconUrl,
 };
 
-type ModeIconMaskStyle = CSSProperties & {
-  '--mode-icon-url': string;
-};
-
-function modeIconMaskStyle(iconUrl: string): ModeIconMaskStyle {
-  return {
-    '--mode-icon-url': `url("${iconUrl}")`,
-  } as ModeIconMaskStyle;
-}
-
 export function ModeIcon({ mode }: { mode: string }) {
   const iconUrl = modeIconUrls[mode];
 
@@ -32,7 +21,7 @@ export function ModeIcon({ mode }: { mode: string }) {
     return (
       <span
         className={styles.icon}
-        style={modeIconMaskStyle(iconUrl)}
+        style={cssUrlVar('--mode-icon-url', iconUrl)}
         aria-hidden="true"
       />
     );

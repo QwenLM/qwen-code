@@ -95,7 +95,9 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
+import { cssUrlVar } from './utils/cssUrlVar';
 import { getModelDisplayName } from './utils/modelDisplay';
+import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
 import {
@@ -128,12 +130,7 @@ import {
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
-import type {
-  ACPToolCall,
-  Message,
-  PermissionRequest,
-  SystemMessage,
-} from './adapters/types';
+import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -570,73 +567,6 @@ function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
   );
 }
 
-function parseModelSwitchStatusModel(content: string): string | null {
-  const prefix = 'Model switched: ';
-  if (!content.startsWith(prefix)) return null;
-  const rawModel = content.slice(prefix.length).trim();
-  return rawModel.replace(/\([^()]+\)$/, '');
-}
-
-function isModelSwitchSummaryMessage(
-  message: Message,
-): message is SystemMessage {
-  return (
-    message.role === 'system' &&
-    message.variant === 'info' &&
-    message.source === 'model_switch_summary'
-  );
-}
-
-function getModelSwitchSummaryMessageModel(message: Message): string | null {
-  if (!isModelSwitchSummaryMessage(message) || !isRecord(message.data)) {
-    return null;
-  }
-  const modelId = message.data['modelId'];
-  return typeof modelId === 'string' && modelId ? modelId : null;
-}
-
-function filterDuplicateModelSwitchMessages(
-  messages: readonly Message[],
-): Message[] {
-  const summarizedModels = new Set<string>();
-  for (const message of messages) {
-    if (!isModelSwitchSummaryMessage(message)) continue;
-    const model = getModelSwitchSummaryMessageModel(message);
-    if (model) summarizedModels.add(model);
-  }
-  if (summarizedModels.size === 0) return [...messages];
-  return messages.filter((message) => {
-    if (message.role !== 'system' || message.variant !== 'info') return true;
-    const statusModel = parseModelSwitchStatusModel(message.content);
-    return !statusModel || !summarizedModels.has(statusModel);
-  });
-}
-
-function isModelSwitchMessage(message: Message): boolean {
-  if (message.role !== 'system' || message.variant !== 'info') return false;
-  return (
-    parseModelSwitchStatusModel(message.content) !== null ||
-    isModelSwitchSummaryMessage(message)
-  );
-}
-
-function filterEmptySessionModelSwitchMessages(
-  messages: readonly Message[],
-): Message[] {
-  if (messages.length === 0) return [];
-  if (!messages.every(isModelSwitchMessage)) return [...messages];
-  return [];
-}
-
-function filterModelSwitchMessages(messages: readonly Message[]): Message[] {
-  // De-duplicate first, then remove empty-session model notices. Reversing this
-  // would drop the summary-only empty-session case before duplicate status
-  // messages have a chance to be removed.
-  return filterEmptySessionModelSwitchMessages(
-    filterDuplicateModelSwitchMessages(messages),
-  );
-}
-
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
   return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
 }
@@ -772,10 +702,6 @@ function translateCopyMessage(
   return message;
 }
 
-function iconMaskStyle(url: string): CSSProperties {
-  return { '--queued-icon-url': `url(${url})` } as CSSProperties;
-}
-
 function QueuedPromptDisplay({
   prompts,
   t,
@@ -809,7 +735,7 @@ function QueuedPromptDisplay({
             <span className={styles.queuedPromptIcon} aria-hidden="true">
               <span
                 className={styles.queuedPromptMaskIcon}
-                style={iconMaskStyle(queueIconUrl)}
+                style={cssUrlVar('--queued-icon-url', queueIconUrl)}
               />
             </span>
             <span className={styles.queuedPromptText}>
@@ -831,7 +757,7 @@ function QueuedPromptDisplay({
                 >
                   <span
                     className={styles.queuedPromptActionIcon}
-                    style={iconMaskStyle(insertIconUrl)}
+                    style={cssUrlVar('--queued-icon-url', insertIconUrl)}
                     aria-hidden="true"
                   />
                   {t('queue.insert')}
@@ -846,7 +772,7 @@ function QueuedPromptDisplay({
               >
                 <span
                   className={styles.queuedPromptActionIcon}
-                  style={iconMaskStyle(deleteIconUrl)}
+                  style={cssUrlVar('--queued-icon-url', deleteIconUrl)}
                   aria-hidden="true"
                 />
               </button>
@@ -859,7 +785,7 @@ function QueuedPromptDisplay({
               >
                 <span
                   className={styles.queuedPromptActionIcon}
-                  style={iconMaskStyle(editIconUrl)}
+                  style={cssUrlVar('--queued-icon-url', editIconUrl)}
                   aria-hidden="true"
                 />
               </button>
@@ -3268,7 +3194,7 @@ export function App({
         .setModel(modelId)
         .then((result) => {
           const summary = getModelSwitchSummary(result);
-          setCurrentModel(modelId);
+          setCurrentModel(summary?.modelId ?? modelId);
           if (summary) {
             store.dispatch({
               type: 'debug',
@@ -3726,7 +3652,6 @@ export function App({
                     ref={messageListRef}
                     messages={displayMessages}
                     pendingApproval={pendingToolApproval}
-                    onConfirm={handleConfirm}
                     onShowContextDetail={handleShowContextDetail}
                     catchingUp={connection.catchingUp}
                     isResponding={streamingState !== 'idle'}

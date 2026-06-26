@@ -33,11 +33,6 @@ import styles from './MessageList.module.css';
 interface MessageListProps {
   messages: Message[];
   pendingApproval: PermissionRequest | null;
-  onConfirm: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   catchingUp?: boolean;
@@ -1054,7 +1049,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     {
       messages,
       pendingApproval,
-      onConfirm,
       onShowContextDetail,
       catchingUp,
       isResponding = false,
@@ -1445,7 +1439,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
       // Rule 2: scrolling up → pause follow
       if (curr < prev - 1) {
-        setShouldFollow(false);
+        // Container resizes can clamp scrollTop downward while the viewport is
+        // still at the tail. Treat that as follow mode, not a manual scroll-up.
+        setShouldFollow(distanceFromBottom < 30);
         return;
       }
       // Rule 3: near bottom → resume follow
@@ -1586,7 +1582,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 <ParallelAgentsGroup
                   agents={displayItem.agents}
                   pendingApproval={pendingApproval}
-                  onConfirm={onConfirm}
                 />
               </MessageTimestamp>
             );
@@ -1620,7 +1615,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             <MessageItem
               message={displayItem.message}
               pendingApproval={pendingApproval}
-              onConfirm={onConfirm}
               onShowContextDetail={onShowContextDetail}
               workspaceCwd={workspaceCwd}
               isLatest={isLatest}
@@ -1661,7 +1655,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         tailContent,
         tailContentIndex,
         pendingApproval,
-        onConfirm,
         onShowContextDetail,
         headerOffset,
         visibleItems,

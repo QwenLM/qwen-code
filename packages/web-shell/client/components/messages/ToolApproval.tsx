@@ -97,6 +97,13 @@ function getOptionRank(option: PermissionRequest['options'][number]): number {
   ) {
     return 2;
   }
+  if (
+    option.kind === 'allow_always' &&
+    (option.id === 'proceed_always_server' ||
+      option.id === 'proceed_always_tool')
+  ) {
+    return 3;
+  }
   if (option.kind === 'allow_always') return 3;
   if (option.kind === 'allow_once') return 4;
   return 5;
@@ -124,6 +131,10 @@ function getOptionI18nKey(
       return 'approval.option.allowAlwaysProject';
     if (option.id === 'proceed_always_user')
       return 'approval.option.allowAlwaysUser';
+    if (option.id === 'proceed_always_server')
+      return 'approval.option.allowAlwaysServer';
+    if (option.id === 'proceed_always_tool')
+      return 'approval.option.allowAlwaysTool';
     if (option.id === 'proceed_always') return 'approval.option.allowAllEdits';
   }
   return undefined;
@@ -266,7 +277,7 @@ export function ToolApproval({
         </div>
       )}
 
-      {command ? (
+      {isExec && command ? (
         <div className={styles.code}>
           <pre className={styles.codeBlock} title={command}>
             {command}

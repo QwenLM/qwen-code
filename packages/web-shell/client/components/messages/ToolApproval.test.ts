@@ -132,4 +132,70 @@ describe('ToolApproval', () => {
 
     act(() => root.unmount());
   });
+
+  it('orders permission options according to the product hierarchy', () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const request: PermissionRequest = {
+      id: 'approval-4',
+      toolName: 'run_shell_command',
+      title: 'Bash: npm test',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        {
+          id: 'proceed_always_project',
+          label: 'Always Allow in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_server',
+          label: 'Always Allow for server',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always Allow for user',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_tool',
+          label: 'Always Allow for tool',
+          kind: 'allow_always',
+        },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+      rawInput: { command: 'npm test' },
+      kind: 'bash',
+    };
+
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(ToolApproval, {
+            request,
+            onConfirm: () => undefined,
+          }),
+        ),
+      );
+    });
+
+    const text = container.textContent ?? '';
+    const rejectIndex = text.indexOf('Reject');
+    const userIndex = text.indexOf('Always allow for this user');
+    const projectIndex = text.indexOf('Always allow in this project');
+    const serverIndex = text.indexOf('Always allow for this server');
+    const toolIndex = text.indexOf('Always allow for this tool');
+    const onceIndex = text.indexOf('Yes, allow once');
+    expect(rejectIndex).toBeGreaterThanOrEqual(0);
+    expect(userIndex).toBeGreaterThan(rejectIndex);
+    expect(projectIndex).toBeGreaterThan(userIndex);
+    expect(serverIndex).toBeGreaterThan(projectIndex);
+    expect(toolIndex).toBeGreaterThan(serverIndex);
+    expect(onceIndex).toBeGreaterThan(toolIndex);
+
+    act(() => root.unmount());
+  });
 });

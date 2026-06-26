@@ -23,11 +23,6 @@ import styles from './ParallelAgentsGroup.module.css';
 interface ParallelAgentsGroupProps {
   agents: ACPToolCall[];
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
 }
 
 function formatDuration(ms: number): string {
