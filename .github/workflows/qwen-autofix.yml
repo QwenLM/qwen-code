@@ -255,7 +255,7 @@ jobs:
             echo "🔍 Tier 2 — unattended bugs created ${MAX_CREATED}..${MIN_CREATED} (newest first)..."
             if ! gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${BUG_LABEL} -label:${READY_FOR_AGENT_LABEL} created:${MAX_CREATED}..${MIN_CREATED} ${AUTOFIX_ISSUE_EXCLUDES}" \
-              --limit 30 --json number,title,body,labels,createdAt,url,comments \
+              --limit 30 --json number,title,body,labels,createdAt,url \
               > "${WORKDIR}/tier2-scan.json"; then
               echo "::warning::Tier-2 issue scan failed; proceeding with tier-1 candidates only."
               jq -n -c '[]' > "${WORKDIR}/tier2.with-tier.json"
