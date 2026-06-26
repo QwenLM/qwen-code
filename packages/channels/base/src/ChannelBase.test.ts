@@ -209,11 +209,19 @@ describe('ChannelBase', () => {
 
     it('/clear confirm in a group clears the shared session', async () => {
       const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
-      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+      const g = envelope({
+        isGroup: true,
+        isMentioned: true,
+        chatId: 'g1',
+        threadId: 't1',
+      });
       await ch.handleInbound({ ...g, text: 'hello' });
       ch.sent = [];
       await ch.handleInbound({ ...g, text: '/clear confirm' });
       expect(ch.sent[0]!.text).toContain('Session cleared');
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/status' });
+      expect(ch.sent[0]!.text).toContain('Session: none');
     });
 
     it('/clear in a user-scoped group clears the sender session directly', async () => {
@@ -284,7 +292,12 @@ describe('ChannelBase', () => {
 
     it('/who reports an active session and does not create one', async () => {
       const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
-      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+      const g = envelope({
+        isGroup: true,
+        isMentioned: true,
+        chatId: 'g1',
+        threadId: 't1',
+      });
       await ch.handleInbound({ ...g, text: 'hello' }); // create the shared session
       ch.sent = [];
       (bridge.newSession as ReturnType<typeof vi.fn>).mockClear();
@@ -443,6 +456,30 @@ describe('ChannelBase', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const promptText = (bridge.prompt as any).mock.calls[0][1] as string;
       expect(promptText).toBe('[Alice] ship it');
+    });
+
+    it('does not prefix forwarded slash commands', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/compress now' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('/compress now');
+    });
+
+    it('does not double-prefix already attributed group messages', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({
+          senderName: 'Alice',
+          text: '[Alice]: hello',
+          alreadyPrefixed: true,
+        }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice]: hello');
     });
 
     it('does not prefix direct (non-group) messages', async () => {

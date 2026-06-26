@@ -95,11 +95,18 @@ export class SessionRouter {
     return this.toTarget.get(sessionId);
   }
 
-  hasSession(channelName: string, senderId: string, chatId?: string): boolean {
+  hasSession(
+    channelName: string,
+    senderId: string,
+    chatId?: string,
+    threadId?: string,
+  ): boolean {
     // If chatId is provided, do an exact lookup; otherwise prefix-scan for any
     // session belonging to this sender on this channel.
     if (chatId) {
-      return this.toSession.has(this.routingKey(channelName, senderId, chatId));
+      return this.toSession.has(
+        this.routingKey(channelName, senderId, chatId, threadId),
+      );
     }
     const prefix = this.senderPrefix(channelName, senderId);
     for (const k of this.toSession.keys()) {
@@ -115,10 +122,11 @@ export class SessionRouter {
     channelName: string,
     senderId: string,
     chatId?: string,
+    threadId?: string,
   ): string[] {
     const removedIds: string[] = [];
     if (chatId) {
-      const key = this.routingKey(channelName, senderId, chatId);
+      const key = this.routingKey(channelName, senderId, chatId, threadId);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
     } else {

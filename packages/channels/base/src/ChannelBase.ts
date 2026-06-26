@@ -149,6 +149,7 @@ export abstract class ChannelBase {
         this.name,
         envelope.senderId,
         envelope.chatId,
+        envelope.threadId,
       );
       if (removedIds.length > 0) {
         for (const id of removedIds) {
@@ -202,6 +203,7 @@ export abstract class ChannelBase {
         this.name,
         envelope.senderId,
         envelope.chatId,
+        envelope.threadId,
       );
       const scopeNote = envelope.isGroup
         ? this.config.sessionScope === 'thread'
@@ -266,6 +268,7 @@ export abstract class ChannelBase {
         this.name,
         envelope.senderId,
         envelope.chatId,
+        envelope.threadId,
       );
       const policy = this.config.senderPolicy;
       const lines = [
@@ -380,7 +383,7 @@ export abstract class ChannelBase {
     // shared session can tell members apart. Sanitize the name so a crafted nick
     // can't break out of the [..] tag or inject newlines. Skipped for 1:1 chats
     // and for already-prefixed re-entries (collect-mode coalescing).
-    if (envelope.isGroup && !envelope.alreadyPrefixed) {
+    if (envelope.isGroup && !envelope.alreadyPrefixed && !parsed) {
       const who = (envelope.senderName || envelope.senderId || 'unknown')
         .replace(/[[\]\r\n]/g, ' ')
         .slice(0, 64);

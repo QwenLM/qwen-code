@@ -146,6 +146,13 @@ describe('SessionRouter', () => {
       expect(router.hasSession('ch', 'alice', 'chat1')).toBe(true);
     });
 
+    it('uses threadId for exact lookups in thread scope', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      await router.resolve('ch', 'alice', 'chat1', 'thread1');
+      expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
+      expect(router.hasSession('ch', 'alice', 'chat1', 'thread1')).toBe(true);
+    });
+
     it('returns false for non-existing session', () => {
       const router = new SessionRouter(bridge, '/tmp');
       expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
@@ -174,6 +181,16 @@ describe('SessionRouter', () => {
       const removed = router.removeSession('ch', 'alice', 'chat1');
       expect(removed).toEqual([sid]);
       expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
+    });
+
+    it('removes thread-scoped sessions by threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sid = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+      expect(router.removeSession('ch', 'alice', 'chat1')).toEqual([]);
+      expect(router.removeSession('ch', 'alice', 'chat1', 'thread1')).toEqual([
+        sid,
+      ]);
+      expect(router.hasSession('ch', 'alice', 'chat1', 'thread1')).toBe(false);
     });
 
     it('returns empty array when nothing to remove', () => {

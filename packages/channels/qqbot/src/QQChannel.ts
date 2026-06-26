@@ -986,6 +986,7 @@ export class QQChannel extends ChannelBase {
       // QQ Bot only receives group messages when explicitly @mentioned, so
       // every group message is semantically a reply to the bot.
       isReplyToBot: true,
+      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
     );
