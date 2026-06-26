@@ -84,6 +84,9 @@ describe('LoopTickResolver', () => {
     const tick = await resolver.resolve('dynamic');
 
     expect(tick.full).toBe(false);
+    // The unchanged branch still reports the resolved source so Session.ts can
+    // label it even when only the short reminder is sent.
+    expect(tick.sourcePath).toBe(projectFile());
     expect(tick.modelText).not.toContain(
       'The user configured a loop-tasks file.',
     );

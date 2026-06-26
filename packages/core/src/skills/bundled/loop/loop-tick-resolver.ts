@@ -61,10 +61,10 @@ const SHORT_REMINDER: Record<LoopMode, string> = {
 const SHORT_ABSENT: Record<LoopMode, string> = {
   cron:
     '# /loop tick — loop.md absent\n' +
-    'loop.md is not currently present at .qwen/loop.md. Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
+    'loop.md is not currently present at .qwen/loop.md (project) or ~/.qwen/loop.md (home). Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
   dynamic:
     '# /loop tick — loop.md absent (dynamic pacing)\n' +
-    'loop.md is not currently present at .qwen/loop.md. Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
+    'loop.md is not currently present at .qwen/loop.md (project) or ~/.qwen/loop.md (home). Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
 };
 
 /** Detect whether a scheduled prompt is a loop.md sentinel, and which mode. */

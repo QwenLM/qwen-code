@@ -7,11 +7,18 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   LOOP_TASK_FILE_MAX_BYTES,
   readLoopTaskFile,
 } from './loop-task-file.js';
+
+// Make only readFile controllable; every other fs call stays real so the
+// temp-dir fixtures keep working. The default impl calls through to actual.
+vi.mock('node:fs/promises', async (importActual) => {
+  const actual = await importActual<typeof import('node:fs/promises')>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 
 describe('readLoopTaskFile', () => {
   let tempDir: string;
@@ -27,6 +34,7 @@ describe('readLoopTaskFile', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -137,6 +145,20 @@ describe('readLoopTaskFile', () => {
       content: 'user tasks',
       truncated: false,
     });
+  });
+
+  it('rethrows non-whitelisted fs errors (e.g. EACCES)', async () => {
+    // Only ENOENT/EISDIR/ENOTDIR fall through to the next candidate; a real
+    // error such as a permission denial must surface, not be swallowed.
+    await writeProject('project tasks');
+    const eacces = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    vi.mocked(fs.readFile).mockRejectedValueOnce(eacces);
+
+    await expect(readLoopTaskFile({ projectRoot, homeDir })).rejects.toThrow(
+      /EACCES/,
+    );
   });
 
   it('skips an empty or whitespace-only file and falls through', async () => {

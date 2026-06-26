@@ -6,6 +6,9 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('LOOP_TASK_FILE');
 
 export const LOOP_TASK_FILE_MAX_BYTES = 25_000;
 
@@ -55,7 +58,16 @@ export async function readLoopTaskFile({
         const realRoot = await fs.realpath(projectRoot);
         const real = await fs.realpath(filePath);
         if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
-          continue; // escapes the workspace via a symlink → skip
+          // Skip silently to the next candidate, but leave a debug trail so a
+          // symlink quietly redirecting loop.md outside the workspace is traceable.
+          debugLogger.debug(
+            'skipping project loop.md that escapes the workspace',
+            {
+              filePath,
+              resolved: real,
+            },
+          );
+          continue;
         }
         buffer = await fs.readFile(real);
       } else {
