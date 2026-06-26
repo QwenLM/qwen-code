@@ -2,8 +2,21 @@
 
 - 分支：`feat/ctrl-o-detail-expand`
 - worktree：`/Users/gawain/Documents/codebase/opensource/qwen-code-ctrl-o`
-- 状态：设计评审中（design-first，先文档 PR，后实现 PR）
+- 状态：**实现进行中——本文档为当前 PR 实现的验收基线**（非 docs-only；当前 PR 已含实现文件改动）
 - 目标读者：qwen-code TUI 维护者
+
+> **实现状态对照（当前 PR）**：
+>
+> | 部分 | 状态 |
+> | --- | --- |
+> | 删除全局 compactMode（context/settings/toggle/i18n key、`mergeCompactToolGroups`） | ✅ 已实现 |
+> | `fullDetail` 管线（`HistoryItemDisplay`/`ToolGroupMessage`，并入 `forceExpandAll`/`forceShowResult`/思考块 expanded） | ✅ 已实现 |
+> | `fullDetail` 不被 `ToolGroupMessage` 两个 early return 绕过（纯并行/ memory-only 守 `!fullDetail`） | ✅ 已实现 + 回归测试 |
+> | `TranscriptView` + alt-screen 接入（Ctrl+O 开关、Esc/q/Ctrl+C 关闭、双段冻结、退出重绘、后台确认自动关闭、消息队列守卫） | ✅ 已实现 |
+> | 基于 #5661 type-based partition 的 rebase（已合入 main） | ✅ 已实现 |
+> | `AlternateScreen` 的 `process.stdout.isTTY` guard（§4.2） | ⏳ 待补 + 测试 |
+> | i18n 旧 compact 文案清理（9 语言）+ KeyboardShortcuts/Help 文案（§5/commit 5） | ⏳ 待补 |
+> | **鼠标点击工具 block 就地展开（§4.8 / commit 4）** | ❌ **未实现**——范围待定：本 PR merge blocker，还是降级为 follow-up（见 §4.8 顶部说明） |
 
 ---
 
@@ -247,11 +260,17 @@ transcript 走 alt-screen 接管整屏，但后台对话仍在跑——这带来
 
 ### 4.8 鼠标点击就地展开 block（第二交互入口）
 
-除键盘（Ctrl+O→transcript、Alt+T→思考块）外，提供**鼠标点击**作为就地展开的第二通道。本节是本 PR 在 transcript 之外**新增的功能目标**。
+> **⚠️ 实现状态 + 范围决策（未定，需 reviewer 拍板）**：本节描述的"点击工具 block 就地展开"**当前 PR 尚未实现**（无 `ToolExpandedContext.tsx`、无工具块 clickable wrapper）。两种收敛方式二选一：
+> - **(A) 作为本 PR merge blocker**：随本 PR 补齐实现（`ToolExpandedContext` + `ToolGroupMessage`/`ToolMessage` 命中区 + 测试），合并前完成；
+> - **(B) 降级为 follow-up（推荐，VP-only MVP）**：本 PR 只交付 **Ctrl+O transcript** 行为；点击展开作为后续 PR，限定 VP/`useTerminalBuffer` 下的 collapsed block，Static 仍靠 Ctrl+O transcript 兜底。
+>
+> 下文为该功能的**设计**（无论 A/B 都适用）；若走 (B)，§1 目标第 4 条与 §9 commit 4 应同步标注为 follow-up。
+
+除键盘（Ctrl+O→transcript、Alt+T→思考块）外，提供**鼠标点击**作为就地展开的第二通道。本节是本 PR 在 transcript 之外的**功能目标**。
 
 **与 [#5751](https://github.com/QwenLM/qwen-code/pull/5751) 的分工（依赖关系，不重复造轮子）**：
 
-- **#5751（OPEN，本 PR 依赖其先合并）负责"鼠标基础设施"**：把终端鼠标追踪从 per-component 启停改为**全局引用计数**（修复"折叠块/overlay 卸载时误关鼠标，导致 VP 下鼠标失效"）、为 `ScrollableList`/`VirtualizedList` 增加滚轮滚动与**滚动条点击拖拽**。改动面：`useMouseEvents.ts`、`ScrollableList.tsx`、`VirtualizedList.tsx`。
+- **#5751（已合入 main，2026-06-23）提供"鼠标基础设施"**：把终端鼠标追踪从 per-component 启停改为**全局引用计数**（修复"折叠块卸载时误关鼠标，导致 VP 下鼠标失效"）、为 `ScrollableList`/`VirtualizedList` 增加滚轮滚动与**滚动条点击拖拽**。涉及 `useMouseEvents.ts`、`ScrollableList.tsx`、`VirtualizedList.tsx`。本设计基于其已合入的基础设施。
 - **本 PR 不改这些鼠标底座文件**，避免与 #5751 冲突/重复；待 #5751 合入 main 后 rebase，在其稳定的鼠标基础上叠加下述"点击工具块展开"。若 #5751 迟迟未合并，再评估 cherry-pick（默认走依赖路径）。
 - **思考块点击已由 main 的 `ClickableThinkMessage` + #5751 提供**（点击折叠思考行→打开 ThinkingViewer），本 PR **不重做**，仅确保与新基线/transcript 共存。
 
@@ -298,11 +317,11 @@ transcript 走 alt-screen 接管整屏，但后台对话仍在跑——这带来
 | --- | --- |
 | `packages/cli/src/config/keyBindings.ts`                                         | 删 `TOGGLE_COMPACT_MODE`；加 `TOGGLE_TRANSCRIPT='toggleTranscript'`，默认绑 Ctrl+O；保留 `SHOW_MORE_LINES`(Ctrl+S) 不动；启动时检测用户 keybindings 是否残留 `toggleCompactMode` 绑定，若有则提示迁移到 `toggleTranscript`（§6）                                                                                                                                                                                                                                                                            |
 | `packages/cli/src/ui/keyMatchers.ts`                                             | 同步增删 matcher                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `packages/cli/src/ui/AppContainer.tsx`                                           | 删 `compactMode/compactInline/setCompactMode` 状态、`CompactModeProvider`、Ctrl+O 旧分支、`compactToggleHasVisualEffect` 调用；加 `isTranscriptOpen`（canonical useState，§4.2）+ `isTranscriptOpenRef` + `transcriptFreeze` + `toggleTranscript/openTranscript/closeTranscript`；全局 Ctrl+O→`toggleTranscript`；Esc/q/Ctrl+C **handleGlobalKeypress 第一分支**关闭（早于 QUIT/EXIT/ESCAPE 及 vim INSERT 守卫，§4.3）；`useEffect` 监听**全部阻塞确认/对话框**自动关闭（§4.6 #1）；消息队列 drain 守卫加 `\|\| isTranscriptOpenRef.current`（§4.6 #3）；`refreshStatic`用`isTranscriptOpenRef`守卫、退出时重绘一次（§4.4）。**不并入`dialogsVisible`，不改 `useDialogClose`\*\*                     |
+| `packages/cli/src/ui/AppContainer.tsx`                                           | 删 `compactMode/compactInline/setCompactMode` 状态、`CompactModeProvider`、Ctrl+O 旧分支、`compactToggleHasVisualEffect` 调用；加 `isTranscriptOpen`（canonical useState，§4.2）+ `isTranscriptOpenRef` + `transcriptFreeze` + `toggleTranscript/openTranscript/closeTranscript`；全局 Ctrl+O→`toggleTranscript`；Esc/q/Ctrl+C **handleGlobalKeypress 第一分支**关闭（早于 QUIT/EXIT/ESCAPE 及 vim INSERT 守卫，§4.3）；`useEffect` 监听**全部阻塞确认/对话框**自动关闭（§4.6 #1）；消息队列 drain 守卫加 `\|\| isTranscriptOpenRef.current`（§4.6 #3）；`refreshStatic`用`isTranscriptOpenRef`守卫、退出时重绘一次（§4.4）。**不并入 `dialogsVisible`，不改 `useDialogClose`**                     |
 | `packages/cli/src/ui/contexts/UIStateContext.tsx`                                | **不改**：transcript 态留 `AppContainer` 本地、顶层消费，**不 surface**（取证：ThinkingViewer / claude-code REPL-local 先例，§4.2）。实现代码已如此                                                                                                                                                                                                                                                                                                                                                          |
 | `packages/cli/src/ui/contexts/UIActionsContext.tsx`                              | **不改**：`toggleTranscript/closeTranscript` 为 `AppContainer` 本地回调，由全局键处理直接调用，不经此 context（§4.2）                                                                                                                                                                                                                                                                                                                                                                                       |
 | `packages/cli/src/ui/hooks/useDialogClose.ts`                                    | **不改动**（transcript 不走此路径，Esc 在全局前置分支处理，见 §4.3）                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `packages/cli/src/ui/layouts/DefaultAppLayout.tsx`（及 `ScreenReaderAppLayout`） | 加顶层条件：`isTranscriptOpen` 时渲染 `<TranscriptView/>`（alt-screen 接管）替代主内容；alt-screen 不可用时降级为 overlay                                                                                                                                                                                                                                                                                                                                                                                   |
+| `packages/cli/src/ui/layouts/DefaultAppLayout.tsx`（及 `ScreenReaderAppLayout`） | 加顶层条件：`isTranscriptOpen` 时渲染 `<TranscriptView/>`（`<AlternateScreen disabled={useVP}>` 接管）替代主内容。**无独立 overlay 路径**——非 TTY 由 `AlternateScreen` 的 `isTTY` guard 退化为普通 buffer 内渲染（§4.2），VP 由 `disabled` 复用 ink root 的 alt-screen                                                                                                                                                                                                                  |
 | `packages/cli/src/ui/components/MainContent.tsx`                                 | #5661 维持 `mergedHistory = visibleHistory`（无 cross-group 合并、无 `getCompactLabel`/`absorbedCallIds`/`isSummaryAbsorbed`）。本 PR **不改动**：主视图不传 `fullDetail`（默认 false），force 语义全由 `ToolGroupMessage` 内联（§4.5）                                                                                                                                                                                                                                                              |
 | `packages/cli/src/ui/components/HistoryItemDisplay.tsx`                          | 引入 `fullDetail` prop（父级传入，默认 false）：折入 `resolvedThoughtExpanded = fullDetail \|\| (thoughtExpanded ?? contextThoughtExpanded)`（§4.7，两个思考块分支自动生效）；下传 `fullDetail` 给 `ToolGroupMessage`。`tool_use_summary` 维持渲染为独立 `● <summary>` 行（跟齐 main，无吸收机制）                                                                                                                                                                                          |
 | `packages/cli/src/ui/components/messages/ConversationMessages.tsx`               | **不改**：`ThinkMessage/Content` 的 `expanded` 由 `HistoryItemDisplay` 传入的 `resolvedThoughtExpanded`（已含 `fullDetail` 分量）决定，无需在此处引用 compactMode/fullDetail                                                                                                                                                                                                                                                                                                                                |
@@ -371,7 +390,7 @@ transcript 走 alt-screen 接管整屏，但后台对话仍在跑——这带来
 
 ## 9. 落地拆分（单 PR + 内部分 commit）
 
-遵循 design-first：本文档作为 docs-only PR 先行评审；评审通过后**实现合到一个 PR**，内部按 commit 拆分以便 review/回滚。**本 PR 是栈式依赖**——叠加在 [#5661](https://github.com/QwenLM/qwen-code/pull/5661)（partition 基线）+ [#5751](https://github.com/QwenLM/qwen-code/pull/5751)（鼠标基础设施）之上，二者需先合入 main（或 rebase 其上）。**每个 commit 必须自身可编译可测**：
+本 PR 实现按 commit 拆分以便 review/回滚（下表为**实际/计划状态**，非纯 design-first 的"先文档后实现"）。**依赖基线 [#5661](https://github.com/QwenLM/qwen-code/pull/5661)（partition 基线）+ [#5751](https://github.com/QwenLM/qwen-code/pull/5751)（鼠标基础设施）均已合入 main**，本分支已 rebase 其上。**每个 commit 必须自身可编译可测**：
 
 1. `commit 1` — **删残留全局 compactMode（保留 type-based partition 基线）**：删 `CompactModeContext`/`useCompactMode`/`compactMode` settings(schema)/i18n，删失去引用的 `mergeCompactToolGroups.ts`（含 `compactToggleHasVisualEffect`）。**不动** `ToolGroupMessage` 的 `forceExpandAll`/分区决策（无 `showCompact`/`compactMode ||` 可删）。同步引入 `fullDetail` prop（默认 false）穿过 `HistoryItemDisplay`/`ToolGroupMessage`，并把 `fullDetail` 并入 `forceExpandAll`/`forceShowResult`、思考块折入 `resolvedThoughtExpanded`；主视图不传（沿用 #5661 的 type-based partition）。完成后主视图即为"#5661 type-based partition 基线、无全局开关"，Ctrl+O 暂为 no-op。
 2. `commit 2` — 接入 alt-screen 能力：**复用现有 `AlternateScreen.tsx`（PR #5627）**，验证 `disabled={useVP}` 跳过 double-enter、退出 `refreshStatic()` 重绘 + `isTranscriptOpenRef` 守卫期间 refreshStatic、非 TTY 退化。仅加能力、不接线。
@@ -397,7 +416,7 @@ transcript 走 alt-screen 接管整屏，但后台对话仍在跑——这带来
 
 ## 附录：关键代码取证索引
 
-> **PR 依赖关系**：本 PR 栈式叠加在 **#5661（partition 基线）+ #5751（鼠标基础设施）** 之上，二者需先合入 main 或 rebase 其上（§9）。
+> **PR 依赖关系**：本 PR 叠加在 **#5661（partition 基线）+ #5751（鼠标基础设施）** 之上，**二者均已合入 main**，本分支已 rebase 其上（§9）。
 
 ### #5661 type-based partition 基线取证（本 PR 保留并叠加，符号名以**已合入 main** 的真实代码为准）
 
