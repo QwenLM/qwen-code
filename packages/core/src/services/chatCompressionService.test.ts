@@ -2193,6 +2193,24 @@ describe('computeThresholds', () => {
       expect(t.hard).toBe(200_000);
       expect(t.warn).toBeLessThanOrEqual(t.auto);
     });
+
+    it('clamps negative pct to 0', () => {
+      expect(computeThresholds(32_000, -0.5)).toEqual(
+        computeThresholds(32_000, 0),
+      );
+    });
+
+    it('clamps pct > 1 to 1', () => {
+      expect(computeThresholds(32_000, 1.5)).toEqual(
+        computeThresholds(32_000, 1),
+      );
+    });
+
+    it('NaN pct falls back to DEFAULT_PCT (via Number.isFinite check)', () => {
+      expect(computeThresholds(32_000, NaN)).toEqual(
+        computeThresholds(32_000), // no pct arg = DEFAULT_PCT
+      );
+    });
   });
 });
 

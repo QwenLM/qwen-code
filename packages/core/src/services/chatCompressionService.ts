@@ -161,7 +161,10 @@ export function computeThresholds(
   window: number,
   pct?: number,
 ): CompactionThresholds {
-  const effectivePct = Math.min(1, Math.max(0, pct ?? DEFAULT_PCT));
+  const effectivePct = Math.min(
+    1,
+    Math.max(0, Number.isFinite(pct) ? pct : DEFAULT_PCT),
+  );
   // Clamp to 0 for tiny windows (window < SUMMARY_RESERVE) so the surfaced
   // value in `/context` stays meaningful. The Math.max guards on auto/warn/hard
   // below absorb the floor — clamping does not shift those outputs because
