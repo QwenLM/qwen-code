@@ -5,20 +5,15 @@
  *
  * Reverse link for the Plan C "CDP tunnel" (issue #5626).
  *
- * Bridges a {@link CdpBrowserEmulator} (which speaks browser-level CDP to a
- * puppeteer client over `/cdp`) to the Chrome extension's reverse `/acp`
- * WebSocket. Page-domain CDP commands the emulator can't answer locally are
- * forwarded to the real tab as `cdp_command` frames; the extension runs them
- * via `chrome.debugger.sendCommand` and replies with `cdp_result`. CDP events
- * the tab emits arrive as `cdp_event` frames and are re-tagged onto the page
- * session by the emulator.
+ * Bridges a {@link CdpBrowserEmulator} (browser-level CDP to a puppeteer client
+ * over `/cdp`) to the Chrome extension's reverse `/acp` WebSocket. Page-domain
+ * commands the emulator can't answer are forwarded to the real tab as
+ * `cdp_command` frames; the extension runs them and replies with `cdp_result`,
+ * and tab `cdp_event`s are re-tagged onto the page session by the emulator.
  *
- * One reverse link is bound to ONE extension `/acp` connection (single daemon
- * = single extension = single browser, per the design doc). The link itself is
- * transport-agnostic: it only needs a `sendToExtension` sink for outbound
- * `cdp_*` frames and an emulator hook for inbound events. The `/acp` WS layer
- * owns the socket and feeds inbound `cdp_result` / `cdp_event` / `cdp_detach`
- * frames back into the link.
+ * One link is bound to ONE extension `/acp` connection (single daemon = single
+ * extension = single browser). The `/acp` WS layer owns the socket and feeds
+ * inbound `cdp_*` frames back into the link.
  *
  * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
@@ -127,8 +122,7 @@ export class CdpReverseLink {
   /**
    * Opens once the initial `cdp_attach` settles (success OR failure).
    * `forwardToTab` awaits this so page-domain commands never race the
-   * extension's async `chrome.debugger.attach` (which pops the debugger banner
-   * and takes a tick). Undefined until {@link attach} is first called.
+   * extension's async `chrome.debugger.attach`. Undefined until {@link attach}.
    */
   private attachGate: Promise<void> | undefined;
   /** Called when the extension reports the tab detached. */
@@ -156,10 +150,8 @@ export class CdpReverseLink {
       throw { code: -32000, message: 'CDP tunnel closed' };
     }
     // Ordering gate: wait for the initial attach to settle before forwarding
-    // page-domain commands. Without this, a fast puppeteer `Network.enable`
-    // reaches the extension before `chrome.debugger.attach` finishes and fails
-    // "not attached to a tab". The gate resolves on attach success OR failure;
-    // on failure the command below still runs and fails cleanly.
+    // page-domain commands, so a fast `Network.enable` doesn't reach the
+    // extension before `chrome.debugger.attach` finishes and fail "not attached".
     if (this.attachGate) {
       await this.attachGate;
     }
@@ -222,8 +214,7 @@ export class CdpReverseLink {
         }
       },
     );
-    // Open the gate once the attach settles (success or failure) so awaiting
-    // page commands proceed or fail cleanly instead of racing the attach.
+    // Open the gate once the attach settles (success or failure).
     this.attachGate = result.then(
       () => undefined,
       () => undefined,

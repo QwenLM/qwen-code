@@ -86,10 +86,8 @@ const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 // `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
 // the daemon WS. Off by default while the contract settles.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
-// CDP tunnel opt-in (Plan C, issue #5626). `=1` advertises the
-// `cdp_tunnel_over_ws` capability and exposes the `/cdp` WebSocket so a
-// loopback puppeteer client can drive a real tab through the extension's
-// reverse `/acp` channel. Off by default while the contract settles.
+// CDP tunnel opt-in (Plan C, issue #5626). `=1` advertises `cdp_tunnel_over_ws`
+// and exposes the `/cdp` WebSocket. Off by default while the contract settles.
 const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
@@ -1100,10 +1098,8 @@ export async function runQwenServe(
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
       process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV] === '1',
-    // CDP tunnel (Plan C, issue #5626). Opt-in via env until the public
-    // contract settles — the `/cdp` endpoint + `cdp_*` frame handling stay
-    // dormant otherwise. An explicit `cdpTunnelOverWs` in `optsIn` (embedded
-    // callers) still wins.
+    // CDP tunnel (Plan C, issue #5626). Opt-in via env until the contract
+    // settles; an explicit `cdpTunnelOverWs` in `optsIn` still wins.
     cdpTunnelOverWs:
       optsIn.cdpTunnelOverWs ??
       process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
@@ -1428,10 +1424,9 @@ export async function runQwenServe(
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     // CDP tunnel (Plan C, #5626): forward the flag + bound port so the spawned
-    // ACP child can auto-register chrome-devtools-mcp against this daemon's
-    // `/cdp` endpoint. Only meaningful with a fixed `--port` — the override map
-    // is frozen at bridge construction, so a post-listen ephemeral (`--port 0`)
-    // value can't be threaded this way.
+    // ACP child can auto-register chrome-devtools-mcp against this `/cdp`
+    // endpoint. Only meaningful with a fixed `--port`: the override map is frozen
+    // at bridge construction, so an ephemeral `--port 0` can't be threaded here.
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
     QWEN_SERVE_CDP_TUNNEL_PORT: opts.cdpTunnelOverWs
       ? String(opts.port)

@@ -7506,18 +7506,13 @@ function diffSettingsKeys(
  * CDP tunnel auto-wiring (Plan C, issue #5626).
  *
  * Builds the `chrome-devtools` session MCP server entry when the daemon runs
- * `qwen serve` with the CDP-tunnel flag. The daemon forwards
- * `QWEN_SERVE_CDP_TUNNEL_OVER_WS=1` + `QWEN_SERVE_CDP_TUNNEL_PORT` into this ACP
- * child's env; we point the (patched) chrome-devtools-mcp at the daemon's
- * `/cdp` endpoint so the agent gets its ready-made DevTools tools driving the
- * user's real browser through the tunnel — no hand-written browser tools, no
- * settings.json edit.
+ * with the CDP-tunnel flag. The daemon forwards `QWEN_SERVE_CDP_TUNNEL_OVER_WS`
+ * + `QWEN_SERVE_CDP_TUNNEL_PORT` into this child's env; we point the patched
+ * chrome-devtools-mcp at the daemon's `/cdp` endpoint.
  *
- * Returns `undefined` (caller skips injection) when the flag is off, the
- * forwarded port is missing/invalid, or chrome-devtools-mcp can't be resolved
- * (e.g. a stripped build). `trust` is left unset so the tools default to 'ask'
- * (per-call confirmation, like any project MCP server — no silent auto-approval
- * of browser control).
+ * Returns `undefined` when the flag is off, the port is missing/invalid, or
+ * chrome-devtools-mcp can't be resolved. `trust` is left unset so the tools
+ * default to 'ask' — no silent auto-approval of browser control.
  */
 export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
   if (process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] !== '1') return undefined;

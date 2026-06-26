@@ -5,18 +5,14 @@
  *
  * CDP bridge — the extension side of the Plan C "CDP tunnel" (issue #5626).
  *
- * The daemon's `/cdp` endpoint speaks browser-level CDP to an external
- * puppeteer client (chrome-devtools-mcp) and forwards page-domain commands to
- * THIS module over the reverse `/acp` WebSocket as `cdp_*` frames. Here we drive
- * the active tab with the existing `chrome.debugger` API:
+ * The daemon's `/cdp` endpoint forwards page-domain CDP commands to this module
+ * over the reverse `/acp` WebSocket as `cdp_*` frames; here we drive the active
+ * tab with `chrome.debugger`:
  *
- *   - `cdp_attach`  → `chrome.debugger.attach` the active tab; ack `cdp_attached`
- *   - `cdp_command` → `chrome.debugger.sendCommand({tabId}, method, params)`
- *                     → reply `cdp_result` (result or error), correlated by id
- *   - `chrome.debugger.onEvent`  → forward as `cdp_event`
- *   - `chrome.debugger.onDetach` → forward as `cdp_detach` (ExtensionTransport
- *                                  has no onDetach of its own; the daemon
- *                                  synthesizes `Target.detachedFromTarget`)
+ *   - `cdp_attach`  → attach the active tab; ack `cdp_attached`
+ *   - `cdp_command` → `chrome.debugger.sendCommand`; reply `cdp_result`
+ *   - debugger events  → `cdp_event`
+ *   - debugger detach  → `cdp_detach`
  *
  * Single tab, single debugger.
  *
@@ -73,13 +69,9 @@ let activeSend: CdpSend | null = null;
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Keep the MV3 service worker alive while the debugger is attached. The worker
- * idles out after ~30s with no activity; between CDP commands the agent can
- * pause to think for tens of seconds, and if the worker sleeps `chrome.debugger`
- * detaches — the next command then hangs and the tunnel appears frozen. A
- * sub-30s extension-API call resets the idle timer; the 30s `chrome.alarms`
- * backstop in the service worker only covers idle reconnects, not an in-flight
- * attachment.
+ * Keep the MV3 worker alive while the debugger is attached: it idles out after
+ * ~30s, and if it sleeps mid-attachment `chrome.debugger` detaches and the next
+ * command hangs. A sub-30s extension-API call resets the idle timer.
  */
 // ponytail: 20s poll while attached. Coarser than ideal but well under the 30s
 // idle floor; drop it if Chrome ever exposes an explicit "stay awake" for an
@@ -233,14 +225,12 @@ async function handleAttach(
 /**
  * Handle a `cdp_command` frame: run it on the attached tab and reply.
  *
- * TRUST MODEL — deliberately NO method allowlist. This bridge is a dumb pipe:
- * chrome-devtools-mcp (puppeteer) drives the tab over the FULL CDP surface
- * (Runtime/Page/Network/DOM/Target…), so any allowlist would break its tools.
+ * TRUST MODEL — deliberately NO method allowlist: chrome-devtools-mcp drives the
+ * tab over the full CDP surface, so any allowlist would break its tools.
  * Arbitrary-CDP exposure (incl. `Runtime.evaluate`) is bounded by the CHANNEL,
- * not the payload: the daemon `/cdp` endpoint is loopback-only, the daemon only
- * binds the reverse link to the `qwen-cdp-bridge` extension connection, and
- * Chrome surfaces its own "started debugging this browser" banner for the
- * user-attached tab. Keep this a transparent forwarder.
+ * not the payload: the daemon `/cdp` endpoint is loopback-only, the daemon binds
+ * the reverse link only to the `qwen-cdp-bridge` connection, and Chrome shows
+ * its "started debugging this browser" banner. Keep this a transparent forwarder.
  */
 async function handleCommand(
   frame: CdpCommandFrame,

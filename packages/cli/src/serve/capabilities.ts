@@ -258,11 +258,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // this tag before attempting to register a client-hosted server.
   client_mcp_over_ws: { since: 'v1' },
   // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
-  // where a loopback puppeteer client (chrome-devtools-mcp) connects and drives
-  // ONE real browser tab via the extension's `chrome.debugger`, tunneled over
-  // the reverse `/acp` channel as `cdp_*` frames. Advertised CONDITIONALLY —
-  // only when the operator opts in (the public contract is still settling per
-  // #5626), so clients pre-flight this tag before connecting a `/cdp` client.
+  // where a loopback puppeteer client (chrome-devtools-mcp) drives ONE real tab
+  // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
+  // frames. Advertised only when the operator opts in (contract still settling).
   cdp_tunnel_over_ws: { since: 'v1' },
   // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
   // streams raw PCM, the daemon transcribes server-side via the configured

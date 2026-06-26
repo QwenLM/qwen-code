@@ -3,18 +3,15 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Process-scoped registry that pairs the (single) extension `/acp` reverse
- * connection with the `/cdp` endpoint for the Plan C "CDP tunnel" (issue
- * #5626).
+ * Process-scoped registry pairing the (single) extension `/acp` reverse
+ * connection with the `/cdp` endpoint for the Plan C "CDP tunnel" (issue #5626).
  *
- * The `/acp` WS layer registers an outbound `cdp_*` frame sink here when an
- * extension connection becomes the active CDP bridge; the `/cdp` endpoint looks
- * up that sink to build a {@link CdpReverseLink}. Single daemon = single
- * extension = single browser, so the registry holds at most one active bridge
- * (last-writer-wins; a fresh extension reconnect supersedes a stale one).
- *
- * Mirrors the shape of `ClientMcpSenderRegistry` (the reverse-MCP analogue) so
- * the two reverse channels are wired the same way through `server.ts`.
+ * The `/acp` WS layer registers an outbound `cdp_*` sink here when an extension
+ * becomes the active CDP bridge; the `/cdp` endpoint looks it up to build a
+ * {@link CdpReverseLink}. Single daemon = single extension = single browser, so
+ * at most one bridge is held (last-writer-wins; a reconnect supersedes a stale
+ * one). Mirrors `ClientMcpSenderRegistry` so both reverse channels wire the same
+ * way through `server.ts`.
  */
 
 import type { CdpOutboundFrame } from './cdp-reverse-link.js';

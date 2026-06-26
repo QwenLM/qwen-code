@@ -5,17 +5,13 @@
  *
  * Daemon CDP client — the entire extension service worker (Plan C, issue #5626).
  *
- * The extension is a dumb CDP-tunnel pipe: it connects to a local `qwen serve`
- * daemon's `/acp` WebSocket and bridges `cdp_*` frames into `chrome.debugger`
- * via {@link handleCdpFrame}. There is no chat UI and no reverse tool channel —
- * chat lives in the daemon web UI and browser tooling runs as chrome-devtools-mcp
- * over this same CDP tunnel.
+ * A dumb CDP-tunnel pipe: connects to the local `qwen serve` daemon's `/acp`
+ * WebSocket and bridges `cdp_*` frames into `chrome.debugger` via
+ * {@link handleCdpFrame}. No chat UI — chat lives in the daemon web UI.
  *
- * Handshake note: the daemon's `/acp` transport closes the socket on a 30s
- * "initialize timeout" unless it receives an ACP `initialize` first, and the
- * daemon eagerly registers this connection as the CDP bridge at that moment. So
- * we send the ACP initialize on open and then route `cdp_*` frames; we do NOT
- * advertise any reverse MCP tool server (chrome-tools is gone).
+ * On open we send an ACP `initialize`: the daemon closes the socket on a 30s
+ * timeout otherwise, and registers this connection as the CDP bridge at that
+ * moment.
  */
 
 import {
@@ -30,12 +26,7 @@ import { checkDaemonHealth } from '../daemon/discovery.js';
 
 const LOG_PREFIX = '[ServiceWorker]';
 
-/**
- * Correlation id for the ACP `initialize` sent right after the socket opens.
- * The daemon closes the connection on a 30s "initialize timeout" unless it sees
- * an ACP initialize before anything else, and it registers this connection as
- * the CDP bridge at that point.
- */
+/** Correlation id for the ACP `initialize` sent right after the socket opens. */
 const ACP_INIT_ID = 'browser-tools-acp-init';
 
 /** Reconnect backoff bounds (ms). */
@@ -77,8 +68,8 @@ function onWsMessage(data: unknown): void {
   }
   if (!msg || typeof msg !== 'object') return;
 
-  // ACP `initialize` ack. We don't register anything afterwards (chrome-tools is
-  // gone); the daemon has already bound this connection as the CDP bridge.
+  // ACP `initialize` ack. Nothing to register afterwards; the daemon already
+  // bound this connection as the CDP bridge.
   if (msg['id'] === ACP_INIT_ID && ('result' in msg || 'error' in msg)) {
     if (msg['error']) {
       console.warn(LOG_PREFIX, 'ACP initialize failed:', msg['error']);
@@ -88,16 +79,13 @@ function onWsMessage(data: unknown): void {
     return;
   }
 
-  // CDP-tunnel frames: the daemon's `/cdp` endpoint forwards page-domain CDP
-  // commands here as `cdp_command` / `cdp_attach`. Route them to the bridge,
-  // which drives the tab via chrome.debugger and pushes `cdp_result` /
-  // `cdp_event` / `cdp_attached` / `cdp_detach` back over this same socket.
+  // CDP-tunnel frames: route to the bridge, which drives the tab via
+  // chrome.debugger and pushes results/events back over this socket.
   if (isCdpBridgeFrame(msg['type'])) {
     handleCdpFrame(msg as { type?: unknown }, (frame) => sendRaw(frame));
     return;
   }
-  // Other frame types (chat/session traffic on the shared /acp socket) are not
-  // ours; ignore them.
+  // Other frame types (chat/session traffic) aren't ours; ignore.
 }
 
 /** Schedule a reconnect with capped exponential backoff. */
@@ -141,16 +129,12 @@ async function connect(): Promise<void> {
   ws.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
     console.log(LOG_PREFIX, 'Connected; sending ACP initialize');
-    // The daemon's /acp transport requires an ACP `initialize` first and closes
-    // the socket on a 30s timeout otherwise; it registers this connection as the
-    // CDP bridge at that point.
     sendRaw({
       jsonrpc: '2.0',
       id: ACP_INIT_ID,
       method: 'initialize',
-      // Identify this /acp connection as the CDP bridge so the daemon routes
-      // cdp_* frames here and NOT to web UI / Zed agent clients sharing /acp.
-      // The name must match the daemon's gate in serve/acp-http/index.ts.
+      // `clientInfo.name` gates which /acp connection becomes the CDP bridge
+      // (vs web UI / Zed clients sharing /acp); must match the daemon's gate.
       params: { clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' } },
     });
   };
@@ -200,13 +184,10 @@ async function start(): Promise<void> {
 }
 
 /**
- * MV3 keepalive. The service worker idles out after ~30s; without this the CDP
- * tunnel silently drops whenever no puppeteer client is driving it, and the
- * user has to keep the "Service Worker" DevTools window open to hold the worker
- * awake. `chrome.alarms` is one of the few things that wakes a terminated
- * worker — and each wake re-runs this file's top level, so `start()` re-opens
- * the tunnel. The recurring `onAlarm` dispatch also keeps the idle timer from
- * firing while the worker is alive.
+ * MV3 keepalive. The service worker idles out after ~30s, silently dropping the
+ * CDP tunnel; `chrome.alarms` is one of the few things that wakes a terminated
+ * worker, and each wake re-runs this file's top level so `start()` re-opens the
+ * tunnel.
  */
 const KEEPALIVE_ALARM = 'cdp-tunnel-keepalive';
 // ponytail: 0.5min is the release-build floor; on a cold idle the reconnect can
@@ -221,10 +202,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   else void start();
 });
 
-// The extension has no UI of its own (it's a pure CDP-tunnel pipe; chat lives
-// in the daemon web UI). Clicking the toolbar icon opens the side panel, which
-// hosts that web UI in an iframe (see sidepanel.html) — a docked sidebar
-// rather than a full tab.
+// No UI of its own: clicking the toolbar icon opens the side panel, which hosts
+// the daemon web UI in an iframe (see sidepanel.html).
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((error) =>

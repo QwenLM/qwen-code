@@ -5,10 +5,10 @@
  *
  * Plan C real-Chrome local verification (issue #5626).
  *
- * Connects puppeteer to a RUNNING daemon's `/cdp` endpoint and reads the user's
- * REAL active tab through the loaded extension's `chrome.debugger`. Unlike
- * `cdp-tunnel-acceptance.mjs` (which uses a mock extension and needs no browser),
- * this exercises the full real path and needs a real Chrome with the extension.
+ * Connects puppeteer to a RUNNING daemon's `/cdp` and reads the user's REAL
+ * active tab through the extension's `chrome.debugger`. Unlike
+ * `cdp-tunnel-acceptance.mjs` (mock extension, no browser), this needs a real
+ * Chrome with the extension loaded.
  *
  * Prereqs:
  *   1. Build: `npm run build` (cli + extension).

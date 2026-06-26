@@ -5,10 +5,9 @@
  *
  * Daemon connection config for the daemon-direct architecture (issue #5626).
  *
- * The extension talks directly to a local `qwen serve` HTTP daemon instead of
- * a native messaging host. A loopback daemon bind is auth-free, so `token` is
- * optional; both fields are overridable via `chrome.storage.local` so a user
- * can point at a non-default port or a token-gated daemon.
+ * The extension talks directly to a local `qwen serve` daemon instead of a
+ * native messaging host. Loopback binds are auth-free so `token` is optional;
+ * both fields are overridable via `chrome.storage.local`.
  */
 
 export interface DaemonConfig {

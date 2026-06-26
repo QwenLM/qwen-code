@@ -12,14 +12,10 @@
  *                                            extension `/acp` socket  <--+
  *
  * The emulator answers browser-level CDP locally and forwards page-domain
- * commands to the real tab over the reverse link; tab events flow back and are
- * re-tagged onto the page session. The puppeteer socket is fed by the
- * emulator's `reply` callback; inbound puppeteer frames are pumped into
- * `emulator.handleFromClient`.
- *
- * One `/cdp` connection binds to the (single) active extension bridge in the
- * {@link CdpTunnelRegistry}. If no extension is connected the `/cdp` socket is
- * closed immediately with a clear reason (puppeteer surfaces it).
+ * commands to the real tab over the reverse link; tab events flow back. One
+ * `/cdp` connection binds to the (single) active extension bridge in the
+ * {@link CdpTunnelRegistry}; if no extension is connected the socket is closed
+ * immediately with a clear reason.
  *
  * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */

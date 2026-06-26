@@ -5,23 +5,20 @@
  *
  * CDP browser-level emulation layer for the Plan C "CDP tunnel" (issue #5626).
  *
- * An external puppeteer client (chrome-devtools-mcp) connects to the daemon's
- * `/cdp` WebSocket expecting a browser-level CDP endpoint, but the only thing
- * behind the tunnel is a single real browser tab driven via the extension's
- * `chrome.debugger` (which is page-level only). This class synthesizes the
- * missing browser-level topology so puppeteer connects and obtains one page:
+ * A puppeteer client (chrome-devtools-mcp) connects to the daemon's `/cdp`
+ * WebSocket expecting a browser-level CDP endpoint, but behind the tunnel is a
+ * single real tab driven via `chrome.debugger` (page-level only). This class
+ * synthesizes the missing browser-level topology so puppeteer connects and gets
+ * one page:
  *
  *   - a two-level `tab` -> `page` target tree, and
- *   - the recursive `Target.setAutoAttach` handshake (browser attaches the tab
- *     session; the tab session attaches the page session),
+ *   - the recursive `Target.setAutoAttach` handshake puppeteer's
+ *     `ExtensionTransport` relies on.
  *
- * exactly the contract puppeteer's own `ExtensionTransport` relies on (verified
- * by the Phase 0 spike: puppeteer connected to a pure synthesis layer and ran
- * `page.evaluate(() => 1 + 1) === 2`). Browser-domain commands are answered
- * locally here; page-domain commands (tagged with the page session id) are
- * forwarded to the real tab through {@link CdpEmulatorCallbacks.forwardToTab},
- * and events from the tab are re-tagged with the page session id on the way
- * back via {@link CdpBrowserEmulator.emitTabEvent}.
+ * Browser-domain commands are answered locally; page-domain commands (tagged
+ * with the page session id) are forwarded to the real tab via
+ * {@link CdpEmulatorCallbacks.forwardToTab}, and tab events are re-tagged with
+ * the page session id on the way back via {@link CdpBrowserEmulator.emitTabEvent}.
  *
  * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
@@ -76,10 +73,9 @@ export class CdpBrowserEmulator {
   ) {}
 
   /**
-   * Refresh the synthetic tab/page targetInfo (url/title). Called once the
-   * extension acks `cdp_attach` with the real tab's metadata, so puppeteer's
-   * `page.url()` / `page.title()` reflect the actual page rather than the
-   * `about:blank` placeholder used before attach.
+   * Refresh the synthetic tab/page targetInfo (url/title) once the extension
+   * acks `cdp_attach`, so puppeteer's `page.url()`/`page.title()` reflect the
+   * real page rather than the `about:blank` placeholder used before attach.
    */
   setTabInfo(info: CdpTabInfo): void {
     this.tab = { ...this.tab, ...info };

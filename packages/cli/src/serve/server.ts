@@ -2135,9 +2135,9 @@ export function createServeApp(
     });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
 
-  // Plan C CDP tunnel (issue #5626). Process-scoped registry pairing the
-  // extension `/acp` reverse connection with the `/cdp` puppeteer endpoint.
-  // Inert until both ends connect (gated by `cdpTunnelOverWs`).
+  // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
+  // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
+  // both ends connect (gated by `cdpTunnelOverWs`).
   const cdpTunnelRegistry =
     opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
 
@@ -5092,9 +5092,8 @@ export function createServeApp(
             ),
         }
       : {}),
-    // Plan C CDP tunnel (issue #5626). The `/cdp` upgrade branch + `cdp_*`
-    // frame routing only activate when the flag is on and a registry is
-    // supplied; existing behaviour is unchanged otherwise.
+    // Plan C CDP tunnel (issue #5626): the `/cdp` branch + `cdp_*` routing
+    // activate only when the flag is on and a registry is supplied.
     cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
     ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes

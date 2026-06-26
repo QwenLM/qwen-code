@@ -5,24 +5,14 @@
  *
  * Plan C "CDP tunnel" end-to-end acceptance (issue #5626).
  *
- * Proves the REAL daemon `/cdp` path works with a MOCK extension standing in
- * for chrome.debugger (no real Chrome needed):
+ * Proves the REAL daemon `/cdp` path works with a MOCK extension standing in for
+ * chrome.debugger (no real Chrome): a Node mock connects `/acp` and answers
+ * `cdp_command` frames with page-domain CDP, then puppeteer connects to `/cdp`
+ * and runs `page.evaluate(() => 1 + 1)`. PASS = evaluate === 2 through the real
+ * daemon /cdp + emulator + reverse-link.
  *
- *   1. Start the real daemon with QWEN_SERVE_CDP_TUNNEL_OVER_WS=1 +
- *      QWEN_SERVE_CLIENT_MCP_OVER_WS=1; wait for /health 200.
- *   2. Connect a Node MOCK EXTENSION to ws://HOST:PORT/acp, do the ACP
- *      `initialize` handshake + mcp_register (copied from browser-tools-server),
- *      then answer cdp_command frames with page-domain CDP (Runtime.enable ->
- *      executionContextCreated, Page.createIsolatedWorld -> executionContextId,
- *      Runtime.callFunctionOn/evaluate -> {result:{type:'number',value:2}}).
- *   3. puppeteer.connect({browserWSEndpoint: ws://HOST:PORT/cdp}) ->
- *      browser.pages() -> page.evaluate(() => 1 + 1).
- *   4. PASS = evaluate === 2 through the REAL daemon /cdp + emulator +
- *      reverse-link to the mock extension.
- *
- * puppeteer-core + ws are loaded from the spike's node_modules (puppeteer-core
- * 25.2.0, the pinned ExtensionTransport topology). The daemon and CLI are the
- * REAL built artifacts in this repo.
+ * puppeteer-core + ws load from the spike's node_modules; the daemon/CLI are the
+ * real built artifacts.
  *
  * Run:
  *   node packages/cli/src/serve/cdp-tunnel/acceptance/cdp-tunnel-acceptance.mjs
@@ -160,13 +150,10 @@ function startMockExtension() {
         return;
       }
 
-      // ACP initialize ack -> register our MCP server (handshake sequence
-      // copied from browser-tools-server.ts) AND proceed. The CDP tunnel path
-      // does NOT depend on mcp_registered: the daemon registers this socket as
-      // the active CDP bridge on the first inbound `cdp_*` frame, so we resolve
-      // as soon as the ACP connection is up. `mcp_register` is still sent to
-      // mirror the real extension's sequence (its ack, if it arrives, just
-      // flips the bookkeeping flag).
+      // ACP initialize ack -> register our MCP server and resolve. The CDP path
+      // doesn't depend on mcp_registered (the daemon binds the bridge on the
+      // first inbound `cdp_*` frame); `mcp_register` just mirrors the real
+      // extension's sequence.
       if (msg.id === ACP_INIT_ID && ('result' in msg || 'error' in msg)) {
         if (msg.error) {
           rejectConn(new Error('ACP initialize failed'));

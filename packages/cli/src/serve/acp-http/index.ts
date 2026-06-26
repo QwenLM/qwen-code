@@ -177,10 +177,9 @@ export interface MountAcpHttpOptions {
   clientMcpProviderFactory?: (connectionId: string) => ClientMcpServerProvider;
   /**
    * Opt-in: tunnel raw CDP to a real browser tab over the reverse `/acp` WS
-   * (Plan C, issue #5626). When true, a new `/cdp` upgrade branch accepts a
-   * loopback puppeteer client (chrome-devtools-mcp) and inbound `cdp_*` frames
-   * on the extension's `/acp` socket are routed to the bound reverse link. Off
-   * by default — existing behaviour is unchanged when off.
+   * (Plan C, issue #5626). When true, a `/cdp` upgrade branch accepts a loopback
+   * puppeteer client and inbound `cdp_*` frames are routed to the bound reverse
+   * link. Off by default.
    */
   cdpTunnelOverWs?: boolean;
   /**
@@ -598,10 +597,9 @@ export function mountAcpHttp(
         return;
       }
       // `/cdp` is the Plan C CDP-tunnel endpoint (issue #5626): a loopback
-      // puppeteer client (chrome-devtools-mcp) connects here to drive a real
-      // tab over the extension's `/acp` reverse channel. It reuses the SAME
-      // loopback / host-allowlist / auth / CSRF checks below, then upgrades
-      // into the CDP glue instead of the ACP handshake. Off unless opted in.
+      // puppeteer client connects to drive a real tab. It reuses the SAME
+      // loopback / host-allowlist / auth / CSRF checks below, then upgrades into
+      // the CDP glue instead of the ACP handshake. Off unless opted in.
       const isCdpPath =
         opts.cdpTunnelOverWs === true &&
         opts.cdpTunnelRegistry !== undefined &&
@@ -730,13 +728,11 @@ export function mountAcpHttp(
         // Per-connection client-hosted MCP holder (issue #5626). Created
         // lazily on the first client-MCP frame; disposed on WS close.
         let clientMcp: ClientMcpWsConnection | undefined;
-        // Per-connection CDP-tunnel bridge unregister (Plan C, issue #5626).
-        // Set when this `/acp` connection registers itself as the active CDP
-        // bridge (on its first inbound `cdp_*` frame); called on WS close.
+        // Per-connection CDP-tunnel bridge unregister (Plan C, issue #5626),
+        // called on WS close.
         let cdpBridgeUnregister: (() => void) | undefined;
-        // The registered CDP bridge endpoint for this connection. Its
-        // `routeInbound` starts as a no-op and is reassigned by the `/cdp` glue
-        // (attachCdpClient) when a puppeteer client binds.
+        // The registered CDP bridge endpoint. Its `routeInbound` starts as a
+        // no-op and is reassigned by the `/cdp` glue when a puppeteer client binds.
         let cdpEndpoint: CdpBridgeEndpoint | undefined;
         const wsKey = rawAddr.startsWith('::ffff:')
           ? rawAddr.slice(7)
@@ -902,11 +898,9 @@ export function mountAcpHttp(
           }
 
           // ── CDP-tunnel frames (Plan C, issue #5626) ──────────────────
-          // The extension sends `cdp_result` / `cdp_event` / `cdp_attached` /
-          // `cdp_detach` on this same `/acp` socket. They are NOT JSON-RPC, so
-          // intercept before `parseInbound` and route to the bound `/cdp`
-          // reverse link. The bridge endpoint was registered eagerly at
-          // initialize (see above); `routeInbound` is a no-op until a puppeteer
+          // The extension's `cdp_*` frames on this `/acp` socket are NOT
+          // JSON-RPC, so intercept before `parseInbound` and route to the bound
+          // `/cdp` reverse link. `routeInbound` is a no-op until a puppeteer
           // client binds.
           if (
             opts.cdpTunnelOverWs === true &&
@@ -995,14 +989,11 @@ export function mountAcpHttp(
             );
             // Plan C (issue #5626): register this connection as the active CDP
             // bridge eagerly so a `/cdp` puppeteer client can bind immediately
-            // (the extension would otherwise only surface as the bridge on its
-            // first inbound `cdp_*` frame, which it never sends until the daemon
-            // `cdp_attach`es it — a chicken-and-egg deadlock). Gate on the
-            // extension's `clientInfo.name`: the web UI / Zed agent share this
-            // same `/acp` endpoint, and an un-gated last-writer-wins would let
-            // an agent connection capture `cdp_*` frames it can't answer,
-            // stealing the bridge from the extension. Single extension =
-            // last-writer-wins among bridge clients only.
+            // (otherwise the extension never surfaces as the bridge until it
+            // sends a `cdp_*` frame, which it won't until attached — a deadlock).
+            // Gate on `clientInfo.name`: web UI / Zed agents share this `/acp`
+            // endpoint, and an un-gated last-writer-wins would let an agent steal
+            // the bridge with `cdp_*` frames it can't answer.
             const clientName =
               message.params &&
               typeof message.params === 'object' &&
