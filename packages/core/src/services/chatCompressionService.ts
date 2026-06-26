@@ -173,7 +173,10 @@ export function computeThresholds(
   const auto = Math.max(effectivePct * window, absAuto);
 
   const absWarn = auto - WARN_BUFFER;
-  const warn = Math.max((effectivePct - WARN_PCT_OFFSET) * window, absWarn);
+  const warn = Math.max(
+    0,
+    Math.max((effectivePct - WARN_PCT_OFFSET) * window, absWarn),
+  );
 
   const rawHard = effectiveWindow - HARD_BUFFER;
   // Guarantee hard >= auto so compaction doesn't wait until the last moment.
