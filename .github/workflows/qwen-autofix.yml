@@ -180,7 +180,10 @@ jobs:
               echo "⏭️ Forced issue #${FORCED_ISSUE} has an autofix exclusion label; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             else
-              jq -c '[. + {autofixTier: 0}]' "${forced_issue_json}" > "${WORKDIR}/candidates.json"
+              if ! jq -c '[. + {autofixTier: 0}]' "${forced_issue_json}" > "${WORKDIR}/candidates.json"; then
+                echo "::warning::Forced issue #${FORCED_ISSUE} processing failed; falling back to an empty candidate list."
+                jq -n -c '[]' > "${WORKDIR}/candidates.json"
+              fi
             fi
           else
             MIN_CREATED="$(date -u -d "${MIN_ISSUE_AGE_DAYS} days ago" +%Y-%m-%d)"
@@ -208,7 +211,9 @@ jobs:
             refresh_issue_comments() {
               local input_file="$1"
               local output_file="$2"
-              local ndjson="${WORKDIR}/tier2-with-comments.ndjson"
+              # Derive the scratch path from the output file so a second call (or
+              # a different tier) can't clobber a shared NDJSON.
+              local ndjson="${output_file%.json}.ndjson"
 
               : > "${ndjson}"
               while IFS= read -r issue; do
