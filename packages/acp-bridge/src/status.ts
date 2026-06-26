@@ -588,6 +588,12 @@ export interface ServeSessionStatsToolByName {
   };
 }
 
+export interface ServeSessionStatsSkillByName {
+  count: number;
+  success: number;
+  fail: number;
+}
+
 export interface ServeSessionStatsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
@@ -606,6 +612,12 @@ export interface ServeSessionStatsStatus {
   files: {
     totalLinesAdded: number;
     totalLinesRemoved: number;
+  };
+  skills: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    byName: Record<string, ServeSessionStatsSkillByName>;
   };
 }
 

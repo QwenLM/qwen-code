@@ -1008,6 +1008,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
+  const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => ({
+    sessionId: entry.sessionId,
+    workspaceCwd: entry.workspaceCwd,
+    createdAt: entry.createdAt,
+    displayName: entry.displayName,
+    clientCount: entry.clientIds.size,
+    hasActivePrompt: entry.promptActive,
+  });
   // Pending + resolved permission state lives in
   // `MultiClientPermissionMediator` (constructed below). The bridge
   // keeps `entry.pendingPermissionIds: Set<string>` on each
@@ -2195,6 +2203,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
+        hasActivePrompt: existing.promptActive,
         ...replayFieldsFor(existing, action),
       };
     }
@@ -2249,6 +2258,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         attached: true,
         clientId: registerClient(entry, req.clientId),
         createdAt: entry.createdAt,
+        hasActivePrompt: entry.promptActive,
       };
     }
 
@@ -2375,6 +2385,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           clientId,
           createdAt: racedEntry.createdAt,
           state: racedEntry.restoreState ?? {},
+          hasActivePrompt: racedEntry.promptActive,
           ...replayFieldsFor(racedEntry, action),
         };
       }
@@ -2410,6 +2421,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         clientId,
         createdAt: entry.createdAt,
         state,
+        hasActivePrompt: entry.promptActive,
         ...replayFieldsFor(entry, action),
       };
     })().finally(() => {
@@ -2710,6 +2722,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             attached: true,
             clientId,
             createdAt: existing.createdAt,
+            hasActivePrompt: existing.promptActive,
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -2758,7 +2771,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
-          return { ...session, attached: true, clientId };
+          return {
+            ...session,
+            attached: true,
+            clientId,
+            hasActivePrompt: attachedEntry.promptActive,
+          };
         }
       }
 
@@ -3548,17 +3566,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const out: BridgeSessionSummary[] = [];
       for (const entry of byId.values()) {
         if (entry.workspaceCwd === key) {
-          out.push({
-            sessionId: entry.sessionId,
-            workspaceCwd: entry.workspaceCwd,
-            createdAt: entry.createdAt,
-            displayName: entry.displayName,
-            clientCount: entry.clientIds.size,
-            hasActivePrompt: entry.promptActive,
-          });
+          out.push(toSessionSummary(entry));
         }
       }
       return out;
+    },
+
+    getSessionSummary(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return toSessionSummary(entry);
     },
 
     recordHeartbeat(sessionId, context) {

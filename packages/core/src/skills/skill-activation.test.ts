@@ -5,13 +5,19 @@
  */
 
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   SkillActivationRegistry,
   resolveProjectRelativePath,
   splitConditionalSkills,
 } from './skill-activation.js';
 import type { SkillConfig } from './types.js';
+
+// The integration tests below `await import('../core/coreToolScheduler.js')`
+// just to reach one pure helper, but that drags in the whole scheduler module
+// graph cold. The first such import runs a few seconds and, under a contended
+// CI runner, crosses the 5s default — a flaky timeout, not a hang.
+vi.setConfig({ testTimeout: 30_000 });
 
 function makeSkill(overrides: Partial<SkillConfig>): SkillConfig {
   return {

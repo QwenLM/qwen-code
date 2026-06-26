@@ -82,6 +82,8 @@ export interface BridgeSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -389,6 +391,15 @@ export interface AcpSessionBridge {
    * supplied cwd. Empty array (not throw) when no sessions exist.
    */
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
+
+  /**
+   * Live status summary for a single session by id — the same shape
+   * `listWorkspaceSessions` produces per item. Throws
+   * `SessionNotFoundError` when no live session with that id exists on
+   * this daemon. Lets a caller that already holds a session id poll
+   * `hasActivePrompt` / `clientCount` without scanning the whole list.
+   */
+  getSessionSummary(sessionId: string): BridgeSessionSummary;
 
   /**
    * Record a client heartbeat for the session. Throws
@@ -763,7 +774,7 @@ export interface AcpSessionBridge {
    */
   isChannelLive(): boolean;
 
-  /** Number of sessions with an active prompt (promptActive === true). */
+  /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
   /**
