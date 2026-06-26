@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
  * Plan C layer-C verification (issue #5626): drive the PATCHED chrome-devtools-mcp
