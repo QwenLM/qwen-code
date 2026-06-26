@@ -4256,6 +4256,134 @@ describe('Session', () => {
         });
       });
 
+      it('expands a loop.md sentinel into the task block and echoes a clean label', async () => {
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-session-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- finish the migration');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: '<<loop.md-dynamic>>',
+                cronExpr: '@wakeup',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The client sees a stable label, never the raw sentinel.
+          await vi.waitFor(() => {
+            expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+              sessionId: 'test-session-id',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'text',
+                  text: `Loop tick — tasks from ${loopMdPath}`,
+                },
+                _meta: { source: 'loop' },
+              },
+            });
+          });
+
+          // The model receives the expanded full task block, not the sentinel.
+          let block = '';
+          await vi.waitFor(() => {
+            const cronCall = (
+              mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+            ).mock.calls.find(
+              (c) =>
+                Array.isArray(c[1]?.message) &&
+                c[1].message.some((p: { text?: string }) =>
+                  p.text?.includes('finish the migration'),
+                ),
+            );
+            expect(cronCall).toBeDefined();
+            block = (cronCall![1].message as Array<{ text?: string }>)
+              .map((p) => p.text ?? '')
+              .join('');
+          });
+          expect(block).toContain('# /loop tick — tasks from');
+          expect(block).toContain('- finish the migration');
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      it('leaves a non-sentinel cron prompt untouched (no loop.md expansion)', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: 'do the normal cron thing',
+                cronExpr: '0 * * * *',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'do the normal cron thing' },
+              _meta: { source: 'cron' },
+            },
+          });
+        });
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        await vi.waitFor(() => {
+          expect(sentToModel()).toContain('do the normal cron thing');
+        });
+        expect(sentToModel()).not.toContain('# /loop tick');
+      });
+
       it('stops cron-fired ACP prompt before sending when the session token limit is exceeded', async () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {

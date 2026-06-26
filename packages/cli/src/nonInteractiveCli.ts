@@ -25,6 +25,7 @@ import {
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
+  detectLoopSentinel,
   SendMessageType,
   restoreWorktreeContext,
   TeamEventType,
@@ -1521,6 +1522,15 @@ export async function runNonInteractive(
               };
 
               scheduler.start((job: { prompt: string; cronExpr?: string }) => {
+                // loop.md sentinel expansion is interactive-only for now; in a
+                // headless run a bare `<<loop.md>>` sentinel would reach the
+                // model as its prompt with no task content, so skip the tick
+                // (no-op) instead of enqueuing it. Full headless loop.md support
+                // is a follow-up.
+                if (detectLoopSentinel(job.prompt)) {
+                  checkCronDone();
+                  return;
+                }
                 const label = job.prompt.slice(0, 40);
                 localQueue.push({
                   displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,

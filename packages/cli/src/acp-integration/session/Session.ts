@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as os from 'node:os';
 import type {
   Content,
   FunctionCall,
@@ -28,11 +29,14 @@ import type {
   GoalTerminalEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
+  LoopMode,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
+  detectLoopSentinel,
+  LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
   createDebugLogger,
@@ -664,6 +668,13 @@ export class Session implements SessionContext {
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
+  // Resolves the `<<loop.md>>` / `<<loop.md-dynamic>>` sentinels at fire time.
+  // Lazily created on the first loop tick; its content cache is reset on
+  // compaction (see #sendMessageStreamWithAutoCompression) and it is rebuilt if
+  // the working dir changes (e.g. /cd) so it always reads the current project's
+  // loop.md.
+  private loopTickResolver: LoopTickResolver | null = null;
+  private loopTickResolverRoot: string | null = null;
   private cronCompletion: Promise<void> | null = null;
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
@@ -1926,6 +1937,10 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          // Context was just compacted; a loop.md tick must re-deliver the full
+          // task block (a short reminder refers back to a message that is no
+          // longer in context).
+          this.loopTickResolver?.resetCache();
           const reasonClause =
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
@@ -2427,6 +2442,20 @@ export class Session implements SessionContext {
     }
   }
 
+  #getLoopTickResolver(): LoopTickResolver {
+    const root = this.config.getWorkingDir();
+    // Rebuild if the working dir changed (e.g. /cd) so loop.md resolves against
+    // the current project; a fresh resolver also correctly re-delivers full.
+    if (!this.loopTickResolver || this.loopTickResolverRoot !== root) {
+      this.loopTickResolver = new LoopTickResolver({
+        projectRoot: root,
+        homeDir: os.homedir(),
+      });
+      this.loopTickResolverRoot = root;
+    }
+    return this.loopTickResolver;
+  }
+
   /**
    * Executes a single cron-fired prompt: echoes it as a user message with
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
@@ -2460,10 +2489,38 @@ export class Session implements SessionContext {
           async () => {
             let turnCount = 0;
             try {
+              // A `<<loop.md>>` / `<<loop.md-dynamic>>` sentinel is expanded at
+              // fire time into the loop.md task block — full on the first or a
+              // changed fire, a short reminder when unchanged. Non-sentinel
+              // prompts pass through untouched.
+              const loopMode = detectLoopSentinel(prompt);
+              const loopTick = loopMode
+                ? await this.#getLoopTickResolver().resolve(loopMode)
+                : null;
+              const modelText = loopTick ? loopTick.modelText : prompt;
+              if (loopTick) {
+                debugLogger.debug(
+                  `loop tick: mode=${loopMode} delivery=${
+                    loopTick.full
+                      ? 'full'
+                      : loopTick.sourcePath
+                        ? 'reminder'
+                        : 'absent'
+                  } path=${loopTick.sourcePath ?? 'none'}`,
+                );
+              }
+              // For a loop tick echo a stable label, never the bare sentinel or
+              // the full task dump; otherwise echo the prompt verbatim.
+              const echoText = loopTick
+                ? loopTick.sourcePath
+                  ? `Loop tick — tasks from ${loopTick.sourcePath}`
+                  : 'Loop tick — loop.md not present'
+                : prompt;
+
               // Echo the cron prompt as a user message so the client sees it
               await this.sendUpdate({
                 sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: prompt },
+                content: { type: 'text', text: echoText },
                 _meta: { source: item.source },
               });
 
@@ -2472,7 +2529,7 @@ export class Session implements SessionContext {
               const cronReminders = await this.#buildInitialSystemReminders();
               let nextMessage: Content | null = {
                 role: 'user',
-                parts: [...cronReminders, { text: prompt }],
+                parts: [...cronReminders, { text: modelText }],
               };
 
               while (nextMessage !== null) {
@@ -2501,6 +2558,13 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                if (loopTick && turnCount === 1) {
+                  // The block reached the model (the send started); commit it so
+                  // the next tick can detect "unchanged". Deferring the commit
+                  // to here keeps an abort before delivery from poisoning the
+                  // cache into a dangling short reminder.
+                  this.loopTickResolver?.markDelivered();
+                }
                 nextMessage = null;
 
                 for await (const resp of responseStream) {
