@@ -1777,7 +1777,10 @@ export async function runQwenServe(
             });
             const plan = core.buildInstallPlan(provider, inputs);
             const fresh = settingsRuntime.settings.loadSettings(boundWorkspace);
-            const adapter = settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(fresh);
+            const adapter =
+              settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
+                fresh,
+              );
             await core.applyProviderInstallPlan(plan, {
               settings: adapter,
               doRefreshAuth: false,
@@ -1789,13 +1792,17 @@ export async function runQwenServe(
             const effectiveModelId =
               (adapter.getValue('model.name') as string | undefined) ??
               plan.modelSelection?.modelId;
+            const effectiveBaseUrl =
+              (adapter.getValue('model.baseUrl') as string | undefined) ??
+              plan.modelSelection?.baseUrl ??
+              inputs.baseUrl;
             return {
               v: 1,
               providerId: provider.id,
               providerLabel: provider.label,
               authType: plan.authType,
               ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
-              ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
+              ...(effectiveBaseUrl ? { baseUrl: effectiveBaseUrl } : {}),
               message: `Successfully configured ${provider.label}. Use /model to switch models.`,
             };
           },
