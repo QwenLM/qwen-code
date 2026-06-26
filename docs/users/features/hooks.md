@@ -567,9 +567,9 @@ Hook output supports three categories of fields:
 {
   "stop_hook_active": "boolean indicating if stop hook is active",
   "last_assistant_message": "the last message from the assistant",
-  "context_usage": "0-1 ratio of context window used (optional)",
+  "context_usage": "ratio of context window used (may exceed 1 when tokens exceed window; optional)",
   "context_limit": "context window size in tokens (optional)",
-  "input_tokens": "current prompt token count (optional)"
+  "input_tokens": "prompt token count (may include output tokens depending on provider; optional)"
 }
 ```
 

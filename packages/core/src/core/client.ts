@@ -34,6 +34,7 @@ import {
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
+import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -2283,7 +2284,8 @@ export class GeminiClient {
           this.getLastModelMessageText() || '[no response text]';
 
         const contextUsage = buildContextUsage(
-          this.config.getContentGeneratorConfig()?.contextWindowSize,
+          this.config.getContentGeneratorConfig()?.contextWindowSize ??
+            DEFAULT_TOKEN_LIMIT,
           uiTelemetryService.getLastPromptTokenCount(),
         );
 

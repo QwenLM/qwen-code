@@ -103,6 +103,7 @@ import {
   dedupeToolCallsById,
   getProviderToolCallId,
   parsePositiveIntegerEnv,
+  DEFAULT_TOKEN_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -1676,7 +1677,8 @@ export class Session implements SessionContext {
         '[no response text]';
 
       const contextUsage = buildContextUsage(
-        this.config.getContentGeneratorConfig()?.contextWindowSize,
+        this.config.getContentGeneratorConfig()?.contextWindowSize ??
+          DEFAULT_TOKEN_LIMIT,
         this.lastPromptTokenCount,
       );
 
