@@ -186,8 +186,8 @@ export {
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export type { DurableCronTask } from './services/cronTasksFile.js';
-export * from './skills/bundled/loop/loopTaskFile.js';
-export * from './skills/bundled/loop/loopTickResolver.js';
+export * from './skills/bundled/loop/loop-task-file.js';
+export * from './skills/bundled/loop/loop-tick-resolver.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';

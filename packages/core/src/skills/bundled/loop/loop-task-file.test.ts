@@ -8,7 +8,10 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { LOOP_TASK_FILE_MAX_BYTES, readLoopTaskFile } from './loopTaskFile.js';
+import {
+  LOOP_TASK_FILE_MAX_BYTES,
+  readLoopTaskFile,
+} from './loop-task-file.js';
 
 describe('readLoopTaskFile', () => {
   let tempDir: string;

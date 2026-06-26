@@ -13,8 +13,8 @@ import {
   LOOP_SENTINEL_DYNAMIC,
   LoopTickResolver,
   detectLoopSentinel,
-} from './loopTickResolver.js';
-import { LOOP_TASK_FILE_MAX_BYTES } from './loopTaskFile.js';
+} from './loop-tick-resolver.js';
+import { LOOP_TASK_FILE_MAX_BYTES } from './loop-task-file.js';
 
 describe('detectLoopSentinel', () => {
   it('recognizes the cron and dynamic sentinels exactly (after trim)', () => {

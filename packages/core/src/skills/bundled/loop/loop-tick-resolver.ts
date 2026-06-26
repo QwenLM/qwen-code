@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LOOP_TASK_FILE_MAX_BYTES, readLoopTaskFile } from './loopTaskFile.js';
+import {
+  LOOP_TASK_FILE_MAX_BYTES,
+  readLoopTaskFile,
+} from './loop-task-file.js';
 
 /**
  * Fire-time resolver for `.qwen/loop.md`-driven loops.
