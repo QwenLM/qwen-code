@@ -1211,7 +1211,7 @@ describe('useGeminiStream', () => {
     });
     expect(mockAddItem).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: MessageType.INFO,
+        type: MessageType.VISION_NOTICE,
         text: expect.stringContaining('to text via'),
       }),
       expect.any(Number),
@@ -1219,7 +1219,7 @@ describe('useGeminiStream', () => {
     // Notice is header-only; the transcript reaches the model, not the notice.
     const midTurnNotice = mockAddItem.mock.calls.find(
       (c) =>
-        c[0]?.type === MessageType.INFO &&
+        c[0]?.type === MessageType.VISION_NOTICE &&
         String(c[0]?.text).includes('to text via'),
     );
     expect(String(midTurnNotice?.[0]?.text)).not.toContain(
