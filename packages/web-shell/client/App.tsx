@@ -159,6 +159,7 @@ import {
   type ComposerToolbarStartRenderer,
   type ComposerToolbarEndRenderer,
   type FooterRenderer,
+  type LoadingPhrasesResolver,
   type WebShellTaskInfo,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
@@ -369,6 +370,12 @@ export interface WebShellProps {
   virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
+  /**
+   * Override the witty phrases cycled while a prompt is streaming. Receives the
+   * resolved UI language; return phrases to replace the built-in defaults, an
+   * empty array to hide the phrase, or `undefined`/`null` to keep the defaults.
+   */
+  loadingPhrases?: LoadingPhrasesResolver;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
   onToast?: (tone: ToastTone, message: string) => void;
   /** Imperative handle for externally controlling the composer input. */
@@ -824,6 +831,7 @@ export function App({
   collapseCompletedTurns = true,
   virtualScrollThreshold,
   markdown,
+  loadingPhrases,
   onTranscriptChange,
   onToast,
   composerRef,
@@ -851,6 +859,7 @@ export function App({
       compactThinking,
       collapseCompletedTurns,
       markdown,
+      loadingPhrases,
     }),
     [
       renderToolHeaderExtra,
@@ -862,6 +871,7 @@ export function App({
       compactThinking,
       collapseCompletedTurns,
       markdown,
+      loadingPhrases,
     ],
   );
   const CustomFooter = renderFooter;
