@@ -27,7 +27,11 @@ scaffold command and bundled templates.
      `qwen extensions new "$extension_path" "$template"`.
    - If the path does not exist and no template is selected, omit the final
      argument.
-   - If the path exists and has `qwen-extension.json`, use the existing manifest.
+   - If the path exists and has `qwen-extension.json`, use the existing
+     manifest. Read its `name`; if `qwen extensions list` already shows that
+     name, treat the task as an iteration on a linked extension and use the
+     Iterating on a Linked Extension flow instead of linking again unless the
+     user explicitly wants to re-link it.
    - If the path exists but is not an extension, create a minimal
      `qwen-extension.json` with `name` set to the directory basename and
      `version` set to `"1.0.0"` before customizing.
@@ -57,19 +61,31 @@ scaffold command and bundled templates.
    build sequence in the extension directory after the trust review is complete.
 9. Run the Before Handoff checklist below. If any check fails, fix the issue
    and re-check before proceeding.
-10. Before linking, summarize default context files, `settings`, `hooks`,
-    `channels`, and `lspServers` because the trust prompt does not show all of
-    that detail. Also summarize the full consent surface the prompt would show:
-    MCP servers, commands, explicit or default context files, skills, and
-    agents. Ask the user whether to approve linking before running
-    `qwen extensions link`. Do not run the command while expecting to pause at
-    the prompt. If the user approves and the extension has no `settings`, run
-    `printf 'y\n' | qwen extensions link "$extension_path"`. If `settings` are
-    present, do not pipe approval; ask the user to run
-    `qwen extensions link "$extension_path"` in an interactive terminal so they
-    can answer both consent and settings prompts. If the user declines, do not
-    run or retry the command; report that linking was skipped and suggest the
-    user run `qwen extensions link` manually when ready.
+10. Run the Linking Approval Procedure below before linking. If it skips or
+    fails, stop and report the result to the user.
+
+## Linking Approval Procedure
+
+Use this procedure before every `qwen extensions link` or re-link attempt.
+
+1. If `qwen extensions list` already shows the manifest `name` and the user only
+   needs validation, do not run link again; continue with the After Linking
+   verification.
+2. Summarize default context files, `settings`, `hooks`, `channels`, and
+   `lspServers` because the trust prompt does not show all of that detail.
+3. Summarize the full consent surface the prompt would show: MCP servers,
+   commands, explicit or default context files, skills, and agents.
+4. Ask the user whether to approve linking before running
+   `qwen extensions link`. Do not run the command while expecting to pause at
+   the prompt.
+5. If the user approves and the extension has no `settings`, run
+   `printf 'y\n' | qwen extensions link "$extension_path"`.
+6. If `settings` are present, do not pipe approval; ask the user to run
+   `qwen extensions link "$extension_path"` in an interactive terminal so they
+   can answer both consent and settings prompts.
+7. If the user declines, do not run or retry the command; report that linking
+   was skipped and suggest the user run `qwen extensions link` manually when
+   ready.
 
 ## Template Selection
 
@@ -171,8 +187,12 @@ Use these resource locations when needed:
 - `skills/<skill-name>/SKILL.md` for skills.
 - `agents/<name>.md` for subagents.
 
-Qwen Code discovers command, skill, and agent resources from the corresponding
-folders, so prefer the folder structure for those resources.
+Qwen Code discovers command resources recursively from `commands/**/*.md` and
+`commands/**/*.toml`, including dot-prefixed files and subdirectories. It
+discovers skills from directory entries under `skills/` without a dotfile
+filter, and each skill directory must contain `SKILL.md`. It discovers agents
+from `agents/*.md`, including dot-prefixed files. Prefer these folder structures
+for those resources.
 
 ## Local Test Flow
 
@@ -223,16 +243,19 @@ the build commands below. For pre-existing directories, only run the build
 commands after the trust review above is complete.
 
 ```bash
-cd -- "$extension_path" && \
-  npm install --ignore-scripts && \
-  npm run build
+cd -- "$extension_path"
+npm install --ignore-scripts
+npm run build
 ```
 
 Use `--ignore-scripts` so dependency install scripts cannot run before review.
-Before `npm run build`, audit the full lifecycle that npm will run:
-`prebuild`, `build`, and `postbuild`; if any are present, summarize them and
-require explicit user approval before running the build. If the build requires
-install scripts, stop and ask the user whether to run `npm install` without
+After `npm install --ignore-scripts`, re-check any lockfile that was created or
+modified before running `npm run build`. Confirm the lockfile changes match the
+reviewed dependency set, or stop and ask the user whether to continue. Before
+`npm run build`, audit the full lifecycle that npm will run: `prebuild`,
+`build`, and `postbuild`; if any are present, summarize them and require
+explicit user approval before running the build. If the build requires install
+scripts, stop and ask the user whether to run `npm install` without
 `--ignore-scripts`, which runs all dependency lifecycle scripts, or to run a
 reviewed project-level npm script, which runs the named script plus its matching
 `pre<script>` and `post<script>` hooks. Explain what each option would execute.
@@ -254,13 +277,17 @@ visible in the current session.
   `qwen-extension.json` is at the linked root, confirm `name` is valid and not a
   duplicate, and re-check referenced files from the Before Handoff checklist.
   Also inspect debug logging for `Warning: Skipping extension in <path>`, which
-  contains the specific load failure reason.
+  contains the specific load failure reason. To capture that output, start or
+  restart Qwen Code with `QWEN_DEBUG_LOG_FILE` set to a writable log path, then
+  inspect that file.
 
 ## Iterating on a Linked Extension
 
 1. Make the file changes.
 2. Re-run the Local Test Flow trust review on all modified files.
-3. Run the relevant build or validation again.
+3. Run the relevant build or validation again. If it fails, stop and report the
+   error to the user; do not continue to re-checking, restarting, uninstalling,
+   or re-linking until the user confirms how to proceed.
 4. Re-run the Before Handoff checklist. For compiled templates, perform channel
    `entry` checks after the build step.
 5. Restart Qwen Code if the updated extension behavior is not visible in the
@@ -268,18 +295,9 @@ visible in the current session.
 6. If the update is still not picked up after restart, run
    `qwen extensions uninstall <name>`, where `<name>` is the `name` field from
    `qwen-extension.json` and not the directory path.
-7. Before re-linking, summarize default context files, `settings`, `hooks`,
-   `channels`, and `lspServers`, plus MCP servers, commands, explicit context
-   files, skills, and agents.
-8. Ask the user whether to approve re-linking before running
-   `qwen extensions link`. Do not run the command while expecting to pause at
-   the prompt. If the user approves and the extension has no `settings`, run
-   `printf 'y\n' | qwen extensions link "$extension_path"`. If `settings` are
-   present, ask the user to run `qwen extensions link "$extension_path"` in an
-   interactive terminal. If the user declines, do not run or retry the command;
-   report that linking was skipped and suggest the user run
-   `qwen extensions link` manually when ready.
-9. After re-linking, repeat the After Linking verification section.
+7. Run the Linking Approval Procedure before re-linking. If it skips or fails,
+   stop and report the result to the user.
+8. After re-linking, repeat the After Linking verification section.
 
 ## Before Handoff
 
