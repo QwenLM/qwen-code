@@ -355,7 +355,7 @@ jobs:
                 fi
               done
           git worktree prune -v || true
-          echo "stale review worktrees cleaned"
+          echo "stale agent state cleaned"
 
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       - name: 'Checkout base branch'

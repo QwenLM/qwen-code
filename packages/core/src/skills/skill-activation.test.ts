@@ -13,12 +13,6 @@ import {
 } from './skill-activation.js';
 import type { SkillConfig } from './types.js';
 
-// The integration tests below `await import('../core/coreToolScheduler.js')`
-// just to reach one pure helper, but that drags in the whole scheduler module
-// graph cold. The first such import runs a few seconds and, under a contended
-// CI runner, crosses the 5s default — a flaky timeout, not a hang.
-vi.setConfig({ testTimeout: 30_000 });
-
 function makeSkill(overrides: Partial<SkillConfig>): SkillConfig {
   return {
     name: overrides.name ?? 'test-skill',
@@ -248,6 +242,11 @@ describe('resolveProjectRelativePath', () => {
 });
 
 describe('extractToolFilePaths → SkillActivationRegistry integration', () => {
+  // These tests `await import('../core/coreToolScheduler.js')` just to reach
+  // one pure helper, but that drags in the whole scheduler module graph cold.
+  // Under a contended CI runner, that can cross the 5s default timeout.
+  vi.setConfig({ testTimeout: 30_000 });
+
   // Regression: feed the real candidate output for a `glob` call into
   // the registry and assert end-to-end activation. The earlier per-field
   // extraction (path + pattern as separate candidates) silently failed
