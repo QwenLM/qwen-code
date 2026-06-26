@@ -2187,9 +2187,10 @@ describe('computeThresholds', () => {
       expect(t.hard).toBeLessThanOrEqual(t.auto);
     });
 
-    it('pct=1 with large window: auto=window but hard capped below window', () => {
+    it('pct=1 with large window: auto and hard both equal window', () => {
       const t = computeThresholds(200_000, 1);
       expect(t.auto).toBe(200_000);
+      expect(t.hard).toBe(200_000);
       expect(t.warn).toBeLessThanOrEqual(t.auto);
     });
   });
