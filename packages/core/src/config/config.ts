@@ -190,6 +190,7 @@ import {
   readUserAutoMemoryIndex,
 } from '../memory/store.js';
 import { rebuildTeamAutoMemoryIndex } from '../memory/indexer.js';
+import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -2232,6 +2233,15 @@ export class Config {
         this.debugLogger.debug(
           'Team memory enabled but inactive: workspace is not trusted.',
         );
+      }
+      // Best-effort git sync of team memory before reading it, when opted in:
+      // pulls collaborators' updates (and pushes local ones) so the rebuilt
+      // index reflects the latest. Never throws — a failure must not break
+      // session start.
+      if (teamMemoryEnabled && this.getTeamMemorySyncEnabled()) {
+        await syncTeamMemory(this.getProjectRoot(), {
+          message: 'chore(memory): sync team memory',
+        }).catch(() => undefined);
       }
       const [managedAutoMemoryIndex, userAutoMemoryIndex, teamAutoMemoryIndex] =
         await Promise.all([
@@ -4362,6 +4372,18 @@ export class Config {
       return true;
     }
     return this.enableTeamMemory;
+  }
+
+  /**
+   * Whether the daemon/session should auto-sync team memory with the git
+   * remote (pull + commit + push). Opt-in via `QWEN_CODE_MEMORY_TEAM_SYNC=1`;
+   * off by default since it mutates the repo and pushes. Inert in bare mode.
+   */
+  getTeamMemorySyncEnabled(): boolean {
+    if (this.getBareMode()) {
+      return false;
+    }
+    return process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] === '1';
   }
 
   isManagedMemoryAvailable(): boolean {

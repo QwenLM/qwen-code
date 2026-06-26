@@ -52,10 +52,8 @@ import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
-import {
-  readAutoMemoryIndex,
-  readTeamAutoMemoryIndex,
-} from '../memory/store.js';
+import { readAutoMemoryIndex } from '../memory/store.js';
+import { rebuildTeamAutoMemoryIndex } from '../memory/indexer.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
@@ -153,6 +151,11 @@ vi.mock('../memory/store.js', () => ({
 }));
 vi.mock('../memory/indexer.js', () => ({
   rebuildTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('../memory/team-memory-sync.js', () => ({
+  syncTeamMemory: vi
+    .fn()
+    .mockResolvedValue({ committed: false, pulled: false, pushed: false }),
 }));
 
 vi.mock('../hooks/index.js', () => {
@@ -443,6 +446,33 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getTeamMemorySyncEnabled', () => {
+    const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = prevEnv;
+      }
+    });
+
+    it('is off by default and on only when QWEN_CODE_MEMORY_TEAM_SYNC=1', () => {
+      delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      expect(new Config(baseParams).getTeamMemorySyncEnabled()).toBe(false);
+      process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+      expect(new Config(baseParams).getTeamMemorySyncEnabled()).toBe(true);
+    });
+
+    it('stays off in bare mode', () => {
+      process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+      expect(
+        new Config({
+          ...baseParams,
+          bareMode: true,
+        }).getTeamMemorySyncEnabled(),
+      ).toBe(false);
+    });
+  });
 
   it('should store a system prompt override', () => {
     const config = new Config({
@@ -1922,13 +1952,13 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readTeamAutoMemoryIndex).mockResolvedValue(
+    vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValue(
       '# Team Memory\n\n- [Shared](shared.md)',
     );
 
     await config.refreshHierarchicalMemory();
 
-    expect(readTeamAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).not.toContain('Team Memory');
   });
 
