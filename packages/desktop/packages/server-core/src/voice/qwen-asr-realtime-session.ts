@@ -9,6 +9,7 @@ import type {
 import { deriveWebSocketBase } from './voice-stream-session';
 import { CONSOLE_LOGGER, createScopedLogger } from '../runtime/platform';
 import { escapeAnsiCtrlCodes } from './ansi';
+import { sanitizeResponseDetails } from './transcribe';
 
 export interface QwenRealtimeDeps {
   createWebSocket?: (
@@ -37,9 +38,12 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function formatServerErrorMessage(raw: unknown): string {
+function formatServerErrorMessage(raw: unknown, apiKey?: string): string {
   const text = typeof raw === 'string' ? raw : 'Qwen ASR realtime failed.';
-  return escapeAnsiCtrlCodes(text).slice(0, MAX_SERVER_ERROR_MESSAGE_LENGTH);
+  return escapeAnsiCtrlCodes(sanitizeResponseDetails(text, apiKey)).slice(
+    0,
+    MAX_SERVER_ERROR_MESSAGE_LENGTH,
+  );
 }
 
 export function openQwenAsrRealtimeStream(
@@ -243,6 +247,7 @@ export function openQwenAsrRealtimeStream(
                 msg.error?.message ??
                   msg.error?.code ??
                   'Qwen ASR realtime transcription failed.',
+                config.apiKey,
               ),
             ),
           );
@@ -271,6 +276,7 @@ export function openQwenAsrRealtimeStream(
                 msg.error?.message ??
                   msg.error?.code ??
                   'Qwen ASR realtime request failed.',
+                config.apiKey,
               ),
             ),
           );

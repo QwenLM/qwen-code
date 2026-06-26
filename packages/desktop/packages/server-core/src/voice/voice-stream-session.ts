@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { CONSOLE_LOGGER, createScopedLogger } from '../runtime/platform';
 import { escapeAnsiCtrlCodes } from './ansi';
+import { sanitizeResponseDetails } from './transcribe';
 
 // Streaming ASR over the DashScope realtime "task" WebSocket protocol
 // (paraformer-realtime / fun-asr-realtime). Audio is pushed as raw binary PCM
@@ -72,9 +73,12 @@ export function deriveStreamUrl(baseUrl: string): string {
   return `${deriveWebSocketBase(baseUrl)}/api-ws/v1/inference`;
 }
 
-function formatServerErrorMessage(raw: unknown): string {
+function formatServerErrorMessage(raw: unknown, apiKey?: string): string {
   const text = typeof raw === 'string' ? raw : 'unknown';
-  return escapeAnsiCtrlCodes(text).slice(0, MAX_SERVER_ERROR_MESSAGE_LENGTH);
+  return escapeAnsiCtrlCodes(sanitizeResponseDetails(text, apiKey)).slice(
+    0,
+    MAX_SERVER_ERROR_MESSAGE_LENGTH,
+  );
 }
 
 export function openVoiceStream(
@@ -304,7 +308,10 @@ export function openVoiceStream(
       } else if (event === 'task-failed') {
         clearConnectTimer();
         const code = msg.header?.error_code ?? 'error';
-        const message = formatServerErrorMessage(msg.header?.error_message);
+        const message = formatServerErrorMessage(
+          msg.header?.error_message,
+          config.apiKey,
+        );
         debugLogger.warn(
           `[voice] stream failed at ${streamUrl} task ${taskId} (${code}): ${message}`,
         );

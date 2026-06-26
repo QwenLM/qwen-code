@@ -148,6 +148,38 @@ describe('openQwenAsrRealtimeStream', () => {
     await expect(finishPromise).rejects.not.toThrow('\u001b')
   })
 
+  it('redacts credentials from realtime server errors', async () => {
+    const socket = new FakeSocket()
+    const streamPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-asr-flash-realtime',
+        apiKey: 'sk-secret-token',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('message', JSON.stringify({ type: 'session.created' }))
+    socket.emit('message', JSON.stringify({ type: 'session.updated' }))
+    const stream = await streamPromise
+    const finishPromise = stream.finish()
+    socket.emit(
+      'message',
+      JSON.stringify({
+        type: 'error',
+        error: {
+          code: 'InvalidApiKey',
+          message:
+            'Authorization Bearer sk-secret-token was rejected for sk-secret-token',
+        },
+      }),
+    )
+
+    await expect(finishPromise).rejects.toThrow('[REDACTED]')
+    await expect(finishPromise).rejects.not.toThrow('sk-secret-token')
+  })
+
   it('keeps trailing partial text in the final transcript', async () => {
     const socket = new FakeSocket()
     const streamPromise = openQwenAsrRealtimeStream(

@@ -38,7 +38,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function sanitizeResponseDetails(raw: string, apiKey?: string): string {
+export function sanitizeResponseDetails(raw: string, apiKey?: string): string {
   let redacted = raw.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
   if (apiKey) {
     redacted = redacted.replace(

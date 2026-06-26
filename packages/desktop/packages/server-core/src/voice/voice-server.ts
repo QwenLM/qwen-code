@@ -143,6 +143,13 @@ export async function startVoiceServer(
   let disabledCloseTimer: ReturnType<typeof setTimeout> | undefined;
   const enabledTimer = options.isEnabled
     ? setInterval(() => {
+        if (options.isEnabled?.()) {
+          if (disabledCloseTimer) {
+            clearTimeout(disabledCloseTimer);
+            disabledCloseTimer = undefined;
+          }
+          return;
+        }
         if (!options.isEnabled?.()) {
           if (disabledCloseTimer) return;
           const closed = closeVoiceClients(wss);
@@ -150,7 +157,9 @@ export async function startVoiceServer(
             log?.info('voice: closing active clients because voice is disabled');
             disabledCloseTimer = setTimeout(() => {
               disabledCloseTimer = undefined;
-              terminateVoiceClients(wss);
+              if (!options.isEnabled?.()) {
+                terminateVoiceClients(wss);
+              }
             }, DISABLED_CLOSE_GRACE_MS);
             disabledCloseTimer.unref?.();
           }
@@ -162,7 +171,9 @@ export async function startVoiceServer(
   httpServer.on('upgrade', (req, socket, head) => {
     // A raw socket error during the upgrade window would otherwise crash the
     // process with an unhandled 'error' event.
-    socket.on('error', () => {});
+    socket.on('error', (err) => {
+      log?.debug('voice: upgrade socket error:', err.message);
+    });
     let url: URL;
     try {
       url = new URL(req.url ?? '/', 'http://localhost');
@@ -197,17 +208,24 @@ export async function startVoiceServer(
     wss.handleUpgrade(req, socket, head, (ws) => handle(ws));
   });
 
-  await new Promise<void>((resolve, reject) => {
-    const onError = (err: Error) => reject(err);
-    httpServer.once('error', onError);
-    httpServer.listen(0, host, () => {
-      httpServer.removeListener('error', onError);
-      httpServer.on('error', (err) => {
-        log?.warn('voice: server error after listen:', err);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => reject(err);
+      httpServer.once('error', onError);
+      httpServer.listen(0, host, () => {
+        httpServer.removeListener('error', onError);
+        httpServer.on('error', (err) => {
+          log?.warn('voice: server error after listen:', err);
+        });
+        resolve();
       });
-      resolve();
     });
-  });
+  } catch (error) {
+    if (enabledTimer) clearInterval(enabledTimer);
+    clearTimeout(disabledCloseTimer);
+    wss.close();
+    throw error;
+  }
 
   const address = httpServer.address();
   const port = typeof address === 'object' && address ? address.port : 0;

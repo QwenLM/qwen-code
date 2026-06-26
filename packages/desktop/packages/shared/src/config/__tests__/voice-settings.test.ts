@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
@@ -29,7 +29,7 @@ function runEval(configDir: string, code: string): void {
 }
 
 describe('voice settings storage', () => {
-  it('persists voice settings when config.json does not exist yet', () => {
+  it('does not create a skeleton config when config.json does not exist yet', () => {
     const configDir = mkdtempSync(join(tmpdir(), 'craft-agent-voice-settings-'))
     const configPath = join(configDir, 'config.json')
 
@@ -38,7 +38,26 @@ describe('voice settings storage', () => {
       "setVoiceModel('qwen3-asr-flash-realtime'); setVoiceEnabled(false);",
     )
 
-    expect(existsSync(configPath)).toBe(true)
+    expect(existsSync(configPath)).toBe(false)
+  })
+
+  it('persists voice settings when config.json exists', () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'craft-agent-voice-settings-'))
+    const configPath = join(configDir, 'config.json')
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        workspaces: [],
+        activeWorkspaceId: null,
+        activeSessionId: null,
+      }),
+    )
+
+    runEval(
+      configDir,
+      "setVoiceModel('qwen3-asr-flash-realtime'); setVoiceEnabled(false);",
+    )
+
     const config = JSON.parse(readFileSync(configPath, 'utf-8'))
     expect(config.voiceModel).toBe('qwen3-asr-flash-realtime')
     expect(config.voiceEnabled).toBe(false)

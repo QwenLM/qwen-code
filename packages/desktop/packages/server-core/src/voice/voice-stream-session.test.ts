@@ -73,4 +73,39 @@ describe('openVoiceStream', () => {
 
     await expect(finishPromise).resolves.toBe('hello world')
   })
+
+  it('redacts credentials from stream server errors', async () => {
+    const socket = new FakeSocket()
+    const streamPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+        apiKey: 'sk-secret-token',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('open')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+    )
+    const stream = await streamPromise
+    const finishPromise = stream.finish()
+    socket.emit(
+      'message',
+      JSON.stringify({
+        header: {
+          event: 'task-failed',
+          error_code: 'InvalidApiKey',
+          error_message:
+            'Authorization Bearer sk-secret-token was rejected for sk-secret-token',
+        },
+      }),
+    )
+
+    await expect(finishPromise).rejects.toThrow('[REDACTED]')
+    await expect(finishPromise).rejects.not.toThrow('sk-secret-token')
+  })
 })

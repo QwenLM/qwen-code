@@ -300,6 +300,8 @@ export function createVoiceConnectionHandler(
             } finally {
               session = undefined;
             }
+          } else {
+            log?.warn('voice: finalize with no active streaming session');
           }
         } else if (pcmChunks.length > 0) {
           transcript = await transcribeBatch(
@@ -307,6 +309,8 @@ export function createVoiceConnectionHandler(
             Buffer.concat(pcmChunks),
             abortController.signal,
           );
+        } else {
+          log?.warn('voice: finalize with no batch audio');
         }
       } catch (error) {
         fail(errMessage(error));
@@ -360,6 +364,7 @@ export function createVoiceConnectionHandler(
       if (!isBinary) {
         const control = parseControl(buf.toString('utf8'));
         if (control?.type === 'abort') {
+          log?.debug('voice: abort requested, discarding session state');
           cleanup();
           try {
             ws.close(1000, 'aborted');

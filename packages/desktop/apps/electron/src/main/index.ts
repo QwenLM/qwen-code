@@ -454,6 +454,7 @@ app.whenReady().then(async () => {
     details?: unknown,
   ) => Boolean(
     wc &&
+    getVoiceEnabled() &&
     VOICE_PERMISSIONS.has(permission) &&
     isAudioOnlyMediaRequest(permission, details) &&
     windowManager?.getWorkspaceForWindow(wc.id) != null,

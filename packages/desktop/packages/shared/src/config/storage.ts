@@ -482,12 +482,8 @@ export function getVoiceModel(): string {
   return loadStoredConfig()?.voiceModel ?? 'qwen3-asr-flash';
 }
 
-function loadStoredConfigForVoiceSettings(): StoredConfig {
-  return loadStoredConfig() ?? {
-    workspaces: [],
-    activeWorkspaceId: null,
-    activeSessionId: null,
-  };
+function loadStoredConfigForVoiceSettings(): StoredConfig | null {
+  return loadStoredConfig();
 }
 
 /**
@@ -495,6 +491,7 @@ function loadStoredConfigForVoiceSettings(): StoredConfig {
  */
 export function setVoiceModel(model: string): void {
   const config = loadStoredConfigForVoiceSettings();
+  if (!config) return;
   config.voiceModel = model;
   saveConfig(config);
 }
@@ -511,6 +508,7 @@ export function getVoiceEnabled(): boolean {
  */
 export function setVoiceEnabled(enabled: boolean): void {
   const config = loadStoredConfigForVoiceSettings();
+  if (!config) return;
   config.voiceEnabled = enabled;
   saveConfig(config);
 }

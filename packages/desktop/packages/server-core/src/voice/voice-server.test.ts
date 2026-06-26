@@ -1,9 +1,11 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import { describe, expect, it } from 'bun:test'
+import WebSocket from 'ws'
 import {
   closeVoiceClients,
   closeVoiceServerResources,
   isAllowedVoiceOrigin,
+  startVoiceServer,
   terminateVoiceClients,
   tokenMatches,
 } from './voice-server'
@@ -113,5 +115,36 @@ describe('closeVoiceClients', () => {
 
     expect(count).toBe(1)
     expect(closes).toEqual([{ code: 1000, reason: 'voice disabled' }])
+  })
+})
+
+describe('startVoiceServer', () => {
+  it('cancels pending disabled-client termination after voice is re-enabled', async () => {
+    let enabled = true
+    const server = await startVoiceServer({
+      token: 'voice-token',
+      isEnabled: () => enabled,
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    })
+    try {
+      const first = new WebSocket(`${server.url}?token=voice-token`)
+      await new Promise<void>((resolve) => first.once('open', resolve))
+
+      enabled = false
+      await delay(1100)
+
+      enabled = true
+      const second = new WebSocket(`${server.url}?token=voice-token`)
+      await new Promise<void>((resolve) => second.once('open', resolve))
+      await delay(700)
+
+      expect(second.readyState).toBe(WebSocket.OPEN)
+      second.close()
+    } finally {
+      await server.close()
+    }
   })
 })
