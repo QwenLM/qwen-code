@@ -140,7 +140,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       initCommand,
       languageCommand,
       mcpCommand,
-      ...(this.config?.getManagedAutoMemoryEnabled()
+      ...(this.config?.isManagedMemoryAvailable()
         ? [dreamCommand, forgetCommand]
         : []),
       goalCommand,

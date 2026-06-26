@@ -5,7 +5,44 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isAbortError, isNodeError } from './errors.js';
+import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
+
+describe('getErrorMessage cause unwrapping', () => {
+  it('returns the plain message when there is no cause', () => {
+    expect(getErrorMessage(new Error('boom'))).toBe('boom');
+  });
+
+  it('surfaces an undici-style fetch-failed AggregateError cause (ECONNREFUSED)', () => {
+    // undici "TypeError: fetch failed" wraps an AggregateError whose own
+    // message is empty; the useful detail lives in `.errors[].code`.
+    const inner = Object.assign(
+      new Error('connect ECONNREFUSED 127.0.0.1:29900'),
+      { code: 'ECONNREFUSED' },
+    );
+    const agg = new AggregateError([inner]); // message === ''
+    const err = new TypeError('fetch failed', { cause: agg });
+
+    const msg = getErrorMessage(err);
+    expect(msg).toContain('fetch failed');
+    expect(msg).toContain('ECONNREFUSED');
+  });
+
+  it('surfaces a single Error cause that has a code but empty message', () => {
+    const cause = Object.assign(new Error(''), { code: 'ECONNREFUSED' });
+    const err = new TypeError('fetch failed', { cause });
+    expect(getErrorMessage(err)).toBe('fetch failed (cause: ECONNREFUSED)');
+  });
+
+  it('keeps the existing behavior for a cause with a meaningful message', () => {
+    const err = new Error('outer', { cause: new Error('inner detail') });
+    expect(getErrorMessage(err)).toBe('outer (cause: inner detail)');
+  });
+
+  it('does not append a redundant cause equal to the message', () => {
+    const err = new Error('same', { cause: new Error('same') });
+    expect(getErrorMessage(err)).toBe('same');
+  });
+});
 
 describe('isAbortError', () => {
   it('should return true for DOMException-style AbortError', () => {

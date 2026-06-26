@@ -1510,6 +1510,8 @@ export default {
   'No tasks currently running': 'Nenhuma tarefa em execução',
   'No entry to show.': 'Nenhuma entrada para mostrar.',
   'needs approval': 'precisa de aprovação',
+  'rejected — edit config to re-approve':
+    'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
     'Agente em segundo plano precisa de aprovação',
   'Approve or deny the request above': 'Aprove ou negue a solicitação acima',

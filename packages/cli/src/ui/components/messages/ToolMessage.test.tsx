@@ -137,7 +137,9 @@ const renderWithContext = (
 };
 
 describe('<ToolMessage />', () => {
-  const mockConfig = {} as Config;
+  const mockConfig = {
+    getShouldUseNodePtyShell: () => false,
+  } as unknown as Config;
 
   const baseProps: ToolMessageProps = {
     callId: 'tool-123',
@@ -151,21 +153,64 @@ describe('<ToolMessage />', () => {
     config: mockConfig,
   };
 
-  it('renders basic tool information', () => {
+  it('collapses text/ANSI result for completed collapsible tool', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} name="ReadFile" description="config.yaml" />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame();
+    expect(output).toContain('✓');
+    expect(output).toContain('ReadFile');
+    expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+  });
+
+  it('collapses ANSI result for completed collapsible tool', () => {
+    const ansiResult: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'file content',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+            fg: '',
+            bg: '',
+          },
+        ],
+      ],
+      totalLines: 1,
+      totalBytes: 12,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="config.yaml"
+        resultDisplay={ansiResult}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame();
+    expect(output).toContain('ReadFile');
+    expect(output).not.toContain('MockAnsiOutput'); // collapsed
+  });
+
+  it('shows result for non-collapsible completed tool', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,
       StreamingState.Idle,
     );
     const output = lastFrame();
-    expect(output).toContain('✓'); // Success indicator
+    expect(output).toContain('✓');
     expect(output).toContain('test-tool');
-    expect(output).toContain('A tool for testing');
-    expect(output).toContain('MockMarkdown:Test result');
+    expect(output).toContain('MockMarkdown:Test result'); // not collapsed
   });
 
-  it('renders tool results directly below the header row', () => {
+  it('renders tool results directly below the header row when forced', () => {
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} contentWidth={100} />,
+      <ToolMessage {...baseProps} contentWidth={100} forceShowResult />,
       StreamingState.Idle,
     );
     const lines = (lastFrame() ?? '').split('\n');
@@ -178,15 +223,14 @@ describe('<ToolMessage />', () => {
     expect(resultLine).toBe(headerLine + 1);
   });
 
-  it('hides result output in compact mode (compactMode=true)', () => {
+  it('hides text result output for completed collapsible tools', () => {
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} />,
+      <ToolMessage {...baseProps} name="Grep" description="search pattern" />,
       StreamingState.Idle,
-      true, // compact mode
     );
     const output = lastFrame();
-    expect(output).toContain('✓'); // status indicator still visible
-    expect(output).toContain('test-tool'); // tool name still visible
+    expect(output).toContain('✓');
+    expect(output).toContain('Grep');
     expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
   });
 
@@ -217,11 +261,10 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
-  it('shows result when forceShowResult overrides compact collapse', () => {
+  it('shows result when forceShowResult overrides collapse', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} forceShowResult />,
       StreamingState.Idle,
-      true,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
@@ -305,10 +348,30 @@ describe('<ToolMessage />', () => {
       newContent: 'new',
     };
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} resultDisplay={diffResult} />,
+      <ToolMessage {...baseProps} resultDisplay={diffResult} forceShowResult />,
       StreamingState.Idle,
     );
     // Check that the output contains the MockDiff content as part of the whole message
+    expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
+  });
+
+  it('diff results are not collapsed for completed collapsible tools (bypass shouldCollapseResult)', () => {
+    const diffResult = {
+      fileDiff: '--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new',
+      fileName: 'file.txt',
+      originalContent: 'old',
+      newContent: 'new',
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="a.ts"
+        resultDisplay={diffResult}
+        status={ToolCallStatus.Success}
+      />,
+      StreamingState.Idle,
+    );
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
@@ -323,7 +386,7 @@ describe('<ToolMessage />', () => {
       fileDiffTruncated: true,
     };
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} resultDisplay={diffResult} />,
+      <ToolMessage {...baseProps} resultDisplay={diffResult} forceShowResult />,
       StreamingState.Idle,
     );
 
@@ -556,7 +619,11 @@ describe('<ToolMessage />', () => {
     ];
     const ansiOutputDisplay: AnsiOutputDisplay = { ansiOutput: ansiResult };
     const { lastFrame } = renderWithContext(
-      <ToolMessage {...baseProps} resultDisplay={ansiOutputDisplay} />,
+      <ToolMessage
+        {...baseProps}
+        resultDisplay={ansiOutputDisplay}
+        forceShowResult
+      />,
       StreamingState.Idle,
     );
     expect(lastFrame()).toContain('MockAnsiOutput:hello');
@@ -585,6 +652,7 @@ describe('<ToolMessage />', () => {
       <ToolMessage
         {...baseProps}
         name="Shell"
+        status={ToolCallStatus.Executing}
         resultDisplay={ansiOutputDisplay}
         availableTerminalHeight={100}
       />,
@@ -619,6 +687,7 @@ describe('<ToolMessage />', () => {
         name="some-other-tool"
         resultDisplay={ansiOutputDisplay}
         availableTerminalHeight={100}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -688,6 +757,7 @@ describe('<ToolMessage />', () => {
             <ToolMessage
               {...baseProps}
               name="Shell"
+              status={ToolCallStatus.Executing}
               resultDisplay={ansiOutputDisplay}
               availableTerminalHeight={100}
             />
@@ -727,6 +797,7 @@ describe('<ToolMessage />', () => {
             <ToolMessage
               {...baseProps}
               name="Shell"
+              status={ToolCallStatus.Executing}
               resultDisplay={ansiOutputDisplay}
               availableTerminalHeight={100}
             />
@@ -752,7 +823,7 @@ describe('<ToolMessage />', () => {
         {...baseProps}
         name="Shell"
         resultDisplay={longString}
-        status={ToolCallStatus.Success}
+        status={ToolCallStatus.Executing}
         availableTerminalHeight={100}
       />,
       StreamingState.Idle,
@@ -782,6 +853,7 @@ describe('<ToolMessage />', () => {
         resultDisplay={longString}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -808,6 +880,7 @@ describe('<ToolMessage />', () => {
         resultDisplay={longSingleLine}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -830,6 +903,7 @@ describe('<ToolMessage />', () => {
         resultDisplay={exactFitString}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -872,6 +946,7 @@ describe('<ToolMessage />', () => {
             <ToolMessage
               {...baseProps}
               name="Shell"
+              status={ToolCallStatus.Executing}
               resultDisplay={ansiOutputDisplay}
               availableTerminalHeight={100}
             />
@@ -906,6 +981,7 @@ describe('<ToolMessage />', () => {
         resultDisplay={longString}
         status={ToolCallStatus.Success}
         availableTerminalHeight={100}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -955,6 +1031,7 @@ describe('<ToolMessage />', () => {
         description="Plan:"
         status={ToolCallStatus.Success}
         resultDisplay={planResultDisplay}
+        forceShowResult
       />,
       StreamingState.Idle,
     );
@@ -995,7 +1072,10 @@ describe('<ToolMessage /> localized badge', () => {
     const output = lastFrame() ?? '';
     expect(output).toContain('读取文件');
     expect(output).not.toContain('ReadFile');
-  });
+    // 15s timeout (not the 5s default): setLanguageAsync() loads locale
+    // resources lazily and intermittently exceeds 5s on the heavily
+    // parallelized macOS CI runner, flaking the merge queue.
+  }, 15000);
 
   it('keeps the English display name under the en locale', async () => {
     const { setLanguageAsync } = await import('../../../i18n/index.js');
@@ -1005,5 +1085,5 @@ describe('<ToolMessage /> localized badge', () => {
       StreamingState.Idle,
     );
     expect(lastFrame() ?? '').toContain('ReadFile');
-  });
+  }, 15000);
 });

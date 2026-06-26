@@ -205,6 +205,70 @@ describe('SessionStatsContext', () => {
     expect(renderCount).toBe(3);
   });
 
+  it('should read metrics for the provided session id', () => {
+    uiTelemetryService.reset();
+    const contextRef: MutableRefObject<
+      ReturnType<typeof useSessionStats> | undefined
+    > = { current: undefined };
+
+    uiTelemetryService.recordSkillInvocation('review', true, 'session-a');
+    uiTelemetryService.recordSkillInvocation('testing', true, 'session-b');
+
+    render(
+      <SessionStatsProvider sessionId="session-a">
+        <TestHarness contextRef={contextRef} />
+      </SessionStatsProvider>,
+    );
+
+    expect(contextRef.current?.stats.metrics.skills).toEqual({
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        review: { count: 1, success: 1, fail: 0 },
+      },
+    });
+
+    uiTelemetryService.reset();
+  });
+
+  it('should update when skill metrics are mutated in place', () => {
+    uiTelemetryService.reset();
+    const contextRef: MutableRefObject<
+      ReturnType<typeof useSessionStats> | undefined
+    > = { current: undefined };
+
+    let renderCount = 0;
+    const CountingTestHarness = () => {
+      contextRef.current = useSessionStats();
+      renderCount++;
+      return null;
+    };
+
+    render(
+      <SessionStatsProvider sessionId="session-a">
+        <CountingTestHarness />
+      </SessionStatsProvider>,
+    );
+    const initialRenderCount = renderCount;
+
+    act(() => {
+      uiTelemetryService.recordSkillInvocation('review', true, 'session-a');
+    });
+
+    expect(renderCount).toBeGreaterThan(initialRenderCount);
+    expect(contextRef.current?.stats.metrics.skills).toEqual({
+      totalCalls: 1,
+      totalSuccess: 1,
+      totalFail: 0,
+      byName: {
+        review: { count: 1, success: 1, fail: 0 },
+      },
+    });
+
+    uiTelemetryService.reset();
+  });
+
   it('should throw an error when useSessionStats is used outside of a provider', () => {
     // Suppress console.error for this test since we expect an error
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

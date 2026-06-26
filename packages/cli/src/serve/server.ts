@@ -56,7 +56,10 @@ import {
   type DeviceFlowProviderId,
   type DeviceFlowPublicView,
 } from './auth/device-flow.js';
-import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
+import {
+  mapDomainErrorToErrorKind,
+  type DaemonStatusProvider,
+} from '@qwen-code/acp-bridge';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
@@ -64,7 +67,7 @@ import { createWorkspaceProvidersStatusProvider } from './workspace-providers-st
 import { isServeDebugMode } from './debug-mode.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { loadSettings } from '../config/settings.js';
-import { isWorkspaceTrusted } from '../config/trustedFolders.js';
+import { getWorkspaceTrustStatus } from '../config/trustedFolders.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
@@ -130,6 +133,8 @@ import {
 } from './fs/index.js';
 import { registerWorkspaceFileReadRoutes } from './routes/workspace-file-read.js';
 import { registerWorkspaceFileWriteRoutes } from './routes/workspace-file-write.js';
+import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-github.js';
+import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
@@ -137,6 +142,11 @@ import {
 } from './workspace-service/index.js';
 import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
+import {
+  registerWorkspaceVoiceRoutes,
+  type WorkspaceVoiceRouteDeps,
+} from './routes/workspace-voice.js';
+import { hasConfiguredBatchVoiceTranscriptionModel } from '../services/voice-service.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
   createRateLimiter,
@@ -153,6 +163,23 @@ import {
 let activeSseCount = 0;
 export function getActiveSseCount(): number {
   return activeSseCount;
+}
+
+function isWorkspaceVoiceTranscriptionAvailable(
+  boundWorkspace: string,
+): boolean {
+  try {
+    return hasConfiguredBatchVoiceTranscriptionModel(
+      loadSettings(boundWorkspace),
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: workspace voice transcription capability check failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return false;
+  }
 }
 
 /**
@@ -769,6 +796,7 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   workspace?: DaemonWorkspaceService;
+  statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
     workspace: string,
     toolName: string,
@@ -781,6 +809,15 @@ export interface ServeAppDeps {
     key: string,
     value: unknown,
   ) => Promise<void | import('../config/settings.js').LoadedSettings>;
+  persistSettings?: (
+    workspace: string,
+    writes: Array<{
+      scope: import('../config/settings.js').SettingScope;
+      key: string;
+      value: unknown;
+    }>,
+  ) => Promise<void>;
+  voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
 }
 
 function resolveDaemonTelemetryRoute(
@@ -856,6 +893,9 @@ function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
   }
+  if (req.method === 'POST' && path === '/workspace/setup-github') {
+    return { route: 'POST /workspace/setup-github' };
+  }
   if (req.method === 'POST' && path === '/workspace/reload') {
     return { route: 'POST /workspace/reload' };
   }
@@ -890,6 +930,19 @@ function resolveDaemonTelemetryRoute(
   if (path === '/workspace/permissions') {
     if (req.method === 'GET') return { route: 'GET /workspace/permissions' };
     if (req.method === 'POST') return { route: 'POST /workspace/permissions' };
+  }
+  if (path === '/workspace/trust') {
+    if (req.method === 'GET') return { route: 'GET /workspace/trust' };
+  }
+  if (req.method === 'POST' && path === '/workspace/trust/request') {
+    return { route: 'POST /workspace/trust/request' };
+  }
+  if (path === '/workspace/voice') {
+    if (req.method === 'GET') return { route: 'GET /workspace/voice' };
+    if (req.method === 'POST') return { route: 'POST /workspace/voice' };
+  }
+  if (req.method === 'POST' && path === '/workspace/voice/transcribe') {
+    return { route: 'POST /workspace/voice/transcribe' };
   }
   return undefined;
 }
@@ -1021,6 +1074,7 @@ function advertisedMaxPendingPromptsPerSession(
  *   - `POST /session/:id/load`
  *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
+ *   - `GET  /session/:id/status`
  *   - `GET  /session/:id/context`
  *   - `GET  /session/:id/supported-commands`
  *   - `GET  /session/:id/tasks`
@@ -1087,10 +1141,20 @@ export function createServeApp(
     injected: deps.fsFactory,
     trusted: false,
   });
+  let cachedVoiceTranscriptionAvailable: boolean | undefined;
+  const invalidateServeFeaturesCache = () => {
+    cachedVoiceTranscriptionAvailable = undefined;
+  };
+  const getCachedVoiceTranscriptionAvailable = () => {
+    cachedVoiceTranscriptionAvailable ??=
+      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
+    return cachedVoiceTranscriptionAvailable;
+  };
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
     opts.enableSessionShell === true && tokenConfigured;
+  const statusProvider = deps.statusProvider ?? createDaemonStatusProvider();
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
@@ -1102,7 +1166,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
-      statusProvider: createDaemonStatusProvider(),
+      statusProvider,
       // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
       // readTextFile pick up trust / TOCTOU / audit.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
@@ -1228,7 +1292,7 @@ export function createServeApp(
     createDaemonWorkspaceService({
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
-      statusProvider: createDaemonStatusProvider(),
+      statusProvider,
       workspaceProvidersStatusProvider:
         createWorkspaceProvidersStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
@@ -1245,7 +1309,19 @@ export function createServeApp(
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       refreshExtensionsForAllSessions: () =>
         bridge.refreshExtensionsForAllSessions(),
-      publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+      ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
+      ...(deps.persistSettings
+        ? { persistSettings: deps.persistSettings }
+        : {}),
+      publishWorkspaceEvent: (event) => {
+        if (
+          event.type === 'settings_changed' ||
+          event.type === 'settings_reloaded'
+        ) {
+          invalidateServeFeaturesCache();
+        }
+        bridge.publishWorkspaceEvent(event);
+      },
     });
   let extensionInstallQueue: Promise<unknown> = Promise.resolve();
   let extensionInstallQueueDepth = 0;
@@ -1295,11 +1371,10 @@ export function createServeApp(
     new ExtensionManager({
       workspaceDir: boundWorkspace,
       isWorkspaceTrusted:
-        isWorkspaceTrusted(
+        getWorkspaceTrustStatus(
           loadSettings(boundWorkspace).merged,
-          undefined,
           boundWorkspace,
-        ).isTrusted ?? true,
+        ).effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting: async (setting: ExtensionSetting) => {
         throw new Error(
@@ -2009,6 +2084,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       rateLimit: opts.rateLimit === true,
       reloadAvailable: deps.workspace !== undefined,
+      voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
       // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
       // on). A configured token no longer suppresses it — the browser carries
       // the bearer token via the WS subprotocol, which the upgrade listener
@@ -2670,6 +2746,35 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
     safeBody,
   });
+  registerWorkspaceSetupGithubRoutes(app, {
+    boundWorkspace,
+    bridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  registerWorkspaceTrustRoutes(app, {
+    boundWorkspace,
+    workspace,
+    mutate,
+    safeBody,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
+
+  const broadcastSettingsChanged = (
+    key: string,
+    value: unknown,
+    scope: string,
+    clientId: string | undefined,
+  ) => {
+    invalidateServeFeaturesCache();
+    bridge.publishWorkspaceEvent({
+      type: 'settings_changed',
+      data: { key, value, scope },
+      ...(clientId ? { originatorClientId: clientId } : {}),
+    });
+  };
 
   if (deps.persistSetting) {
     const persistSetting = deps.persistSetting;
@@ -2680,34 +2785,30 @@ export function createServeApp(
       persistSetting: async (...args) => {
         await persistSetting(...args);
       },
-      broadcastSettingsChanged: (key, value, scope, clientId) => {
-        bridge.publishWorkspaceEvent({
-          type: 'settings_changed',
-          data: { key, value, scope },
-          ...(clientId ? { originatorClientId: clientId } : {}),
-        });
-      },
-      parseAndValidateClientId: (req, res) =>
-        parseAndValidateWorkspaceClientId(req, res, bridge),
-    });
-    registerWorkspacePermissionsRoutes(app, {
-      boundWorkspace,
-      mutate,
-      safeBody,
-      persistSetting,
-      invokeWorkspaceCommand: (method, params) =>
-        bridge.invokeWorkspaceCommand(method, params),
-      broadcastSettingsChanged: (key, value, scope, clientId) => {
-        bridge.publishWorkspaceEvent({
-          type: 'settings_changed',
-          data: { key, value, scope },
-          ...(clientId ? { originatorClientId: clientId } : {}),
-        });
-      },
+      broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, bridge),
     });
   }
+  registerWorkspacePermissionsRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    workspace,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
+  registerWorkspaceVoiceRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    persistSetting: deps.persistSetting,
+    persistSettings: deps.persistSettings,
+    transcribe: deps.voiceTranscriber,
+    broadcastSettingsChanged,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
 
   // A2UI action inbound (the upstream half of A2UI-over-MCP): user
   // interactions from web clients are proxied to the UI MCP server's
@@ -3218,6 +3319,19 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'POST /session/:id/fork',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/status', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(bridge.getSessionSummary(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/status',
         sessionId,
       });
     }
@@ -4370,6 +4484,7 @@ export function createServeApp(
       try {
         const ctx = buildWorkspaceCtx(req, 'POST /workspace/reload', clientId);
         const result = await workspace.reload(ctx);
+        invalidateServeFeaturesCache();
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: 'POST /workspace/reload' });

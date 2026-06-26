@@ -425,7 +425,12 @@ function finalizeStreamingTextBlock(
     block.streaming = false;
     block.updatedAt = state.now;
     if (event?.eventId !== undefined) block.eventId = event.eventId;
-    if (event?.serverTimestamp !== undefined) {
+    // Preserve the text event's own timestamp during history replay; later
+    // finalize/status events can be much newer and would skew message times.
+    if (
+      block.serverTimestamp === undefined &&
+      event?.serverTimestamp !== undefined
+    ) {
       block.serverTimestamp = event.serverTimestamp;
     }
   }

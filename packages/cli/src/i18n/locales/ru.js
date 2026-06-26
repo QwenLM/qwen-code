@@ -1425,6 +1425,8 @@ export default {
   'No tasks currently running': 'Нет запущенных задач',
   'No entry to show.': 'Нет записи для отображения.',
   'needs approval': 'требует подтверждения',
+  'rejected — edit config to re-approve':
+    'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
   Running: 'Выполняется',
