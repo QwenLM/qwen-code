@@ -48,13 +48,34 @@ impl Tool for ZoomTool {
         use cua_driver_core::tool_args::ArgsExt;
         let window_id = match args.require_u32("window_id") { Ok(v) => v, Err(e) => return e };
         let pid = args.opt_i64("pid").map(|v| v as i32);
-        let x1 = match args.require_f64("x1") { Ok(v) => v, Err(e) => return e };
-        let y1 = match args.require_f64("y1") { Ok(v) => v, Err(e) => return e };
-        let x2 = match args.require_f64("x2") { Ok(v) => v, Err(e) => return e };
-        let y2 = match args.require_f64("y2") { Ok(v) => v, Err(e) => return e };
+        let mut x1 = match args.require_f64("x1") { Ok(v) => v, Err(e) => return e };
+        let mut y1 = match args.require_f64("y1") { Ok(v) => v, Err(e) => return e };
+        let mut x2 = match args.require_f64("x2") { Ok(v) => v, Err(e) => return e };
+        let mut y2 = match args.require_f64("y2") { Ok(v) => v, Err(e) => return e };
 
         if x2 <= x1 || y2 <= y1 {
             return ToolResult::error("x2 must be > x1 and y2 must be > y1");
+        }
+
+        // Normalized coordinate-space mode only: the agent's coords are relative
+        // to the (possibly downscaled) get_window_state image, but
+        // `screenshot_window_bytes` below captures at FULL resolution. Scale up
+        // by the same resize ratio the other coordinate tools (click / drag /
+        // right_click / double_click) already apply (see click.rs:349), so the
+        // crop lands on the region the agent actually saw. No-op when
+        // get_window_state didn't downscale (`ratio` == None). Gated on
+        // normalized mode so pixel-mode zoom stays byte-for-byte identical to
+        // upstream — upstream zoom is the lone coordinate tool that skips the
+        // resize ratio, so we only correct it on our normalized path.
+        if cua_driver_core::coord_norm::default_normalized() {
+            if let Some(p) = pid {
+                if let Some(ratio) = self.state.resize_registry.ratio(p) {
+                    x1 *= ratio;
+                    y1 *= ratio;
+                    x2 *= ratio;
+                    y2 *= ratio;
+                }
+            }
         }
 
         let state = self.state.clone();

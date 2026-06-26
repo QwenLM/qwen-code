@@ -169,16 +169,17 @@ pub fn initialize_result() -> Value {
 /// Interpreter uses for its system message.
 /// Coordinate wording for the agent instructions, by mode. Returns
 /// `(term, trailing_note)`. Pixel mode keeps the historical wording and an
-/// empty note; normalized mode swaps in 0–1000 wording plus an explanatory
-/// note. Pure (mode in, strings out) so it's unit-testable without globals.
-fn coordinate_terms(normalized: bool) -> (&'static str, &'static str) {
+/// empty note; normalized mode swaps in 0–`scale` wording (tracking
+/// `CUA_DRIVER_RS_COORDINATE_SCALE`) plus an explanatory note.
+fn coordinate_terms(normalized: bool) -> (String, String) {
     if normalized {
+        let scale = crate::coord_norm::coordinate_scale() as u64;
         (
-            "0–1000 normalized coordinates",
-            " Raw x/y coordinates are 0–1000 normalized to the window (top-left origin), not pixels.",
+            format!("0–{scale} normalized coordinates"),
+            format!(" Raw x/y coordinates are 0–{scale} normalized to the window (top-left origin), not pixels."),
         )
     } else {
-        ("pixel coordinates", "")
+        ("pixel coordinates".to_string(), String::new())
     }
 }
 

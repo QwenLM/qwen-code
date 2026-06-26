@@ -50,14 +50,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static CLAUDE_CODE_COMPAT: AtomicBool = AtomicBool::new(false);
 
 /// Seed the coordinate-space default + scale from env before any registry is
-/// built. `CUA_DRIVER_RS_COORDINATE_SPACE=normalized_1000` opts into the
-/// relative-coordinate shim; anything else (incl. unset) stays pixels — zero
-/// behavior change. `CUA_DRIVER_RS_COORDINATE_SCALE` overrides the normalization
-/// full-scale (default 1000; e.g. 999 for the mobile_use cookbook convention).
+/// built. `CUA_DRIVER_RS_COORDINATE_SPACE=1` opts into the relative-coordinate
+/// shim; `0` / unset / anything-not-truthy stays pixels — zero behavior change.
+/// `CUA_DRIVER_RS_COORDINATE_SCALE` overrides the normalization full-scale
+/// (default 1000; e.g. 999 for the mobile_use cookbook convention).
 fn seed_coordinate_space_from_env() {
-    let normalized = std::env::var("CUA_DRIVER_RS_COORDINATE_SPACE")
-        .map(|v| v.eq_ignore_ascii_case("normalized_1000"))
-        .unwrap_or(false);
+    // `1` (also true/yes/on) → normalized mode; `0`/unset/other → pixels.
+    let normalized = crate::bundle::is_env_truthy("CUA_DRIVER_RS_COORDINATE_SPACE");
     cua_driver_core::coord_norm::set_default_normalized(normalized);
 
     if let Ok(raw) = std::env::var("CUA_DRIVER_RS_COORDINATE_SCALE") {
@@ -315,12 +314,12 @@ fn main() {
             // Bind the Unix socket FIRST, on a background thread, BEFORE
             // running the (blocking) permissions gate (#1761).
             //
-            // The gate's `wait_for_grants` blocks while `com.trycua.driver`
+            // The gate's `wait_for_grants` blocks while `com.qwencode.cua-driver`
             // is ungranted — it prompts and re-exec-loops until the user
             // grants or the deadline elapses. If serve ran after the gate,
             // the daemon's socket wouldn't appear for minutes on first
             // launch, so `permissions grant` / MCP clients launched via
-            // `open -n -g -a CuaDriver --args serve` (the correct-TCC-
+            // `open -n -g -a QwenCuaDriver --args serve` (the correct-TCC-
             // attribution path) couldn't reach the daemon to even report
             // "pending". Binding the socket first makes the daemon
             // reachable within ~1s while the gate works toward the grant.
@@ -452,7 +451,7 @@ fn main() {
             // banner can land on stderr in either dispatch path.
             version_check::maybe_announce_update();
             // TCC sidestep: if we're a shell-spawned bare binary that
-            // resolves into /Applications/CuaDriver.app, run the
+            // resolves into /Applications/QwenCuaDriver.app, run the
             // proxy path instead of the in-process MCP server. The
             // proxy ensures a daemon is up under the bundle's TCC
             // attribution and forwards stdio MCP through its socket.

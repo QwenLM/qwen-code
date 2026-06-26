@@ -415,14 +415,14 @@ impl ToolRegistry {
         };
 
         // ── coord_norm input hook: 0–1000 → pixels, before the real tool ──
-        // No-op unless the registry is in normalized mode AND we have a cached
-        // screenshot size for this (pid, window_id) to use as the basis.
+        // Window-basis fields use this (pid, window_id)'s cached screenshot
+        // size (no-op if absent); screen-basis fields (move_cursor) use the
+        // cached screen size internally — so always call when normalized.
         if self.normalized {
             let pid = args.opt_i64("pid").unwrap_or(0);
             let window_id = args.opt_u64("window_id").unwrap_or(0);
-            if let Some((w, h)) = crate::coord_norm::get_size(pid, window_id) {
-                crate::coord_norm::denormalize_args(resolved_name, &mut args, w, h);
-            }
+            let (w, h) = crate::coord_norm::get_size(pid, window_id).unwrap_or((0, 0));
+            crate::coord_norm::denormalize_args(resolved_name, &mut args, w, h);
         }
 
         let mut result = match self.tools.get(resolved_name) {
@@ -434,6 +434,7 @@ impl ToolRegistry {
         // ingest must precede normalize_result (which rewrites the dims to 1000).
         if self.normalized {
             crate::coord_norm::ingest_window_size(resolved_name, &args, &result);
+            crate::coord_norm::ingest_screen_size(resolved_name, &result);
             crate::coord_norm::normalize_result(resolved_name, &mut result);
         }
 

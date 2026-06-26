@@ -57,8 +57,9 @@ Phase-1 对用户提供的 qwen 出错轨迹
 
 ### 1.3 开关
 - core 全局（仿 `main.rs:50 CLAUDE_CODE_COMPAT: AtomicBool`）。
-- env `CUA_DRIVER_RS_COORDINATE_SPACE=normalized_1000`，默认 `pixels`（兼容惯例，
-  项目已有 ~18 个 `CUA_DRIVER_RS_*` env）。
+- env `CUA_DRIVER_RS_COORDINATE_SPACE=1` 开启（`0`/未设/其他值 = `pixels` 默认关；
+  经 `is_env_truthy`，也接受 `true`/`yes`/`on`）。另有 `CUA_DRIVER_RS_COORDINATE_SCALE`
+  配满量程（默认 1000），贯通输入换算、输出截图尺寸、描述、agent 指令。
 - 可选叠加 `DriverConfig.coordinate_space` 字段 + `set_config`/`get_config`（持久 + MCP 可改）。
 - 默认 pixels 时全部 early-return，零行为变化。
 
@@ -80,11 +81,30 @@ Phase-1 对用户提供的 qwen 出错轨迹
 
 | 工具 | 字段 | 平台 | 基准 |
 |---|---|---|---|
-| click / double_click / right_click | `x`,`y` | mac/win/linux | (pid,window_id) |
-| drag | `from_x`,`from_y`,`to_x`,`to_y` | mac/win/linux | 同上 |
-| mouse_button_down / mouse_drag / mouse_button_up | `x`,`y` | linux only | 同上 |
+| click / double_click / right_click | `x`,`y` | mac/win/linux | **window**：(pid,window_id) 截图尺寸 |
+| drag | `from_x`,`from_y`,`to_x`,`to_y` | mac/win/linux | **window**：同上 |
+| zoom | `x1`,`y1`,`x2`,`y2` | mac/win/linux | **window**：裁剪框两角同样落在窗口截图 0–1000 网格（见下方 resize-ratio 注意） |
+| move_cursor | `x`,`y` | mac/win/linux | **screen**：overlay 是屏幕全局坐标，按 `get_screen_size` 逻辑点尺寸归一化 |
+| mouse_button_down / mouse_drag / mouse_button_up | `x`,`y` | linux only | window：同 click |
 
-字段命名跨平台统一（`click.rs:80-81`、`drag.rs:58-61`、各平台 impl_.rs 一致）。
+字段命名跨平台统一（`click.rs:80-81`、`drag.rs:58-61`、`zoom.rs`、`move_cursor.rs`、各平台 impl_.rs 一致）。
+
+**zoom 的 resize-ratio 修正**（实测发现的上游不一致）：`get_window_state` 把物理截图
+（如 Retina 2400×1640）**降采样**到 `max_dim`（约 1567×1071）后才返回，并据此报告
+`screenshot_width/height`、把比例存进 `resize_registry`。click/drag/right_click/double_click
+**都**用 `resize_registry.ratio()` 把降采样基准坐标放大回物理像素（`click.rs:349`），
+唯独 **zoom 漏了**——它直接裁 `screenshot_window_bytes` 的全分辨率 PNG。归一化基准是
+降采样后的 1567，喂给裁全分辨率 2400 的 zoom 会偏 `1567/2400≈0.65` 倍。修复：在
+`zoom.rs` 里补上同款 `ratio` 放大，**仅 normalized 模式**生效（`default_normalized()` 门控），
+pixel 模式逐字节不变。非降采样窗口 `ratio==None`，无副作用。
+
+**两种基准**（`input_coord_fields` 的第三元 `screen_basis`）：
+- **window basis**（click/drag/zoom 等）：按 per-(pid,window_id) 缓存的截图尺寸换算，
+  与 qwen 看到的窗口截图 0–1000 网格对齐。
+- **screen basis**（仅 move_cursor）：overlay 光标走屏幕全局逻辑点，无 window 截图基准，
+  改按 `SCREEN_SIZE` 缓存（由 `get_screen_size` 的 `structuredContent.width/height` ingest）
+  换算。缓存未热时 **透传原值**（降级为字面像素）——move_cursor 是只读 attention overlay，
+  不参与点击主路径，可接受。get_screen_size 与 move_cursor 同为逻辑点空间，基准自洽。
 
 ---
 
@@ -92,11 +112,15 @@ Phase-1 对用户提供的 qwen 出错轨迹
 
 | 排除 | 原因 |
 |---|---|
-| `move_cursor` x,y | screen/overlay 坐标，无 window 截图基准（`move_cursor.rs:56`） |
-| `zoom` x1y1x2y2 | 定义裁剪框 + 产出 ZoomContext，归一化会污染 from_zoom 链路（`zoom.rs:70`） |
-| `from_zoom=true` 的 click/drag | 坐标在 zoom 图空间，core 拿不到 crop 尺寸 |
-| `get_screen_size` 返回 | 是 points 尺寸，非坐标 |
+| `from_zoom=true` 的 click/drag | 坐标在 zoom 图空间，core 拿不到 crop 尺寸；`denormalize_args` 见到 `from_zoom=true` 直接 return 透传 |
+| `get_screen_size` 返回值本身 | 是 points 尺寸，非坐标（但其 width/height 被 ingest 进 SCREEN_SIZE 缓存供 move_cursor 用） |
+| `elements[].frame{x,y,w,h}` 等输出坐标 | screen-global，core 拿不到 window_origin + scale，见 §5 |
 | `parallel_mouse_drag` 的 `path`/`fn` | linux，数组嵌坐标 + 字符串表达式，非线性，低优先级 |
+
+> **zoom / move_cursor 已纳入转换**（见 §3）。zoom 是 window basis（裁剪框两角同窗口网格），
+> 且 `from_zoom=true` 链路通过 early-return 保护不被二次归一化；move_cursor 是 screen basis。
+> 二者均有单测覆盖（`denormalize_zoom_converts_rect_by_axis`、
+> `denormalize_move_cursor_uses_screen_size`、`denormalize_skips_when_from_zoom_set`）。
 
 排除项在 normalized 模式下 **透传原值**，并在文案/文档说明其语义未变。
 
@@ -207,7 +231,8 @@ MCP `instructions`（`protocol.rs:191` "Prefer element_index … over pixel coor
 - [ ] mac app 证书签名（待用户提供）
 
 ### 启用方式
-`CUA_DRIVER_RS_COORDINATE_SPACE=normalized_1000`（不设 / 其他值 = pixels，零行为变化）。
+`CUA_DRIVER_RS_COORDINATE_SPACE=1` 开启（`0` / 不设 / 其他非真值 = pixels，零行为变化）。
+满量程可选 `CUA_DRIVER_RS_COORDINATE_SCALE=<N>`（默认 1000）。
 
 ### 本次改动文件（fork rebase 友好，集中在 core + bin 入口）
 - `crates/cua-driver-core/src/coord_norm.rs`（新增：换算/缓存/ingest/文案改写/种子）

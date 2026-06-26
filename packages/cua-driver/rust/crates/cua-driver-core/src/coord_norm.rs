@@ -1,6 +1,6 @@
 //! Relative-coordinate (1000×1000 normalized) translation layer.
 //!
-//! Opt-in (`coordinate_space = normalized_1000`, default `pixels`) shim that
+//! Opt-in (`CUA_DRIVER_RS_COORDINATE_SPACE=1`, default off = `pixels`) shim that
 //! lets clients trained on 0–1000 normalized coordinates (e.g. Qwen-VL
 //! `computer_use`) drive the pixel-based tool surface. It runs entirely in
 //! `cua-driver-core` so the per-platform tools stay untouched (fork-rebase
@@ -38,24 +38,37 @@ pub fn px_to_norm(px: f64, dim: u32, scale: f64) -> f64 {
     (px / dim as f64 * scale).round()
 }
 
-/// Input coordinate fields per tool. `true` = X axis (scale by width),
-/// `false` = Y axis (scale by height). Tools not listed (move_cursor,
-/// zoom, scroll, …) are intentionally excluded — see the design doc.
-fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool)] {
+/// Input coordinate fields per tool: `(field, is_x_axis, screen_basis)`.
+/// `is_x_axis` true = scale by width, false = by height. `screen_basis` true =
+/// normalize against the SCREEN size (move_cursor moves the agent-cursor
+/// overlay in screen space — it has no window_id); false = against the window's
+/// screenshot size. scroll / page / set_value carry no coordinates → excluded.
+fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
     match tool {
-        "click" | "double_click" | "right_click" => &[("x", true), ("y", false)],
+        "click" | "double_click" | "right_click" => &[("x", true, false), ("y", false, false)],
         "drag" => &[
-            ("from_x", true),
-            ("from_y", false),
-            ("to_x", true),
-            ("to_y", false),
+            ("from_x", true, false),
+            ("from_y", false, false),
+            ("to_x", true, false),
+            ("to_y", false, false),
         ],
+        // zoom defines a crop rectangle in screenshot pixels; window-basis like
+        // click. from_zoom (handled below) is the only zoom-space concern.
+        "zoom" => &[
+            ("x1", true, false),
+            ("y1", false, false),
+            ("x2", true, false),
+            ("y2", false, false),
+        ],
+        // move_cursor positions the overlay in SCREEN space (no window_id).
+        "move_cursor" => &[("x", true, true), ("y", false, true)],
         _ => &[],
     }
 }
 
-/// In-place convert a coordinate tool's normalized input fields to pixels,
-/// using the window's current screenshot dimensions as the basis.
+/// In-place convert a coordinate tool's normalized input fields to pixels.
+/// Window-basis fields use the window's screenshot size (`screenshot_w/h`);
+/// screen-basis fields (move_cursor) use the cached screen size.
 pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screenshot_h: u32) {
     // from_zoom coords live in the zoom-image space, not window-local; core has
     // no crop basis to convert them, so leave the whole call untouched.
@@ -63,9 +76,20 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
         return;
     }
     let scale = coordinate_scale();
-    for &(field, is_x) in input_coord_fields(tool) {
+    let screen = screen_size();
+    for &(field, is_x, screen_basis) in input_coord_fields(tool) {
+        let (dw, dh) = if screen_basis {
+            match screen {
+                Some(s) => s,
+                None => continue, // no screen size cached yet → leave field as-is
+            }
+        } else if screenshot_w == 0 {
+            continue; // no window basis available → leave field as-is
+        } else {
+            (screenshot_w, screenshot_h)
+        };
+        let dim = if is_x { dw } else { dh };
         if let Some(v) = args.get(field).and_then(|v| v.as_f64()) {
-            let dim = if is_x { screenshot_w } else { screenshot_h };
             args[field] = json!(norm_to_px(v, dim, scale));
         }
     }
@@ -81,36 +105,42 @@ pub fn extract_screenshot_size(result: &ToolResult) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
-/// In-place normalize a tool result's pixel coordinates back to 0–1000.
+/// In-place normalize a tool result's pixel coordinates back to 0–`scale`.
 ///
-/// First version: rewrite `screenshot_width/height` to 1000 (the model treats
-/// the returned image as a 0–1000 grid). Element frames stay in pixels — they
-/// are screen-global with no window-origin/scale basis available in core (see
-/// design doc §5), so converting them here would introduce error.
+/// Rewrites `screenshot_width/height` to the configured full-scale (default
+/// 1000) so the model treats the returned image as a 0–`scale` grid — matching
+/// the basis `denormalize_args` uses for input. Element frames stay in pixels —
+/// they are screen-global with no window-origin/scale basis available in core
+/// (see design doc §5), so converting them here would introduce error.
 pub fn normalize_result(tool: &str, result: &mut ToolResult) {
     // First version only rewrites get_window_state's screenshot dims.
     if tool != "get_window_state" {
         return;
     }
+    let scale = coordinate_scale() as u64;
     if let Some(obj) = result
         .structured_content
         .as_mut()
         .and_then(|v| v.as_object_mut())
     {
         if obj.contains_key("screenshot_width") {
-            obj.insert("screenshot_width".to_string(), json!(1000));
+            obj.insert("screenshot_width".to_string(), json!(scale));
         }
         if obj.contains_key("screenshot_height") {
-            obj.insert("screenshot_height".to_string(), json!(1000));
+            obj.insert("screenshot_height".to_string(), json!(scale));
         }
     }
 }
 
 /// Rewrite coordinate-field descriptions in a `tools/list` payload from pixel
-/// wording to 0–1000 normalized wording. Caller gates on normalized mode. Only
-/// the fields that actually get converted (same table as `denormalize_args`)
-/// are rewritten, so the docs match behavior — move_cursor/zoom stay pixels.
+/// wording to 0–`scale` normalized wording. Caller gates on normalized mode.
+/// Only the fields that actually get converted (same table as
+/// `denormalize_args` — click/double_click/right_click/drag/zoom/move_cursor)
+/// are rewritten, so the docs match behavior (move_cursor uses the screen basis,
+/// the rest window-local). Uses the configured full-scale so the wording tracks
+/// `CUA_DRIVER_RS_COORDINATE_SCALE`.
 pub fn rewrite_coord_desc(tools_list: &mut Value) {
+    let scale = coordinate_scale() as u64;
     let tools = match tools_list.get_mut("tools").and_then(|t| t.as_array_mut()) {
         Some(t) => t,
         None => return,
@@ -137,16 +167,20 @@ pub fn rewrite_coord_desc(tools_list: &mut Value) {
             .and_then(|s| s.get_mut("properties"))
             .and_then(|p| p.as_object_mut())
         {
-            for &(field, is_x) in fields {
+            for &(field, is_x, screen_basis) in fields {
                 if let Some(fobj) = props.get_mut(field).and_then(|f| f.as_object_mut()) {
-                    if fobj.contains_key("description") {
-                        let desc = if is_x {
-                            "X coordinate, 0–1000 normalized to window width (top-left origin)."
-                        } else {
-                            "Y coordinate, 0–1000 normalized to window height (top-left origin)."
-                        };
-                        fobj.insert("description".to_string(), json!(desc));
-                    }
+                    // Insert unconditionally: in normalized mode the model MUST be
+                    // told these are 0–`scale`, even for fields the upstream schema
+                    // left undescribed (e.g. move_cursor's bare x/y). This runs
+                    // only when `normalized` is set, so pixel mode is untouched.
+                    // move_cursor is screen-space; the rest are window-local.
+                    let basis = if screen_basis { "screen" } else { "window" };
+                    let desc = if is_x {
+                        format!("X coordinate, 0–{scale} normalized to {basis} width (top-left origin).")
+                    } else {
+                        format!("Y coordinate, 0–{scale} normalized to {basis} height (top-left origin).")
+                    };
+                    fobj.insert("description".to_string(), json!(desc));
                 }
             }
         }
@@ -159,7 +193,7 @@ pub fn rewrite_coord_desc(tools_list: &mut Value) {
             .map(|d| {
                 d.replace(
                     "window-local screenshot pixels",
-                    "0–1000 normalized coordinates (top-left origin)",
+                    &format!("0–{scale} normalized coordinates (top-left origin)"),
                 )
             });
         if let Some(nd) = new_top {
@@ -248,6 +282,43 @@ pub fn ingest_window_size(tool: &str, args: &Value, result: &ToolResult) {
     }
 }
 
+// ── Screen-size cache (for move_cursor, which is screen-space) ────────────────
+
+/// Screen size (from `get_screen_size`) — the basis for move_cursor's
+/// screen-space coordinates. Single global; the agent cursor overlay lives on
+/// the main display.
+static SCREEN_SIZE: OnceLock<Mutex<Option<(u32, u32)>>> = OnceLock::new();
+
+fn screen_cache() -> &'static Mutex<Option<(u32, u32)>> {
+    SCREEN_SIZE.get_or_init(|| Mutex::new(None))
+}
+
+/// Cache the screen size for normalizing move_cursor coordinates.
+pub fn put_screen_size(w: u32, h: u32) {
+    if let Ok(mut c) = screen_cache().lock() {
+        *c = Some((w, h));
+    }
+}
+
+/// The cached screen size, if a `get_screen_size` has been seen.
+pub fn screen_size() -> Option<(u32, u32)> {
+    screen_cache().lock().ok().and_then(|c| *c)
+}
+
+/// Ingest the screen size from a `get_screen_size` result into the cache.
+pub fn ingest_screen_size(tool: &str, result: &ToolResult) {
+    if tool != "get_screen_size" {
+        return;
+    }
+    if let Some(sc) = result.structured_content.as_ref() {
+        let w = sc.get("width").and_then(|v| v.as_u64());
+        let h = sc.get("height").and_then(|v| v.as_u64());
+        if let (Some(w), Some(h)) = (w, h) {
+            put_screen_size(w as u32, h as u32);
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -328,12 +399,26 @@ mod tests {
     }
 
     #[test]
-    fn denormalize_excludes_move_cursor() {
-        // move_cursor is screen/overlay space with no window basis — never scale.
+    fn denormalize_zoom_converts_rect_by_axis() {
+        // zoom is window-basis like click: x1/x2 by width, y1/y2 by height.
+        let mut args = json!({ "x1": 400.0, "y1": 400.0, "x2": 600.0, "y2": 600.0 });
+        denormalize_args("zoom", &mut args, 800, 600);
+        assert_eq!(args["x1"], json!(320.0)); // 400/1000*800
+        assert_eq!(args["x2"], json!(480.0)); // 600/1000*800
+        assert_eq!(args["y1"], json!(240.0)); // 400/1000*600
+        assert_eq!(args["y2"], json!(360.0)); // 600/1000*600
+    }
+
+    #[test]
+    fn denormalize_move_cursor_uses_screen_size() {
+        // move_cursor is screen-space (no window_id): normalize against the
+        // cached SCREEN size, not the window screenshot size. (Sole test that
+        // writes the screen-size global, so no cross-test race.)
+        put_screen_size(1920, 1080);
         let mut args = json!({ "x": 500.0, "y": 500.0 });
-        denormalize_args("move_cursor", &mut args, 800, 600);
-        assert_eq!(args["x"], json!(500.0));
-        assert_eq!(args["y"], json!(500.0));
+        denormalize_args("move_cursor", &mut args, 800, 600); // window size ignored
+        assert_eq!(args["x"], json!(960.0)); // 500/1000*1920 (screen, not 800)
+        assert_eq!(args["y"], json!(540.0)); // 500/1000*1080 (screen, not 600)
     }
 
     #[test]
@@ -417,21 +502,31 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_excludes_move_cursor_description() {
-        // move_cursor is screen-space and not converted — its docs stay pixels.
+    fn rewrite_move_cursor_description_uses_screen_basis() {
+        // move_cursor is screen-space: its normalized docs must say "screen",
+        // not "window" — the basis the agent normalizes against differs.
+        // The real upstream schema gives x/y NO description; normalized mode
+        // must still INSERT one so the model knows the 0–1000 convention.
         let mut tl = json!({
             "tools": [{
                 "name": "move_cursor",
                 "description": "Move cursor.",
                 "inputSchema": { "properties": {
-                    "x": { "type": "number", "description": "Screen X." },
-                    "y": { "type": "number", "description": "Screen Y." }
+                    "x": { "type": "number" },
+                    "y": { "type": "number" }
                 }}
             }]
         });
         rewrite_coord_desc(&mut tl);
         let props = &tl["tools"][0]["inputSchema"]["properties"];
-        assert_eq!(props["x"]["description"], json!("Screen X."));
+        assert_eq!(
+            props["x"]["description"],
+            json!("X coordinate, 0–1000 normalized to screen width (top-left origin).")
+        );
+        assert_eq!(
+            props["y"]["description"],
+            json!("Y coordinate, 0–1000 normalized to screen height (top-left origin).")
+        );
     }
 
     #[test]
