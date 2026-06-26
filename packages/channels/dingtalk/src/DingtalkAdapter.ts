@@ -512,6 +512,16 @@ export class DingtalkChannel extends ChannelBase {
         return;
       }
 
+      // A 'thread'-scoped group shares one session keyed by conversationId;
+      // without it, chatId would fall back to the expiring sessionWebhook and
+      // the shared-session key would churn — drop rather than fragment the group.
+      if (isGroup && !conversationId) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] Group message has no conversationId, skipping.\n`,
+        );
+        return;
+      }
+
       // Cache webhook by conversationId so sendMessage can look it up
       if (conversationId) {
         this.webhooks.set(conversationId, sessionWebhook);

@@ -195,6 +195,48 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session: active');
     });
 
+    it('/clear in a group asks for confirmation and does not clear', async () => {
+      const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+      await ch.handleInbound({ ...g, text: 'hello' }); // establish shared session
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/clear' });
+      expect(ch.sent[0]!.text).toContain('/clear confirm');
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/status' });
+      expect(ch.sent[0]!.text).toContain('Session: active');
+    });
+
+    it('/clear confirm in a group clears the shared session', async () => {
+      const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+      await ch.handleInbound({ ...g, text: 'hello' });
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/clear confirm' });
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+    });
+
+    it('/who reports workspace + shared scope without creating a session', async () => {
+      const ch = createChannel({
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+        cwd: '/work',
+      });
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          text: '/who',
+        }),
+      );
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('Workspace: /work');
+      expect(ch.sent[0]!.text).toContain('shared by this group');
+      expect(ch.sent[0]!.text).toContain('Session: none');
+      expect(bridge.newSession).not.toHaveBeenCalled();
+    });
+
     it('handles /command@botname format', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ text: '/help@mybot' }));
@@ -311,6 +353,106 @@ describe('ChannelBase', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const secondPrompt = (bridge.prompt as any).mock.calls[1][1] as string;
       expect(secondPrompt).not.toContain('Be concise.');
+    });
+  });
+
+  describe('multiplayer identity (sender attribution)', () => {
+    function groupEnv(overrides: Partial<Envelope> = {}): Envelope {
+      return envelope({
+        isGroup: true,
+        isMentioned: true,
+        chatId: 'g1',
+        ...overrides,
+      });
+    }
+
+    it('prefixes group messages with the sender name', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: 'ship it' }),
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const promptText = (bridge.prompt as any).mock.calls[0][1] as string;
+      expect(promptText).toBe('[Alice] ship it');
+    });
+
+    it('does not prefix direct (non-group) messages', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope({ senderName: 'Alice', text: 'hi' }));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const promptText = (bridge.prompt as any).mock.calls[0][1] as string;
+      expect(promptText).toBe('hi');
+    });
+
+    it('places the sender prefix below the reply-quote context', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({
+          senderName: 'Bob',
+          text: 'my reply',
+          referencedText: 'orig',
+        }),
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const promptText = (bridge.prompt as any).mock.calls[0][1] as string;
+      expect(promptText).toContain('[Replying to: "orig"]');
+      expect(promptText).toContain('[Bob] my reply');
+      expect(promptText.indexOf('[Replying to:')).toBeLessThan(
+        promptText.indexOf('[Bob]'),
+      );
+    });
+
+    it('falls back to senderId when senderName is empty', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: '', senderId: 'u-42', text: 'x' }),
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const promptText = (bridge.prompt as any).mock.calls[0][1] as string;
+      expect(promptText).toBe('[u-42] x');
+    });
+
+    it('collect: coalesced followup keeps per-sender prefixes without double-prefixing', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('coalesced response');
+      });
+
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { dispatchMode: 'collect' } },
+      });
+
+      // Alice's message starts processing
+      const p1 = ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: 'first' }),
+      );
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Bob and Carol buffer while Alice's turn runs
+      await ch.handleInbound(groupEnv({ senderName: 'Bob', text: 'second' }));
+      await ch.handleInbound(groupEnv({ senderName: 'Carol', text: 'third' }));
+
+      expect(callCount).toBe(1);
+      resolveFirst('first response');
+      await p1;
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(callCount).toBe(2);
+      const coalesced = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      // Per-message speaker prefixes are preserved from buffer time...
+      expect(coalesced).toContain('[Bob] second');
+      expect(coalesced).toContain('[Carol] third');
+      // ...and the whole blob is NOT re-wrapped with the last sender's prefix.
+      expect(coalesced.startsWith('[Bob] second')).toBe(true);
+      expect(coalesced.match(/\[Carol\]/g)?.length).toBe(1);
     });
   });
 

@@ -144,7 +144,7 @@ export abstract class ChannelBase {
 
   /** Register shared slash commands. Called from constructor. */
   private registerSharedCommands(): void {
-    const clearHandler: CommandHandler = async (envelope) => {
+    const doClear = async (envelope: Envelope): Promise<void> => {
       const removedIds = this.router.removeSession(
         this.name,
         envelope.senderId,
@@ -156,11 +156,25 @@ export abstract class ChannelBase {
         }
         await this.sendMessage(
           envelope.chatId,
-          'Session cleared. Your next message will start a fresh conversation.',
+          'Session cleared. The next message starts a fresh conversation.',
         );
       } else {
         await this.sendMessage(envelope.chatId, 'No active session to clear.');
       }
+    };
+
+    // In a group the session is shared ('thread' scope), so a bare /clear would
+    // reset it for everyone — require explicit "/clear confirm" there. DMs clear
+    // directly.
+    const clearHandler: CommandHandler = async (envelope, args) => {
+      if (envelope.isGroup && args.trim().toLowerCase() !== 'confirm') {
+        await this.sendMessage(
+          envelope.chatId,
+          'This clears the shared session for the whole group. Send "/clear confirm" to proceed.',
+        );
+        return true;
+      }
+      await doClear(envelope);
       return true;
     };
 
@@ -168,16 +182,49 @@ export abstract class ChannelBase {
     this.registerCommand('reset', clearHandler);
     this.registerCommand('new', clearHandler);
 
+    // Read-only: report the current (possibly group-shared) session and workspace.
+    this.registerCommand('who', async (envelope) => {
+      const active = this.router.hasSession(
+        this.name,
+        envelope.senderId,
+        envelope.chatId,
+      );
+      const scopeNote = envelope.isGroup
+        ? this.config.sessionScope === 'thread'
+          ? ' (shared by this group)'
+          : ' (private to you)'
+        : '';
+      await this.sendMessage(
+        envelope.chatId,
+        [
+          `Channel: ${this.name}`,
+          `Workspace: ${this.config.cwd}`,
+          `Session: ${active ? 'active' : 'none'}${scopeNote}`,
+        ].join('\n'),
+      );
+      return true;
+    });
+
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
         '/help — Show this help',
-        '/clear — Clear your session (aliases: /reset, /new)',
+        envelope.isGroup
+          ? '/clear confirm — Clear the shared group session (aliases: /reset, /new)'
+          : '/clear — Clear your session (aliases: /reset, /new)',
+        '/who — Show current session & workspace',
         '/status — Show session info',
       ];
 
       // Platform-specific commands (registered by adapters, not shared ones)
-      const sharedCmds = new Set(['help', 'clear', 'reset', 'new', 'status']);
+      const sharedCmds = new Set([
+        'help',
+        'clear',
+        'reset',
+        'new',
+        'who',
+        'status',
+      ]);
       const platformCmds = [...this.commands.keys()].filter(
         (c) => !sharedCmds.has(c),
       );
@@ -314,6 +361,16 @@ export abstract class ChannelBase {
 
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
+
+    // Multiplayer attribution: in a shared ('thread'-scoped) group every member
+    // feeds one session, so tag each turn with the speaker. Fires every turn
+    // (the speaker changes per message); skipped for 1:1 chats and for
+    // already-prefixed synthetic re-entries (collect-mode coalescing).
+    if (envelope.isGroup && !envelope.alreadyPrefixed) {
+      const who = envelope.senderName || envelope.senderId || 'unknown';
+      promptText = `[${who}] ${promptText}`;
+    }
+
     if (envelope.referencedText) {
       promptText = `[Replying to: "${envelope.referencedText}"]\n\n${promptText}`;
     }
@@ -452,6 +509,8 @@ export abstract class ChannelBase {
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
             text: coalesced,
+            // Coalesced text already carries each message's [sender] prefix.
+            alreadyPrefixed: true,
             // Clear attachments/references — already resolved in original text
             referencedText: undefined,
             attachments: undefined,

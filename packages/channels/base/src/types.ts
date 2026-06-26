@@ -39,7 +39,7 @@ export interface ChannelConfig {
   groupPolicy: GroupPolicy; // default: "disabled"
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
-  /** Dispatch mode for concurrent messages. Default: 'collect'. */
+  /** Dispatch mode for concurrent messages. Default: 'steer' (resolved in ChannelBase.handleInbound). */
   dispatchMode?: DispatchMode;
 
   /** Enable block streaming — emit completed blocks as separate messages. */
@@ -83,6 +83,11 @@ export interface Envelope {
   imageMimeType?: string;
   /** Structured attachments (images, files, audio, video). */
   attachments?: Attachment[];
+  /**
+   * Set on a synthetic re-entry envelope whose text already carries per-message
+   * [sender] prefixes (collect-mode coalescing) — suppresses re-prefixing.
+   */
+  alreadyPrefixed?: boolean;
 }
 
 export interface SessionTarget {
