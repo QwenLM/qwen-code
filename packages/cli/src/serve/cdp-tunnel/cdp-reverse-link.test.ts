@@ -98,6 +98,29 @@ describe('CdpReverseLink (Plan C #5626)', () => {
     ).rejects.toMatchObject({ message: 'CDP tunnel closed' });
   });
 
+  it('rejects a forwarded command when its per-command timer expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: CdpOutboundFrame[] = [];
+      // Small per-command timeout so the timer fires under the fake clock.
+      const link = new CdpReverseLink((f) => sent.push(f), 50);
+      const p = link.forwardToTab('Page.navigate', { url: 'about:blank' });
+      let err: unknown;
+      p.catch((e) => {
+        err = e;
+      });
+      expect(link.pendingCount()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(err).toMatchObject({ code: -32000 });
+      expect((err as { message: string }).message).toContain('timed out');
+      expect(link.pendingCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('isCdpInboundFrameType recognizes extension->daemon frames only', () => {
     expect(isCdpInboundFrameType('cdp_result')).toBe(true);
     expect(isCdpInboundFrameType('cdp_event')).toBe(true);

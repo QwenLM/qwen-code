@@ -37,7 +37,7 @@ import {
   type CdpOutboundFrame,
 } from '../cdp-tunnel/cdp-reverse-link.js';
 import { attachCdpClient } from '../cdp-tunnel/cdp-ws.js';
-import { isServeDebugMode } from '../debug-mode.js';
+import { safeWsSend } from './safe-ws-send.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
@@ -1151,30 +1151,6 @@ export function mountAcpHttp(
 function headerOf(req: Request, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
-}
-
-/**
- * Send `payload` on `ws` only if the socket is still open. Post-async sends —
- * client-MCP acks/requests that await a provider round-trip, and CDP frames
- * pushed in from the `/cdp` glue — can race the extension disconnecting: a bare
- * `ws.send()` on a CLOSED/CLOSING socket throws, and (unguarded, outside the
- * message handler's try/catch) that rejection can take the daemon down. Match
- * `WsStream`'s instance-level `OPEN` check so a late send is a silent no-op.
- *
- * `context` labels the dropped frame's surface (e.g. `CDP`, `client-MCP`) so a
- * tunnel that's been quietly cut shows up in the logs under `QWEN_SERVE_DEBUG`
- * instead of disappearing without a trace.
- */
-function safeWsSend(ws: WebSocket, payload: string, context = 'frame'): void {
-  if (ws.readyState === ws.OPEN) {
-    ws.send(payload);
-    return;
-  }
-  if (isServeDebugMode()) {
-    writeStderrLine(
-      `qwen serve: dropped ${context} frame on non-OPEN /acp socket (readyState=${ws.readyState})`,
-    );
-  }
 }
 
 /**
