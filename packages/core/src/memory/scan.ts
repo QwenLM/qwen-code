@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { AUTO_MEMORY_TYPES, type AutoMemoryType } from './types.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -13,6 +14,8 @@ import {
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_SCAN');
 
 const MAX_SCANNED_MEMORY_FILES = 200;
 
@@ -33,8 +36,12 @@ function parseFrontmatterValue(
 ): string | undefined {
   // `[^\S\n]*` = horizontal whitespace only. A plain `\s*` would cross the
   // newline and, for an empty value (`description:`), greedily capture the
-  // NEXT frontmatter line as the value.
-  const match = frontmatter.match(new RegExp(`^${key}:[^\\S\\n]*(.+)$`, 'm'));
+  // NEXT frontmatter line as the value. `key` is escaped so a future key with
+  // regex metacharacters can't silently match unintended text.
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = frontmatter.match(
+    new RegExp(`^${escapedKey}:[^\\S\\n]*(.+)$`, 'm'),
+  );
   return match?.[1]?.trim();
 }
 
@@ -102,16 +109,26 @@ async function scanAutoMemoryDocumentsFromRoot(
   const docs = await Promise.all(
     relativePaths.map(async (relativePath) => {
       const filePath = path.join(root, relativePath);
-      const [content, stats] = await Promise.all([
-        fs.readFile(filePath, 'utf-8'),
-        fs.stat(filePath),
-      ]);
-      return parseAutoMemoryTopicDocument(
-        filePath,
-        content,
-        stats.mtimeMs,
-        relativePath,
-      );
+      try {
+        const [content, stats] = await Promise.all([
+          fs.readFile(filePath, 'utf-8'),
+          fs.stat(filePath),
+        ]);
+        return parseAutoMemoryTopicDocument(
+          filePath,
+          content,
+          stats.mtimeMs,
+          relativePath,
+        );
+      } catch (error) {
+        // One unreadable file (EACCES, or a TOCTOU delete mid-`git pull`) must
+        // not reject the whole scan and wipe every memory from the index.
+        debugLogger.debug(
+          `skipping unreadable memory file ${relativePath}`,
+          error,
+        );
+        return null;
+      }
     }),
   );
 

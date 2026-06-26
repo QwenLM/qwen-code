@@ -2259,9 +2259,20 @@ export class Config {
       // index reflects the latest. Never throws — a failure must not break
       // session start.
       if (teamMemoryEnabled && this.getTeamMemorySyncEnabled()) {
-        await syncTeamMemory(this.getProjectRoot(), {
+        const syncResult = await syncTeamMemory(this.getProjectRoot(), {
           message: 'chore(memory): sync team memory',
-        }).catch(() => undefined);
+        }).catch((err) => {
+          this.debugLogger.warn('team memory sync failed', err);
+          return undefined;
+        });
+        // Surface the silent no-op: the user opted into sync but, e.g., the repo
+        // has no upstream, so nothing is shared. Debug-level — not every session
+        // should warn loudly, but an operator can see why sync did nothing.
+        if (syncResult?.skippedReason) {
+          this.debugLogger.warn(
+            `team memory sync skipped: ${syncResult.skippedReason}`,
+          );
+        }
       }
       const [managedAutoMemoryIndex, userAutoMemoryIndex, teamAutoMemoryIndex] =
         await Promise.all([

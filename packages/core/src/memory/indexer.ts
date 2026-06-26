@@ -201,8 +201,15 @@ export async function rebuildTeamAutoMemoryIndex(
     return null;
   }
   const docs = await scanTeamAutoMemoryTopicDocuments(projectRoot);
+  // Code-unit comparison, NOT localeCompare: the index is committed and pushed,
+  // so its ordering must be byte-identical across machines/locales — otherwise
+  // two collaborators churn MEMORY.md back and forth and the ff-only sync wedges.
   const ordered = [...docs].sort((a, b) =>
-    a.relativePath.localeCompare(b.relativePath),
+    a.relativePath < b.relativePath
+      ? -1
+      : a.relativePath > b.relativePath
+        ? 1
+        : 0,
   );
   const content = buildTeamAutoMemoryIndex(ordered);
   await atomicWriteFile(getTeamAutoMemoryIndexPath(projectRoot), content, {

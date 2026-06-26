@@ -90,4 +90,33 @@ describe('auto-memory topic scanning', () => {
     expect(referenceDoc?.relativePath).toBe('reference/grafana.md');
     expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
   });
+
+  it('survives an unreadable file instead of dropping the whole index', async () => {
+    const goodPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('feedback', 'good.md'),
+    );
+    await fs.mkdir(path.dirname(goodPath), { recursive: true });
+    await fs.writeFile(
+      goodPath,
+      '---\ntype: feedback\nname: Good\ndescription: kept\n---\nbody',
+      'utf-8',
+    );
+    // A directory named like a `.md` file forces an EISDIR on readFile — a
+    // deterministic stand-in for a permission error or a TOCTOU delete during
+    // `git pull`. The good file must still be scanned.
+    await fs.mkdir(
+      getAutoMemoryFilePath(projectRoot, path.join('feedback', 'broken.md')),
+      { recursive: true },
+    );
+
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+
+    expect(
+      docs.find((d) => d.relativePath === 'feedback/good.md'),
+    ).toBeTruthy();
+    expect(docs.some((d) => d.relativePath === 'feedback/broken.md')).toBe(
+      false,
+    );
+  });
 });
