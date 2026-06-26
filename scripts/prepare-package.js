@@ -301,22 +301,31 @@ function writeDistPackageJson(
 
   const cliEntryContent = `#!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const cliPath = join(__dirname, 'cli.js');
 
-const result = spawnSync(
-  process.execPath,
-  ['--expose-gc', cliPath, ...process.argv.slice(2)],
-  { stdio: 'inherit' },
-);
+function isServeCommand() {
+  return process.argv[2] === 'serve';
+}
 
-if (result.signal) {
-  process.kill(process.pid, result.signal);
+if (isServeCommand()) {
+  process.argv[1] = cliPath;
+  await import(pathToFileURL(cliPath).href);
 } else {
-  process.exit(result.status ?? 1);
+  const result = spawnSync(
+    process.execPath,
+    ['--expose-gc', cliPath, ...process.argv.slice(2)],
+    { stdio: 'inherit' },
+  );
+
+  if (result.signal) {
+    process.kill(process.pid, result.signal);
+  } else {
+    process.exit(result.status ?? 1);
+  }
 }
 `;
 

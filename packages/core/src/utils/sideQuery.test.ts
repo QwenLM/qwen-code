@@ -345,6 +345,35 @@ describe('runSideQuery', () => {
       );
     });
 
+    it('forwards stream:true to generateText when opted in', async () => {
+      mockTextResult('streamed');
+
+      await runSideQuery(mockConfig, {
+        purpose: 'chat-compression',
+        contents: [{ role: 'user', parts: [{ text: 'summarize' }] }],
+        abortSignal: abortController.signal,
+        stream: true,
+      });
+
+      expect(mockBaseLlmClient.generateText).toHaveBeenCalledWith(
+        expect.objectContaining({ stream: true }),
+      );
+    });
+
+    it('omits stream from the generateText call when not set (backward-compat)', async () => {
+      mockTextResult('ok');
+
+      await runSideQuery(mockConfig, {
+        purpose: 'p',
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        abortSignal: abortController.signal,
+      });
+
+      const callArg = vi.mocked(mockBaseLlmClient.generateText).mock
+        .calls[0][0];
+      expect(callArg).not.toHaveProperty('stream');
+    });
+
     it('prefers fastModel when available', async () => {
       vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model');
       mockTextResult('ok');

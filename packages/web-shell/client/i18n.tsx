@@ -1119,7 +1119,7 @@ const EN: Messages = {
   'thinking.collapse': 'Collapse thinking',
   'thinking.running': (v) => `Thinking${v?.duration ? ` ${v.duration}` : ''}`,
   'thinking.done': (v) =>
-    `Finished thinking${v?.duration ? ` ${v.duration}` : ''}`,
+    v?.duration ? `Thought for ${v.duration}` : 'Done thinking',
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -2219,7 +2219,7 @@ const ZH: Messages = {
   'tool.showFullLines': '▼ 显示完整行',
   'tool.linesTotal': (v) => `▼ 共 ${v?.count ?? 0} 行`,
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
-  'toolGroup.summary': (v) => `执行了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
     `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
@@ -2227,7 +2227,7 @@ const ZH: Messages = {
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
   'thinking.running': (v) => `正在思考${v?.duration ? ` ${v.duration}` : ''}`,
-  'thinking.done': (v) => `已完成思考${v?.duration ? ` ${v.duration}` : ''}`,
+  'thinking.done': (v) => (v?.duration ? `已思考 ${v.duration}` : '思考完成'),
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
   'settings.title': '设置',
