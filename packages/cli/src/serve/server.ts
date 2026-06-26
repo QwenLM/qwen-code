@@ -73,7 +73,6 @@ import {
 import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
-  type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
@@ -99,6 +98,7 @@ import {
 } from './server/error-response.js';
 import { resolveBridgeFsFactory } from './server/fs-factory.js';
 import {
+  createBuildWorkspaceCtx,
   MAX_SERVER_NAME_LENGTH,
   MAX_TOOL_NAME_LENGTH,
   parseAndValidateWorkspaceClientId,
@@ -701,16 +701,7 @@ export function createServeApp(
 
   app.use(daemonTelemetryMiddleware(boundWorkspace));
 
-  function buildWorkspaceCtx(
-    route: string,
-    clientId?: string,
-  ): WorkspaceRequestContext {
-    return {
-      originatorClientId: clientId,
-      route,
-      workspaceCwd: boundWorkspace,
-    };
-  }
+  const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
   const currentServeFeatures = () =>

@@ -7,18 +7,11 @@
 import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { SendBridgeError } from '../server/error-response.js';
-import { MAX_SERVER_NAME_LENGTH } from '../server/request-helpers.js';
-import type {
-  DaemonWorkspaceService,
-  WorkspaceRequestContext,
-} from '../workspace-service/index.js';
-
-function makeBuildWorkspaceCtx(boundWorkspace: string) {
-  return (route: string): WorkspaceRequestContext => ({
-    route,
-    workspaceCwd: boundWorkspace,
-  });
-}
+import {
+  createBuildWorkspaceCtx,
+  MAX_SERVER_NAME_LENGTH,
+} from '../server/request-helpers.js';
+import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 
 interface RegisterWorkspaceStatusRoutesDeps {
   boundWorkspace: string;
@@ -32,7 +25,7 @@ export function registerWorkspaceStatusRoutes(
   deps: RegisterWorkspaceStatusRoutesDeps,
 ): void {
   const { boundWorkspace, bridge, workspace, sendBridgeError } = deps;
-  const buildWorkspaceCtx = makeBuildWorkspaceCtx(boundWorkspace);
+  const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   app.get('/workspace/mcp', async (_req, res) => {
     try {
@@ -98,7 +91,7 @@ export function registerWorkspaceDiagnosticStatusRoutes(
   deps: RegisterWorkspaceStatusRoutesDeps,
 ): void {
   const { boundWorkspace, workspace, sendBridgeError } = deps;
-  const buildWorkspaceCtx = makeBuildWorkspaceCtx(boundWorkspace);
+  const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
   // TODO(#4175 PR 24 — PermissionMediator audit log): emit an
   // `audit.diagnostic_read` event from these two routes so a security
   // operator can correlate "who read what when". Read-only diagnostic

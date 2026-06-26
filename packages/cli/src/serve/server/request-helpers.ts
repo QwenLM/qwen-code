@@ -11,6 +11,7 @@ import {
   MAX_WORKSPACE_PATH_LENGTH,
   type AcpSessionBridge,
 } from '../acp-session-bridge.js';
+import type { WorkspaceRequestContext } from '../workspace-service/index.js';
 
 export function sendJsonBodyParserError(res: Response, err: unknown): boolean {
   if (
@@ -242,6 +243,14 @@ export function parseAndValidateWorkspaceClientId(
     return null;
   }
   return raw;
+}
+
+export function createBuildWorkspaceCtx(boundWorkspace: string) {
+  return (route: string, clientId?: string): WorkspaceRequestContext => ({
+    originatorClientId: clientId,
+    route,
+    workspaceCwd: boundWorkspace,
+  });
 }
 
 export function parsePermissionVoteBody(

@@ -24,6 +24,7 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
+  createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
   type safeBody as safeBodyType,
 } from '../server/request-helpers.js';
@@ -33,10 +34,7 @@ import {
   type ServeExtensionEntry,
   type ServeWorkspaceExtensionsStatus,
 } from '../status.js';
-import type {
-  DaemonWorkspaceService,
-  WorkspaceRequestContext,
-} from '../workspace-service/index.js';
+import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 
 type SafeBody = typeof safeBodyType;
 
@@ -61,14 +59,7 @@ export function registerWorkspaceExtensionRoutes(
     safeBody,
     sendBridgeError,
   } = deps;
-  const buildWorkspaceCtx = (
-    route: string,
-    clientId?: string,
-  ): WorkspaceRequestContext => ({
-    originatorClientId: clientId,
-    route,
-    workspaceCwd: boundWorkspace,
-  });
+  const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   let extensionInstallQueue: Promise<unknown> = Promise.resolve();
   let extensionInstallQueueDepth = 0;
