@@ -139,6 +139,50 @@ await esbuild.build({
   treeShaking: true,
 });
 
+// Opt-in transports subpath (`@qwen-code/sdk/daemon/transports`): the concrete
+// ACP transports + negotiateTransport. Kept out of the default daemon barrel
+// (and its byte budget) so REST-only consumers stay tree-shaken; consumers who
+// want resumable ACP-over-HTTP import this entry explicitly. Built as its own
+// bundle for both browser (esm) and node (cjs) targets.
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon', 'transports.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'browser',
+  target: 'es2022',
+  outfile: join(rootDir, 'dist', 'daemon', 'transports.js'),
+  sourcemap: false,
+  minify: true,
+  minifyWhitespace: true,
+  minifyIdentifiers: true,
+  minifySyntax: true,
+  legalComments: 'none',
+  keepNames: false,
+  treeShaking: true,
+});
+
+assertNoNodeBuiltins(
+  join(rootDir, 'dist', 'daemon', 'transports.js'),
+  'Browser daemon transports bundle',
+);
+
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon', 'transports.ts')],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  outfile: join(rootDir, 'dist', 'daemon', 'transports.cjs'),
+  sourcemap: false,
+  minify: true,
+  minifyWhitespace: true,
+  minifyIdentifiers: true,
+  minifySyntax: true,
+  legalComments: 'none',
+  keepNames: false,
+  treeShaking: true,
+});
+
 // Build serve-bridge CLI bin entry
 await esbuild.build({
   entryPoints: [join(rootDir, 'src', 'daemon-mcp', 'serve-bridge', 'bin.ts')],
@@ -170,10 +214,17 @@ function assertBrowserSafeBundle(filePath) {
       `Browser daemon SDK bundle is ${size} bytes; expected <= ${MAX_DAEMON_BROWSER_BUNDLE_BYTES}`,
     );
   }
+  assertNoNodeBuiltins(filePath, 'Browser daemon SDK bundle');
+}
 
+// Node-builtin guard, shared by the budget-checked default daemon barrel and
+// the opt-in `daemon/transports` bundle. The transports bundle is allowed to
+// be larger (it ships the concrete ACP transports), but must still be
+// browser-safe — agent-web consumes it in the browser.
+function assertNoNodeBuiltins(filePath, label) {
   const contents = readFileSync(filePath, 'utf8');
   if (contents.includes('node:')) {
-    throw new Error('Browser daemon SDK bundle contains Node-only token node:');
+    throw new Error(`${label} contains Node-only token node:`);
   }
   const forbiddenBuiltins = [
     'assert',
@@ -204,8 +255,6 @@ function assertBrowserSafeBundle(filePath) {
   );
   const found = contents.match(requirePattern);
   if (found) {
-    throw new Error(
-      `Browser daemon SDK bundle contains Node-only token ${found[0]}`,
-    );
+    throw new Error(`${label} contains Node-only token ${found[0]}`);
   }
 }
