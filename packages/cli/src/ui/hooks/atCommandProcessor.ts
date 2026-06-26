@@ -31,6 +31,7 @@ import {
   parseExtensionRef,
   matchExtensionByRef,
   buildExtensionContextText,
+  buildExtensionRef,
   sanitizeDisplayText,
 } from './extension-mention-ref.js';
 
@@ -521,19 +522,31 @@ export async function resolveAtCommandQuery({
 
     let contextText = buildExtensionContextText(extension);
 
-    // Read extension context files in parallel, with path traversal and
-    // budget checks.
+    // Read extension context files in parallel, with symlink-aware path
+    // traversal and budget checks.
     if (extension.contextFiles && extension.contextFiles.length > 0) {
       const fileReads = await Promise.allSettled(
         extension.contextFiles.map(async (contextFilePath) => {
-          const resolved = path.resolve(contextFilePath);
-          if (!isSubpath(extension.path, resolved)) {
+          // Resolve symlinks to prevent path traversal via symlinks within
+          // the extension directory (e.g., context.md -> ~/.ssh/id_rsa).
+          let realPath: string;
+          let realExtPath: string;
+          try {
+            realPath = await fs.realpath(contextFilePath);
+            realExtPath = await fs.realpath(extension.path);
+          } catch {
+            onDebugMessage(
+              `Skipping unreadable context file: ${contextFilePath}`,
+            );
+            return null;
+          }
+          if (!isSubpath(realExtPath, realPath)) {
             onDebugMessage(
               `Skipping context file outside extension directory: ${contextFilePath}`,
             );
             return null;
           }
-          return fs.readFile(resolved, { encoding: 'utf-8', signal });
+          return fs.readFile(realPath, { encoding: 'utf-8', signal });
         }),
       );
 
@@ -564,7 +577,7 @@ export async function resolveAtCommandQuery({
     }
 
     extensionParts.push({ text: contextText });
-    extensionLabels.push(`ext:${extension.name}`);
+    extensionLabels.push(buildExtensionRef(extension.name));
     extensionDisplays.push({
       callId,
       name: 'Activate Extension',
