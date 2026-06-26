@@ -6,6 +6,7 @@ export function buildContextUsage(
 ): ContextUsageData | undefined {
   if (
     !contextWindowSize ||
+    !Number.isFinite(contextWindowSize) ||
     contextWindowSize <= 0 ||
     !Number.isFinite(inputTokens) ||
     inputTokens <= 0
