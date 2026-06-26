@@ -37,7 +37,8 @@ const SECRET_RULES: readonly SecretRule[] = [
   // Cloud providers
   {
     id: 'aws-access-token',
-    source: '\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b',
+    // Suffix is base62 ([A-Z0-9]) per gitleaks; base32 [A-Z2-7] missed 0/1/8/9.
+    source: '\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\\b',
   },
   {
     id: 'alibaba-cloud-access-key',

@@ -10,6 +10,9 @@ const MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES = 25_000;
 const DIR_EXISTS_GUIDANCE =
   'This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence).';
 
+// Spell out the tier count so a future 4th tier never silently reads "two".
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four'] as const;
+
 export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```markdown',
   '---',
@@ -250,7 +253,7 @@ export function buildManagedAutoMemoryPrompt(
 
   const intro = multiTier
     ? [
-        `You have ${tierLines.length === 3 ? 'three' : 'two'} persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
+        `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
         '',
         ...tierLines,
         '',

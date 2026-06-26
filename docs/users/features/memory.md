@@ -144,6 +144,8 @@ It is **off by default**. Keep these caveats in mind:
   !.qwen/team-memory/**
   ```
 
+  Caveat: use the file-glob ignore form (`.qwen/*`), not a directory form with a trailing slash (`.qwen/`). A directory-form ignore makes git skip the folder entirely, so a `!`-reinclude below it is a no-op and the team tier stays silently empty in git.
+
 `QWEN_CODE_MEMORY_TEAM=1` / `=0` overrides the setting for a single run.
 
 ---

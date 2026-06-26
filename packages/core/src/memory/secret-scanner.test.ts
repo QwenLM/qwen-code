@@ -59,6 +59,13 @@ describe('scanForSecrets', () => {
     }
   });
 
+  it('detects an AWS access key whose suffix contains digits 0/1/8/9', () => {
+    // Suffix is base62; the retired base32 [A-Z2-7] class missed 0/1/8/9.
+    expect(
+      scanForSecrets(`AKIA0918ABCDEFGH9012`).map((m) => m.ruleId),
+    ).toContain('aws-access-token');
+  });
+
   it('detects a HuggingFace token containing digits', () => {
     expect(
       scanForSecrets(`hf_${'a1b2'.repeat(9)}`).map((m) => m.ruleId),

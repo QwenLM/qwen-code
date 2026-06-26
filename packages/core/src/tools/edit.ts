@@ -351,9 +351,21 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         this.config.getProjectRoot(),
       );
       if (teamMemoryError) {
+        // If the secret is already in the on-disk file, this edit can't clear it
+        // — tell the user to remove the committed secret, not just retry.
+        const preExisting =
+          currentContent !== null &&
+          checkTeamMemorySecrets(
+            params.file_path,
+            currentContent,
+            this.config.getProjectRoot(),
+          ) !== null;
+        const message = preExisting
+          ? `${teamMemoryError} Note: the secret already exists in the current file content, so removing it from your edit alone is not enough — delete the committed secret from the file.`
+          : teamMemoryError;
         error = {
-          display: teamMemoryError,
-          raw: teamMemoryError,
+          display: message,
+          raw: message,
           type: ToolErrorType.INVALID_TOOL_PARAMS,
         };
       }

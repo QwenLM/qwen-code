@@ -314,6 +314,10 @@ function realpathNearestExisting(inputPath: string): string {
  * True if the path lives in EITHER the project-level memory root for the
  * given project OR the user-level memory root. Used by the extraction
  * agent's sandbox to allow writes to both scopes.
+ *
+ * Security-load-bearing: team memory is deliberately EXCLUDED. It is committed
+ * to the repo and shared with collaborators, so its writes must stay 'ask' and
+ * never be auto-approved through this predicate. Do not add team paths here.
  */
 export function isAnyAutoMemPath(
   absolutePath: string,

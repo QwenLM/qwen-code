@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { isTeamAutoMemPath } from './paths.js';
 import { scanForSecrets } from './secret-scanner.js';
+
+const debugLogger = createDebugLogger('TEAM_MEMORY_SECRET_GUARD');
 
 /**
  * Guards writes to team memory against leaking credentials. Team memory is
@@ -29,6 +32,12 @@ export function checkTeamMemorySecrets(
   if (matches.length === 0) {
     return null;
   }
+  // Rule IDs only — never the matched content, which is the secret itself.
+  debugLogger.debug(
+    `Blocked team-memory write; matched rules: ${matches
+      .map((m) => m.ruleId)
+      .join(', ')}`,
+  );
   const labels = matches.map((m) => m.label).join(', ');
   return (
     `Content contains potential secrets (${labels}) and cannot be written to ` +
