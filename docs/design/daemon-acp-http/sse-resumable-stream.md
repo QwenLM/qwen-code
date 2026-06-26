@@ -115,6 +115,53 @@ the monotonic sequence the client resumes from.
 
 No `eventBus`/bridge changes — the engine is reused verbatim.
 
+## Making resume actually engage (session-stream grace/reclaim)
+
+The `id:`/`Last-Event-ID` plumbing above is necessary but **not sufficient** —
+on its own it never fires in the real flow. Previously, when a session SSE
+stream closed at the transport level, the GET handler ran the **full**
+`closeSessionStream` teardown: it removed the session from `ownedSessions`,
+aborted the in-flight prompt, and detached the bridge client. In the real
+EventSource/proxy order (old socket closes _first_, then the client
+reconnects), that means a reconnect carrying `Last-Event-ID` is rejected
+**403** by the ownership check before the cursor is ever read — and the prompt
+producing the content was already aborted. The replay engine would have
+nothing to reconnect to.
+
+So a transport-level session-stream close now **detaches** instead of tears
+down (`AcpConnection.detachSessionStream`): it stops only the stream + its
+event subscription and **keeps the binding, ownership, the in-flight prompt,
+and the bridge-client registration** alive for a grace window
+(`SESSION_GRACE_MS`, mirroring `CONN_GRACE_MS`). A reconnect within the window
+re-attaches (`attachSessionStream` clears the grace timer — reclaim) and the
+ring replay backfills the gap. If no reconnect arrives, the grace timer runs
+the full teardown — bounding the runaway-prompt cost. Full teardown remains
+immediate for an explicit `session/close` and for connection teardown
+(`destroy`). The GET handler branches on `stream.isClosed`: a transport close
+→ detach-with-grace; a pump that ends while the stream is still open
+(subprocess done / iterator error) → full close (zombie stream).
+
+### Two replay-correctness guards this unlocks
+
+Both are latent until resume actually runs; the grace/reclaim above makes them
+reachable, so they ship together:
+
+- **No double-delivery (buffer ↔ ring overlap).** `attachSessionStream` flushes
+  the pre-attach buffer (frames produced during the gap) _and_ records the
+  highest bus id flushed (`lastFlushedEventId`). The GET handler advances the
+  replay cursor to `max(Last-Event-ID, lastFlushedEventId)` so the ring replay
+  doesn't re-emit a frame the flush already delivered.
+- **Idempotent `permission_request` under replay.** A `permission_request` is
+  an id-bearing ring event, so a reconnect whose cursor precedes a still-
+  unanswered permission replays it. `translateEvent` now reuses the existing
+  `conn.pending` entry for that `bridgeRequestId` (re-sending the same outbound
+  JSON-RPC id for catch-up) instead of minting a second id + entry — no orphan
+  pending, no double-prompt for a client that dedupes on `_meta.requestId`.
+
+`parseLastEventId` is extracted to a shared `serve/sse-last-event-id.ts` used
+by both the REST and `/acp` surfaces, so their strict accept/reject rules and
+operator logging can't drift.
+
 ## Backward compatibility
 
 - **Old clients that don't send `Last-Event-ID`** → `lastEventId` is
@@ -136,15 +183,28 @@ No `eventBus`/bridge changes — the engine is reused verbatim.
   blank line.
 - `transport.test.ts` (end-to-end over the `/acp` transport):
   - live `session/update` frames now arrive with an `id:` line;
-  - a `GET /acp` reconnect carrying `Last-Event-ID: N` replays buffered
-    events with `id > N` (gap content recovered), then continues live;
-  - a fresh stream with no `Last-Event-ID` behaves as today (no replay).
+  - a `GET /acp` carrying `Last-Event-ID: N` flows the cursor to
+    `subscribeEvents`; a fresh stream with no header behaves as today;
+  - an overflow `Last-Event-ID` (> `MAX_SAFE_INTEGER`) → live-only;
+  - **real close-then-reconnect order**: close the old SSE _first_, then
+    reconnect with `Last-Event-ID` — assert **200 not 403** (ownership kept)
+    and the prompt is **not** aborted (grace/reclaim);
+  - a replayed `permission_request` reuses the pending entry (same outbound id).
+- `connection-registry.test.ts` — buffer flush threads each frame's `id` and
+  records `lastFlushedEventId`; `detachSessionStream` keeps ownership/prompt
+  across the grace window then tears down on expiry; a reconnect within the
+  window reclaims (cancels the pending teardown).
 
 ## Out of scope (still deferred)
 
 - WebSocket / HTTP/2 transports.
-- §1.7 (lost in-flight _prompt response_ on the session stream) — a
-  separate concern; this PR recovers **content** frames, which all flow
-  through the `eventBus` ring.
+- §1.7 cross-connection permission resolve (a vote POSTed on a different
+  `Acp-Connection-Id` than the one that streamed the prompt) — a separate,
+  security-sensitive concern tracked as its own follow-up. This PR does make
+  `permission_request` translation idempotent under replay (above), but does
+  not add the session-global requestId resolve.
+- The lost in-flight _prompt response_ on the session stream — recovered
+  content frames all flow through the `eventBus` ring; a JSON-RPC response is
+  not a ring event.
 - Consumer-side `supportsReplay` flip in the external `agent-web`
   `AcpHttpTransport` (lives in a different repo; unblocked by this PR).

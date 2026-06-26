@@ -186,6 +186,9 @@ class FakeBridge {
   subscribeThrows = false;
   /** Records every subscribeEvents call so tests can assert the resume cursor. */
   subscribeCalls: Array<{ sessionId: string; lastEventId?: number }> = [];
+  /** Parallel to `subscribeCalls`: each subscription's abort signal, so a test
+   * can detect when a closed stream's pump has actually stopped server-side. */
+  subscribeSignals: Array<AbortSignal | undefined> = [];
 
   subscribeEvents(
     sessionId: string,
@@ -193,6 +196,7 @@ class FakeBridge {
   ) {
     if (this.subscribeThrows) throw new Error('subscribe failed');
     this.subscribeCalls.push({ sessionId, lastEventId: opts?.lastEventId });
+    this.subscribeSignals.push(opts?.signal);
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
     return q.iterable;
@@ -978,6 +982,118 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       lastEventId: undefined,
     });
     await fresh.body?.cancel().catch(() => {});
+  });
+
+  it('real close-then-reconnect order keeps ownership (no 403) + prompt alive, resumes via Last-Event-ID', async () => {
+    let promptSignal: AbortSignal | undefined;
+    bridge.promptBehavior = async (_s, q, signal) => {
+      promptSignal = signal;
+      q.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk' },
+        },
+      });
+      // Keep the prompt running across the disconnect + reconnect.
+      await new Promise((r) => setTimeout(r, 1000));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1); // pump subscribed
+    const r1 = frameReader(s1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    expect(ack.status).toBe(202);
+    await r1.next(); // first content frame (bus id 1)
+
+    // Close the OLD stream FIRST — the real EventSource/proxy order (the
+    // existing reconnect tests overlap streams, hiding this).
+    r1.close();
+    await s1.body?.cancel().catch(() => {});
+    // Wait until the daemon has PROCESSED the close (old pump's signal aborted).
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+
+    // Detach-with-grace, NOT teardown: the in-flight prompt must survive.
+    expect(promptSignal?.aborted).toBe(false);
+
+    // Reconnect carrying the cursor — must be 200 (ownership kept), not 403.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '1',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 1,
+    });
+    expect(promptSignal?.aborted).toBe(false); // still alive after reconnect
+    await s2.body?.cancel().catch(() => {});
+  });
+
+  it('GET Last-Event-ID past MAX_SAFE_INTEGER → live-only (undefined)', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const overflow = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '9007199254740992', // MAX_SAFE_INTEGER + 1
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await overflow.body?.cancel().catch(() => {});
+  });
+
+  it('a replayed permission_request reuses the pending entry (idempotent, same outbound id)', async () => {
+    bridge.promptBehavior = async (_s, q) => {
+      const perm = {
+        requestId: 'perm-1',
+        sessionId: 'sess-1',
+        toolCall: { name: 'shell' },
+        options: [{ optionId: 'allow', name: 'Allow' }],
+      };
+      q.push({ type: 'permission_request', data: perm });
+      // Simulate a ring replay re-delivering the SAME bridge request (a
+      // reconnect whose Last-Event-ID precedes the still-pending permission).
+      q.push({ type: 'permission_request', data: perm });
+      await new Promise((r) => setTimeout(r, 50));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const reader = frameReader(sess);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    const f1 = (await reader.next()) as { method: string; id: unknown };
+    const f2 = (await reader.next()) as { method: string; id: unknown };
+    expect(f1.method).toBe('session/request_permission');
+    expect(f2.method).toBe('session/request_permission');
+    // SAME outbound JSON-RPC id ⇒ one pending entry reused, not a 2nd orphan.
+    expect(f1.id).toBe(f2.id);
+    reader.close();
   });
 
   it('permission request round-trips agent→client→agent', async () => {

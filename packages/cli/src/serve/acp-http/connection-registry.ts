@@ -87,6 +87,23 @@ export interface SessionBinding {
    * the agent burning model quota on a result nobody will read.
    */
   promptAbort?: AbortController;
+  /**
+   * Armed by `detachSessionStream` when the session stream closes at the
+   * transport level (proxy idle-close, network blip) WITHOUT an explicit
+   * `session/close`. The binding — ownership, prompt, bridge-client — is kept
+   * alive across the window so a reconnect (`attachSessionStream`) can resume
+   * (ring replay backfills the gap, §1.8). If no reconnect arrives the timer
+   * fires the full teardown, bounding the runaway-prompt cost. Cleared on
+   * reconnect and on teardown.
+   */
+  graceTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Highest bus event id flushed from `buffer` on the most recent
+   * `attachSessionStream`. The event pump uses it to advance the ring-replay
+   * cursor past already-delivered frames so a buffered frame isn't re-emitted
+   * by replay (would otherwise double-deliver — see the GET handler).
+   */
+  lastFlushedEventId?: number;
 }
 
 /** An agent→client request awaiting the client's JSON-RPC response. */
@@ -325,6 +342,12 @@ export class AcpConnection {
     abort: AbortController,
   ): SessionBinding {
     const binding = this.getOrCreateSession(sessionId);
+    // Reclaim: a reconnect within the grace window cancels the pending
+    // teardown so ownership/prompt survive the transport-level blip.
+    if (binding.graceTimer) {
+      clearTimeout(binding.graceTimer);
+      binding.graceTimer = undefined;
+    }
     const prevStream = binding.stream;
     binding.abort.abort();
     binding.abort = abort;
@@ -339,10 +362,51 @@ export class AcpConnection {
     if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
       prevStream.close();
     }
+    // Flush buffered pre-attach frames, tracking the highest bus id so the
+    // event pump can advance its replay cursor past them (no double-delivery).
+    let flushedMaxId: number | undefined;
     for (const { frame, id } of binding.buffer.splice(0)) {
       void stream.send(frame, id);
+      if (
+        id !== undefined &&
+        (flushedMaxId === undefined || id > flushedMaxId)
+      ) {
+        flushedMaxId = id;
+      }
     }
+    binding.lastFlushedEventId = flushedMaxId;
     return binding;
+  }
+
+  /**
+   * Transport-level session-stream close (proxy idle-close / network blip) —
+   * as opposed to an explicit `session/close`. Detaches ONLY the stream and
+   * its event subscription while KEEPING the binding, ownership, the in-flight
+   * prompt, and the bridge-client registration, so a reconnect within
+   * `graceMs` can resume (ring replay backfills the gap — §1.8). If no
+   * reconnect arrives, the grace timer runs the full `closeSessionStream`
+   * teardown, bounding the runaway-prompt cost. Identity-guarded: a stale
+   * stream's close can't detach a newer reconnect's stream.
+   */
+  detachSessionStream(
+    sessionId: string,
+    stream: TransportStream,
+    graceMs: number,
+  ): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding || binding.stream !== stream) return;
+    // Stop the closing stream's event pump; the prompt + ownership live on.
+    binding.abort.abort();
+    // Drop the stream ref so frames produced during the gap buffer until the
+    // reconnect re-attaches and flushes them.
+    binding.stream = undefined;
+    if (binding.graceTimer) clearTimeout(binding.graceTimer);
+    binding.graceTimer = setTimeout(() => {
+      // Grace expired with no reconnect → full teardown (aborts the prompt,
+      // releases ownership, detaches the bridge client).
+      this.closeSessionStream(sessionId);
+    }, graceMs);
+    binding.graceTimer.unref?.();
   }
 
   closeSessionStream(sessionId: string): void {
@@ -373,6 +437,10 @@ export class AcpConnection {
   }
 
   private teardownBinding(binding: SessionBinding): void {
+    if (binding.graceTimer) {
+      clearTimeout(binding.graceTimer);
+      binding.graceTimer = undefined;
+    }
     binding.abort.abort();
     binding.promptAbort?.abort();
     // Don't close the stream if it's the shared connStream (WS reuses

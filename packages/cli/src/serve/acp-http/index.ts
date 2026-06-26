@@ -23,6 +23,7 @@ import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
 import { RPC, error as rpcError, isRequest, parseInbound } from './json-rpc.js';
+import { parseLastEventId } from '../sse-last-event-id.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
@@ -74,6 +75,16 @@ function extractUpgradeBearer(req: IncomingMessage): string | undefined {
  * `ownedSessions` + a `maxConnections` slot well before the 30-min idle TTL.
  */
 const CONN_GRACE_MS = 10_000;
+
+/**
+ * Grace window after a SESSION-scoped SSE stream closes at the transport level
+ * (proxy idle-close, network blip) without an explicit `session/close`. The
+ * binding — ownership, in-flight prompt, bridge-client — is kept alive so a
+ * reconnect within the window resumes via ring replay (§1.8) instead of being
+ * rejected (403) and re-spawning. Short enough to bound the runaway-prompt
+ * cost if the client never returns. Mirrors `CONN_GRACE_MS`.
+ */
+const SESSION_GRACE_MS = 10_000;
 
 const WS_EXEMPT_METHODS = new Set([
   '_qwen/session/heartbeat',
@@ -414,52 +425,57 @@ export function mountAcpHttp(
     const stream = new SseStream(
       res,
       () => {
-        // Stream closed (tab close / network drop / crash): stop the event
-        // pump AND abort any in-flight prompt for this session — otherwise
-        // the agent keeps running (quota, FIFO) until idle TTL.
+        // Transport-level close (tab close / network drop / proxy idle-close):
+        // stop THIS stream's event pump only. The prompt + ownership are NOT
+        // torn down here — `detachSessionStream` (below) keeps them across a
+        // grace window so a reconnect can resume (§1.8). Only an expired grace,
+        // an explicit `session/close`, or connection teardown aborts the prompt.
         ac.abort();
-        // BUT only abort the prompt when THIS is still the session's live
-        // stream. A reconnect already installed a newer stream — the prompt
-        // must survive the old stream's close. CONTRACT: this identity guard
-        // pairs with `attachSessionStream`'s install-before-close ordering
-        // (connection-registry.ts) — keep both in lockstep.
-        if (conn.sessions.get(sessionId)?.stream === stream) {
-          conn.sessions.get(sessionId)?.promptAbort?.abort();
-        }
       },
       () => conn.touch(),
     );
     // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
     // handshake precedes any buffered frames the attach flushes.
     stream.open();
-    conn.attachSessionStream(sessionId, stream, ac);
     // Resume cursor: an EventSource/SSE client auto-resends the last `id:` it
     // saw as `Last-Event-ID` on reconnect. Drives the EventBus ring replay so
     // content frames produced during a mid-turn proxy gap are recovered (§1.8).
-    const lastEventId = parseLastEventId(headerOf(req, 'last-event-id'));
-    // Identity-guarded close: only tear down if THIS stream is still the
-    // session's current one (a reconnect between settle and this microtask
-    // would otherwise kill the fresh stream).
-    const closeIfCurrent = () => {
-      if (conn.sessions.get(sessionId)?.stream === stream) {
+    const lastEventId = parseLastEventId(
+      headerOf(req, 'last-event-id'),
+      '/acp ',
+    );
+    const binding = conn.attachSessionStream(sessionId, stream, ac);
+    // When replaying, advance the cursor past any frames just flushed from the
+    // pre-attach buffer, so the ring replay below doesn't re-deliver them
+    // (buffer-flush ↔ ring-replay overlap would otherwise double-deliver).
+    const resumeCursor =
+      lastEventId !== undefined && binding.lastFlushedEventId !== undefined
+        ? Math.max(lastEventId, binding.lastFlushedEventId)
+        : lastEventId;
+    // When the pump settles, branch on WHY:
+    //  • the transport closed the stream (proxy idle-close / tab close) →
+    //    DETACH with a grace window: keep ownership + the in-flight prompt so a
+    //    reconnect resumes (§1.8); full teardown only if no reconnect arrives.
+    //  • the pump ended while the stream is still open (subprocess done /
+    //    iterator error) → the stream is a zombie; full close now.
+    // Both are identity-guarded so a stale stream can't act on a newer one.
+    const onPumpSettled = () => {
+      if (stream.isClosed) {
+        conn.detachSessionStream(sessionId, stream, SESSION_GRACE_MS);
+      } else if (conn.sessions.get(sessionId)?.stream === stream) {
         conn.closeSessionStream(sessionId);
       }
     };
     void dispatcher
-      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
-      .then(
-        // NORMAL completion (iterator returned `done` — subprocess ended): close
-        // so the stream isn't a zombie heartbeating with nothing left to deliver.
-        closeIfCurrent,
-        (err: unknown) => {
-          writeStderrLine(
-            `qwen serve: /acp event pump error (${sessionId}): ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          closeIfCurrent();
-        },
-      );
+      .pumpSessionEvents(conn, sessionId, ac.signal, resumeCursor)
+      .then(onPumpSettled, (err: unknown) => {
+        writeStderrLine(
+          `qwen serve: /acp event pump error (${sessionId}, lastEventId=${
+            resumeCursor ?? 'none'
+          }): ${err instanceof Error ? err.message : String(err)}`,
+        );
+        onPumpSettled();
+      });
   });
 
   // ── DELETE /acp ────────────────────────────────────────────────────
@@ -893,34 +909,6 @@ export function mountAcpHttp(
 function headerOf(req: Request, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
-}
-
-/**
- * Parse a `Last-Event-ID` reconnect header into a bus event id. Mirrors the
- * REST surface's `parseLastEventId` (server.ts): accept ONLY pure decimal
- * digits (so "1abc"/"1.5" don't silently parse to 1) and reject values past
- * `Number.MAX_SAFE_INTEGER` (the bus's monotonic ids are bounded by it).
- * Returns `undefined` for missing/invalid headers ⇒ live-only subscription.
- * Replicated here rather than imported to avoid a server↔acp-http import cycle.
- */
-function parseLastEventId(raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  if (!/^\d+$/.test(raw)) {
-    if (raw.length > 0) {
-      writeStderrLine(
-        `qwen serve: /acp rejected Last-Event-ID (not a decimal integer)`,
-      );
-    }
-    return undefined;
-  }
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) {
-    writeStderrLine(
-      `qwen serve: /acp rejected Last-Event-ID (exceeds MAX_SAFE_INTEGER)`,
-    );
-    return undefined;
-  }
-  return n;
 }
 
 /**

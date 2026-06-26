@@ -2814,12 +2814,32 @@ export class AcpDispatcher {
           }
           return;
         }
-        const id = conn.nextId();
-        conn.pending.set(id, {
-          sessionId,
-          bridgeRequestId: data.requestId,
-          kind: 'permission',
-        });
+        // Idempotent under ring replay: a `permission_request` is an
+        // id-bearing ring event, so a reconnect whose `Last-Event-ID` precedes
+        // a still-unanswered request replays it here. Reuse the existing
+        // pending entry for this bridge requestId (re-send the SAME outbound id
+        // for catch-up) instead of minting a second id + entry — which would
+        // orphan one until teardown and double-prompt a client that doesn't
+        // dedupe on `_meta.requestId`.
+        let id: string | undefined;
+        for (const [existingId, p] of conn.pending) {
+          if (
+            p.kind === 'permission' &&
+            p.sessionId === sessionId &&
+            p.bridgeRequestId === data.requestId
+          ) {
+            id = existingId;
+            break;
+          }
+        }
+        if (id === undefined) {
+          id = conn.nextId();
+          conn.pending.set(id, {
+            sessionId,
+            bridgeRequestId: data.requestId,
+            kind: 'permission',
+          });
+        }
         void binding.stream.send(
           request(id, 'session/request_permission', {
             sessionId: data.sessionId,
