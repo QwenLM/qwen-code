@@ -183,6 +183,10 @@ export function createVoiceConnectionHandler(
     let bufferedBytes = 0;
     let queuedBytes = 0;
     let pendingOperations = 0;
+    // The count cap guards control-message backlog only; buffered PCM is already
+    // bounded by queuedBytes. A slow upstream connect can legitimately queue
+    // dozens of frames behind `start`, which must not trip the cap.
+    let pendingControlOps = 0;
     const abortController = new AbortController();
     // Serialize message handling so async start/push/finalize never interleave.
     let chain: Promise<void> = Promise.resolve();
@@ -397,12 +401,13 @@ export function createVoiceConnectionHandler(
           return;
         }
       }
-      if (pendingOperations >= MAX_PENDING_OPERATIONS) {
+      if (!isBinary && pendingControlOps >= MAX_PENDING_OPERATIONS) {
         fail('Too many pending voice messages.');
         releaseSlotWhenIdle();
         return;
       }
       pendingOperations++;
+      if (!isBinary) pendingControlOps++;
       chain = chain
         .then(async () => {
           try {
@@ -412,6 +417,7 @@ export function createVoiceConnectionHandler(
               queuedBytes = Math.max(0, queuedBytes - queuedSize);
             }
             pendingOperations--;
+            if (!isBinary) pendingControlOps--;
             releaseSlotWhenIdle();
           }
         })

@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it } from 'bun:test'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 import {
+  getQwenConfigDir,
   normalizeBaseUrl,
   resolveDesktopVoiceConfig,
 } from './resolve-voice-config'
@@ -131,6 +134,42 @@ describe('resolveDesktopVoiceConfig', () => {
     })
 
     expect(config.baseUrl).toBe('https://dashscope-proxy.example.com/asr/v1')
+  })
+})
+
+describe('getQwenConfigDir', () => {
+  const original = process.env.QWEN_HOME
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.QWEN_HOME
+    else process.env.QWEN_HOME = original
+  })
+
+  // QWEN_HOME must be normalized the same way core's Storage.getGlobalQwenDir
+  // does, so desktop voice reads the same dir the qwen CLI writes to.
+  it('expands a leading ~ to the home directory', () => {
+    process.env.QWEN_HOME = '~/custom-qwen'
+    expect(getQwenConfigDir()).toBe(join(homedir(), 'custom-qwen'))
+  })
+
+  it('resolves a relative value to an absolute path', () => {
+    process.env.QWEN_HOME = 'relative/config'
+    expect(getQwenConfigDir()).toBe(resolve('relative/config'))
+  })
+
+  it('falls back to ~/.qwen when QWEN_HOME is empty', () => {
+    process.env.QWEN_HOME = ''
+    expect(getQwenConfigDir()).toBe(join(homedir(), '.qwen'))
+  })
+
+  it('falls back to ~/.qwen when QWEN_HOME is unset', () => {
+    delete process.env.QWEN_HOME
+    expect(getQwenConfigDir()).toBe(join(homedir(), '.qwen'))
+  })
+
+  it('passes an absolute QWEN_HOME through unchanged', () => {
+    process.env.QWEN_HOME = '/opt/qwen-home'
+    expect(getQwenConfigDir()).toBe('/opt/qwen-home')
   })
 })
 

@@ -211,6 +211,34 @@ describe('createVoiceConnectionHandler', () => {
     await flush()
   })
 
+  it('does not count buffered PCM frames toward the control-message cap', async () => {
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      // Never resolves — mimics a slow upstream connect that holds the chain
+      // on the first frame while PCM keeps streaming in behind it.
+      resolveConfig: async () => {
+        await new Promise(() => {})
+        return {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        }
+      },
+    })
+
+    handler(ws as never)
+    // Far more PCM frames than MAX_PENDING_OPERATIONS (64); their total size
+    // stays well under the queued-bytes limit, so only the count cap is at play.
+    for (let i = 0; i < 200; i++) {
+      ws.emitMessage(Buffer.from([1, 2, 3, 4]), true)
+    }
+    await flush()
+
+    expect(ws.sentJson()).not.toContainEqual({
+      type: 'error',
+      message: 'Too many pending voice messages.',
+    })
+  })
+
   it('rejects unbounded queued control messages', () => {
     const ws = new FakeWebSocket()
     const handler = createVoiceConnectionHandler({

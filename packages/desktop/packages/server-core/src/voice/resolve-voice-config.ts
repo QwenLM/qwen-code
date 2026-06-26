@@ -14,8 +14,8 @@
  * downstream from the model id.
  */
 
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { isLoopbackHost } from './net-guard';
 import type { VoiceConfig } from './transcribe';
@@ -61,10 +61,41 @@ export function normalizeBaseUrl(raw: string): string {
   }
 }
 
+/**
+ * Resolve the global qwen config dir, mirroring core's
+ * `Storage.getGlobalQwenDir()` so desktop voice reads the SAME `~/.qwen`
+ * credentials the qwen CLI writes. QWEN_HOME is normalized exactly as core does:
+ * a leading `~`/`~/` expands to homedir() and a relative value resolves to an
+ * absolute path; an unset/empty value falls back to `~/.qwen`. Reading the raw
+ * env value would point voice at a different dir than the rest of Qwen.
+ * Exported for tests.
+ */
+export function getQwenConfigDir(): string {
+  const envDir = process.env.QWEN_HOME;
+  if (envDir) {
+    let resolved = envDir;
+    if (
+      resolved === '~' ||
+      resolved.startsWith('~/') ||
+      resolved.startsWith('~\\')
+    ) {
+      const segments =
+        resolved === '~'
+          ? []
+          : resolved.slice(2).split(/[/\\]+/).filter(Boolean);
+      resolved = join(homedir(), ...segments);
+    }
+    return isAbsolute(resolved) ? resolved : resolve(resolved);
+  }
+  const home = homedir();
+  return home ? join(home, '.qwen') : join(tmpdir(), '.qwen');
+}
+
 async function readQwenJsonFromDisk<T>(file: string): Promise<T | undefined> {
   try {
-    const baseDir = process.env.QWEN_HOME ?? join(homedir(), '.qwen');
-    return JSON.parse(await readFile(join(baseDir, file), 'utf-8')) as T;
+    return JSON.parse(
+      await readFile(join(getQwenConfigDir(), file), 'utf-8'),
+    ) as T;
   } catch {
     return undefined;
   }
