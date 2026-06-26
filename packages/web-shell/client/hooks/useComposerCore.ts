@@ -86,8 +86,8 @@ const TOOLTIP_STYLES = `
   max-width: 700px !important;
   max-height: 400px !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
-  background: var(--bg-primary, #0d0d0d) !important;
-  border: 1px solid var(--border-color, #2a2a2a) !important;
+  background: var(--background, #0d0d0d) !important;
+  border: 1px solid var(--border, #2a2a2a) !important;
   border-radius: 6px !important;
   overflow: visible;
 }
@@ -99,7 +99,7 @@ const TOOLTIP_STYLES = `
   font-family: var(--font-mono, monospace);
   font-size: 13px;
   scrollbar-width: thin;
-  scrollbar-color: var(--border-color) transparent;
+  scrollbar-color: var(--border) transparent;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul::-webkit-scrollbar {
@@ -112,7 +112,7 @@ const TOOLTIP_STYLES = `
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul::-webkit-scrollbar-thumb {
-  background: var(--border-color);
+  background: var(--border);
   border-radius: 3px;
 }
 
@@ -121,22 +121,22 @@ const TOOLTIP_STYLES = `
   align-items: baseline;
   min-width: 0;
   padding: 4px 8px !important;
-  color: var(--text-primary, #e4e4e4) !important;
+  color: var(--foreground, #e4e4e4) !important;
   overflow: hidden;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:hover {
-  background: var(--bg-tertiary, #1e1e1e) !important;
-  color: var(--text-primary, #e4e4e4) !important;
+  background: var(--secondary, #1e1e1e) !important;
+  color: var(--foreground, #e4e4e4) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li[aria-selected] {
-  background: var(--bg-tertiary, #1e1e1e) !important;
-  color: var(--text-primary, #e4e4e4) !important;
+  background: var(--secondary, #1e1e1e) !important;
+  color: var(--foreground, #e4e4e4) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:is(:hover, [aria-selected]) .cm-completionLabel {
-  color: var(--accent-color, #4a9eff);
+  color: var(--agent-blue-500, #4a9eff);
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section {
@@ -144,7 +144,7 @@ const TOOLTIP_STYLES = `
   height: 0;
   margin: 6px 10px 3px;
   padding: 0 !important;
-  border-bottom: 1px solid var(--border-color) !important;
+  border-bottom: 1px solid var(--border) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section:first-of-type {
@@ -164,7 +164,7 @@ const TOOLTIP_STYLES = `
   flex: 1 1 auto;
   min-width: 0;
   font-style: normal;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 13px;
   margin-left: var(--web-shell-completion-column-gap);
   opacity: 0.8;
@@ -204,10 +204,10 @@ const TOOLTIP_STYLES = `
   max-height: min(280px, calc(100vh - 32px));
   padding: 8px 10px;
   overflow: auto;
-  border: 1px solid var(--border-color, #2a2a2a);
+  border: 1px solid var(--border, #2a2a2a);
   border-radius: 6px;
-  background: var(--bg-secondary, #161616);
-  color: var(--text-primary, #e4e4e4);
+  background: var(--muted, #161616);
+  color: var(--foreground, #e4e4e4);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
@@ -215,7 +215,7 @@ const TOOLTIP_STYLES = `
   white-space: pre-line;
   overflow-wrap: anywhere;
   scrollbar-width: thin;
-  scrollbar-color: var(--border-color) transparent;
+  scrollbar-color: var(--border) transparent;
 }
 
 [data-web-shell-tooltip-portal] .cm-completionInfo-hover {
@@ -233,7 +233,7 @@ const TOOLTIP_STYLES = `
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip.cm-completionInfo::-webkit-scrollbar-thumb {
-  background: var(--border-color);
+  background: var(--border);
   border-radius: 3px;
 }
 
@@ -520,14 +520,14 @@ class ComposerTagWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const chip = document.createElement('span');
     chip.style.cssText =
-      'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-tertiary);color:var(--text-primary);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
+      'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
     const tagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
 
     if (tagLabel) {
       const label = document.createElement('span');
       label.style.cssText =
-        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--accent-color);';
+        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--agent-blue-500);';
       label.textContent = tagLabel;
       chip.appendChild(label);
     }
@@ -535,13 +535,13 @@ class ComposerTagWidget extends WidgetType {
     if (tagValue) {
       const value = document.createElement('span');
       value.style.cssText =
-        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--text-secondary);';
+        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--muted-foreground);';
       value.textContent = tagValue;
       chip.appendChild(value);
     } else if (!tagLabel) {
       const fallback = document.createElement('span');
       fallback.style.cssText =
-        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--accent-color);';
+        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--agent-blue-500);';
       fallback.textContent = this.tag.id;
       chip.appendChild(fallback);
     }
@@ -554,7 +554,7 @@ class ComposerTagWidget extends WidgetType {
         `Remove ${getComposerTagDisplay(this.tag)}`,
       );
       remove.style.cssText =
-        'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--text-dimmed);font:inherit;line-height:22px;cursor:pointer;';
+        'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--muted-foreground);font:inherit;line-height:22px;cursor:pointer;';
       remove.textContent = '×';
       remove.addEventListener('mousedown', (event) => event.preventDefault());
       remove.addEventListener('click', (event) => {
@@ -582,7 +582,7 @@ class ComposerTagWidget extends WidgetType {
         remove.style.color = 'var(--error-color)';
       });
       remove.addEventListener('mouseleave', () => {
-        remove.style.color = 'var(--text-dimmed)';
+        remove.style.color = 'var(--muted-foreground)';
       });
       chip.appendChild(remove);
     }

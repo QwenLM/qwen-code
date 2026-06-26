@@ -3,9 +3,9 @@
   max-width: 100%;
   margin: 8px 0;
   overflow: visible;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--bg-surface);
+  background: var(--card);
 }
 
 .toolbar {
@@ -14,22 +14,22 @@
   gap: 8px;
   align-items: center;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border);
   background: var(--subtle-bg);
   font-size: 12px;
 }
 
 .summary {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 600;
 }
 
 .hint {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .selection {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   font-weight: 600;
 }
 
@@ -37,22 +37,22 @@
 .secondaryButton,
 .primaryButton {
   padding: 3px 8px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font: inherit;
   cursor: pointer;
 }
 
 .copyButton,
 .secondaryButton {
-  background: var(--bg-surface);
+  background: var(--card);
 }
 
 .primaryButton {
-  border-color: var(--accent-color);
-  background: var(--accent-color);
-  color: var(--bg-surface);
+  border-color: var(--agent-blue-500);
+  background: var(--agent-blue-500);
+  color: var(--card);
 }
 
 .copyButton:hover,
@@ -72,7 +72,7 @@
 }
 
 .scroller:focus-visible {
-  outline: 2px solid var(--accent-color);
+  outline: 2px solid var(--agent-blue-500);
   outline-offset: -2px;
 }
 
@@ -86,8 +86,8 @@
 
 .headerCell,
 .cell {
-  border-right: 1px solid var(--border-color);
-  border-bottom: 1px solid var(--border-color);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
 
 .headerCell:last-child,
@@ -102,8 +102,8 @@
   min-width: 120px;
   max-width: 360px;
   overflow: visible;
-  background: var(--bg-surface);
-  color: var(--text-primary);
+  background: var(--card);
+  color: var(--foreground);
   font-weight: 600;
   text-align: left;
 }
@@ -144,23 +144,23 @@
 
 .sortIcon {
   flex: 0 0 auto;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 11px;
 }
 
 .filterTrigger {
   flex: 0 0 28px;
   border: none;
-  border-left: 1px solid var(--border-color);
+  border-left: 1px solid var(--border);
   background: transparent;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font: inherit;
   cursor: pointer;
 }
 
 .filterTriggerActive {
-  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
-  color: var(--accent-color);
+  background: color-mix(in srgb, var(--agent-blue-500) 18%, transparent);
+  color: var(--agent-blue-500);
 }
 
 .filterMenu {
@@ -170,19 +170,19 @@
   max-width: min(320px, 80vw);
   max-height: min(430px, calc(100vh - 16px));
   overflow: auto;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--bg-surface);
+  background: var(--card);
   box-shadow: 0 16px 36px rgb(0 0 0 / 34%);
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   font-weight: 400;
 }
 
 .filterMenuTitle {
   padding: 9px 10px;
-  border-bottom: 1px solid var(--border-color);
-  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+  color: var(--foreground);
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -194,7 +194,7 @@
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border);
 }
 
 .filterMenuAction {
@@ -203,7 +203,7 @@
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--foreground);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -215,7 +215,7 @@
 }
 
 .activeAction {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   font-weight: 600;
 }
 
@@ -225,24 +225,24 @@
   width: 100%;
   box-sizing: border-box;
   padding: 5px 7px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--editor-bg);
-  color: var(--text-primary);
+  background: var(--muted);
+  color: var(--foreground);
   font: inherit;
 }
 
 .filterSearch::placeholder,
 .conditionInput::placeholder {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .filterOptionList {
   max-height: 170px;
   overflow: auto;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--editor-bg);
+  background: var(--muted);
 }
 
 .filterOption {
@@ -251,7 +251,7 @@
   align-items: center;
   min-height: 26px;
   padding: 3px 6px;
-  color: var(--text-primary);
+  color: var(--foreground);
   cursor: pointer;
 }
 
@@ -273,18 +273,18 @@
 
 .optionCount {
   margin-left: auto;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
 
 .optionLimitHint {
   padding: 7px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   text-align: center;
 }
 
 .conditionTitle {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-weight: 600;
 }
 
@@ -308,8 +308,8 @@
   min-width: 120px;
   max-width: 360px;
   padding: 6px 8px;
-  background: var(--bg-surface);
-  color: var(--text-primary);
+  background: var(--card);
+  color: var(--foreground);
   text-align: left;
   vertical-align: top;
   white-space: pre-wrap;
@@ -332,8 +332,8 @@ tr:hover .cell {
 .selectedCell,
 .evenRow .selectedCell,
 tr:hover .selectedCell {
-  background: color-mix(in srgb, var(--accent-color) 20%, transparent);
-  box-shadow: inset 0 0 0 1px var(--accent-color);
+  background: color-mix(in srgb, var(--agent-blue-500) 20%, transparent);
+  box-shadow: inset 0 0 0 1px var(--agent-blue-500);
 }
 
 .actionHeaderCell,
@@ -352,10 +352,10 @@ tr:hover .selectedCell {
 
 .rowDetailButton {
   padding: 3px 7px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--bg-surface);
-  color: var(--text-primary);
+  background: var(--card);
+  color: var(--foreground);
   font: inherit;
   cursor: pointer;
 }
@@ -371,9 +371,9 @@ tr:hover .selectedCell {
 
 .detailCell {
   padding: 0;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border);
   background: var(--subtle-bg);
-  color: var(--text-primary);
+  color: var(--foreground);
 }
 
 .detailPanel {
@@ -383,7 +383,7 @@ tr:hover .selectedCell {
 }
 
 .detailTitle {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 700;
 }
 
@@ -394,20 +394,20 @@ tr:hover .selectedCell {
 }
 
 .detailLabel {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-weight: 600;
 }
 
 .detailValue {
   min-width: 0;
-  color: var(--text-primary);
+  color: var(--foreground);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .emptyState {
   padding: 16px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 13px;
   text-align: center;
 }

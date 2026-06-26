@@ -8521,6 +8521,80 @@ describe('useGeminiStream', () => {
       });
     });
   });
+
+  describe('timestamp attachment', () => {
+    it('attaches a numeric timestamp to gemini items via commitItem', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Hello world',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test');
+      });
+
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      const geminiCalls = mockAddItem.mock.calls.filter(
+        (call: any[]) => call[0]?.type === 'gemini',
+      );
+      expect(geminiCalls.length).toBeGreaterThanOrEqual(1);
+      const geminiItem = geminiCalls[0][0];
+      expect(typeof geminiItem.timestamp).toBe('number');
+      expect(geminiItem.timestamp).toBeGreaterThan(0);
+    });
+
+    it('does not attach timestamp to non-gemini items', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'response',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test');
+      });
+
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      const nonGeminiCalls = mockAddItem.mock.calls.filter(
+        (call: any[]) => call[0]?.type !== 'gemini',
+      );
+      expect(nonGeminiCalls.length).toBeGreaterThanOrEqual(1);
+      for (const call of nonGeminiCalls) {
+        expect(call[0]).not.toHaveProperty('timestamp');
+      }
+    });
+  });
 });
 
 describe('classifyApiError', () => {

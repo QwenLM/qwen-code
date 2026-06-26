@@ -33,11 +33,6 @@ import styles from './MessageList.module.css';
 interface MessageListProps {
   messages: Message[];
   pendingApproval: PermissionRequest | null;
-  onConfirm: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   catchingUp?: boolean;
@@ -403,6 +398,58 @@ function isExecutionWorkStep(item: DisplayItem): boolean {
   if (item.type === 'turn_collapse') return false;
   if (item.type === 'turn_content') return item.items.some(isExecutionWorkStep);
   return item.message.role === 'tool_group' || item.message.role === 'plan';
+}
+
+function isActiveToolStatus(status: ACPToolCall['status'] | string): boolean {
+  return (
+    status === 'pending' || status === 'running' || status === 'in_progress'
+  );
+}
+
+function activeExecutionKey(item: DisplayItem): string | null {
+  if (item.type === 'turn_content') {
+    for (let i = item.items.length - 1; i >= 0; i--) {
+      const key = activeExecutionKey(item.items[i]!);
+      if (key) return key;
+    }
+    return null;
+  }
+
+  if (item.type === 'turn_collapse') {
+    if (item.turnCollapse.liveStartedAt === undefined) return null;
+    if (
+      item.turnCollapse.toolCallCount === undefined ||
+      item.turnCollapse.toolCallCount <= 0
+    ) {
+      return null;
+    }
+    return `turn:${item.turnCollapse.turnId}:${item.turnCollapse.toolCallCount}`;
+  }
+
+  if (item.type === 'parallel_agents') {
+    const activeAgents = item.agents.filter((agent) =>
+      isActiveToolStatus(agent.status),
+    );
+    if (activeAgents.length === 0) return null;
+    return `agents:${item.key}:${activeAgents.map((agent) => agent.callId).join(',')}`;
+  }
+
+  if (item.message.role !== 'tool_group') return null;
+  const activeTools = item.message.tools.filter((tool) =>
+    isActiveToolStatus(tool.status),
+  );
+  if (activeTools.length === 0) return null;
+  return `tools:${item.message.id}:${activeTools.map((tool) => tool.callId).join(',')}`;
+}
+
+function latestActiveExecutionKey(
+  items: readonly DisplayItem[],
+): string | null {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const key = activeExecutionKey(items[i]!);
+    if (key) return key;
+  }
+  return null;
 }
 
 function terminalTurnTimestamp(item: DisplayItem): number | undefined {
@@ -920,7 +967,12 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
       <span className={turnCollapseStyles.collapseLabel}>
         <span className={turnCollapseStyles.processedLabel}>
           {statusLabel}
-          {showVisibleMetrics && ` ${visibleMetrics}`}
+          {showVisibleMetrics && (
+            <span className={turnCollapseStyles.processedMeta}>
+              {' '}
+              {visibleMetrics}
+            </span>
+          )}
         </span>
         {showSummaryMetrics && (
           <span className={turnCollapseStyles.summaryMetrics}>
@@ -997,7 +1049,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     {
       messages,
       pendingApproval,
-      onConfirm,
       onShowContextDetail,
       catchingUp,
       isResponding = false,
@@ -1067,6 +1118,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const scrollCooldownCount = useRef(0);
     const lastReportedFollow = useRef(true);
     const prevLastUserMsgId = useRef<string | null>(null);
+    const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
       useRef(catchingUp);
     const catchingUpRef = useRef(catchingUp);
@@ -1163,24 +1215,17 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     const handleToggleCollapse = useCallback(
       (turnId: string, nextExpanded: boolean) => {
-        const el = getScrollElement();
-        const distanceFromBottom = el
-          ? el.scrollHeight - el.scrollTop - el.clientHeight
-          : 0;
-        const isScrolledAwayFromBottom =
-          !!el && el.scrollHeight > el.clientHeight && distanceFromBottom >= 30;
-
-        // Only pause follow when the user is actually reading away from the
-        // tail. Short, non-overflowing chats should not surface the
-        // scroll-to-bottom affordance just because a turn was expanded.
-        setShouldFollow(!isScrolledAwayFromBottom);
+        // Expanding/collapsing a turn is an explicit reading action. Pause
+        // follow so streaming output does not yank the viewport back to the
+        // tail while the user is inspecting history.
+        setShouldFollow(false);
         setCollapseOverrides((prev) => {
           const next = new Map(prev);
           next.set(turnId, nextExpanded);
           return next;
         });
       },
-      [getScrollElement, setShouldFollow],
+      [setShouldFollow],
     );
 
     const getItemKey = useCallback(
@@ -1394,12 +1439,14 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
       // Rule 2: scrolling up → pause follow
       if (curr < prev - 1) {
-        setShouldFollow(false);
+        // Container resizes can clamp scrollTop downward while the viewport is
+        // still at the tail. Treat that as follow mode, not a manual scroll-up.
+        setShouldFollow(distanceFromBottom < 30);
+        return;
       }
       // Rule 3: near bottom → resume follow
-      // (runs unconditionally so that container-resize-induced scrollTop
-      // clamping — which looks like scrolling up — doesn't permanently
-      // disable follow when the viewport is still near the bottom)
+      // Run only after non-upward scrolls. Otherwise a tiny wheel-up near the
+      // tail would pause follow and immediately re-enable it in the same event.
       if (distanceFromBottom < 30) {
         setShouldFollow(true);
       }
@@ -1470,6 +1517,33 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       prevCatchingUp.current = catchingUp;
     }, [catchingUp, scrollToBottom, setShouldFollow]);
 
+    const runningExecutionKey = useMemo(
+      () => latestActiveExecutionKey(visibleItems),
+      [visibleItems],
+    );
+
+    // Tool summaries and parallel-agent boxes can grow after their first
+    // render, which used to leave the row clipped behind the fixed composer.
+    // Instead of observing every row resize (too noisy while streaming), scroll
+    // once when a new execution row starts, and only while the user is already
+    // following the bottom.
+    useLayoutEffect(() => {
+      if (catchingUp) return;
+      if (!runningExecutionKey) {
+        prevActiveExecutionKey.current = null;
+        return;
+      }
+      if (runningExecutionKey === prevActiveExecutionKey.current) return;
+      prevActiveExecutionKey.current = runningExecutionKey;
+      if (shouldFollow.current) {
+        requestAnimationFrame(() => {
+          if (shouldFollow.current) {
+            scrollToBottom();
+          }
+        });
+      }
+    }, [catchingUp, runningExecutionKey, scrollToBottom]);
+
     // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
     // at the very bottom of the virtualized list, so if the user had scrolled
     // up it would open below the fold and the action would look like a no-op.
@@ -1508,7 +1582,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 <ParallelAgentsGroup
                   agents={displayItem.agents}
                   pendingApproval={pendingApproval}
-                  onConfirm={onConfirm}
                 />
               </MessageTimestamp>
             );
@@ -1542,7 +1615,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             <MessageItem
               message={displayItem.message}
               pendingApproval={pendingApproval}
-              onConfirm={onConfirm}
               onShowContextDetail={onShowContextDetail}
               workspaceCwd={workspaceCwd}
               isLatest={isLatest}
@@ -1583,7 +1655,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         tailContent,
         tailContentIndex,
         pendingApproval,
-        onConfirm,
         onShowContextDetail,
         headerOffset,
         visibleItems,
