@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { isValidChatId, hasMarkdownSyntax, splitText } from './QQChannel.js';
+import { isValidChatId, hasMarkdownSyntax } from './QQChannel.js';
 
 const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
   mockSendQQMessage: vi.fn(),
@@ -176,40 +176,6 @@ describe('hasMarkdownSyntax', () => {
   });
 });
 
-describe('splitText', () => {
-  it('returns single-element array for short text', () => {
-    expect(splitText('hello')).toEqual(['hello']);
-  });
-
-  it('returns single-element array for exactly 2000 chars', () => {
-    const text = 'a'.repeat(2000);
-    const result = splitText(text);
-    expect(result).toHaveLength(1);
-    expect(result[0]).toHaveLength(2000);
-  });
-
-  it('splits text longer than 2000 chars into chunks', () => {
-    const text = 'a'.repeat(4500);
-    const result = splitText(text);
-    expect(result).toHaveLength(3);
-    expect(result[0]).toHaveLength(2000);
-    expect(result[1]).toHaveLength(2000);
-    expect(result[2]).toHaveLength(500);
-  });
-
-  it('preserves content across chunk boundaries', () => {
-    const text = 'x'.repeat(2000) + 'y'.repeat(500);
-    const result = splitText(text);
-    expect(result).toHaveLength(2);
-    expect(result[0]).toBe('x'.repeat(2000));
-    expect(result[1]).toBe('y'.repeat(500));
-  });
-
-  it('handles empty string', () => {
-    expect(splitText('')).toEqual(['']);
-  });
-});
-
 describe('sendMessage', () => {
   /** Construct a QQChannel with internal state pre-configured for sendMessage. */
   function makeChannel(overrides?: {
@@ -249,10 +215,12 @@ describe('sendMessage', () => {
       );
     }
     if (overrides?.replyMsgId) {
-      (chp['replyMsgId'] as Map<string, string>).set(
-        'test-chat-id',
-        overrides.replyMsgId,
-      );
+      (
+        chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+      ).set('test-chat-id', {
+        msgId: overrides.replyMsgId,
+        timestamp: Date.now(),
+      });
     }
 
     return ch;
@@ -332,7 +300,7 @@ describe('sendMessage', () => {
     );
   });
 
-  it('stops on first chunk failure (no fallback for plain text)', async () => {
+  it('does not retry on plain-text send failure', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     mockSendQQMessage.mockResolvedValue(mockResponse(false, 500));
 
@@ -403,25 +371,17 @@ describe('sendMessage', () => {
     );
   });
 
-  it('sends multi-chunk text as separate messages with incrementing msg_seq', async () => {
+  it('sends single request even for long text (no splitting)', async () => {
     const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-789' });
-    const text = 'a'.repeat(2500); // 2 chunks: 2000 + 500
+    const text = 'a'.repeat(4500);
     await ch.sendMessage('test-chat-id', text);
 
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
-    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
-      1,
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: 'a'.repeat(2000), msg_type: 0, msg_id: 'msg-789', msg_seq: 1 },
-    );
-    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
-      2,
-      'https://api.sgroup.qq.com',
-      '/v2/users/test-chat-id/messages',
-      'test-token',
-      { content: 'a'.repeat(500), msg_type: 0, msg_id: 'msg-789', msg_seq: 2 },
+      { content: text, msg_type: 0, msg_id: 'msg-789', msg_seq: 1 },
     );
   });
 });

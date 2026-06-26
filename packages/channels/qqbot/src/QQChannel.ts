@@ -12,6 +12,7 @@
  * @see https://bot.q.qq.com/wiki/develop/api-v2/
  */
 
+import type { EventEmitter } from 'events';
 import {
   ChannelBase,
   SessionRouter,
@@ -20,7 +21,8 @@ import {
 import type {
   ChannelConfig,
   ChannelBaseOptions,
-  ChannelAgentBridge,
+  AcpBridge,
+  ToolCallEvent,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -68,6 +70,7 @@ export function hasLinkSyntax(text: string): boolean {
 
 export function hasMarkdownSyntax(text: string): boolean {
   return (
+    /^\|/m.test(text) ||
     /^#{1,6}\s/m.test(text) ||
     text.includes('```') ||
     /\*\*|__|~~/.test(text) ||
@@ -76,24 +79,6 @@ export function hasMarkdownSyntax(text: string): boolean {
     /^[-*+]\s/m.test(text) ||
     /^\d+\.\s/m.test(text)
   );
-}
-
-/**
- * Split long text into QQ-compatible chunks (max 2000 chars each).
- *
- * Uses UTF-16 code-unit length — in the extremely rare case that the
- * 2000-unit boundary falls in the middle of a surrogate pair (emoji),
- * that character will be garbled. QQ chat messages rarely approach
- * this limit at a boundary that aligns with a high-codepoint character.
- */
-export function splitText(text: string): string[] {
-  const MAX = 2000;
-  if (text.length <= MAX) return [text];
-  const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += MAX) {
-    chunks.push(text.slice(i, i + MAX));
-  }
-  return chunks;
 }
 
 export class QQChannel extends ChannelBase {
@@ -133,7 +118,10 @@ export class QQChannel extends ChannelBase {
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
   /** Track the latest user messageId per chatId for proper reply (msg_id). */
-  private replyMsgId: Map<string, string> = new Map();
+  private replyMsgId: Map<string, { msgId: string; timestamp: number }> =
+    new Map();
+  /** Periodic cleanup timer for expired replyMsgId entries. */
+  private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
 
@@ -146,6 +134,16 @@ export class QQChannel extends ChannelBase {
   private readonly globalSessionsPath: string;
   /** Backup of sessions.json so conversations survive daemon restarts. */
   private readonly sessionsBackupPath: string;
+
+  // ── Streaming line-buffered output state ──────────────────────
+  /** Accumulated text not yet flushed. */
+  private streamBuffer: string = '';
+  /** Current chatId for the active stream. */
+  private streamChatId: string = '';
+  /** Current sessionId for the active stream. */
+  private streamSessionId: string = '';
+  /** Timer that flushes streamBuffer after 2 seconds of silence. */
+  private streamIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     name: string,
@@ -170,6 +168,28 @@ export class QQChannel extends ChannelBase {
       stateDir,
       `${safeName}-sessions-backup.json`,
     );
+    if (this.bridge?.on) {
+      this.bridge.on('toolCall', (event: ToolCallEvent) => {
+        const target = this.router.getTarget(event.sessionId);
+        if (target) {
+          this.onToolCall(target.chatId, event);
+        }
+      });
+    } else {
+      try {
+        (this.bridge as unknown as EventEmitter).addListener?.(
+          'toolCall',
+          (event: ToolCallEvent) => {
+            const target = this.router.getTarget(event.sessionId);
+            if (target) {
+              this.onToolCall(target.chatId, event);
+            }
+          },
+        );
+      } catch (_e: unknown) {
+        // listener registration failed silently
+      }
+    }
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -181,13 +201,14 @@ export class QQChannel extends ChannelBase {
         '## QQ Bot Channel',
         '',
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
-        '回复控制在 2000 字符以内（超长会自动分块），支持 Markdown 格式。',
+        '支持 Markdown 格式，回复自然流畅即可。',
       ].join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.fetchToken();
         await this.connectGateway();
+        this.startReplyMsgIdCleanup();
         return;
       } catch (e: unknown) {
         if (attempt < 2) {
@@ -204,79 +225,66 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    // ── Normal text / markdown flow ──────────────────────────
     const route = await this.resolveRoute(chatId);
     if (!route) return;
 
-    const msgId = this.replyMsgId.get(chatId);
+    const entry = this.replyMsgId.get(chatId);
+    const msgId =
+      entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
     const useMarkdown = hasMarkdownSyntax(text);
 
-    for (const chunk of splitText(text)) {
-      try {
-        const body: Record<string, unknown> = useMarkdown
-          ? { msg_type: 2, markdown: { content: chunk } }
-          : { content: chunk, msg_type: 0 };
-        // Multi-block streaming: set msg_id + incrementing msg_seq
-        // seq incremented before send so we can track the next value
-        const nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
-        if (msgId) {
-          body['msg_id'] = msgId;
-          body['msg_seq'] = nextSeq;
-        }
+    try {
+      const body: Record<string, unknown> = useMarkdown
+        ? { msg_type: 2, markdown: { content: text } }
+        : { content: text, msg_type: 0 };
+      const nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
+      if (msgId) {
+        body['msg_id'] = msgId;
+        body['msg_seq'] = nextSeq;
+      }
 
-        let resp = await sendQQMessage(
+      let resp = await sendQQMessage(
+        route.base,
+        route.path,
+        this.accessToken,
+        body,
+      );
+
+      if (!resp.ok && useMarkdown) {
+        const errBody = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 100)}), retrying as plain text\n`,
+        );
+        const plainBody: Record<string, unknown> = {
+          content: text,
+          msg_type: 0,
+        };
+        if (msgId) {
+          plainBody['msg_id'] = msgId;
+          plainBody['msg_seq'] = nextSeq;
+        }
+        resp = await sendQQMessage(
           route.base,
           route.path,
           this.accessToken,
-          body,
+          plainBody,
         );
-
-        // Markdown is a fully available, zero-permission message type on the QQ
-        // Bot Open Platform — bot.q.qq.com API docs list msg_type=2 alongside
-        // text/ark/embed with no application gate. (q.qq.com/wiki/FAQ/robot
-        // mentions a markdown permission application, but that FAQ targets a
-        // different platform — likely older 群机器人 or mini-program bots —
-        // not the Open Platform API we use here.) We retry as plaintext as
-        // defense-in-depth against edge cases where a bot's markdown capability
-        // might be restricted server-side.
-        if (!resp.ok && useMarkdown) {
-          const errBody = await resp.text().catch(() => '');
-          process.stderr.write(
-            `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 100)}), retrying as plain text\n`,
-          );
-          const plainBody: Record<string, unknown> = {
-            content: chunk,
-            msg_type: 0,
-          };
-          if (msgId) {
-            plainBody['msg_id'] = msgId;
-            plainBody['msg_seq'] = nextSeq;
-          }
-          resp = await sendQQMessage(
-            route.base,
-            route.path,
-            this.accessToken,
-            plainBody,
-          );
-        }
-
-        if (!resp.ok) {
-          // Drain response body to avoid socket leak
-          const errBody = await resp.text().catch(() => '');
-          process.stderr.write(
-            `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${errBody.slice(0, 200)}\n`,
-          );
-          break; // stop sending on failure to avoid msg_seq gaps
-        }
-        // Only persist seq on success
-        if (msgId) this.msgSeqMap.set(msgId, nextSeq);
-      } catch (e) {
-        process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
-        break;
       }
+
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${errBody.slice(0, 200)}\n`,
+        );
+        return;
+      }
+      if (msgId) {
+        this.msgSeqMap.set(msgId, nextSeq);
+        this.saveQQState();
+      }
+    } catch (e) {
+      process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
     }
-    // Persist msgSeqMap once after all chunks are sent
-    if (msgId) this.saveQQState();
   }
 
   /**
@@ -311,9 +319,14 @@ export class QQChannel extends ChannelBase {
       clearInterval(this.seenCleanupTimer);
       this.seenCleanupTimer = null;
     }
+    this.stopReplyMsgIdCleanup();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.streamIdleTimer) {
+      clearTimeout(this.streamIdleTimer);
+      this.streamIdleTimer = null;
     }
     this.flushQQState();
     this.backupGlobalSessions();
@@ -346,6 +359,99 @@ export class QQChannel extends ChannelBase {
     _sessionId: string,
     _messageId?: string,
   ): void {}
+
+  /**
+   * Accumulate response text chunks. Text is only flushed when a tool call
+   * starts (onToolCall) — no streaming line-by-line output.
+   */
+  protected override onResponseChunk(
+    chatId: string,
+    chunk: string,
+    sessionId: string,
+  ): void {
+    // Cancel any pending idle timer — new data arrived, restart the silence window.
+    if (this.streamIdleTimer) {
+      clearTimeout(this.streamIdleTimer);
+      this.streamIdleTimer = null;
+    }
+    if (this.streamSessionId !== sessionId) {
+      this.streamChatId = chatId;
+      this.streamSessionId = sessionId;
+      this.streamBuffer = chunk;
+    } else {
+      this.streamBuffer += chunk;
+    }
+    // Start a new 2-second silence timer: flush when the model stops sending chunks.
+    this.streamIdleTimer = setTimeout(() => {
+      this.streamIdleTimer = null;
+      const toFlush = this.streamBuffer;
+      if (toFlush) {
+        process.stderr.write(
+          `[QQ:${this.name}] idleFlush "${toFlush.slice(0, 60)}"\n`,
+        );
+        this.sendMessage(this.streamChatId, toFlush).catch(() => {});
+        this.streamBuffer = '';
+      }
+    }, 2000);
+  }
+
+  /**
+   * Send remaining un-flushed text. Uses streamBuffer (not fullText)
+   * because onToolCall may have already sent the pre-tool-call portion.
+   */
+  protected override async onResponseComplete(
+    chatId: string,
+    _fullText: string,
+    sessionId: string,
+  ): Promise<void> {
+    if (this.streamIdleTimer) {
+      clearTimeout(this.streamIdleTimer);
+      this.streamIdleTimer = null;
+    }
+    const remaining = this.streamBuffer;
+    this.streamBuffer = '';
+    this.streamSessionId = '';
+    if (remaining) {
+      await super.onResponseComplete(chatId, remaining, sessionId);
+    }
+  }
+
+  /**
+   * Flush buffered text when a tool call starts, so users see the
+   * model's intent text (e.g. "我先来查一下天气") immediately rather
+   * than waiting for the tool call to complete.
+   */
+  override onToolCall(chatId: string, _event: ToolCallEvent): void {
+    if (this.streamIdleTimer) {
+      clearTimeout(this.streamIdleTimer);
+      this.streamIdleTimer = null;
+    }
+    if (this.streamBuffer) {
+      this.sendMessage(chatId, this.streamBuffer).catch(() => {});
+      this.streamBuffer = '';
+    }
+  }
+
+  /**
+   * Start periodic cleanup of expired replyMsgId entries.
+   * Evicts entries older than 5 minutes every 60 seconds.
+   */
+  private startReplyMsgIdCleanup(): void {
+    this.stopReplyMsgIdCleanup();
+    this.replyMsgIdCleanupTimer = setInterval(() => {
+      const cutoff = Date.now() - 300_000;
+      for (const [chatId, entry] of this.replyMsgId) {
+        if (entry.timestamp < cutoff) this.replyMsgId.delete(chatId);
+      }
+    }, 60_000);
+  }
+
+  private stopReplyMsgIdCleanup(): void {
+    if (this.replyMsgIdCleanupTimer) {
+      clearInterval(this.replyMsgIdCleanupTimer);
+      this.replyMsgIdCleanupTimer = null;
+    }
+  }
 
   // ── State Persistence (cross-server context continuation) ──────
 
@@ -400,7 +506,17 @@ export class QQChannel extends ChannelBase {
       if (!existsSync(this.qqStatePath)) return false;
       const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
       if (raw.chatTypeMap) this.chatTypeMap = new Map(raw.chatTypeMap);
-      if (raw.replyMsgId) this.replyMsgId = new Map(raw.replyMsgId);
+      if (raw.replyMsgId) {
+        const now = Date.now();
+        this.replyMsgId = new Map(
+          raw.replyMsgId.map(
+            ([k, v]: [string, unknown]) =>
+              typeof v === 'string'
+                ? ([k, { msgId: v, timestamp: now }] as const) // Old format: msgId only
+                : ([k, v] as const), // New format: { msgId, timestamp }
+          ),
+        );
+      }
       if (raw.msgSeqMap) this.msgSeqMap = new Map(raw.msgSeqMap);
       return true;
     } catch (e) {
@@ -908,7 +1024,7 @@ export class QQChannel extends ChannelBase {
     // not expose a unified user identity, so this is unavoidable.
     const chatId = event.author.user_openid || event.author.id;
     this.chatTypeMap.set(chatId, 'c2c');
-    this.replyMsgId.set(chatId, event.id);
+    this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
     this.saveQQState();
     this.handleInbound({
       channelName: this.name,
@@ -935,7 +1051,7 @@ export class QQChannel extends ChannelBase {
     }
     const chatId = event.group_openid;
     this.chatTypeMap.set(chatId, 'group');
-    this.replyMsgId.set(chatId, event.id);
+    this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
     this.saveQQState();
     const senderName = event.author.username || event.author.id || 'QQ User';
     // Strip @mention tags from message content. QQ Bot API docs state the API
