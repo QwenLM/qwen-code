@@ -77,6 +77,17 @@ describe('team auto-memory paths', () => {
     ).toBe(false);
   });
 
+  it('recognizes a first-ever write before the team-memory dir exists', () => {
+    const root = getTeamAutoMemoryRoot(projectRoot);
+    // Normal first-write state: nothing under .qwen has been created yet, so
+    // realpathNearestExisting must walk up to an existing ancestor (the repo
+    // root) and still classify the not-yet-created file as a team path.
+    expect(fs.existsSync(root)).toBe(false);
+    expect(
+      isTeamAutoMemPath(path.join(root, 'feedback', 'new.md'), projectRoot),
+    ).toBe(true);
+  });
+
   it('recognizes new files under a symlinked team-memory directory', () => {
     const root = getTeamAutoMemoryRoot(projectRoot);
     fs.mkdirSync(root, { recursive: true });

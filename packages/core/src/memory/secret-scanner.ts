@@ -66,7 +66,7 @@ const SECRET_RULES: readonly SecretRule[] = [
     // retired bare `sk-` + 48 base62 chars (archived legacy keys).
     id: 'openai-api-key',
     source:
-      'sk-(?:proj|svcacct|admin)-[a-zA-Z0-9_-]{20,}|sk-[a-zA-Z0-9-]{20,}T3BlbkFJ[a-zA-Z0-9-]{20,}|sk-[a-zA-Z0-9]{48}',
+      'sk-(?:proj|svcacct|admin)-[a-zA-Z0-9_-]{20,}|sk-[a-zA-Z0-9_-]{20,}T3BlbkFJ[a-zA-Z0-9_-]{20,}|sk-[a-zA-Z0-9]{48}',
   },
   {
     id: 'huggingface-access-token',

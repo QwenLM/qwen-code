@@ -43,6 +43,8 @@ describe('scanForSecrets', () => {
       `sk-proj-${'a'.repeat(48)}`,
       `sk-svcacct-${'a'.repeat(48)}`,
       `sk-${'a'.repeat(20)}T3BlbkFJ${'b'.repeat(20)}`,
+      // Legacy T3BlbkFJ keys are base64url, so the body can contain `_`.
+      `sk-${'a'.repeat(18)}_x_T3BlbkFJ${'b'.repeat(18)}_y`,
     ]) {
       expect(scanForSecrets(sample).map((m) => m.ruleId)).toContain(
         'openai-api-key',

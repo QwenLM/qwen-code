@@ -277,6 +277,26 @@ describe('EditTool', () => {
         /shared with all repository collaborators/i,
       );
     });
+
+    it('reports the pre-existing-secret message and leaves the file untouched', async () => {
+      // Prior-read enforcement off so we can edit an existing file directly.
+      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
+      const file = teamFile();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // Seed the on-disk file with a FULL detectable token so currentContent
+      // itself trips the scanner — exercises the preExisting branch.
+      const original = `secret = ghp_${'a'.repeat(36)}\nkeep`;
+      fs.writeFileSync(file, original, 'utf8');
+      // Edit a clean line; the committed secret survives in the merged result.
+      const result = await tool
+        .build({ file_path: file, old_string: 'keep', new_string: 'kept' })
+        .execute(new AbortController().signal);
+      expect(JSON.stringify(result)).toMatch(
+        /secret already exists in the current file content/i,
+      );
+      // The blocked edit must not have written anything.
+      expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    });
   });
 
   describe('validateToolParams', () => {
