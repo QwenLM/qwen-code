@@ -32,6 +32,12 @@ on:
         required: false
         type: 'boolean'
         default: true
+      dry_run:
+        description: 'Build + package only; do NOT create/update a GitHub Release.
+          Leave on (with notarize=false) to rehearse the build pipeline.'
+        required: false
+        type: 'boolean'
+        default: true
 permissions:
   contents: 'write'
 jobs:
@@ -312,8 +318,8 @@ jobs:
     name: 'Create GitHub Release'
     needs: ['build-linux', 'build-windows', 'build-macos']
     runs-on: 'ubuntu-latest'
-    if: 'startsWith(github.ref, ''refs/tags/cua-driver-rs-v'') || github.event_name
-      == ''workflow_dispatch'''
+    if: 'startsWith(github.ref, ''refs/tags/cua-driver-rs-v'') || (github.event_name
+      == ''workflow_dispatch'' && inputs.dry_run == false)'
     steps:
       - uses: 'actions/download-artifact@v4'
         with:
