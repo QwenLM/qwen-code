@@ -696,6 +696,7 @@ export default {
   'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
+  'Show skill-specific usage statistics.': '显示技能相关的使用统计信息',
   'Show daily token usage statistics.': '显示每日 token 使用统计信息',
   'Show monthly token usage statistics.': '显示每月 token 使用统计信息',
   'Export token usage statistics to CSV or JSON.':
@@ -2161,6 +2162,7 @@ export default {
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
   'needs approval': '待审批',
+  'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
   Running: '运行中',

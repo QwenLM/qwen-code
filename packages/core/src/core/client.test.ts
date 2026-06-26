@@ -511,8 +511,10 @@ describe('Gemini Client (client.ts)', () => {
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getAutoSkillEnabled: vi.fn().mockReturnValue(false),
+      getAutoSkillConfirmEnabled: vi.fn().mockReturnValue(true),
       getModelsConfig: vi.fn().mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
@@ -4499,10 +4501,8 @@ hello
       expect(client['pendingMemoryPrefetch']).not.toBeUndefined();
     });
 
-    it('should proceed without auto-memory when managed auto-memory is disabled', async () => {
-      // When getManagedAutoMemoryEnabled returns false, no recall is initiated
-      // and sendMessageStream completes without memory content
-      vi.mocked(mockConfig.getManagedAutoMemoryEnabled).mockReturnValue(false);
+    it('should skip recall when managed memory is unavailable', async () => {
+      vi.mocked(mockConfig.isManagedMemoryAvailable).mockReturnValue(false);
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -4537,8 +4537,7 @@ hello
         expect.any(AbortSignal),
       );
 
-      // Restore default
-      vi.mocked(mockConfig.getManagedAutoMemoryEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.isManagedMemoryAvailable).mockReturnValue(true);
     });
 
     it('should proceed normally when recall rejects', async () => {
@@ -4970,6 +4969,29 @@ hello
         );
 
         expect(client['skillsModifiedInSession']).toBe(false);
+      });
+
+      it('should pass confirmBeforePersist from getAutoSkillConfirmEnabled', async () => {
+        vi.spyOn(
+          client['config'],
+          'getAutoSkillConfirmEnabled',
+        ).mockReturnValue(true);
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'below_threshold',
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'a query' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-confirm',
+          ),
+        );
+
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({ confirmBeforePersist: true }),
+        );
       });
     });
 
@@ -8265,6 +8287,7 @@ function makeMockConfigForShutdown(
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getMemoryManager: vi.fn().mockReturnValue(mgr),
     getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+    getBareMode: vi.fn().mockReturnValue(false),
     getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
     getAutoSkillEnabled: vi.fn().mockReturnValue(false),
     getModel: vi.fn().mockReturnValue('test-model'),

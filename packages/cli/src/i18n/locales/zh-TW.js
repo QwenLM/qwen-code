@@ -652,6 +652,7 @@ export default {
   'toggle vim mode on/off': '切換 vim 模式開關',
   'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',
   'Show tool-specific usage statistics.': '顯示工具相關的使用統計資訊',
+  'Show skill-specific usage statistics.': '顯示技能相關的使用統計資訊',
   'Show daily token usage statistics.': '顯示每日 token 使用統計資訊',
   'Show monthly token usage statistics.': '顯示每月 token 使用統計資訊',
   'Export token usage statistics to CSV or JSON.':
@@ -1965,6 +1966,7 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
   Running: '執行中',

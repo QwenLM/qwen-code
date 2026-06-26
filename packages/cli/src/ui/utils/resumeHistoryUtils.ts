@@ -382,7 +382,11 @@ function convertToHistoryItems(
             });
             currentToolGroup = [];
           }
-          items.push({ type: 'gemini', text });
+          items.push({
+            type: 'gemini',
+            text,
+            timestamp: new Date(record.timestamp).getTime(),
+          });
         }
 
         // Track function calls for pairing with results

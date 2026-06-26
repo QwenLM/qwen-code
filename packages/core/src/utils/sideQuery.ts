@@ -99,6 +99,13 @@ export interface SideQueryTextOptions {
    * new user-visible side queries honor the preference automatically.
    */
   skipOutputLanguagePreference?: boolean;
+  /**
+   * Opt in to stream the response so a slow inference keeps its HTTP connection
+   * alive against gateways that would time out the non-streaming request (e.g.
+   * chat compression behind a BFF); see {@link GenerateTextOptions.stream} for
+   * the full rationale. Defaults to `false`.
+   */
+  stream?: boolean;
   validate?: (text: string) => string | null;
 }
 
@@ -248,6 +255,7 @@ export async function runSideQuery<TResponse>(
     ...(options.maxAttempts !== undefined && {
       maxAttempts: options.maxAttempts,
     }),
+    ...(options.stream !== undefined && { stream: options.stream }),
   });
 
   const customError = options.validate?.(result.text);

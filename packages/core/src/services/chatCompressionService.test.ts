@@ -282,6 +282,12 @@ describe('ChatCompressionService', () => {
 
       expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(generateText).toHaveBeenCalled();
+      // Compression opts into streaming so a slow inference keeps the HTTP
+      // connection alive behind a BFF gateway whose proxy_read_timeout would
+      // otherwise kill the non-streaming request (issue #5861).
+      expect(generateText).toHaveBeenCalledWith(
+        expect.objectContaining({ stream: true }),
+      );
       // Screenshot trigger → reason must be image_overflow (not token_limit)
       // so the UI notice is accurate when it fired below the token threshold.
       expect(result.info.triggerReason).toBe('image_overflow');

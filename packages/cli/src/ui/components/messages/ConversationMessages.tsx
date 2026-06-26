@@ -22,6 +22,9 @@ import { formatDuration } from '../../utils/displayUtils.js';
 
 export const THINKING_ICON = '∴ ';
 
+export const toggleKeyHint =
+  process.platform === 'darwin' ? 'option+t' : 'alt+t';
+
 interface UserMessageProps {
   text: string;
 }
@@ -329,7 +332,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     return (
       <Text dimColor italic>
         {THINKING_ICON}
-        {label} {t('(alt+t to expand)')}
+        {label} {t('({{keyHint}} to expand)', { keyHint: toggleKeyHint })}
       </Text>
     );
   }
@@ -370,7 +373,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     <Box flexDirection="column">
       <Text dimColor italic>
         {THINKING_ICON}
-        {expandedLabel} {t('(alt+t to collapse)')}
+        {expandedLabel}{' '}
+        {t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}
       </Text>
       <Box paddingLeft={2} flexDirection="column">
         <MarkdownDisplay

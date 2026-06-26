@@ -1038,7 +1038,11 @@ describe('modelCommand', () => {
   describe('fastOnly/voiceOnly filtering', () => {
     it('should reject fastOnly models from normal /model selection', async () => {
       mockContext = createMockCommandContext({
-        invocation: { raw: '/model fast-model', name: 'model', args: 'fast-model' },
+        invocation: {
+          raw: '/model fast-model',
+          name: 'model',
+          args: 'fast-model',
+        },
         services: {
           config: {
             getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -1064,7 +1068,11 @@ describe('modelCommand', () => {
 
     it('should reject voiceOnly models from normal /model selection', async () => {
       mockContext = createMockCommandContext({
-        invocation: { raw: '/model voice-model', name: 'model', args: 'voice-model' },
+        invocation: {
+          raw: '/model voice-model',
+          name: 'model',
+          args: 'voice-model',
+        },
         services: {
           config: {
             getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -1112,7 +1120,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--fast fast-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--fast fast-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'info',
@@ -1143,7 +1154,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--fast voice-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--fast voice-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
@@ -1166,7 +1180,11 @@ describe('modelCommand', () => {
               authType: AuthType.USE_OPENAI,
             }),
             getAllConfiguredModels: vi.fn().mockReturnValue([
-              { id: 'main-model', label: 'Main', authType: AuthType.USE_OPENAI },
+              {
+                id: 'main-model',
+                label: 'Main',
+                authType: AuthType.USE_OPENAI,
+              },
               {
                 id: 'qwen3-asr-flash',
                 label: 'ASR',
@@ -1180,7 +1198,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--voice qwen3-asr-flash');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--voice qwen3-asr-flash',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'info',
@@ -1210,7 +1231,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--voice fast-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--voice fast-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',

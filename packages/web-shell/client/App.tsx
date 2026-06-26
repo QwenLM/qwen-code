@@ -78,7 +78,6 @@ import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
-import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
@@ -94,6 +93,10 @@ import {
 } from './utils/copyCommand';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import {
+  appendOrDeferLocalUserMessage,
+  isCommandPrompt,
+} from './utils/localCommandQueue';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
@@ -112,18 +115,13 @@ import {
   serializeStatusMessage,
   type StatusInfo,
 } from './components/messages/StatusMessage';
-import {
-  MCP_STATUS_ACTIVE_EVENT,
-  parseMcpStatusMessage,
-  type SerializedMcpStatusMessage,
-} from './components/messages/McpStatusMessage';
+import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpDialog } from './components/dialogs/McpDialog';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
-import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
@@ -595,15 +593,6 @@ function filterDuplicateModelSwitchMessages(
   });
 }
 
-function hasMcpStatusPanel(messages: readonly Message[]): boolean {
-  return messages.some(
-    (message) =>
-      message.role === 'system' &&
-      message.variant === 'info' &&
-      parseMcpStatusMessage(message.content) !== null,
-  );
-}
-
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
   return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
 }
@@ -764,6 +753,10 @@ function QueuedPromptDisplay({
             ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
             : normalizedPreview;
         const imageCount = prompt.images?.length ?? 0;
+        // A command (/… or !…) can't be inserted into the running turn — insert
+        // injects raw text the model would see literally, never running the
+        // command. Show the action disabled so it stays visible but inert.
+        const isCommand = isCommandPrompt(prompt.text);
         return (
           <div key={prompt.id} className={styles.queuedPrompt}>
             <span className={styles.queuedPromptText}>
@@ -794,6 +787,10 @@ function QueuedPromptDisplay({
                   type="button"
                   className={styles.queuedPromptAction}
                   onClick={() => onInsert(prompt.id)}
+                  disabled={isCommand}
+                  title={
+                    isCommand ? t('queue.insertCommandDisabled') : undefined
+                  }
                 >
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <path
@@ -975,18 +972,6 @@ export function App({
     }
     return filterDuplicateModelSwitchMessages(result);
   }, [messages, recapMessage]);
-  const hasMcpPanelMessage = useMemo(
-    () => hasMcpStatusPanel(displayMessages),
-    [displayMessages],
-  );
-  useEffect(() => {
-    if (hasMcpPanelMessage) return;
-    window.dispatchEvent(
-      new CustomEvent(MCP_STATUS_ACTIVE_EVENT, {
-        detail: { active: false },
-      }),
-    );
-  }, [hasMcpPanelMessage]);
   const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
     () => extractPendingPermission(messageBlocks),
@@ -1294,8 +1279,6 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
-  const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
-  const tasksPanelActive = usePanelActive(TASKS_STATUS_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
@@ -1339,8 +1322,7 @@ export function App({
     showSettingsDialog ||
     showMemoryDialog ||
     showAuthDialog;
-  const bottomHidden = mcpPanelActive || tasksPanelActive;
-  const interactionBlocked = dialogOpen || bottomHidden;
+  const interactionBlocked = dialogOpen;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -1548,6 +1530,24 @@ export function App({
     [],
   );
 
+  // Echo a local command into the transcript, or defer it to the queue when a
+  // turn is streaming so the injected user row can't split the active turn (see
+  // appendOrDeferLocalUserMessage). Returns true when deferred — callers must
+  // then stop and not run the command's inline side effects.
+  const echoOrDeferLocalCommand = useCallback(
+    (text: string, images?: PromptImage[]): boolean =>
+      appendOrDeferLocalUserMessage(
+        streamingStateRef.current !== 'idle',
+        text,
+        images,
+        {
+          append: (value: string) => store.appendLocalUserMessage(value),
+          enqueue: enqueuePrompt,
+        },
+      ),
+    [enqueuePrompt, store],
+  );
+
   // When the turn settles, abort any still-in-flight explicit insert so it can't
   // arrive during the next turn (see midTurnEnqueueAbortRef). If aborted, the
   // message remains in queuedPrompts.
@@ -1593,6 +1593,9 @@ export function App({
     async (id: number) => {
       const prompt = queuedPromptsRef.current.find((item) => item.id === id);
       if (!prompt || (prompt.images?.length ?? 0) > 0) return;
+      // Commands can't be inserted into the running turn (the model would see
+      // the raw text and never run them); they re-dispatch on drain instead.
+      if (isCommandPrompt(prompt.text)) return;
       let abort = midTurnEnqueueAbortRef.current;
       if (!abort) {
         abort = new AbortController();
@@ -2021,7 +2024,9 @@ export function App({
   // is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
-      store.appendLocalUserMessage(commandText);
+      // Self-guard so every entry point (keyboard, status-bar button, in-chat
+      // "context detail" click) defers mid-turn instead of splitting the turn.
+      if (echoOrDeferLocalCommand(commandText)) return;
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
@@ -2037,7 +2042,13 @@ export function App({
           reportError(error, 'Failed to load context usage');
         });
     },
-    [store, sessionActions, reportError, resumeChatBottomFollow],
+    [
+      echoOrDeferLocalCommand,
+      store,
+      sessionActions,
+      reportError,
+      resumeChatBottomFollow,
+    ],
   );
 
   // Stable reference: this travels through the memoized MessageList →
@@ -2402,7 +2413,7 @@ export function App({
               return true;
             }
             if (modelArg === '--voice') {
-              store.appendLocalUserMessage(text);
+              if (echoOrDeferLocalCommand(text, images)) return true;
               workspaceActions
                 .loadProviders()
                 .then((status) => {
@@ -2502,7 +2513,7 @@ export function App({
                 reportError(error, 'Failed to send /skills command'),
               );
             } else {
-              store.appendLocalUserMessage(text);
+              if (echoOrDeferLocalCommand(text, images)) return true;
               workspaceActions
                 .loadSkillsStatus()
                 .then((status) => {
@@ -2539,7 +2550,7 @@ export function App({
             if (toolsArg === 'desc' || toolsArg === 'descriptions') {
               setShowToolsDialog(true);
             } else {
-              store.appendLocalUserMessage(text);
+              if (echoOrDeferLocalCommand(text, images)) return true;
               workspaceActions
                 .loadToolsStatus()
                 .then((status) => {
@@ -2628,6 +2639,10 @@ export function App({
               return true;
             }
             if (subCommand === 'install') {
+              // Install echoes into the transcript (and its error/usage replies
+              // do too); defer the whole command mid-turn so it can't split the
+              // active turn. It re-dispatches here once the turn settles.
+              if (promptBlocked) return enqueuePrompt(text, images);
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -2686,16 +2701,6 @@ export function App({
                 ]);
                 return true;
               }
-              if (promptBlocked) {
-                store.appendLocalUserMessage(text);
-                store.dispatch([
-                  {
-                    type: 'error',
-                    text: t('extensions.install.waitForTurn'),
-                  },
-                ]);
-                return true;
-              }
               const clientId = connectionRef.current.clientId;
               if (!clientId) {
                 store.appendLocalUserMessage(text);
@@ -2734,7 +2739,7 @@ export function App({
                 });
               return true;
             }
-            store.appendLocalUserMessage(text);
+            if (echoOrDeferLocalCommand(text, images)) return true;
             store.dispatch([
               {
                 type: 'error',
@@ -2804,7 +2809,7 @@ export function App({
             let statsView: StatsView = 'overview';
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
-            store.appendLocalUserMessage(text);
+            if (echoOrDeferLocalCommand(text, images)) return true;
             sessionActions
               .getStats()
               .then((result) => {
@@ -2820,7 +2825,7 @@ export function App({
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
-            store.appendLocalUserMessage(text);
+            if (echoOrDeferLocalCommand(text, images)) return true;
             Promise.all([
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadProviders().catch(() => null),
@@ -2886,7 +2891,7 @@ export function App({
           }
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
-            store.appendLocalUserMessage(text);
+            if (echoOrDeferLocalCommand(text, images)) return true;
             Promise.all([
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadEnv().catch(() => null),
@@ -2964,6 +2969,7 @@ export function App({
       sessionActions,
       store,
       enqueuePrompt,
+      echoOrDeferLocalCommand,
       branchCurrentSession,
       createNewSession,
       handleBusyGoalClear,
@@ -3694,14 +3700,7 @@ export function App({
               </TodoContextsProvider>
             </CompactModeContext.Provider>
 
-            <div
-              ref={footerRef}
-              className={
-                bottomHidden
-                  ? `${styles.footer} ${styles.footerHidden}`
-                  : styles.footer
-              }
-            >
+            <div ref={footerRef} className={styles.footer}>
               {showScrollToBottom && (
                 <div
                   className={

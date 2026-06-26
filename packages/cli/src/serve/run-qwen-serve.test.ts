@@ -26,7 +26,6 @@ import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import { Storage } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 
@@ -323,6 +322,40 @@ describe('runQwenServe daemon logger wiring', () => {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
       }
     }
+  });
+});
+
+describe('runQwenServe telemetry validation', () => {
+  let tmpDir: string;
+  const originalSensitiveSpanAttributeMaxLengthEnv =
+    process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'];
+
+  afterEach(() => {
+    if (originalSensitiveSpanAttributeMaxLengthEnv === undefined) {
+      delete process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'];
+    } else {
+      process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'] =
+        originalSensitiveSpanAttributeMaxLengthEnv;
+    }
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('wraps invalid daemon telemetry configuration as FatalConfigError', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tv-')));
+    process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'] = '';
+
+    const run = runQwenServe({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace: tmpDir,
+      maxSessions: 1,
+    });
+
+    await expect(run).rejects.toThrow(qwenCore.FatalConfigError);
+    await expect(run).rejects.toThrow(/Invalid telemetry configuration:/);
   });
 });
 
@@ -641,8 +674,7 @@ describe('runQwenServe runtime startup failures', () => {
   ])(
     'resolves QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS=%s to %s',
     (envValue, expected) => {
-      const originalEnv =
-        process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];
+      const originalEnv = process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];
       try {
         if (envValue === undefined) {
           delete process.env['QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS'];
@@ -666,9 +698,9 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-starting-route-')),
     );
     let resolveTelemetry:
-      | ((settings: qwenCore.TelemetrySettings) => void)
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
       | undefined;
-    const telemetryPromise = new Promise<qwenCore.TelemetrySettings>(
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
       },
@@ -713,7 +745,10 @@ describe('runQwenServe runtime startup failures', () => {
         code: 'daemon_runtime_starting',
       });
     } finally {
-      resolveTelemetry?.({ enabled: false });
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
       await handle.close();
     }
   });
@@ -822,9 +857,9 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),
     );
     let resolveTelemetry:
-      | ((settings: qwenCore.TelemetrySettings) => void)
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
       | undefined;
-    const telemetryPromise = new Promise<qwenCore.TelemetrySettings>(
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
       (resolve) => {
         resolveTelemetry = resolve;
       },
@@ -875,7 +910,10 @@ describe('runQwenServe runtime startup failures', () => {
         'Daemon bridge runtime is not available: Daemon runtime startup timed out after 1ms.',
       );
 
-      resolveTelemetry?.({ enabled: false });
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
       await vi.waitFor(() => {
         expect(bridge.shutdown).toHaveBeenCalledTimes(1);
       });
@@ -1430,7 +1468,7 @@ describe('runQwenServe startup observability', () => {
   it('preserves Storage runtime base dir for default exported callers', async () => {
     const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_RUNTIME_DIR'];
-    Storage.setRuntimeBaseDir(null);
+    qwenCore.Storage.setRuntimeBaseDir(null);
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-storage-dir-')),
     );
@@ -1442,7 +1480,7 @@ describe('runQwenServe startup observability', () => {
       }),
     );
     const runtimeBaseDir = path.join(tmpDir, 'storage-runtime');
-    Storage.setRuntimeBaseDir(runtimeBaseDir);
+    qwenCore.Storage.setRuntimeBaseDir(runtimeBaseDir);
     const stderrWrites: string[] = [];
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
       stderrWrites.push(String(chunk));
@@ -1469,7 +1507,7 @@ describe('runQwenServe startup observability', () => {
       expect(fs.existsSync(expectedDaemonDir)).toBe(true);
     } finally {
       await handle?.close();
-      Storage.setRuntimeBaseDir(null);
+      qwenCore.Storage.setRuntimeBaseDir(null);
       if (originalRuntimeDir === undefined) {
         delete process.env['QWEN_RUNTIME_DIR'];
       } else {
