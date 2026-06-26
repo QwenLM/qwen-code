@@ -240,6 +240,48 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('buffers events produced during the detach gap and flushes them exactly once on reattach', () => {
+    // End-to-end of the PR's core value prop at the registry layer: detach →
+    // produce gap events (no stream attached → buffered) → reattach → the gap
+    // events flush exactly once, in order. (A resuming reattach instead leaves
+    // id-bearing frames to the ring replay — covered by the resume test above.)
+    vi.useFakeTimers();
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const s1 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s1, new AbortController());
+
+      // Transport-level close → detach with grace; stream is gone, ownership
+      // and the binding survive so subsequent frames buffer.
+      conn.detachSessionStream('sess-1', s1, 10_000);
+      expect(conn.sessions.get('sess-1')?.stream).toBeUndefined();
+
+      // Gap events arrive while detached — they must buffer, not drop.
+      conn.sendSession('sess-1', { chunk: 'a' }, 10);
+      conn.sendSession('sess-1', { chunk: 'b' }, 11);
+      expect(s1.sent).toEqual([]); // old stream is gone — nothing leaks to it
+
+      // Non-resume reattach (no Last-Event-ID) → flush the whole gap buffer once.
+      const s2 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s2, new AbortController());
+      expect(s2.sent).toEqual([
+        { message: { chunk: 'a' }, id: 10 },
+        { message: { chunk: 'b' }, id: 11 },
+      ]);
+
+      // The buffer is drained — a second reattach delivers nothing again.
+      const s3 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s3, new AbortController());
+      expect(s3.sent).toEqual([]);
+    } finally {
+      registry.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('aborts the connection signal when the connection is deleted', () => {
     const registry = new ConnectionRegistry();
     try {

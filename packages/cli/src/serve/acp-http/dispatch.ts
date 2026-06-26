@@ -2862,7 +2862,8 @@ export class AcpDispatcher {
             ...(event.data as object),
             kind: 'stream_error',
           }),
-          // Synthetic terminal frame — no bus id, so no SSE `id:` line.
+          // Pass the bus cursor through if present; a synthetic terminal frame
+          // has no bus id (event.id undefined) so no SSE `id:` line is written.
           event.id,
         );
         return;

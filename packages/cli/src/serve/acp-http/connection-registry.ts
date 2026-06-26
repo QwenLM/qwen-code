@@ -345,13 +345,16 @@ export class AcpConnection {
     const prevStream = binding.stream;
     binding.abort.abort();
     binding.abort = abort;
-    // Install the NEW stream BEFORE closing the old one. The old stream's
-    // `onClose` is identity-guarded on `binding.stream` (see the session-GET
-    // handler in `index.ts` — `if (conn.sessions.get(sessionId)?.stream ===
-    // stream) ...promptAbort?.abort()`), so installing first means a
-    // reconnect's close can't abort the in-flight prompt (the client is
-    // reconnecting, not leaving — the prompt must survive). CONTRACT: that
-    // identity guard and this ordering must stay in lockstep.
+    // Install the NEW stream BEFORE closing the old one. Each stream's event
+    // pump has its OWN abort controller, and the post-pump teardown in the
+    // session-GET handler (`index.ts` `onPumpSettled`) is identity-guarded on
+    // `binding.stream`: a settling stream only acts if it is STILL the bound
+    // stream (`conn.sessions.get(sessionId)?.stream === stream`). Installing
+    // first means the old stream settles against a binding that already points
+    // at the new stream, so it falls into detach-with-grace instead of tearing
+    // down the in-flight prompt — the client is reconnecting, not leaving, and
+    // the prompt must survive. CONTRACT: that identity guard and this ordering
+    // must stay in lockstep.
     binding.stream = stream;
     if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
       prevStream.close();
