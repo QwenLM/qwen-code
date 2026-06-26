@@ -182,7 +182,7 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 ## Dependencies
 
 - Consumed by `packages/acp-bridge/src/bridge.ts` (`BridgeClient.sessionUpdate` / `BridgeClient.extNotification` → `events.publish(...)`).
-- Consumed by `packages/cli/src/serve/server.ts` (SSE route handler → `events.subscribe(...)` then formats `BridgeEvent` to SSE wire frames).
+- Consumed by `packages/cli/src/serve/routes/sse-events.ts` (SSE route handler → `events.subscribe(...)` then formats `BridgeEvent` to SSE wire frames).
 - Re-export shim: `packages/cli/src/serve/event-bus.ts` → `@qwen-code/acp-bridge/eventBus`.
 - SDK consumer: `packages/sdk-typescript/src/daemon/sse.ts` (`parseSseStream`), then `asKnownDaemonEvent` (see [`09-event-schema.md`](./09-event-schema.md), [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
 
@@ -204,6 +204,6 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 
 - `packages/acp-bridge/src/eventBus.ts` (entire file)
 - `packages/acp-bridge/src/bridge.ts` (publish sites, esp. `BridgeClient.sessionUpdate` and the F3 permission events)
-- `packages/cli/src/serve/server.ts` (SSE route handler — formats `BridgeEvent` to wire SSE)
+- `packages/cli/src/serve/routes/sse-events.ts` (SSE route handler — formats `BridgeEvent` to wire SSE)
 - `packages/sdk-typescript/src/daemon/sse.ts` (SSE wire parser on the client side)
 - Wire reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md) (the `Last-Event-ID` reconnect contract).

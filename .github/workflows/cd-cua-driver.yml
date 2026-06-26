@@ -1,0 +1,358 @@
+name: 'CD: cua-driver (relative-coordinate fork)'
+# Cross-platform release for the vendored cua-driver fork under
+# packages/cua-driver. Adapted from upstream trycua/cua
+# cd-rust-cua-driver.yml, with two changes for this repo:
+#   - paths point at packages/cua-driver/rust (not libs/cua-driver/rust)
+#   - macOS signing/notarization uses qwen-code's existing secrets:
+#       cert      : MAC_CSC_LINK (base64 .p12) + MAC_CSC_KEY_PASSWORD
+#       notarize  : App Store Connect API key
+#                   (APPLE_NOTARY_API_KEY_P8_BASE64 / _KEY_ID / _ISSUER_ID)
+#     The Developer ID Application identity is auto-discovered from the
+#     imported cert (no DEVELOPER_NAME secret needed).
+# Windows ships UNSIGNED (matches upstream — no EV cert).
+#
+# Artifact convention (matches the qwen-code computer-use downloader):
+#   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
+#            (each contains the universal binary + signed QwenCuaDriver.app)
+#            + *-binary.tar.gz (bare universal binary)
+#   Linux  : cua-driver-rs-<v>-linux-{x86_64,arm64}.tar.gz + *-binary.tar.gz
+#   Windows: cua-driver-rs-<v>-windows-{x86_64,arm64}.zip + *-binary.zip
+on:
+  push:
+    tags: ['cua-driver-rs-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (without v prefix)'
+        required: true
+        default: '0.6.7'
+      notarize:
+        description: 'Codesign + notarize the macOS artifacts (false to skip during
+          iteration)'
+        required: false
+        type: 'boolean'
+        default: true
+      dry_run:
+        description: 'Build + package only; do NOT create/update a GitHub Release.
+          Leave on (with notarize=false) to rehearse the build pipeline.'
+        required: false
+        type: 'boolean'
+        default: true
+permissions:
+  contents: 'write'
+jobs:
+  # ── Linux (x86_64 + arm64) ───────────────────────────────────────────────
+  # Built inside debian:11 (glibc 2.31) so binaries run on Debian 11+,
+  # Ubuntu 20.04+, RHEL/Rocky 8+. arm64 builds natively on a hosted ARM
+  # runner to avoid hand-wiring a cross linker for the X11/Wayland C deps.
+  build-linux:
+    name: 'linux-${{ matrix.arch }}'
+    runs-on: '${{ matrix.runner }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: 'x86_64'
+            target: 'x86_64-unknown-linux-gnu'
+            runner: 'ubuntu-latest'
+          - arch: 'arm64'
+            target: 'aarch64-unknown-linux-gnu'
+            runner: 'ubuntu-24.04-arm'
+    container:
+      image: 'debian:11'
+    steps:
+      - name: 'Install base tooling (container is bare)'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl build-essential pkg-config \
+            libx11-dev libxi-dev libxtst-dev libxext-dev libwayland-dev
+      - uses: 'actions/checkout@v4'
+      - name: 'Determine version'
+        id: 'version'
+        shell: 'bash'
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: 'dtolnay/rust-toolchain@stable'
+        with:
+          targets: '${{ matrix.target }}'
+      - uses: 'actions/cache@v4'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/cua-driver/rust/target
+          key: 'cua-driver-linux-${{ matrix.arch }}-${{ hashFiles(''packages/cua-driver/rust/Cargo.lock'')
+            }}'
+          restore-keys: |
+            cua-driver-linux-${{ matrix.arch }}-
+      - name: 'Build (release)'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo build -p cua-driver --release --target ${{ matrix.target }}'
+      - name: 'Package'
+        working-directory: 'packages/cua-driver/rust'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          STAGE="cua-driver-rs-${VERSION}-linux-${{ matrix.arch }}"
+          mkdir -p "release/${STAGE}"
+          cp "target/${TARGET}/release/qwen-cua-driver" "release/${STAGE}/"
+          cp ../LICENSE.md "release/${STAGE}/LICENSE" 2>/dev/null || true
+          (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
+          tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" qwen-cua-driver
+          ls -lh "release/${STAGE}.tar.gz" "release/${STAGE}-binary.tar.gz"
+      - uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'cua-driver-rs-linux-${{ matrix.arch }}'
+          path: 'packages/cua-driver/rust/release/cua-driver-rs-*-linux-${{ matrix.arch }}*.tar.gz'
+          if-no-files-found: 'error'
+
+  # ── Windows (x86_64 + arm64) — UNSIGNED ──────────────────────────────────
+  build-windows:
+    name: 'windows-${{ matrix.arch }}'
+    runs-on: 'windows-latest'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: 'x86_64'
+            target: 'x86_64-pc-windows-msvc'
+          - arch: 'arm64'
+            target: 'aarch64-pc-windows-msvc'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - name: 'Determine version'
+        id: 'version'
+        shell: 'bash'
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: 'dtolnay/rust-toolchain@stable'
+        with:
+          targets: '${{ matrix.target }}'
+      - uses: 'actions/cache@v4'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/cua-driver/rust/target
+          key: 'cua-driver-windows-${{ matrix.arch }}-${{ hashFiles(''packages/cua-driver/rust/Cargo.lock'')
+            }}'
+          restore-keys: |
+            cua-driver-windows-${{ matrix.arch }}-
+      - name: 'Build (release, unsigned)'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo build -p cua-driver -p cua-driver-uia --release --target ${{ matrix.target }}'
+      - name: 'Package'
+        working-directory: 'packages/cua-driver/rust'
+        shell: 'pwsh'
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $target  = "${{ matrix.target }}"
+          $stage   = "cua-driver-rs-$version-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path "release/$stage" | Out-Null
+          Copy-Item "target/$target/release/qwen-cua-driver.exe" "release/$stage/"
+          Copy-Item "target/$target/release/cua-driver-uia.exe" "release/$stage/"
+          Compress-Archive -Path "release/$stage" -DestinationPath "release/$stage.zip" -Force
+          Compress-Archive -Path "release/$stage/qwen-cua-driver.exe","release/$stage/cua-driver-uia.exe" -DestinationPath "release/$stage-binary.zip" -Force
+          Get-ChildItem "release/$stage*.zip"
+      - uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'cua-driver-rs-windows-${{ matrix.arch }}'
+          path: 'packages/cua-driver/rust/release/cua-driver-rs-*-windows-${{ matrix.arch }}*.zip'
+          if-no-files-found: 'error'
+
+  # ── macOS (universal: lipo arm64 + x86_64) — SIGNED + NOTARIZED ──────────
+  build-macos:
+    name: 'macos-universal'
+    runs-on: 'macos-latest'
+    env:
+      # Sign+notarize on tag push (real release); on manual dispatch honor the
+      # `notarize` input so the pipeline can be iterated without Apple's notary.
+      DO_NOTARIZE: '${{ startsWith(github.ref, ''refs/tags/cua-driver-rs-v'') || inputs.notarize == true }}'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - name: 'Determine version'
+        id: 'version'
+        shell: 'bash'
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: 'dtolnay/rust-toolchain@stable'
+        with:
+          targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+      - uses: 'actions/cache@v4'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/cua-driver/rust/target
+          key: 'cua-driver-darwin-universal-${{ hashFiles(''packages/cua-driver/rust/Cargo.lock'') }}'
+          restore-keys: |
+            cua-driver-darwin-universal-
+      - name: 'Build arm64'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo build -p cua-driver --release --target aarch64-apple-darwin'
+      - name: 'Build x86_64'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo build -p cua-driver --release --target x86_64-apple-darwin'
+      - name: 'Create universal binary (lipo)'
+        working-directory: 'packages/cua-driver/rust'
+        run: |
+          mkdir -p release/universal
+          lipo -create \
+            target/aarch64-apple-darwin/release/qwen-cua-driver \
+            target/x86_64-apple-darwin/release/qwen-cua-driver \
+            -output release/universal/qwen-cua-driver
+          lipo -info release/universal/qwen-cua-driver
+      - name: 'Import signing certificate + discover identity'
+        if: 'env.DO_NOTARIZE == ''true'''
+        env:
+          MAC_CSC_LINK: '${{ secrets.MAC_CSC_LINK }}'
+          MAC_CSC_KEY_PASSWORD: '${{ secrets.MAC_CSC_KEY_PASSWORD }}'
+        run: |
+          KEYCHAIN_PASSWORD="temp-cd-keychain-pwd"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -l build.keychain
+          echo "$MAC_CSC_LINK" | base64 --decode > certificate.p12
+          security import certificate.p12 -k build.keychain -P "$MAC_CSC_KEY_PASSWORD" \
+            -T /usr/bin/codesign > /dev/null 2>&1
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain > /dev/null
+          # Auto-discover the Developer ID Application identity from the cert
+          # (avoids needing a separate DEVELOPER_NAME secret).
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain \
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No 'Developer ID Application' identity in MAC_CSC_LINK"
+            security find-identity -v -p codesigning build.keychain
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Signing identity: $IDENTITY"
+      - name: 'Codesign universal binary (hardened runtime)'
+        if: 'env.DO_NOTARIZE == ''true'''
+        working-directory: 'packages/cua-driver/rust'
+        run: |
+          codesign --force --timestamp --options runtime \
+            --entitlements scripts/CuaDriver.entitlements \
+            --sign "$SIGN_IDENTITY" release/universal/qwen-cua-driver
+          codesign --verify --strict --verbose=2 release/universal/qwen-cua-driver
+      - name: 'Assemble QwenCuaDriver.app bundle'
+        working-directory: 'packages/cua-driver/rust'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p release/QwenCuaDriver.app
+          cp -R scripts/CuaDriverBundle/Contents release/QwenCuaDriver.app/Contents
+          cp release/universal/qwen-cua-driver release/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver
+          chmod +x release/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver
+          plutil -replace CFBundleShortVersionString -string "$VERSION" release/QwenCuaDriver.app/Contents/Info.plist
+          plutil -replace CFBundleVersion -string "$VERSION" release/QwenCuaDriver.app/Contents/Info.plist
+          rm -f release/QwenCuaDriver.app/Contents/MacOS/.gitkeep
+          plutil -p release/QwenCuaDriver.app/Contents/Info.plist | grep -E 'CFBundle(Short)?Version'
+      - name: 'Codesign + notarize + staple QwenCuaDriver.app (App Store Connect API
+          key)'
+        if: 'env.DO_NOTARIZE == ''true'''
+        working-directory: 'packages/cua-driver/rust'
+        env:
+          APPLE_NOTARY_API_KEY_P8_BASE64: '${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}'
+          APPLE_NOTARY_KEY_ID: '${{ secrets.APPLE_NOTARY_KEY_ID }}'
+          APPLE_NOTARY_ISSUER_ID: '${{ secrets.APPLE_NOTARY_ISSUER_ID }}'
+        run: |
+          codesign --force --deep --timestamp --options runtime \
+            --entitlements scripts/CuaDriver.entitlements \
+            --sign "$SIGN_IDENTITY" release/QwenCuaDriver.app
+          codesign --verify --strict --verbose=2 release/QwenCuaDriver.app
+
+          # notarytool with App Store Connect API key (.p8). ditto a zip,
+          # submit, wait, then staple the ticket into the bundle.
+          echo "$APPLE_NOTARY_API_KEY_P8_BASE64" | base64 --decode > notary_key.p8
+          /usr/bin/ditto -c -k --keepParent release/QwenCuaDriver.app release/QwenCuaDriver.app.zip
+          xcrun notarytool submit release/QwenCuaDriver.app.zip \
+            --key notary_key.p8 \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 20m
+          xcrun stapler staple release/QwenCuaDriver.app
+          spctl -a -vv -t exec release/QwenCuaDriver.app || true
+          rm -f release/QwenCuaDriver.app.zip notary_key.p8
+      - name: 'Package'
+        working-directory: 'packages/cua-driver/rust'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          for LABEL in darwin-arm64 darwin-x86_64 darwin-universal; do
+            STAGE="cua-driver-rs-${VERSION}-${LABEL}"
+            mkdir -p "release/${STAGE}"
+            # Same universal slice in all three named tarballs (matches the
+            # upstream convention so arch-keyed downloaders still work).
+            cp release/universal/qwen-cua-driver "release/${STAGE}/"
+            cp -R release/QwenCuaDriver.app "release/${STAGE}/QwenCuaDriver.app"
+            cp ../LICENSE.md "release/${STAGE}/LICENSE" 2>/dev/null || true
+            (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
+            tar -czf "release/${STAGE}-binary.tar.gz" -C "release/${STAGE}" qwen-cua-driver
+          done
+          ls -lh release/cua-driver-rs-*-darwin-*.tar.gz
+      - uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'cua-driver-rs-macos'
+          path: 'packages/cua-driver/rust/release/cua-driver-rs-*-darwin-*.tar.gz'
+          if-no-files-found: 'error'
+
+  # ── Release ──────────────────────────────────────────────────────────────
+  release:
+    name: 'Create GitHub Release'
+    needs: ['build-linux', 'build-windows', 'build-macos']
+    runs-on: 'ubuntu-latest'
+    if: 'startsWith(github.ref, ''refs/tags/cua-driver-rs-v'') || (github.event_name
+      == ''workflow_dispatch'' && inputs.dry_run == false)'
+    steps:
+      - uses: 'actions/download-artifact@v4'
+        with:
+          path: 'release-upload'
+          merge-multiple: true
+      - name: 'Determine version + tag'
+        id: 'version'
+        shell: 'bash'
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="${{ inputs.version }}"
+            TAG="cua-driver-rs-v${VERSION}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: 'Create GitHub Release'
+        uses: 'softprops/action-gh-release@v2'
+        with:
+          tag_name: '${{ steps.version.outputs.tag }}'
+          name: 'cua-driver-rs v${{ steps.version.outputs.version }}'
+          files: 'release-upload/**/*'
+          prerelease: true
+          generate_release_notes: true
+          body: |
+            cua-driver prebuilt binaries — relative-coordinate fork
+            (vendored under `packages/cua-driver`).
+
+            - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
+            - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
+            - **Windows**: unsigned (x86_64 + arm64)
+
+            Enable relative coordinates: `CUA_DRIVER_RS_COORDINATE_SPACE=1`
+            (default `0` = off; optional `CUA_DRIVER_RS_COORDINATE_SCALE=1000`).
