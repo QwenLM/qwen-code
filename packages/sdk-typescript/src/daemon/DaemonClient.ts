@@ -50,6 +50,7 @@ import type {
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
@@ -677,6 +678,24 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/mcp/:server/tools');
         }
         return (await res.json()) as DaemonWorkspaceMcpToolsStatus;
+      },
+    );
+  }
+
+  async workspaceMcpResources(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpResourcesStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/resources`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace/mcp/:server/resources',
+          );
+        }
+        return (await res.json()) as DaemonWorkspaceMcpResourcesStatus;
       },
     );
   }

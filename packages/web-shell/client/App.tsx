@@ -2472,19 +2472,44 @@ export function App({
                   string,
                   Awaited<ReturnType<typeof workspaceActions.loadMcpTools>>
                 > = {};
+                const resourcesByServer: Record<
+                  string,
+                  Awaited<ReturnType<typeof workspaceActions.loadMcpResources>>
+                > = {};
                 await Promise.all(
                   (status?.servers ?? []).map(async (server) => {
-                    try {
-                      toolsByServer[server.name] =
-                        await workspaceActions.loadMcpTools(server.name);
-                    } catch {
-                      // Allow partial failure — other servers still render
-                    }
+                    // Tools and resources load in parallel; a failure in one
+                    // must not hide the other, and per-server failures still
+                    // let sibling servers render.
+                    await Promise.all([
+                      (async () => {
+                        try {
+                          toolsByServer[server.name] =
+                            await workspaceActions.loadMcpTools(server.name);
+                        } catch {
+                          // Allow partial failure — other servers still render
+                        }
+                      })(),
+                      (async () => {
+                        // Skip the round-trip for servers that advertise no
+                        // resources (or older daemons that omit the count).
+                        if (!server.resourceCount) return;
+                        try {
+                          resourcesByServer[server.name] =
+                            await workspaceActions.loadMcpResources(
+                              server.name,
+                            );
+                        } catch {
+                          // Allow partial failure — other servers still render
+                        }
+                      })(),
+                    ]);
                   }),
                 );
                 setMcpDialogMessage({
                   status,
                   toolsByServer,
+                  resourcesByServer,
                   showDescriptions: mcpArg === 'desc',
                   showSchema: mcpArg === 'schema',
                   showTips: !mcpArg,

@@ -187,6 +187,12 @@
   text-align: right;
 }
 
+.resourceCount,
+.promptCount {
+  margin-left: 6px;
+  text-align: right;
+}
+
 .success {
   color: var(--success-color);
 }
@@ -281,6 +287,46 @@
 .tool {
   display: flex;
   flex-direction: column;
+}
+
+.resources {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-color, var(--bg-secondary));
+}
+
+.resources > .sectionTitle {
+  padding: 2px 8px;
+  color: var(--text-secondary);
+}
+
+.resourceUri {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resourceLabel {
+  flex: 0 1 auto;
+  margin-left: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resourceRef {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  color: var(--accent-color, var(--text-primary));
+  word-break: break-all;
 }
 
 .toolDetail {

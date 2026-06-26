@@ -26,6 +26,7 @@ import type {
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
+  ServeWorkspaceMcpResourcesStatus,
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
@@ -456,6 +457,16 @@ export interface AcpSessionBridge {
   getWorkspaceMcpToolsStatus(
     serverName: string,
   ): Promise<ServeWorkspaceMcpToolsStatus>;
+
+  /**
+   * Read discovered MCP resources (`resources/list`) for one server from
+   * the live ACP registry. Drill-down companion to
+   * `getWorkspaceMcpToolsStatus`; the per-server `resourceCount` rides
+   * the base `/workspace/mcp` status.
+   */
+  getWorkspaceMcpResourcesStatus(
+    serverName: string,
+  ): Promise<ServeWorkspaceMcpResourcesStatus>;
 
   /**
    * Read the live built-in tool registry for the bound workspace.

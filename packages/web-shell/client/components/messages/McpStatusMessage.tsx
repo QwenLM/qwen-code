@@ -4,6 +4,7 @@ import type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourcesStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useMcp } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
@@ -36,6 +37,12 @@ type McpPanelActiveEvent = CustomEvent<{ id: string; active: boolean }>;
 interface SerializedMcpStatusMessage {
   status: DaemonWorkspaceMcpStatus;
   toolsByServer: Record<string, DaemonWorkspaceMcpToolsStatus>;
+  /**
+   * Per-server MCP resources, preloaded alongside tools so the dialog can
+   * browse them offline. Keyed by server name. May be absent on messages
+   * serialized by older clients — read defensively (`?? {}`).
+   */
+  resourcesByServer: Record<string, DaemonWorkspaceMcpResourcesStatus>;
   showDescriptions: boolean;
   showSchema: boolean;
   showTips: boolean;
