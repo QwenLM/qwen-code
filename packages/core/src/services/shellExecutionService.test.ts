@@ -39,6 +39,7 @@ const mockGetSystemEncoding = vi.hoisted(() =>
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockSpawnSync = vi.hoisted(() => vi.fn());
+const mockDebugWarn = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
@@ -114,6 +115,22 @@ vi.mock('../utils/systemEncoding.js', () => ({
   getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
   getSystemEncoding: mockGetSystemEncoding,
 }));
+// Spy on debugLogger.warn so the taskkill-failure observability can be asserted
+// (preserve the module's other exports).
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      isEnabled: () => true,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: mockDebugWarn,
+      error: vi.fn(),
+    }),
+  };
+});
 
 const mockProcessKill = vi
   .spyOn(process, 'kill')
@@ -1318,12 +1335,11 @@ describe('ShellExecutionService', () => {
       expect(result.aborted).toBe(true);
       // Cancel tree-kills (/t) SYNCHRONOUSLY (spawnSync) so taskkill enumerates
       // the tree before ptyProcess.kill() fires ClosePseudoConsole. See #5873.
-      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+        expect.objectContaining({ timeout: expect.any(Number) }),
+      );
       // The finalizer reap (async cpSpawn via windowsKillPid) must ALSO
       // tree-kill on cancel — positively asserted so removing the reap or
       // forcing cancelKillDispatched=false fails here, not just trivially via
@@ -1399,6 +1415,26 @@ describe('ShellExecutionService', () => {
       ).not.toThrow();
     });
 
+    it('normal completion on win32 logs when the reap taskkill exits non-zero', async () => {
+      mockPlatform.mockReturnValue('win32');
+      const taskkillProc = new EventEmitter();
+      mockCpSpawn.mockReturnValue(taskkillProc);
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+      expect(result.exitCode).toBe(0);
+
+      // The reap spawned taskkill (taskkillProc) and attached an 'exit'
+      // listener; a launch that succeeds but exits non-zero (denied after
+      // launch) must be logged — otherwise this runtime reap could fail
+      // silently. See #5873.
+      taskkillProc.emit('exit', 1, null);
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('taskkill exited non-zero'),
+      );
+    });
+
     it('normal completion on win32 does NOT taskkill when the pty already exited', async () => {
       mockPlatform.mockReturnValue('win32');
       // isPtyActive -> process.kill(pid, 0) throws => the process is gone, so
@@ -1453,12 +1489,11 @@ describe('ShellExecutionService', () => {
       ShellExecutionService.cleanup();
       ShellExecutionService['activePtys'].delete(pid);
 
-      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(pid),
-      ]);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(pid)],
+        expect.objectContaining({ timeout: expect.any(Number) }),
+      );
       // The ConPTY host is torn down unconditionally, alongside the tree-kill.
       expect(mockPtyProcess.kill).toHaveBeenCalled();
     });
@@ -1529,12 +1564,11 @@ describe('ShellExecutionService', () => {
 
         expect(result.aborted).toBe(true);
         // performCancelKill's sync tree-kill still runs...
-        expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
-          '/f',
-          '/t',
-          '/pid',
-          String(mockPtyProcess.pid),
-        ]);
+        expect(mockSpawnSync).toHaveBeenCalledWith(
+          TASKKILL,
+          ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+          expect.objectContaining({ timeout: expect.any(Number) }),
+        );
         // ...but the finalizer reap is skipped (isPtyActive false via ESRCH),
         // so no async taskkill fires there.
         expect(mockCpSpawn).not.toHaveBeenCalledWith(
@@ -1577,12 +1611,11 @@ describe('ShellExecutionService', () => {
 
       // Pins killChildProcesses on the absolute System32 path — a regression to
       // the bare 'taskkill' name reopens the binary-planting hole. See #5873.
-      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(childPid),
-      ]);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(childPid)],
+        expect.objectContaining({ timeout: expect.any(Number) }),
+      );
     });
 
     it('win32 taskkill is invoked by absolute System32 path, not the bare name', async () => {

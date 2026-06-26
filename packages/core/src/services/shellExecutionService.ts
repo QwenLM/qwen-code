@@ -487,7 +487,23 @@ interface ProcessCleanupStrategy {
 // path AND the current directory, so a taskkill.exe/.bat planted in the
 // workspace or on PATH could run from these cleanup paths with the CLI's
 // environment — arbitrary code execution out of a benign teardown. See #5873.
-const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+// Only trust SystemRoot if it's an absolute drive path. A relative-poisoned
+// value (e.g. SystemRoot=Windows) would otherwise make the resolved taskkill
+// path relative and re-open CWD resolution — the very planting vector this
+// closes. Fall back to the canonical absolute path otherwise.
+const WINDOWS_SYSTEM_ROOT = process.env['SystemRoot'];
+const WINDOWS_TASKKILL =
+  WINDOWS_SYSTEM_ROOT && /^[A-Za-z]:[\\/]/.test(WINDOWS_SYSTEM_ROOT)
+    ? `${WINDOWS_SYSTEM_ROOT}\\System32\\taskkill.exe`
+    : 'C:\\Windows\\System32\\taskkill.exe';
+
+// Bound the *synchronous* taskkill calls so a hung taskkill (antivirus /
+// endpoint-security hooking the spawn, extreme I/O pressure) can't block the
+// Node event loop indefinitely — the POSIX path has its SIGKILL escalation as a
+// natural bound; the Windows spawnSync path otherwise has none. On timeout
+// spawnSync returns { error: ETIMEDOUT } and the caller's ptyProcess.kill /
+// child.kill fallback still runs. taskkill normally completes well under 1s.
+const TASKKILL_TIMEOUT_MS = 5000;
 
 const windowsKillPid = (pid: number, tree: boolean): void => {
   try {
@@ -535,7 +551,9 @@ const windowsStrategy: ProcessCleanupStrategy = {
       // before the process dies (and a sync stderr write would be exit-time
       // noise). The unconditional ptyProcess.kill() below is the mitigation;
       // the runtime reap paths (windowsKillPid), which DO flush, keep logging.
-      spawnSync(WINDOWS_TASKKILL, ['/f', '/t', '/pid', pid.toString()]);
+      spawnSync(WINDOWS_TASKKILL, ['/f', '/t', '/pid', pid.toString()], {
+        timeout: TASKKILL_TIMEOUT_MS,
+      });
     } catch {
       // ignore
     }
@@ -559,7 +577,7 @@ const windowsStrategy: ProcessCleanupStrategy = {
         }
         // No logging — like killPty, this runs only from the 'exit' handler
         // where an async debug write can't flush before the process dies.
-        spawnSync(WINDOWS_TASKKILL, args);
+        spawnSync(WINDOWS_TASKKILL, args, { timeout: TASKKILL_TIMEOUT_MS });
       } catch {
         // ignore
       }
@@ -1249,8 +1267,15 @@ export class ShellExecutionService {
             // Mirrors the POSIX branch's child.kill below and the PTY cancel's
             // ptyProcess.kill fallback. See #5873.
             const killChildFallback = (why: string) => {
+              // child.kill('SIGKILL') terminates only the shell pid, not its
+              // descendants — taskkill is our only tree-kill on Windows. So if
+              // taskkill is consistently broken (AV / lockdown / EMFILE), a
+              // cancelled command's descendant tree leaks (the #5873 OOM on this
+              // path). Nothing else can tree-kill here; make the diagnostic
+              // unambiguous. A sync taskkill retry is deliberately NOT attempted:
+              // it would likely fail the same way and could block the event loop.
               debugLogger.warn(
-                `performCancelKill (child_process): taskkill ${why} for pid ${child.pid}; falling back to child.kill`,
+                `performCancelKill (child_process): taskkill ${why} for pid ${child.pid}; falling back to child.kill (descendant tree may leak)`,
               );
               if (!exited) {
                 try {
@@ -2200,12 +2225,11 @@ export class ShellExecutionService {
             // cancel path). ptyProcess.kill() alone doesn't tree-kill under
             // ConPTY (microsoft/node-pty#333).
             try {
-              const r = spawnSync(WINDOWS_TASKKILL, [
-                '/f',
-                '/t',
-                '/pid',
-                ptyProcess.pid.toString(),
-              ]);
+              const r = spawnSync(
+                WINDOWS_TASKKILL,
+                ['/f', '/t', '/pid', ptyProcess.pid.toString()],
+                { timeout: TASKKILL_TIMEOUT_MS },
+              );
               if (r.error || (typeof r.status === 'number' && r.status !== 0)) {
                 debugLogger.warn(
                   `performCancelKill: taskkill failed for pid ${ptyProcess.pid}: ${r.error?.message ?? `exit ${r.status}`}`,
