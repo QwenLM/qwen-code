@@ -218,6 +218,15 @@ export class IdeClient {
       }
     }
 
+    if (this.workspaceRejectedPorts.size > 0) {
+      this.setState(
+        IDEConnectionStatus.Disconnected,
+        `Found IDE companion extension, but its workspace does not match the current directory. Run Qwen Code from the workspace open in your IDE, or switch the IDE to this project.`,
+        true,
+      );
+      return;
+    }
+
     this.setState(
       IDEConnectionStatus.Disconnected,
       `Failed to connect to IDE companion extension in ${this.currentIde.displayName}. Please ensure the extension is running. To install the extension, run /ide install.`,
@@ -647,11 +656,18 @@ export class IdeClient {
 
     const ideDir = Storage.getGlobalIdeDir();
     const configs = await this.getAllConnectionConfigs(ideDir);
-    return configs.find(
-      (config) =>
-        config.workspacePath !== undefined &&
-        IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid,
-    );
+    for (const config of configs) {
+      if (config.workspacePath === undefined) {
+        continue;
+      }
+      if (IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid) {
+        return config;
+      }
+      if (config.port) {
+        this.workspaceRejectedPorts.add(config.port);
+      }
+    }
+    return undefined;
   }
 
   // Legacy connection files were written in the global temp directory.
@@ -815,6 +831,7 @@ export class IdeClient {
       }
 
       if (config.workspacePath === undefined) {
+        // Fallback keeps old extension locks usable after a stale primary port fails.
         otherConfigs.push(config);
       } else if (
         IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid
