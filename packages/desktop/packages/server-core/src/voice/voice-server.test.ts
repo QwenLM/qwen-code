@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   closeVoiceServerResources,
   isAllowedVoiceOrigin,
+  terminateVoiceClients,
   tokenMatches,
 } from './voice-server'
 
@@ -66,5 +67,30 @@ describe('closeVoiceServerResources', () => {
     expect(closeAllConnectionsCalled).toBe(true)
     expect(wssClosed).toBe(true)
     expect(clientTerminated).toBe(true)
+  })
+})
+
+describe('terminateVoiceClients', () => {
+  it('terminates active voice clients', () => {
+    let firstTerminated = false
+    let secondTerminated = false
+
+    terminateVoiceClients({
+      clients: new Set([
+        {
+          terminate: () => {
+            firstTerminated = true
+          },
+        },
+        {
+          terminate: () => {
+            secondTerminated = true
+          },
+        },
+      ]),
+    })
+
+    expect(firstTerminated).toBe(true)
+    expect(secondTerminated).toBe(true)
   })
 })

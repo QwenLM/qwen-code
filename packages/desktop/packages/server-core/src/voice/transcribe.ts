@@ -56,7 +56,7 @@ interface ChatCompletionResponse {
 export async function transcribeQwenAsrBatch(
   audio: VoiceAudio,
   config: VoiceConfig,
-  options: { language?: string } = {},
+  options: { language?: string; signal?: AbortSignal } = {},
   fetchFn: typeof fetch = fetch,
 ): Promise<string> {
   if (audio.data.byteLength > MAX_AUDIO_BYTES) {
@@ -93,6 +93,11 @@ export async function transcribeQwenAsrBatch(
     headers['Authorization'] = `Bearer ${config.apiKey}`;
   }
 
+  const timeoutSignal = AbortSignal.timeout(INFERENCE_TIMEOUT_MS);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, timeoutSignal])
+    : timeoutSignal;
+
   let response: Response;
   try {
     response = await fetchFn(
@@ -106,7 +111,7 @@ export async function transcribeQwenAsrBatch(
           asr_options: asrOptions,
         }),
         redirect: 'error',
-        signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
+        signal,
       },
     );
   } catch (error) {

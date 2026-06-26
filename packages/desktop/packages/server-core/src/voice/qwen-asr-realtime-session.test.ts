@@ -147,4 +147,33 @@ describe('openQwenAsrRealtimeStream', () => {
     await expect(finishPromise).rejects.toThrow('upstream rejected audio')
     await expect(finishPromise).rejects.not.toThrow('\u001b')
   })
+
+  it('keeps trailing partial text in the final transcript', async () => {
+    const socket = new FakeSocket()
+    const streamPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('message', JSON.stringify({ type: 'session.created' }))
+    socket.emit('message', JSON.stringify({ type: 'session.updated' }))
+    const stream = await streamPromise
+    socket.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.text',
+        text: 'hello',
+        stash: ' world',
+      }),
+    )
+
+    const finishPromise = stream.finish()
+    socket.emit('message', JSON.stringify({ type: 'session.finished' }))
+
+    await expect(finishPromise).resolves.toBe('hello world')
+  })
 })

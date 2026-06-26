@@ -27,6 +27,10 @@ class FakeWebSocket {
     for (const cb of this.handlers.get('message') ?? []) cb(data, isBinary)
   }
 
+  emitClose() {
+    for (const cb of this.handlers.get('close') ?? []) cb()
+  }
+
   sentJson() {
     return this.sent.map((message) => JSON.parse(message))
   }
@@ -137,5 +141,96 @@ describe('createVoiceConnectionHandler', () => {
     })
     expect(streamLanguage).toBe('en')
     expect(aborted).toBe(false)
+  })
+
+  it('aborts in-flight batch transcription when the socket closes', async () => {
+    let signal: AbortSignal | undefined
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+      transcribeBatch: async (_config, _pcm, abortSignal) => {
+        signal = abortSignal
+        await new Promise(() => {})
+        return ''
+      },
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+    ws.emitMessage(Buffer.from([1, 2, 3, 4]), true)
+    await flush()
+    ws.emitMessage(JSON.stringify({ type: 'stop' }))
+    await flush()
+    ws.emitClose()
+
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it('ignores trailing audio while a streaming session is finalizing', async () => {
+    let finish!: () => void
+    let aborted = false
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash-realtime',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+      openStream: async () => ({
+        pushAudio: () => {},
+        finish: async () => {
+          await new Promise<void>((resolve) => {
+            finish = resolve
+          })
+          return 'final transcript'
+        },
+        abort: () => {
+          aborted = true
+        },
+      }),
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+    ws.emitMessage(JSON.stringify({ type: 'stop' }))
+    await flush()
+    ws.emitMessage(Buffer.alloc(21 * 1024 * 1024), true)
+    await flush()
+
+    expect(aborted).toBe(false)
+    expect(ws.closes).not.toContainEqual({
+      code: 1011,
+      reason: 'voice error',
+    })
+
+    finish()
+    await flush()
+  })
+
+  it('rejects unbounded queued control messages', () => {
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: async () => {
+        await new Promise(() => {})
+        return {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        }
+      },
+    })
+
+    handler(ws as never)
+    for (let i = 0; i < 65; i++) {
+      ws.emitMessage(JSON.stringify({ type: 'start' }))
+    }
+
+    expect(ws.sentJson()).toContainEqual({
+      type: 'error',
+      message: 'Too many pending voice messages.',
+    })
   })
 })

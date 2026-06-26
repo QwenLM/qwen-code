@@ -100,6 +100,7 @@ export function openVoiceStream(
     let started = false;
     let settled = false;
     let committed = '';
+    let lastPartial = '';
     let finishPromise: Promise<string> | null = null;
     let finishResolve: ((text: string) => void) | null = null;
     let finishReject: ((error: unknown) => void) | null = null;
@@ -271,11 +272,13 @@ export function openVoiceStream(
             committed = committed
               ? `${committed} ${sentence.text}`
               : sentence.text;
+            lastPartial = '';
             callbacks.onInterim?.(committed);
           } else {
             const running = committed
               ? `${committed} ${sentence.text}`
               : sentence.text;
+            lastPartial = running;
             callbacks.onInterim?.(running);
           }
         }
@@ -286,7 +289,7 @@ export function openVoiceStream(
           fail(new Error('Voice stream finished before it started.'));
           return;
         }
-        finishedTranscript = committed.trim();
+        finishedTranscript = lastPartial.trim() || committed.trim();
         settled = true;
         clearConnectTimer();
         clearFinishTimer();

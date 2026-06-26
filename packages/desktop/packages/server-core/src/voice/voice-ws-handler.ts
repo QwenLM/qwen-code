@@ -49,6 +49,7 @@ const MAX_QUEUED_AUDIO_BYTES = MAX_AUDIO_BYTES * 2;
 const MAX_CONNECTION_MS = 6 * 60_000;
 // Cap concurrent sessions so a client can't open unbounded sockets.
 const MAX_CONCURRENT_VOICE_SESSIONS = 8;
+const MAX_PENDING_OPERATIONS = 64;
 
 interface VoiceContext {
   config: VoiceConfig;
@@ -62,7 +63,11 @@ export interface VoiceHandlerDeps {
     config: VoiceConfig,
     callbacks: VoiceStreamCallbacks,
   ) => Promise<VoiceStreamSession>;
-  transcribeBatch?: (config: VoiceConfig, pcm: Uint8Array) => Promise<string>;
+  transcribeBatch?: (
+    config: VoiceConfig,
+    pcm: Uint8Array,
+    signal: AbortSignal,
+  ) => Promise<string>;
   logger?: Logger;
 }
 
@@ -96,11 +101,13 @@ async function defaultOpenStreamFor(
 async function defaultTranscribeBatch(
   config: VoiceConfig,
   pcm: Uint8Array,
+  signal: AbortSignal,
 ): Promise<string> {
   await assertVoiceBaseUrlNetworkAllowed(config.baseUrl, config.model);
   return transcribeQwenAsrBatch(
     { data: encodeWav(pcm), mimeType: 'audio/wav' },
     config,
+    { signal },
   );
 }
 
@@ -139,6 +146,9 @@ export function createVoiceConnectionHandler(
 
   return (ws: WebSocket) => {
     if (activeSessions >= MAX_CONCURRENT_VOICE_SESSIONS) {
+      log?.warn(
+        `[voice-ws] rejected: activeSessions=${activeSessions} limit=${MAX_CONCURRENT_VOICE_SESSIONS}`,
+      );
       try {
         ws.send(
           JSON.stringify({
@@ -169,6 +179,7 @@ export function createVoiceConnectionHandler(
     let bufferedBytes = 0;
     let queuedBytes = 0;
     let pendingOperations = 0;
+    const abortController = new AbortController();
     // Serialize message handling so async start/push/finalize never interleave.
     let chain: Promise<void> = Promise.resolve();
 
@@ -197,6 +208,7 @@ export function createVoiceConnectionHandler(
 
     function cleanup(): void {
       state = 'closed';
+      abortController.abort();
       clearTimeout(hardTimer);
       if (session) {
         try {
@@ -214,7 +226,7 @@ export function createVoiceConnectionHandler(
 
     function fail(message: string): void {
       if (state === 'closed') return;
-      log?.debug(`[voice-ws] failed: ${message}`);
+      log?.warn(`[voice-ws] failed: ${message}`);
       sendJson({ type: 'error', message });
       cleanup();
       releaseSlotWhenIdle();
@@ -290,7 +302,11 @@ export function createVoiceConnectionHandler(
             }
           }
         } else if (pcmChunks.length > 0) {
-          transcript = await transcribeBatch(ctx.config, Buffer.concat(pcmChunks));
+          transcript = await transcribeBatch(
+            ctx.config,
+            Buffer.concat(pcmChunks),
+            abortController.signal,
+          );
         }
       } catch (error) {
         fail(errMessage(error));
@@ -310,16 +326,16 @@ export function createVoiceConnectionHandler(
       if (isBinary) {
         await ensureStarted();
         if (isClosed() || !ctx) return;
+        bufferedBytes += data.byteLength;
+        if (bufferedBytes > MAX_AUDIO_BYTES) {
+          fail('Recording is too long for transcription (max ~5 minutes).');
+          return;
+        }
         if (ctx.streaming) {
           const active =
             session ?? (sessionPromise ? await sessionPromise : undefined);
           active?.pushAudio(data);
         } else {
-          bufferedBytes += data.byteLength;
-          if (bufferedBytes > MAX_AUDIO_BYTES) {
-            fail('Recording is too long for transcription (max ~5 minutes).');
-            return;
-          }
           pcmChunks.push(data);
         }
         return;
@@ -339,6 +355,7 @@ export function createVoiceConnectionHandler(
     }
 
     ws.on('message', (data: RawData, isBinary: boolean) => {
+      if (state === 'closed' || state === 'finalizing') return;
       const buf = toBuffer(data);
       if (!isBinary) {
         const control = parseControl(buf.toString('utf8'));
@@ -362,9 +379,14 @@ export function createVoiceConnectionHandler(
           return;
         }
       }
+      if (pendingOperations >= MAX_PENDING_OPERATIONS) {
+        fail('Too many pending voice messages.');
+        releaseSlotWhenIdle();
+        return;
+      }
+      pendingOperations++;
       chain = chain
         .then(async () => {
-          pendingOperations++;
           try {
             await handleMessage(buf, isBinary);
           } finally {
@@ -385,7 +407,7 @@ export function createVoiceConnectionHandler(
       releaseSlotWhenIdle();
     });
     ws.on('error', (error: Error) => {
-      log?.debug(`[voice-ws] socket error: ${error.message}`);
+      log?.warn(`[voice-ws] socket error: ${error.message}`);
       if (state !== 'closed') cleanup();
       releaseSlotWhenIdle();
     });

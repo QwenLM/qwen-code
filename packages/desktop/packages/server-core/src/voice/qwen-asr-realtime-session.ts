@@ -66,6 +66,7 @@ export function openQwenAsrRealtimeStream(
     let opened = false;
     let openSettled = false;
     let committed = '';
+    let lastPartial = '';
     let finishPromise: Promise<string> | null = null;
     let finishResolve: ((text: string) => void) | null = null;
     let finishReject: ((error: unknown) => void) | null = null;
@@ -224,12 +225,14 @@ export function openQwenAsrRealtimeStream(
           const text = typeof msg.text === 'string' ? msg.text : '';
           const stash = typeof msg.stash === 'string' ? msg.stash : '';
           const preview = `${text}${stash}`.trim();
-          callbacks.onInterim?.([committed, preview].filter(Boolean).join(' '));
+          lastPartial = [committed, preview].filter(Boolean).join(' ');
+          callbacks.onInterim?.(lastPartial);
           break;
         }
         case 'conversation.item.input_audio_transcription.completed':
           if (typeof msg.transcript === 'string') {
             committed = appendTranscript(committed, msg.transcript);
+            lastPartial = '';
             callbacks.onInterim?.(committed);
           }
           break;
@@ -255,7 +258,7 @@ export function openQwenAsrRealtimeStream(
           }
           failed = true;
           clearFinishTimer();
-          finishedTranscript = committed.trim();
+          finishedTranscript = lastPartial.trim() || committed.trim();
           finishResolve?.(finishedTranscript);
           finishResolve = null;
           finishReject = null;

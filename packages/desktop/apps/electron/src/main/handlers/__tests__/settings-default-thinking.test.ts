@@ -69,6 +69,10 @@ mock.module('@craft-agent/shared/config', () => ({
   isProtectedWorkspace: () => false,
 }));
 
+mock.module('@craft-agent/shared/config/storage', () => ({
+  setVoiceModel: setVoiceModelMock,
+}));
+
 mock.module('@craft-agent/shared/workspaces', () => ({
   loadWorkspaceConfig: loadWorkspaceConfigMock,
 }));

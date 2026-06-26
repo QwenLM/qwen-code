@@ -71,6 +71,18 @@ export function isAllowedVoiceOrigin(
   );
 }
 
+export function terminateVoiceClients(
+  wss: Pick<ClosableWebSocketServer, 'clients'>,
+): void {
+  for (const client of wss.clients) {
+    try {
+      client.terminate();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 export function closeVoiceServerResources(
   httpServer: ClosableHttpServer,
   wss: ClosableWebSocketServer,
@@ -87,13 +99,7 @@ export function closeVoiceServerResources(
     const timer = setTimeout(finish, timeoutMs);
     timer.unref?.();
 
-    for (const client of wss.clients) {
-      try {
-        client.terminate();
-      } catch {
-        // ignore
-      }
-    }
+    terminateVoiceClients(wss);
     httpServer.closeAllConnections?.();
     wss.close();
     httpServer.close(finish);
@@ -115,6 +121,14 @@ export async function startVoiceServer(
     maxPayload: VOICE_MAX_PAYLOAD_BYTES,
   });
   const handle = createVoiceConnectionHandler(options);
+  const enabledTimer = options.isEnabled
+    ? setInterval(() => {
+        if (!options.isEnabled?.()) {
+          terminateVoiceClients(wss);
+        }
+      }, 1000)
+    : undefined;
+  enabledTimer?.unref?.();
 
   httpServer.on('upgrade', (req, socket, head) => {
     // A raw socket error during the upgrade window would otherwise crash the
@@ -178,6 +192,7 @@ export async function startVoiceServer(
     url: `ws://${host}:${port}/voice/stream`,
     close: () => {
       if (!closePromise) {
+        if (enabledTimer) clearInterval(enabledTimer);
         closePromise = closeVoiceServerResources(httpServer, wss);
       }
       return closePromise;
