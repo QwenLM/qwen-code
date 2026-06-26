@@ -391,11 +391,6 @@ jobs:
             echo "Dry run enabled. Skipping push."
           fi
 
-      - name: 'Build Bundle and Prepare Package'
-        run: |-
-          npm run bundle
-          npm run prepare:package
-
       - name: 'Download audio capture prebuilds'
         if: |-
           ${{ github.repository == 'QwenLM/qwen-code' }}
@@ -403,6 +398,13 @@ jobs:
         with:
           name: 'audio-capture-prebuilds'
           path: 'packages/audio-capture/prebuilds'
+
+      - name: 'Build Bundle and Prepare Package'
+        env:
+          QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+        run: |-
+          npm run bundle
+          npm run prepare:package
 
       - name: 'Build Standalone Archives'
         env:
@@ -510,6 +512,7 @@ jobs:
             pr_url="$(gh pr create \
               --base main \
               --head "${RELEASE_BRANCH}" \
+              --label 'skip-changelog' \
               --title "chore(release): ${RELEASE_TAG}" \
               --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
           fi
@@ -540,10 +543,14 @@ jobs:
           # Keep [skip ci] only on the squash commit that lands on main. The
           # release branch commit and PR title intentionally omit it so tag-push
           # workflows and PR metadata stay unaffected.
+          #
+          # No --delete-branch: main has a merge queue, and gh rejects
+          # --delete-branch when one is enabled (the queue owns the merge, so
+          # head-branch deletion is governed by the repo's
+          # "Automatically delete head branches" setting instead).
           gh pr merge "${PR_URL}" \
             --squash \
             --auto \
-            --delete-branch \
             --subject "chore(release): ${RELEASE_TAG} [skip ci]"
 
   notify_failure:

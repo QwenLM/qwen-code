@@ -135,21 +135,15 @@ function isHiddenInCompactMode(item: HistoryItem): boolean {
  * Ctrl+O for plain-chat sessions that have neither tool calls nor thinking
  * blocks regardless of conversation length.
  *
- * Conservative: returns true for any `tool_group`, even though a history of
- * only force-expanded groups would technically render the same way in both
- * modes (force-expand groups bypass the compact-rendering path and their
- * adjacent `tool_use_summary` items are not absorbed). Distinguishing
- * force-expand from regular groups requires `embeddedShellFocused` and
- * `activePtyId`, which are not cheaply available at the keypress handler
- * call site — we accept the false-positive in exchange for keeping this
- * predicate self-contained and O(N).
+ * Currently only `gemini_thought` and `gemini_thought_content` items are
+ * affected by compact mode. Tool groups use type-based partitioning that
+ * is independent of compact mode.
  */
 export function compactToggleHasVisualEffect(
   history: readonly HistoryItem[],
 ): boolean {
   for (const item of history) {
     if (
-      item.type === 'tool_group' ||
       item.type === 'gemini_thought' ||
       item.type === 'gemini_thought_content'
     ) {
