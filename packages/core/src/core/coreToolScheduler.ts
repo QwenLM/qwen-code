@@ -3234,12 +3234,25 @@ export class CoreToolScheduler {
           );
           this.notifyToolCallsUpdate();
         };
+        const canPromoteForegroundShell = () => {
+          const promotableShells = this.toolCalls.filter(
+            (tc) =>
+              tc.status === 'executing' &&
+              tc.request.name === ToolNames.SHELL &&
+              tc.promoteAbortController !== undefined,
+          );
+          return (
+            promotableShells.length === 1 &&
+            promotableShells[0]?.request.callId === callId
+          );
+        };
         promise = invocation.execute(
           signal,
           liveOutputCallback,
           shellExecutionConfig,
           setPidCallback,
           setPromoteAbortControllerCallback,
+          canPromoteForegroundShell,
         );
       } else {
         promise = invocation.execute(
