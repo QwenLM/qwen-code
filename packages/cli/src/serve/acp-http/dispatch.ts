@@ -2775,8 +2775,15 @@ export class AcpDispatcher {
         }
       }
       // Safety: a live-only subscription (no cursor → no replay boundary) or a
-      // clean end without a boundary frame still releases anything deferred.
-      flushDeferred();
+      // clean end without a boundary frame still releases anything deferred —
+      // but NOT if this pump was aborted. An abort means the stream was
+      // detached/reclaimed; flushing here could drain the deferred reply onto a
+      // RECLAIMING stream ahead of its own replay (reintroducing the very out-of-
+      // order delivery the deferral prevents). The reclaiming pump owns the
+      // buffer then and will flush after its replay boundary. On an iterator
+      // error mid-replay (the catch below) the deferred frames likewise stay
+      // buffered for the next attach — never lost, just delivered next round.
+      if (!signal.aborted) flushDeferred();
     } catch (err) {
       // Symmetric for the SYNC `subscribeEvents` throw and a MID-STREAM
       // iterator error: surface a `stream_error` to the client, then re-throw

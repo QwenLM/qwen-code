@@ -19,9 +19,14 @@ function safeLogValue(raw: unknown): string {
 }
 
 /**
- * Parse a `Last-Event-ID` header into a bus event id, shared by the REST
- * (`GET /session/:id/events`) and ACP (`GET /acp`) SSE surfaces so their
- * accept/reject rules can't drift.
+ * Parse a `Last-Event-ID` header into a bus event id for the ACP `GET /acp`
+ * SSE surface.
+ *
+ * NOTE: the REST `GET /session/:id/events` surface still has its own copy in
+ * `server/request-helpers.ts` (the two implement the same accept/reject rule).
+ * Unifying them onto this util is a worthwhile cleanup but is deliberately
+ * deferred: it would change the REST surface, and this PR keeps REST untouched
+ * (no behavioural side effects). Tracked as a follow-up.
  *
  * Stricter than `Number.parseInt`: accept ONLY pure decimal digits (so
  * "1abc" / "1.5" don't silently parse to 1) and reject values past

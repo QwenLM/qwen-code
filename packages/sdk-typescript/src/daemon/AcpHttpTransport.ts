@@ -11,6 +11,7 @@ import type {
   DaemonTransportSubscribeOptions,
 } from './DaemonTransport.js';
 import { DaemonTransportClosedError } from './DaemonTransport.js';
+import { consumeFrames } from './sse.js';
 import {
   denormalizeAcpNotification,
   type JsonRpcNotification,
@@ -23,6 +24,14 @@ import {
   composeAbortSignals,
   mergeHeaders,
 } from './acpTransportUtils.js';
+
+/**
+ * Cap the unread SSE buffer of the session-stream parser. Mirrors
+ * `parseSseStream`'s `MAX_BUF_CHARS` — an unbounded buffer is a memory-pressure
+ * vector (a tab crash for browser consumers) if a server/proxy never emits a
+ * frame boundary or serves a non-SSE body.
+ */
+const MAX_SSE_BUF_CHARS = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -356,23 +365,36 @@ export class AcpHttpTransport implements DaemonTransport {
         ]);
         if (done) break;
         buf += decoder.decode(value, { stream: true });
+        if (buf.length > MAX_SSE_BUF_CHARS) {
+          throw new Error(
+            `AcpHttpTransport: unread SSE buffer exceeded ${MAX_SSE_BUF_CHARS} ` +
+              `bytes without a frame boundary`,
+          );
+        }
 
-        let idx: number;
-        while ((idx = buf.indexOf('\n\n')) !== -1) {
-          const rawFrame = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-
+        // Reuse the shared CRLF-aware frame splitter (handles both `\n\n` and
+        // `\r\n\r\n`) instead of reimplementing it.
+        const { frames, tail } = consumeFrames(buf);
+        buf = tail;
+        for (const rawFrame of frames) {
           let busId: number | undefined;
-          let dataLine: string | undefined;
-          for (const line of rawFrame.split('\n')) {
+          const dataParts: string[] = [];
+          for (const rawLine of rawFrame.split('\n')) {
+            // Strip a trailing CR so CRLF line endings don't corrupt JSON.parse.
+            const line = rawLine.endsWith('\r')
+              ? rawLine.slice(0, -1)
+              : rawLine;
             if (line.startsWith('id:')) {
               const n = Number(line.slice(3).trim());
               if (Number.isInteger(n)) busId = n;
             } else if (line.startsWith('data:')) {
-              dataLine = line.slice('data:'.length).replace(/^ /, '');
+              // Per the SSE spec, multiple `data:` lines in one event join with
+              // a newline.
+              dataParts.push(line.slice('data:'.length).replace(/^ /, ''));
             }
           }
-          if (dataLine === undefined) continue;
+          if (dataParts.length === 0) continue;
+          const dataLine = dataParts.join('\n');
 
           let msg: unknown;
           try {

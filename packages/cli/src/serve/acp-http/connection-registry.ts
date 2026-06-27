@@ -337,10 +337,15 @@ export class AcpConnection {
   ): SessionBinding {
     const binding = this.getOrCreateSession(sessionId);
     // Reclaim: a reconnect within the grace window cancels the pending
-    // teardown so ownership/prompt survive the transport-level blip.
+    // teardown so ownership/prompt survive the transport-level blip. Log it so
+    // an operator can tell "reclaimed within grace" apart from a first attach
+    // (the detach + grace-expiry paths already log; this completes the trail).
     if (binding.graceTimer) {
       clearTimeout(binding.graceTimer);
       binding.graceTimer = undefined;
+      writeStderrLine(
+        `qwen serve: /acp session reclaimed within grace (${logSafe(sessionId)})`,
+      );
     }
     const prevStream = binding.stream;
     binding.abort.abort();
