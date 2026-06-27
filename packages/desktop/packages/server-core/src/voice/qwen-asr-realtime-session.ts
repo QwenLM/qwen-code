@@ -291,6 +291,9 @@ export function openQwenAsrRealtimeStream(
       clearConnectTimer();
       clearFinishTimer();
       if (settled) return;
+      // Every branch below is terminal; mark settled so a late error/close event
+      // can't re-enter via fail() and double-fire reject/onError.
+      settled = true;
       if (!openSettled) {
         openSettled = true;
         reject(new Error('Qwen ASR realtime connection closed.'));

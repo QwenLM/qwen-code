@@ -76,8 +76,12 @@ export interface VoiceUpgradeRejection {
 
 /**
  * Decide whether a voice upgrade request must be rejected, in guard order
- * (path → disabled → origin → token). Returns `null` to allow the upgrade.
+ * (path → token → disabled → origin). Returns `null` to allow the upgrade.
  * Pure so the guards are testable without going over the wire.
+ *
+ * The token check runs before `isEnabled` because `isEnabled` reads config from
+ * disk (uncached); gating it behind auth stops an unauthenticated client from
+ * triggering a disk read on every upgrade attempt.
  */
 export function classifyVoiceUpgrade(args: {
   pathname: string;
@@ -90,14 +94,14 @@ export function classifyVoiceUpgrade(args: {
   if (args.pathname !== '/voice/stream') {
     return { status: 404, statusText: 'Not Found', reason: 'bad-path' };
   }
+  if (!tokenMatches(args.token, args.expectedToken)) {
+    return { status: 401, statusText: 'Unauthorized', reason: 'bad-token' };
+  }
   if (args.isEnabled && !args.isEnabled()) {
     return { status: 403, statusText: 'Forbidden', reason: 'disabled' };
   }
   if (!isAllowedVoiceOrigin(args.origin, args.allowedOrigins)) {
     return { status: 403, statusText: 'Forbidden', reason: 'bad-origin' };
-  }
-  if (!tokenMatches(args.token, args.expectedToken)) {
-    return { status: 401, statusText: 'Unauthorized', reason: 'bad-token' };
   }
   return null;
 }

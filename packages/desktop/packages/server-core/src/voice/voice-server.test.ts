@@ -167,6 +167,26 @@ describe('classifyVoiceUpgrade', () => {
   it('allows a valid upgrade (returns null)', () => {
     expect(classifyVoiceUpgrade(base)).toBeNull()
   })
+
+  it('checks the token before the disk-reading isEnabled guard', () => {
+    // isEnabled wraps loadStoredConfig (an uncached disk read); a bad token must
+    // short-circuit before it so unauthenticated upgrades never touch disk.
+    let isEnabledCalls = 0
+    const result = classifyVoiceUpgrade({
+      ...base,
+      token: 'wrong',
+      isEnabled: () => {
+        isEnabledCalls++
+        return false
+      },
+    })
+    expect(result).toEqual({
+      status: 401,
+      statusText: 'Unauthorized',
+      reason: 'bad-token',
+    })
+    expect(isEnabledCalls).toBe(0)
+  })
 })
 
 interface FakeLogger extends Logger {

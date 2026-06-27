@@ -208,4 +208,29 @@ describe('openQwenAsrRealtimeStream', () => {
 
     await expect(finishPromise).resolves.toBe('hello world')
   })
+
+  it('does not double-fire onError when a close is followed by another terminal event', async () => {
+    const socket = new FakeSocket()
+    const errors: Error[] = []
+    const streamPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      { onError: (error) => errors.push(error) },
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('message', JSON.stringify({ type: 'session.created' }))
+    socket.emit('message', JSON.stringify({ type: 'session.updated' }))
+    await streamPromise
+
+    // The first close fires onError once; a late error/close must not re-fire it.
+    socket.emit('close')
+    socket.emit('error', new Error('late error'))
+    socket.emit('close')
+
+    expect(errors).toHaveLength(1)
+    expect(errors[0]?.message).toContain('closed unexpectedly')
+  })
 })
