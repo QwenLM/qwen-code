@@ -932,11 +932,14 @@ export function mountAcpHttp(
             // that ITSELF needs `mcp_message` response frames delivered on
             // THIS same serialized queue — awaiting it inline would deadlock
             // (responses queued behind the still-in-flight register). Mirror
-            // the `session/prompt` fire-and-forget pattern: dispatch off the
-            // queue and ack when it resolves. `mcp_message` is a synchronous
-            // correlation resolve, so it stays inline (keeps ordering).
-            const isFireAndForget = frameType !== 'mcp_message';
-            if (isFireAndForget) {
+            // the `session/prompt` pattern: dispatch off the queue and ack when
+            // it resolves. NOTE the naming: register/unregister still EXPECT a
+            // response frame (`mcp_registered`/`mcp_error`) — they're just
+            // dispatched off-queue, not awaited inline. `mcp_message` is itself a
+            // synchronous correlation response, so it stays inline (keeps
+            // ordering) and needs no ack.
+            const dispatchOffQueue = frameType !== 'mcp_message';
+            if (dispatchOffQueue) {
               // DoS guard: the dispatch below is NOT awaited, so a burst of
               // register/unregister frames would otherwise spawn unbounded
               // concurrent provider round-trips. Reject once at the cap.
@@ -971,7 +974,7 @@ export function mountAcpHttp(
                 // mcp_unregister callers block on a response frame, so without
                 // an mcp_error here they hang. mcp_message is a reply (not a
                 // request), so it needs no ack.
-                if (isFireAndForget) {
+                if (dispatchOffQueue) {
                   safeWsSend(
                     ws,
                     JSON.stringify({
@@ -984,7 +987,7 @@ export function mountAcpHttp(
                 }
               })
               .finally(() => {
-                if (isFireAndForget) clientMcpInflightDispatch--;
+                if (dispatchOffQueue) clientMcpInflightDispatch--;
               });
             if (frameType === 'mcp_message') {
               await handleP;

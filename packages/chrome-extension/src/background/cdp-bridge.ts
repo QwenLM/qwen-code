@@ -283,6 +283,14 @@ async function handleAttach(
       attaching = false;
       releaseRequestedDuringAttach = false;
       console.log(LOG_PREFIX, 'release arrived during attach; tearing down');
+      // Ack the attach (as an error) before tearing down: the daemon's reverse
+      // link is awaiting a `cdp_attached` for this id, so without it the
+      // puppeteer client hangs until the ~170s CDP command timeout.
+      send({
+        type: 'cdp_attached',
+        id: frame.id,
+        error: { message: 'released during attach' },
+      });
       shutdownCdpBridge();
       return;
     }
