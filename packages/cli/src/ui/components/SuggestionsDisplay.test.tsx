@@ -166,7 +166,7 @@ describe('SuggestionsDisplay', () => {
 
     const lines = (lastFrame() ?? '').split('\n');
 
-    expect(lines[0]).toMatch(/^  pr/);
+    expect(lines[0]).toMatch(/^ {2}pr/);
     expect(lines[1]).toMatch(/^> issue-to-pr/);
   });
 });
