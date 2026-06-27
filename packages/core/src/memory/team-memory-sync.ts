@@ -37,18 +37,26 @@ export interface TeamMemorySyncResult {
 /**
  * Best-effort git command. Returns stdout on success, or null on any failure.
  * Uses execFile (no shell) so paths with spaces / metacharacters are safe.
+ *
+ * `killSignal` is chosen PER OP because Node's `timeout` does not escalate: a
+ * git child that traps/blocks the signal hangs past the timeout. SIGKILL is
+ * unblockable but skips cleanup, so it is safe ONLY for read-only / network ops
+ * (no index/lock to corrupt) — which are also the hang-prone ones. MUTATING ops
+ * (add/commit) default to SIGTERM so git can release `index.lock` and finish
+ * cleanup; these are fast and don't hang in practice. Default SIGTERM is the
+ * safe-for-mutation choice for any unspecified call site.
  */
-async function tryGit(cwd: string, args: string[]): Promise<string | null> {
+async function tryGit(
+  cwd: string,
+  args: string[],
+  killSignal: NodeJS.Signals = 'SIGTERM',
+): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync('git', args, {
       cwd,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
-      // Graceful kill: SIGTERM lets git release index.lock and finish cleanup,
-      // so a timeout mid-commit/-pull can't corrupt the index. The
-      // non-interactive ssh guards below already bound the network-hang case, so
-      // a hard SIGKILL (which would skip that cleanup) isn't needed.
-      killSignal: 'SIGTERM',
+      killSignal,
       env: {
         ...process.env,
         // Force non-interactive git so a missing credential / askpass prompt
@@ -71,20 +79,16 @@ async function tryGit(cwd: string, args: string[]): Promise<string | null> {
 }
 
 /**
- * Resolve the explicit single refspec for pushing the current branch only.
- * Returns null when HEAD is detached or the branch lacks upstream config, so the
- * caller can skip rather than fall back to an unqualified `git push` (which could
- * publish other branches under `push.default=matching`).
+ * Resolve the explicit single refspec for pushing the given branch only.
+ * Returns null when the branch lacks upstream config, so the caller can skip
+ * rather than fall back to an unqualified `git push` (which could publish other
+ * branches under `push.default=matching`). `branch` is threaded in from the
+ * caller's detached-HEAD check so this doesn't re-spawn `symbolic-ref`.
  */
 async function resolvePushTarget(
   gitRoot: string,
+  branch: string,
 ): Promise<{ remote: string; mergeRef: string } | null> {
-  const branch = (
-    await tryGit(gitRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
-  )?.trim();
-  if (!branch) {
-    return null; // detached HEAD — no branch to push
-  }
   const remote = (
     await tryGit(gitRoot, ['config', '--get', `branch.${branch}.remote`])
   )?.trim();
@@ -144,8 +148,13 @@ export async function syncTeamMemory(
   // orphaned (unreachable, never pushable). Skip the whole sync cleanly instead
   // of stranding a commit. (A branch with no upstream is different — that commit
   // still lands on the user's branch — and is handled by `no-upstream` below.)
+  // Read-only ref ops below use SIGKILL: they hold no mutable state to corrupt.
   const branch = (
-    await tryGit(gitRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+    await tryGit(
+      gitRoot,
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      'SIGKILL',
+    )
   )?.trim();
   if (!branch) {
     result.skippedReason = 'detached-head';
@@ -154,12 +163,11 @@ export async function syncTeamMemory(
 
   // Resolve upstream up-front: it gates both the reconcile-before-commit pull
   // and whether a push is even possible.
-  const upstream = await tryGit(gitRoot, [
-    'rev-parse',
-    '--abbrev-ref',
-    '--symbolic-full-name',
-    '@{u}',
-  ]);
+  const upstream = await tryGit(
+    gitRoot,
+    ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'],
+    'SIGKILL',
+  );
 
   // Capture whether the branch was ALREADY ahead of upstream BEFORE this sync.
   // If so, pushing would publish those unrelated commits, so we must not push
@@ -171,8 +179,11 @@ export async function syncTeamMemory(
 
     // 1. Reconcile FIRST — fast-forward-pull upstream BEFORE committing, so the
     // local commit lands on top of upstream and can ff-push. Committing first
-    // would diverge a two-writer branch and wedge `--ff-only`.
-    result.pulled = (await tryGit(gitRoot, ['pull', '--ff-only'])) !== null;
+    // would diverge a two-writer branch and wedge `--ff-only`. SIGKILL: a hung
+    // pull is hung in its network fetch phase (which holds no index.lock); the
+    // ff ref-advance afterwards is fast and local, so a hard kill is safe.
+    result.pulled =
+      (await tryGit(gitRoot, ['pull', '--ff-only'], 'SIGKILL')) !== null;
     if (!result.pulled) {
       // ff refused (diverged) or a transient error — nothing can be shared this
       // cycle. Skip cleanly WITHOUT committing, leaving the working tree as-is.
@@ -218,18 +229,19 @@ export async function syncTeamMemory(
     result.skippedReason = 'local-ahead';
     return result;
   }
-  const pushTarget = await resolvePushTarget(gitRoot);
+  const pushTarget = await resolvePushTarget(gitRoot, branch);
   if (!pushTarget) {
     result.skippedReason = 'push-failed';
     return result;
   }
-  // Explicit single-branch refspec — never an unqualified `git push`.
+  // Explicit single-branch refspec — never an unqualified `git push`. SIGKILL: a
+  // hung push is hung on the network and holds no local index.lock.
   result.pushed =
-    (await tryGit(gitRoot, [
-      'push',
-      pushTarget.remote,
-      `HEAD:${pushTarget.mergeRef}`,
-    ])) !== null;
+    (await tryGit(
+      gitRoot,
+      ['push', pushTarget.remote, `HEAD:${pushTarget.mergeRef}`],
+      'SIGKILL',
+    )) !== null;
   if (!result.pushed) {
     result.skippedReason = 'push-failed';
   }

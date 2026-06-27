@@ -166,7 +166,7 @@ When on, at session start Qwen best-effort syncs the `.qwen/team-memory/` direct
 Two things to know before enabling it:
 
 - **The fast-forward pull acts on your whole current branch, not just `.qwen/team-memory/`** (git has no path-scoped pull). So sync will fast-forward your branch to the remote tip. The push, by contrast, is scoped: it publishes **only the commit this sync just created**, so it never pushes other unpushed commits you have — if your branch is already ahead of upstream, sync commits locally and skips the push. Enable it on branches where the fast-forward pull is fine — or run it on a dedicated checkout.
-- **A diverged branch is left untouched** (`--ff-only` never merges). When that happens sync simply does nothing that session; resolve the divergence (`git pull`) and it resumes. A branch with no upstream commits locally but has nothing to push.
+- **A diverged branch is left untouched** (`--ff-only` never merges). When that happens sync simply does nothing that session; resolve the divergence (`git pull`) and it resumes. A branch with no upstream (no tracking configuration) still commits locally but skips the push — there is nowhere to push to.
 
 ---
 

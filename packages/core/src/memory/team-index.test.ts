@@ -8,7 +8,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { rebuildTeamAutoMemoryIndex } from './indexer.js';
+import {
+  rebuildTeamAutoMemoryIndex,
+  TeamMemoryRootSecurityError,
+} from './indexer.js';
 import {
   clearAutoMemoryRootCache,
   getTeamAutoMemoryIndexPath,
@@ -122,6 +125,11 @@ describe('rebuildTeamAutoMemoryIndex', () => {
       fs.mkdirSync(path.dirname(teamRoot), { recursive: true });
       fs.symlinkSync(outside, teamRoot, 'dir');
 
+      // A typed SECURITY rejection (not a plain Error): the sync gate keys off
+      // this class to block git add/commit/push of an escaping root.
+      await expect(
+        rebuildTeamAutoMemoryIndex(projectRoot),
+      ).rejects.toBeInstanceOf(TeamMemoryRootSecurityError);
       await expect(rebuildTeamAutoMemoryIndex(projectRoot)).rejects.toThrow(
         /symlink/,
       );
@@ -148,6 +156,10 @@ describe('rebuildTeamAutoMemoryIndex', () => {
       expect(fs.existsSync(teamRoot)).toBe(true);
       expect(fs.lstatSync(teamRoot).isSymbolicLink()).toBe(false);
 
+      // Same typed SECURITY rejection for a parent-component symlink escape.
+      await expect(
+        rebuildTeamAutoMemoryIndex(projectRoot),
+      ).rejects.toBeInstanceOf(TeamMemoryRootSecurityError);
       await expect(rebuildTeamAutoMemoryIndex(projectRoot)).rejects.toThrow(
         /outside the repository/,
       );

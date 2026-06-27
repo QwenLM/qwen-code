@@ -53,7 +53,10 @@ import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
-import { rebuildTeamAutoMemoryIndex } from '../memory/indexer.js';
+import {
+  rebuildTeamAutoMemoryIndex,
+  TeamMemoryRootSecurityError,
+} from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
@@ -151,7 +154,10 @@ vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
   readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
-vi.mock('../memory/indexer.js', () => ({
+vi.mock('../memory/indexer.js', async (importActual) => ({
+  // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
+  // gate distinguishes via instanceof) and override only the rebuild.
+  ...(await importActual<typeof import('../memory/indexer.js')>()),
   rebuildTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../memory/team-memory-sync.js', () => ({
@@ -2256,9 +2262,10 @@ describe('Server Config (config.ts)', () => {
         conditionalRules: [],
         projectRoot: '/tmp',
       });
-      // Mirror the indexer's symlink-escape rejection (see indexer.ts).
+      // Mirror the indexer's symlink-escape rejection: a SECURITY failure, which
+      // is the only class that blocks sync (see indexer.ts).
       vi.mocked(rebuildTeamAutoMemoryIndex).mockRejectedValueOnce(
-        new Error(
+        new TeamMemoryRootSecurityError(
           'Refusing to write team memory index: /tmp/.qwen/team-memory is a ' +
             'symlink, which could redirect the committed index outside the repository.',
         ),
@@ -2266,10 +2273,93 @@ describe('Server Config (config.ts)', () => {
 
       await config.refreshHierarchicalMemory();
 
-      // Gate proof: sync is enabled, yet the rejection must skip it entirely.
-      // Remove `teamRootSafe &&` from the sync guard and this assertion fails.
+      // Gate proof: sync is enabled, yet the security rejection must skip it
+      // entirely. Stop treating TeamMemoryRootSecurityError as blocking and this
+      // assertion fails.
       expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledTimes(1);
       expect(syncTeamMemory).not.toHaveBeenCalled();
+    } finally {
+      if (prevSync === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = prevSync;
+      }
+    }
+  });
+
+  it('still syncs when the team-index rebuild fails for an OPERATIONAL reason', async () => {
+    // An EACCES/ENOSPC/EPERM rebuild failure is not a security escape, so it must
+    // NOT permanently gate legitimate sync — it self-corrects on the next
+    // successful rebuild. Only TeamMemoryRootSecurityError blocks sync.
+    const prevSync = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+    try {
+      const config = new Config({
+        ...baseParams,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+      });
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      // A plain Error stands in for an operational IO failure (e.g. EACCES).
+      const operationalError = Object.assign(
+        new Error('EACCES: permission denied, lstat'),
+        {
+          code: 'EACCES',
+        },
+      );
+      vi.mocked(rebuildTeamAutoMemoryIndex).mockRejectedValueOnce(
+        operationalError,
+      );
+
+      await config.refreshHierarchicalMemory();
+
+      // Not security-gated: sync still runs despite the operational failure.
+      expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledTimes(1);
+      expect(syncTeamMemory).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prevSync === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = prevSync;
+      }
+    }
+  });
+
+  it('syncs when the rebuild succeeds and sync is enabled (positive gate)', async () => {
+    // Complement to the negative branches: a successful rebuild on a trusted
+    // folder with sync enabled MUST call syncTeamMemory. Inverting or removing
+    // the sync condition is caught here.
+    const prevSync = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+    try {
+      const config = new Config({
+        ...baseParams,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+      });
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValueOnce(
+        '# Team Memory\n\n- [Shared](shared.md)',
+      );
+
+      await config.refreshHierarchicalMemory();
+
+      expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledTimes(1);
+      expect(syncTeamMemory).toHaveBeenCalledTimes(1);
     } finally {
       if (prevSync === undefined) {
         delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];

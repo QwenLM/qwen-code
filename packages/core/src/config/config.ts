@@ -189,7 +189,10 @@ import {
   readAutoMemoryIndex,
   readUserAutoMemoryIndex,
 } from '../memory/store.js';
-import { rebuildTeamAutoMemoryIndex } from '../memory/indexer.js';
+import {
+  rebuildTeamAutoMemoryIndex,
+  TeamMemoryRootSecurityError,
+} from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
@@ -2339,24 +2342,35 @@ export class Config {
       // PULLED new files, rebuild once more so the in-prompt index reflects them.
       let teamAutoMemoryIndex: string | null = null;
       if (teamMemoryEnabled) {
-        // rebuildTeamAutoMemoryIndex THROWS when the team root is a symlink that
-        // could redirect the committed index outside the repo. That escape must
-        // also block sync: otherwise syncTeamMemory would still git add/commit/
-        // push that out-of-repo dir, defeating the indexer's refusal. So gate
-        // sync on the rebuild succeeding — never share a dir that failed the
-        // safety check.
-        let teamRootSafe = false;
+        // rebuildTeamAutoMemoryIndex throws for two distinct classes, and only
+        // ONE may block sync:
+        //   • SECURITY — a symlink/escape rejection (TeamMemoryRootSecurityError)
+        //     means the team root could redirect the committed index OUTSIDE the
+        //     repo. Sync MUST be blocked: otherwise syncTeamMemory would git
+        //     add/commit/push that out-of-repo dir, defeating the indexer's
+        //     refusal. This invariant is non-negotiable.
+        //   • OPERATIONAL — EACCES/ENOSPC/EPERM on lstat/readdir/write. Not a
+        //     security problem, so it must NOT permanently gate legitimate sync;
+        //     it self-corrects on the next successful rebuild. Log and sync on.
+        let teamRootSecurityBlocked = false;
         try {
           teamAutoMemoryIndex =
             await rebuildTeamAutoMemoryIndex(teamProjectRoot);
-          teamRootSafe = true;
         } catch (err) {
-          this.debugLogger.warn(
-            'team memory index rebuild failed; skipping sync',
-            err,
-          );
+          if (err instanceof TeamMemoryRootSecurityError) {
+            teamRootSecurityBlocked = true;
+            this.debugLogger.warn(
+              'team memory root failed the symlink/escape safety check; skipping sync',
+              err,
+            );
+          } else {
+            this.debugLogger.warn(
+              'team memory index rebuild failed (operational); not security-gating sync',
+              err,
+            );
+          }
         }
-        if (teamRootSafe && this.getTeamMemorySyncEnabled()) {
+        if (!teamRootSecurityBlocked && this.getTeamMemorySyncEnabled()) {
           const syncResult = await syncTeamMemory(teamProjectRoot, {
             message: 'chore(memory): sync team memory',
           }).catch((err) => {

@@ -262,6 +262,22 @@ export async function rebuildUserAutoMemoryIndex(): Promise<string> {
 }
 
 /**
+ * Thrown by {@link rebuildTeamAutoMemoryIndex} when the team-memory root (or any
+ * parent component) is a symlink that could redirect the committed index OUTSIDE
+ * the repository. This is a SECURITY rejection, deliberately distinct from
+ * operational IO failures (EACCES/ENOSPC/EPERM): the git-sync gate MUST block on
+ * it — never add/commit/push a root that escapes the repo — whereas an
+ * operational failure self-corrects on the next rebuild and must not permanently
+ * gate legitimate sync.
+ */
+export class TeamMemoryRootSecurityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TeamMemoryRootSecurityError';
+  }
+}
+
+/**
  * Rebuild the team (in-repo, git-tracked) MEMORY.md index from the saved memory
  * files. The team index is generated, never hand-edited — this removes the
  * git merge-conflict surface a hand-maintained shared index would have.
@@ -285,7 +301,7 @@ export async function rebuildTeamAutoMemoryIndex(
   // directory symlink it cannot catch is rejected here.
   const rootStat = await fs.lstat(teamRoot);
   if (rootStat.isSymbolicLink()) {
-    throw new Error(
+    throw new TeamMemoryRootSecurityError(
       `Refusing to write team memory index: ${teamRoot} is a symlink, which ` +
         `could redirect the committed index outside the repository.`,
     );
@@ -303,7 +319,7 @@ export async function rebuildTeamAutoMemoryIndex(
   );
   const resolvedRoot = await fs.realpath(teamRoot);
   if (resolvedRoot !== expectedRoot) {
-    throw new Error(
+    throw new TeamMemoryRootSecurityError(
       `Refusing to write team memory index: ${teamRoot} resolves to ` +
         `${resolvedRoot}, outside the repository — a parent-directory symlink ` +
         `may be redirecting it.`,
