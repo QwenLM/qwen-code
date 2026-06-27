@@ -33,7 +33,13 @@ export type LoopMode = 'cron' | 'dynamic';
 export interface LoopTickResolverDeps {
   /** Pass `config.getWorkingDir()` — loop.md is resolved against the cwd. */
   projectRoot: string;
+  /** Home-candidate confinement root: `$QWEN_HOME` when set, else `$HOME`. */
   homeDir: string;
+  /**
+   * QWEN_HOME-aware global dir holding the home `loop.md` (`Storage.getGlobalQwenDir()`).
+   * Omitted → defaults to `<homeDir>/.qwen` inside readLoopTaskFile.
+   */
+  homeQwenDir?: string;
   /**
    * Pass `() => config.isTrustedFolder()`. Re-evaluated on every `resolve()`,
    * never captured once: `isTrustedFolder()` is not process-stable in IDE
@@ -173,6 +179,7 @@ export class LoopTickResolver {
     const result = await readLoopTaskFile({
       projectRoot: this.deps.projectRoot,
       homeDir: this.deps.homeDir,
+      homeQwenDir: this.deps.homeQwenDir,
       // Re-read trust per tick (see LoopTickResolverDeps.allowProjectFile): a
       // resolver built while trusted must skip the project file once trust flips.
       allowProjectFile: this.deps.allowProjectFile(),

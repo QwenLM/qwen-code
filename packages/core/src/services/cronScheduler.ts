@@ -755,9 +755,15 @@ export class CronScheduler {
         // run). They are not notified and, critically, left on disk (not
         // in removeMissedFromDisk) so the owning interactive session still
         // surfaces and runs them instead of losing the task permanently.
-        const runnable = pending.tasks.filter(
-          (t) => !this.skipDurableFire?.(durableTaskToJob(t)),
-        );
+        const runnable = pending.tasks.filter((t) => {
+          if (this.skipDurableFire?.(durableTaskToJob(t))) {
+            debugLogger.debug(
+              `Skipping durable job ${t.id} (missed): consumer cannot run it`,
+            );
+            return false;
+          }
+          return true;
+        });
         if (runnable.length > 0) {
           onFire({
             ...durableTaskToJob(runnable[0]!),
@@ -773,10 +779,16 @@ export class CronScheduler {
         for (const id of pending.ids) {
           const job = this.jobs.get(id);
           if (!job) continue; // deleted while buffered
-          // Same skip as the tick loop: a durable job this consumer can't run
-          // is not fired and not stamped (left out of persistCatchUpStamps),
-          // so its overdue schedule survives for the owning session.
-          if (this.skipDurableFire?.(job)) continue;
+          // Same skip as the tick loop (job.durable && …): a durable job this
+          // consumer can't run is not fired and not stamped (left out of
+          // persistCatchUpStamps), so its overdue schedule survives for the
+          // owning session.
+          if (job.durable && this.skipDurableFire?.(job)) {
+            debugLogger.debug(
+              `Skipping durable job ${job.id} (catch-up): consumer cannot run it`,
+            );
+            continue;
+          }
           onFire(job);
           fired.push(id);
         }
@@ -786,9 +798,15 @@ export class CronScheduler {
       case 'final': {
         const fired: string[] = [];
         for (const job of pending.jobs) {
-          // A skipped durable job is left on disk (not in removeMissedFromDisk)
-          // so the owning session still gets its one final fire + delete.
-          if (this.skipDurableFire?.(job)) continue;
+          // Same skip as the tick loop (job.durable && …): a skipped durable
+          // job is left on disk (not in removeMissedFromDisk) so the owning
+          // session still gets its one final fire + delete.
+          if (job.durable && this.skipDurableFire?.(job)) {
+            debugLogger.debug(
+              `Skipping durable job ${job.id} (final): consumer cannot run it`,
+            );
+            continue;
+          }
           onFire(job);
           fired.push(job.id);
         }
@@ -1047,7 +1065,12 @@ export class CronScheduler {
       // headless run) is skipped BEFORE processJob stamps lastFiredAt — firing
       // it here would persist the stamp while the work is skipped downstream,
       // silently consuming the tick. Leave it for the owning session.
-      if (job.durable && this.skipDurableFire?.(job)) continue;
+      if (job.durable && this.skipDurableFire?.(job)) {
+        debugLogger.debug(
+          `Skipping durable job ${job.id} (tick): consumer cannot run it`,
+        );
+        continue;
+      }
 
       const result = this.processJob(job, currentDate, currentMs);
       if (!job.durable || result === 'none') continue;

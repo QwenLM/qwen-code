@@ -31,7 +31,21 @@ export type LoopTaskFileResult =
 
 export interface ReadLoopTaskFileOptions {
   projectRoot: string;
+  /**
+   * Confinement root for the home candidate's resolved (symlink-followed)
+   * target — a target escaping this dir (e.g. `-> /etc/passwd`) is refused while
+   * an in-root dotfile symlink is followed. Pass `$QWEN_HOME` when set, else
+   * `$HOME` (see `homeQwenDir`).
+   */
   homeDir: string;
+  /**
+   * Directory holding the home/global `loop.md` candidate (`<homeQwenDir>/loop.md`).
+   * Pass the QWEN_HOME-aware global dir (`Storage.getGlobalQwenDir()`) so a
+   * relocated config home is honored instead of always reading the real OS home.
+   * Defaults to `<homeDir>/.qwen` so a direct barrel caller keeps the `~/.qwen`
+   * layout.
+   */
+  homeQwenDir?: string;
   /**
    * When false, the project `.qwen/loop.md` candidate is skipped entirely — it
    * is repo-controlled, so an untrusted workspace must not read it and feed it
@@ -156,14 +170,18 @@ async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
  * final-component `lstat` cannot see. When `allowProjectFile` is false (untrusted
  * folder) the candidate is dropped entirely.
  *
- * Home candidate: the user's own dotfile, so a symlink IS followed (a common,
- * legitimate setup — e.g. into a synced dotfiles repo), but the resolved target
- * must be a regular file AND stay within $HOME so a FIFO/device/dir can't hang
- * the tick and an escaping symlink (e.g. `-> /etc/passwd`) can't be exfiltrated.
+ * Home candidate: `<homeQwenDir>/loop.md` (the QWEN_HOME-aware global dir, not
+ * always the real `~/.qwen`). It is the user's own dotfile, so a symlink IS
+ * followed (a common, legitimate setup — e.g. into a synced dotfiles repo), but
+ * the resolved target must be a regular file AND stay within the home
+ * confinement root (`homeDir`: `$QWEN_HOME` or `$HOME`) so a FIFO/device/dir
+ * can't hang the tick and an escaping symlink (e.g. `-> /etc/passwd`) can't be
+ * exfiltrated.
  */
 export async function readLoopTaskFile({
   projectRoot,
   homeDir,
+  homeQwenDir = path.join(homeDir, '.qwen'),
   allowProjectFile = false,
   realDirCache = moduleRealDirCache,
 }: ReadLoopTaskFileOptions): Promise<LoopTaskFileResult> {
@@ -184,7 +202,7 @@ export async function readLoopTaskFile({
           },
         ]
       : []),
-    { source: 'home', path: path.join(homeDir, '.qwen', 'loop.md') },
+    { source: 'home', path: path.join(homeQwenDir, 'loop.md') },
   ];
 
   for (const { source, path: filePath } of candidates) {

@@ -29,6 +29,7 @@ import type {
   GoalTerminalEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
+  LoopTickResult,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -2464,9 +2465,20 @@ export class Session implements SessionContext {
     // Rebuild if the working dir changed (e.g. /cd) so loop.md resolves against
     // the current project; a fresh resolver also correctly re-delivers full.
     if (!this.loopTickResolver || this.loopTickResolverRoot !== root) {
+      // Resolve the home/global loop.md from the QWEN_HOME-aware global dir (the
+      // rest of Qwen honors QWEN_HOME for `.qwen`); reading raw os.homedir() here
+      // would always hit the real `~/.qwen` and ignore a relocated config home.
+      const homeQwenDir = Storage.getGlobalQwenDir();
+      // Confinement root for the home candidate's resolved target: $QWEN_HOME
+      // when set (it IS the global dir), else $HOME — keeps the earlier
+      // confinement (an in-root dotfile symlink resolves; an escape is refused).
+      const homeConfineRoot = process.env['QWEN_HOME']
+        ? homeQwenDir
+        : os.homedir();
       this.loopTickResolver = new LoopTickResolver({
         projectRoot: root,
-        homeDir: os.homedir(),
+        homeDir: homeConfineRoot,
+        homeQwenDir,
         // The project `.qwen/loop.md` is repo-controlled, so an untrusted folder
         // must not read it and feed it to the model (mirrors getProjectHooks()'s
         // trust gate). The home/global `~/.qwen/loop.md` is user-owned and stays
@@ -2519,9 +2531,26 @@ export class Session implements SessionContext {
               // changed fire, a short reminder when unchanged. Non-sentinel
               // prompts pass through untouched.
               const loopMode = detectLoopSentinel(prompt);
-              const loopTick = loopMode
-                ? await this.#getLoopTickResolver().resolve(loopMode)
-                : null;
+              let loopTick: LoopTickResult | null = null;
+              if (loopMode) {
+                try {
+                  loopTick =
+                    await this.#getLoopTickResolver().resolve(loopMode);
+                } catch (resolveErr) {
+                  // resolve() reads .qwen/loop.md (project or home/global); an
+                  // EACCES/EIO here is a sentinel-RESOLUTION failure, not a
+                  // model-call failure — tag it so the two are distinguishable
+                  // in logs (the shared catch below still surfaces it). Log the
+                  // sentinel mode + error code only, never an absolute path (the
+                  // error message may embed one; the relative file is .qwen/loop.md).
+                  debugLogger.warn(
+                    `loop.md sentinel resolution failed (mode=${loopMode}, code=${
+                      (resolveErr as NodeJS.ErrnoException).code ?? 'unknown'
+                    }) — check .qwen/loop.md permissions/IO`,
+                  );
+                  throw resolveErr;
+                }
+              }
               const modelText = loopTick ? loopTick.modelText : prompt;
               if (loopTick) {
                 debugLogger.debug(

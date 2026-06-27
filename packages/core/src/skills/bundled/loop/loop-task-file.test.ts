@@ -338,6 +338,57 @@ describe('readLoopTaskFile', () => {
     });
   });
 
+  it('reads the home loop.md from a relocated homeQwenDir (QWEN_HOME)', async () => {
+    // The home candidate lives in the QWEN_HOME-aware global dir, not always
+    // <homeDir>/.qwen — write loop.md into a relocated global dir and confirm it
+    // is read as the `home` source from <homeQwenDir>/loop.md.
+    const relocated = path.join(tempDir, 'relocated-qwen');
+    await fs.mkdir(relocated, { recursive: true });
+    await fs.writeFile(path.join(relocated, 'loop.md'), 'relocated user tasks');
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      // Caller passes the global dir as both candidate dir and confinement root
+      // when QWEN_HOME is set (see Session.#getLoopTickResolver).
+      homeDir: relocated,
+      homeQwenDir: relocated,
+      allowProjectFile: true,
+    });
+
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(relocated, 'loop.md'),
+      source: 'home',
+      content: 'relocated user tasks',
+      truncated: false,
+    });
+  });
+
+  it('keeps confinement for a relocated homeQwenDir (escaping symlink refused)', async () => {
+    // Relocation must not loosen the earlier confinement: a symlink whose target
+    // escapes the home confinement root is still refused, not read.
+    const relocated = path.join(tempDir, 'relocated-qwen');
+    await fs.mkdir(relocated, { recursive: true });
+    const outside = path.join(tempDir, 'outside-secret');
+    await fs.writeFile(outside, 'SECRET=should-not-be-read');
+    await fs.symlink(outside, path.join(relocated, 'loop.md'));
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir: relocated,
+      homeQwenDir: relocated,
+      allowProjectFile: true,
+    });
+
+    expect(result).toEqual({
+      status: 'missing',
+      checkedPaths: [
+        path.join(projectRoot, '.qwen', 'loop.md'),
+        path.join(relocated, 'loop.md'),
+      ],
+    });
+  });
+
   it('skips a home loop.md that is a self-referential symlink (ELOOP) instead of throwing', async () => {
     // fs.stat follows the home symlink; a self-referential link raises ELOOP.
     // That must be treated as a skippable candidate (→ missing), not crash the

@@ -4530,6 +4530,96 @@ describe('Session', () => {
         }
       });
 
+      it('delivers the full block then a SHORT REMINDER on an unchanged second tick', async () => {
+        // Two ticks of the same sentinel over unchanged loop.md: tick1 delivers
+        // the FULL block (INTRO + task body) and commits it; tick2 sees the
+        // unchanged content and delivers the one-line SHORT REMINDER (full:false)
+        // — a pure pointer with neither the INTRO nor the body. The client echo
+        // still names the source on the reminder (sourceLabel set), so this pins
+        // the full:false/labelled-reminder path through BOTH the echo and the
+        // model-message paths.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-reminder-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- finish the migration');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              // Drained serially against the one persistent resolver, so tick2
+              // sees tick1's committed content as unchanged.
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const cronModelTexts = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .filter((c) => Array.isArray(c[1]?.message))
+              .map((c) =>
+                (c[1].message as Array<{ text?: string }>)
+                  .map((p) => p.text ?? '')
+                  .join(''),
+              );
+
+          await vi.waitFor(() => {
+            const texts = cronModelTexts();
+            // Exactly one FULL delivery (INTRO) and one SHORT REMINDER (preamble).
+            const full = texts.filter((t) =>
+              t.includes('The user configured a loop-tasks file.'),
+            );
+            const reminder = texts.filter((t) =>
+              t.includes(
+                'Work the tasks from the loop.md contents established earlier',
+              ),
+            );
+            expect(full).toHaveLength(1);
+            expect(reminder).toHaveLength(1);
+            // The reminder is a pointer only: no INTRO and no task body (which
+            // the full block already paid into the cached prefix).
+            expect(reminder[0]).not.toContain(
+              'The user configured a loop-tasks file.',
+            );
+            expect(reminder[0]).not.toContain('- finish the migration');
+          });
+
+          // full:false reminder still resolves a sourceLabel, so its client echo
+          // names the source — identical to the full tick's echo (both ticks).
+          const labelledEchoes = (
+            mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+          ).mock.calls.filter(
+            (c) =>
+              c[0]?.update?.sessionUpdate === 'user_message_chunk' &&
+              c[0]?.update?.content?.text ===
+                'Loop tick — tasks from project loop.md',
+          ).length;
+          expect(labelledEchoes).toBe(2);
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      });
+
       it('does not expand the project loop.md sentinel in an untrusted folder', async () => {
         // An untrusted folder's repo-controlled .qwen/loop.md must not be read
         // and fed to the model. With no user-owned ~/.qwen/loop.md, the tick is
@@ -4610,6 +4700,92 @@ describe('Session', () => {
           restoreHome();
           await fs.rm(tmpDir, { recursive: true, force: true });
           await fs.rm(fakeHome, { recursive: true, force: true });
+        }
+      });
+
+      it('reads the home loop.md from QWEN_HOME, not the real ~/.qwen', async () => {
+        // The home/global candidate must honor QWEN_HOME (the relocated global
+        // dir) instead of always reading the real OS home. Point QWEN_HOME at a
+        // dir holding loop.md, leave the project dir and fake $HOME empty, and
+        // confirm the relocated file's block reaches the model.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-qwenhome-proj-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-qwenhome-home-'),
+        );
+        const qwenHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-qwenhome-dir-'),
+        );
+        await fs.writeFile(
+          path.join(qwenHome, 'loop.md'),
+          '- relocated home task',
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        const restoreHome = setFakeHome(fakeHome);
+        const prevQwenHome = process.env['QWEN_HOME'];
+        process.env['QWEN_HOME'] = qwenHome;
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // Echo names the home source (sourceLabel='home loop.md'), proving the
+          // home candidate resolved from QWEN_HOME rather than the empty $HOME.
+          await vi.waitFor(() => {
+            expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+              sessionId: 'test-session-id',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'text',
+                  text: 'Loop tick — tasks from home loop.md',
+                },
+                // `*/5 * * * *` is a recurring cron (not an @wakeup), so the
+                // echo carries source 'cron' (see job.cronExpr mapping).
+                _meta: { source: 'cron' },
+              },
+            });
+          });
+
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain('- relocated home task');
+          });
+        } finally {
+          restoreHome();
+          if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = prevQwenHome;
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+          await fs.rm(qwenHome, { recursive: true, force: true });
         }
       });
 
