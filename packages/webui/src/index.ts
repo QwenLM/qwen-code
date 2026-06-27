@@ -163,7 +163,6 @@ export {
   ShellToolCall,
   ReadToolCall,
   WebFetchToolCall,
-  ChromeToolCall,
   CheckboxDisplay,
   getToolCallComponent,
 } from './components/toolcalls';
