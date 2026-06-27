@@ -932,6 +932,37 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('skips a durable job the consumer cannot run: no fire, lastFiredAt left untouched', async () => {
+      // A headless run can't expand a `<<loop.md>>` sentinel. Firing it would
+      // stamp + persist lastFiredAt while the work is skipped downstream,
+      // silently consuming the tick; setSkipDurableFire must leave such a job's
+      // schedule intact for the owning interactive session. A co-scheduled
+      // non-sentinel durable job proves the skip is selective AND lands its
+      // persist in the SAME tick write — so checking the sentinel stayed null
+      // once the sibling shows its stamp is race-free, not a timing gap.
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('loopmd'), prompt: '<<loop.md>>' },
+        { ...diskTask('normal'), prompt: 'normal task' },
+      ]);
+      await scheduler.enableDurable('session-1');
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+      expect(fired.map((j) => j.prompt)).toEqual(['normal task']);
+
+      const minuteMs = new Date(2025, 0, 15, 10, 30, 0).getTime();
+      await vi.waitFor(async () => {
+        const byId = Object.fromEntries(
+          (await readCronTasks(tmpDir)).map((t) => [t.id, t]),
+        );
+        expect(byId['normal']!.lastFiredAt).toBe(minuteMs); // fired → persisted
+        expect(byId['loopmd']!.lastFiredAt ?? null).toBeNull(); // skipped → untouched
+      });
+    });
+
     it('rolls back the in-memory job when the durable persist fails', async () => {
       // A corrupted tasks file makes updateCronTasks throw inside
       // addCronTask, after the job was provisionally installed in memory.

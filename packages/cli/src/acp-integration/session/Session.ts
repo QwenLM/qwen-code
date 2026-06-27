@@ -2470,9 +2470,11 @@ export class Session implements SessionContext {
         // The project `.qwen/loop.md` is repo-controlled, so an untrusted folder
         // must not read it and feed it to the model (mirrors getProjectHooks()'s
         // trust gate). The home/global `~/.qwen/loop.md` is user-owned and stays
-        // allowed. Folder trust is process-stable (a change restarts the CLI),
-        // so capturing it at construction is sufficient.
-        allowProjectFile: this.config.isTrustedFolder(),
+        // allowed. Pass a getter, not a snapshot: isTrustedFolder() can flip
+        // mid-session on an IDE workspace-trust update, and the resolver outlives
+        // a single tick — re-read it on every resolve() so a trusted→untrusted
+        // flip stops reading the project file immediately.
+        allowProjectFile: () => this.config.isTrustedFolder(),
       });
       this.loopTickResolverRoot = root;
     }
@@ -2526,16 +2528,16 @@ export class Session implements SessionContext {
                   `loop tick: mode=${loopMode} delivery=${
                     loopTick.full
                       ? 'full'
-                      : loopTick.sourcePath
+                      : loopTick.sourceLabel
                         ? 'reminder'
                         : 'absent'
                   } source=${loopTick.sourceLabel ?? 'none'}`,
                 );
               }
               // For a loop tick echo a stable, relative label — never the bare
-              // sentinel, the full task dump, or the absolute sourcePath (which
-              // would leak the OS username / dir layout into the ACP client UI);
-              // otherwise echo the prompt verbatim.
+              // sentinel or the full task dump (and the resolver never hands back
+              // the absolute path, which would leak the OS username / dir layout
+              // into the ACP client UI); otherwise echo the prompt verbatim.
               const echoText = loopTick
                 ? loopTick.sourceLabel
                   ? `Loop tick — tasks from ${loopTick.sourceLabel}`

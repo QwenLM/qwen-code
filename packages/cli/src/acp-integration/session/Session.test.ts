@@ -4614,7 +4614,7 @@ describe('Session', () => {
       });
 
       it('echoes the absent label when a sentinel fires with no loop.md present', async () => {
-        // The `loopTick && !loopTick.sourcePath` branch: a sentinel fires but no
+        // The `loopTick && !loopTick.sourceLabel` branch: a sentinel fires but no
         // project or home loop.md exists, so the tick is a labelled no-op.
         const tmpDir = await fs.mkdtemp(
           path.join(os.tmpdir(), 'loop-md-absent-'),

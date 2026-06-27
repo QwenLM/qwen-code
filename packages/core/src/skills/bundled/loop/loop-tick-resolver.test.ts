@@ -64,7 +64,7 @@ describe('LoopTickResolver', () => {
     resolver = new LoopTickResolver({
       projectRoot,
       homeDir,
-      allowProjectFile: true,
+      allowProjectFile: () => true,
     });
   });
 
@@ -82,13 +82,12 @@ describe('LoopTickResolver', () => {
     const untrusted = new LoopTickResolver({
       projectRoot,
       homeDir,
-      allowProjectFile: false,
+      allowProjectFile: () => false,
     });
 
     const tick = await untrusted.resolve('cron');
 
     expect(tick.full).toBe(true);
-    expect(tick.sourcePath).toBe(homeFile());
     expect(tick.sourceLabel).toBe('home loop.md');
     expect(tick.modelText).toContain('- user tasks');
     expect(tick.modelText).not.toContain('- repo-controlled tasks');
@@ -99,14 +98,45 @@ describe('LoopTickResolver', () => {
     const untrusted = new LoopTickResolver({
       projectRoot,
       homeDir,
-      allowProjectFile: false,
+      allowProjectFile: () => false,
     });
 
     const tick = await untrusted.resolve('cron');
 
     expect(tick.full).toBe(false);
-    expect(tick.sourcePath).toBeUndefined();
+    expect(tick.sourceLabel).toBeUndefined();
     expect(tick.modelText).toContain('loop.md is not currently present');
+  });
+
+  it('re-reads folder trust per tick: a trusted→untrusted flip stops reading the project file', async () => {
+    // allowProjectFile is a getter, not a snapshot: isTrustedFolder() can flip
+    // mid-session (IDE workspace-trust update) and the resolver outlives a tick.
+    // A resolver built while trusted must skip the repo-controlled project
+    // loop.md on the very next tick once trust flips — not keep reading it.
+    await writeProject('- repo-controlled tasks');
+    let trusted = true;
+    const flipping = new LoopTickResolver({
+      projectRoot,
+      homeDir,
+      allowProjectFile: () => trusted,
+    });
+
+    const trustedTick = await flipping.resolve('cron');
+    expect(trustedTick.full).toBe(true);
+    expect(trustedTick.sourceLabel).toBe('project loop.md');
+    expect(trustedTick.modelText).toContain('- repo-controlled tasks');
+    flipping.markDelivered();
+
+    // Trust revoked. With no user-owned home loop.md, the next tick must be a
+    // labelled no-op — the project file is no longer read by the SAME resolver.
+    trusted = false;
+    const untrustedTick = await flipping.resolve('cron');
+    expect(untrustedTick.full).toBe(false);
+    expect(untrustedTick.sourceLabel).toBeUndefined();
+    expect(untrustedTick.modelText).toContain(
+      'loop.md is not currently present',
+    );
+    expect(untrustedTick.modelText).not.toContain('- repo-controlled tasks');
   });
 
   it('delivers the full task block on first fire', async () => {
@@ -115,8 +145,9 @@ describe('LoopTickResolver', () => {
     const tick = await resolver.resolve('dynamic');
 
     expect(tick.full).toBe(true);
-    // sourcePath keeps the absolute path for local UI; the model text must not.
-    expect(tick.sourcePath).toBe(projectFile());
+    // sourceLabel is the relative label, never the absolute path — the model
+    // text (and this label) must not leak projectFile().
+    expect(tick.sourceLabel).toBe('project loop.md');
     expect(tick.modelText).toContain(
       '# /loop tick — loop.md tasks from project loop.md',
     );
@@ -143,7 +174,7 @@ describe('LoopTickResolver', () => {
     expect(tick.full).toBe(false);
     // The unchanged branch still reports the resolved source so Session.ts can
     // label it even when only the short reminder is sent.
-    expect(tick.sourcePath).toBe(projectFile());
+    expect(tick.sourceLabel).toBe('project loop.md');
     expect(tick.modelText).not.toContain(
       'The user configured a loop-tasks file.',
     );
@@ -235,7 +266,7 @@ describe('LoopTickResolver', () => {
   it('emits the absent reminder without poisoning the cache, then re-expands on recreate', async () => {
     const absent = await resolver.resolve('dynamic');
     expect(absent.full).toBe(false);
-    expect(absent.sourcePath).toBeUndefined();
+    expect(absent.sourceLabel).toBeUndefined();
     expect(absent.modelText).toContain('loop.md is not currently present');
 
     await writeProject('- recreated tasks');
@@ -252,7 +283,7 @@ describe('LoopTickResolver', () => {
     const dyn = new LoopTickResolver({
       projectRoot,
       homeDir,
-      allowProjectFile: true,
+      allowProjectFile: () => true,
     });
     const dynTick = await dyn.resolve('dynamic');
     expect(dynTick.modelText).toContain(
@@ -294,7 +325,7 @@ describe('LoopTickResolver', () => {
     const dyn = new LoopTickResolver({
       projectRoot,
       homeDir,
-      allowProjectFile: true,
+      allowProjectFile: () => true,
     });
     const dynTick = await dyn.resolve('dynamic');
     expect(dynTick.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
@@ -350,7 +381,7 @@ describe('LoopTickResolver', () => {
     const first = await resolver.resolve('cron');
     resolver.markDelivered();
     expect(first.full).toBe(true);
-    expect(first.sourcePath).toBe(projectFile());
+    expect(first.sourceLabel).toBe('project loop.md');
 
     // Project gone, home has DIFFERENT content → re-expand (cache keys on
     // content, not path) and the header now names the home file.
@@ -359,7 +390,7 @@ describe('LoopTickResolver', () => {
     const second = await resolver.resolve('cron');
 
     expect(second.full).toBe(true);
-    expect(second.sourcePath).toBe(homeFile());
+    expect(second.sourceLabel).toBe('home loop.md');
     expect(second.modelText).toContain(
       '# /loop tick — loop.md tasks from home loop.md',
     );

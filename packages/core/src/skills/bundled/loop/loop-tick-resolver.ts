@@ -35,10 +35,13 @@ export interface LoopTickResolverDeps {
   projectRoot: string;
   homeDir: string;
   /**
-   * Pass `config.isTrustedFolder()`. When false, the repo-controlled project
-   * `.qwen/loop.md` is not read (the user-owned `~/.qwen/loop.md` still is).
+   * Pass `() => config.isTrustedFolder()`. Re-evaluated on every `resolve()`,
+   * never captured once: `isTrustedFolder()` is not process-stable in IDE
+   * sessions (a workspace-trust update can flip it), and a trusted→untrusted
+   * flip must immediately stop reading the repo-controlled project
+   * `.qwen/loop.md` (the user-owned `~/.qwen/loop.md` still is read).
    */
-  allowProjectFile: boolean;
+  allowProjectFile: () => boolean;
 }
 
 export interface LoopTickResult {
@@ -46,10 +49,9 @@ export interface LoopTickResult {
   modelText: string;
   /** True when the full task block was delivered (vs a short reminder). */
   full: boolean;
-  /** Resolved loop.md path, when present — for a clean user-facing label. */
-  sourcePath?: string;
   /** Non-absolute label for the matched candidate (e.g. "project loop.md"),
-   * when present — safe for logs/UI that must not leak the absolute path. */
+   * when present — safe for logs/UI that must not leak the absolute path, and
+   * doubles as the "a loop.md was found" flag for callers. */
   sourceLabel?: string;
 }
 
@@ -171,7 +173,9 @@ export class LoopTickResolver {
     const result = await readLoopTaskFile({
       projectRoot: this.deps.projectRoot,
       homeDir: this.deps.homeDir,
-      allowProjectFile: this.deps.allowProjectFile,
+      // Re-read trust per tick (see LoopTickResolverDeps.allowProjectFile): a
+      // resolver built while trusted must skip the project file once trust flips.
+      allowProjectFile: this.deps.allowProjectFile(),
       realDirCache: this.#realDirCache,
     });
 
@@ -193,17 +197,16 @@ export class LoopTickResolver {
       : result.content;
     this.#pendingContent = content;
 
-    // Label by which candidate matched, not result.path (the absolute path) —
-    // the absolute path would leak the OS username / dir layout to the API
-    // provider, and to debug logs. It still reaches the caller via sourcePath
-    // for local UI use.
+    // Label by which candidate matched, never result.path (the absolute path),
+    // which would leak the OS username / dir layout to the API provider and to
+    // debug logs. The label alone is enough for the caller's UI and presence
+    // check, so the absolute path is not surfaced on the result at all.
     const sourceLabel = SOURCE_LABELS[result.source];
 
     if (this.#lastContent === content) {
       return {
         modelText: `${tickHeading(mode)}\n${SHORT_REMINDER_PREAMBLE} ${PACING_SUFFIX[mode]}`,
         full: false,
-        sourcePath: result.path,
         sourceLabel,
       };
     }
@@ -214,7 +217,6 @@ export class LoopTickResolver {
     return {
       modelText: `${tickHeading(mode, { sourceLabel })}\n${INTRO}\n${content}\n${PACING_SUFFIX[mode]}`,
       full: true,
-      sourcePath: result.path,
       sourceLabel,
     };
   }

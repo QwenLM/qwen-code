@@ -106,18 +106,25 @@ function isWithin(root: string, real: string): boolean {
 async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
   const handle = await fs.open(filePath, 'r');
   try {
-    if (!(await handle.stat()).isFile()) {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
       return null;
     }
     const cap = LOOP_TASK_FILE_MAX_BYTES + 1;
-    const buffer = Buffer.alloc(cap);
+    // Size the buffer to the file (+1 to still detect a file that exceeds the
+    // cap), never above cap — so a small loop.md doesn't zero-fill 25 KB every
+    // tick. `read` below is bounded by this length too, so a file that grows
+    // past `stat.size` between stat and read is still read safely (its tail just
+    // isn't seen this tick).
+    const allocSize = Math.min(cap, stat.size + 1);
+    const buffer = Buffer.alloc(allocSize);
     let total = 0;
-    // A single read() may return short even before EOF; loop until cap or EOF.
-    while (total < cap) {
+    // A single read() may return short even before EOF; loop until full or EOF.
+    while (total < allocSize) {
       const { bytesRead } = await handle.read(
         buffer,
         total,
-        cap - total,
+        allocSize - total,
         total,
       );
       if (bytesRead === 0) {
@@ -312,6 +319,16 @@ export async function readLoopTaskFile({
     } else {
       content = buffer.toString('utf8');
     }
+
+    // The one happy-path trace (all other logs here are skip/failure) so oncall
+    // can confirm a tick actually picked up a file. Logs the relative source
+    // label and byte count, never the absolute path (which would leak the OS
+    // username / dir layout into debug logs).
+    debugLogger.debug('read loop.md', {
+      source,
+      bytes: buffer.byteLength,
+      truncated,
+    });
 
     return {
       status: 'found',

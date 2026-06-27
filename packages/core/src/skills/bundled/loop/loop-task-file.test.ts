@@ -640,6 +640,10 @@ describe('readLoopTaskFile', () => {
     for (const length of readLengths) {
       expect(length).toBeLessThanOrEqual(cap);
     }
+    // Load-bearing: the buffer is sized to the file (+1 for truncation
+    // detection), NOT the 25 KB cap — so a tiny loop.md doesn't zero-fill 25 KB
+    // every tick. The first read requests exactly that bounded length.
+    expect(readLengths[0]).toBe(body.length + 1);
   });
 
   it('does not truncate task files at exactly the byte cap', async () => {
@@ -709,6 +713,61 @@ describe('readLoopTaskFile', () => {
       // body ends on the last complete ('a') char.
       expect(result.content).not.toContain('�');
       expect(result.content.endsWith('a')).toBe(true);
+    }
+  });
+
+  it('drops an INCOMPLETE trailing 2-byte lead at the cap (covers the 2-byte width branch)', async () => {
+    // A lone 2-byte lead (0xc3, its continuation replaced by a non-continuation)
+    // must be dropped by the width branch ((b & 0xe0) === 0xc0 → width 2), not
+    // kept as an orphan decoding to U+FFFD. The two trailing continuation bytes
+    // are sized so a width-table regression (treating 0xc3 as width 1) leaves
+    // the orphan's U+FFFD at exactly the cap, where the byte-length re-clamp
+    // can't mask it — catching a regression the re-clamp alone would hide.
+    const N = LOOP_TASK_FILE_MAX_BYTES;
+    const head = Buffer.alloc(N - 3, 0x61); // 'a' * (N-3)
+    const tail = Buffer.from([0xc3, 0x41, 0x80, 0x80]); // 2-byte lead, 'A', 2 conts
+    const raw = Buffer.concat([head, tail]); // N + 1 bytes → truncated
+    await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
+    await fs.writeFile(path.join(projectRoot, '.qwen', 'loop.md'), raw);
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result.status).toBe('found');
+    if (result.status === 'found') {
+      expect(result.truncated).toBe(true);
+      expect(result.content).not.toContain('�');
+      expect(result.content).toBe('a'.repeat(N - 3));
+    }
+  });
+
+  it('drops an INCOMPLETE trailing 3-byte lead at the cap (covers the 3-byte width branch)', async () => {
+    // A 3-byte lead with only ONE of its two continuations (0xe4 0xb8) followed
+    // by a non-continuation must be dropped by the width branch
+    // ((b & 0xf0) === 0xe0 → width 3). Sized so a width-table regression (0xe4
+    // treated as width 1 or 2) leaves the orphan's U+FFFD below the cap, where
+    // it survives the re-clamp — so the regression is observable.
+    const N = LOOP_TASK_FILE_MAX_BYTES;
+    const head = Buffer.alloc(N - 4, 0x61); // 'a' * (N-4)
+    const tail = Buffer.from([0xe4, 0xb8, 0x41, 0x80, 0x80]); // lead+1 cont, 'A', 2 conts
+    const raw = Buffer.concat([head, tail]); // N + 1 bytes → truncated
+    await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
+    await fs.writeFile(path.join(projectRoot, '.qwen', 'loop.md'), raw);
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result.status).toBe('found');
+    if (result.status === 'found') {
+      expect(result.truncated).toBe(true);
+      expect(result.content).not.toContain('�');
+      expect(result.content).toBe('a'.repeat(N - 4));
     }
   });
 
