@@ -5,6 +5,63 @@
   --text-secondary: #a1a1aa;
   --border-color: #3f3f46;
   --accent-color: #3b82f6;
+  --header-bg: rgba(24, 24, 27, 0.95);
+  --scrollbar-thumb-hover: #52525b;
+}
+
+:root.light {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f3f4f6;
+  --text-primary: #1f2937;
+  --text-secondary: #6b7280;
+  --border-color: #e5e7eb;
+  --accent-color: #2563eb;
+  --header-bg: rgba(249, 250, 251, 0.95);
+  --scrollbar-thumb-hover: #d1d5db;
+
+  /*
+   * Mirror webui's light-theme overrides so ChatViewer follows the toggle.
+   * The first group tracks @qwen-code/webui's variables.css `:root.auto-theme`
+   * block. The second group covers `--app-*` tokens that the auto-theme block
+   * does NOT override but ChatViewer / MarkdownRenderer / CollapsibleFileContent
+   * still read — without these, light-mode exports leak dark surfaces (e.g.
+   * markdown table headers, collapsible file blocks).
+   *
+   * When upgrading the webui dependency, diff its `:root` defaults plus the
+   * `:root.auto-theme` block and sync any new `--app-*` keys here so light
+   * mode keeps parity with dark.
+   */
+  --app-primary-foreground: #1f2937;
+  --app-secondary-foreground: #6b7280;
+  --app-background: #ffffff;
+  --app-primary-background: #ffffff;
+  --app-background-secondary: #f3f4f6;
+  --app-background-tertiary: #e5e7eb;
+  --app-foreground: #1f2937;
+  --app-foreground-secondary: #6b7280;
+  --app-foreground-muted: #9ca3af;
+  --app-border: #e5e7eb;
+  --app-primary-border-color: #e5e7eb;
+  --app-input-background: #ffffff;
+  --app-input-border: #d1d5db;
+  --app-input-placeholder-foreground: #9ca3af;
+  --app-ghost-button-hover-background: rgba(0, 0, 0, 0.05);
+  --app-header-background: #f9fafb;
+  --app-list-hover-background: rgba(0, 0, 0, 0.05);
+  --app-list-active-background: #3b82f6;
+  --app-menu-background: #ffffff;
+  --app-menu-border: #e5e7eb;
+  --app-menu-foreground: #1f2937;
+  --app-tool-background: #ffffff;
+  --app-code-background: #f3f4f6;
+  --app-secondary-background: #f3f4f6;
+  --app-input-secondary-background: #f3f4f6;
+  --app-input-foreground: #1f2937;
+  --app-button-background: #e5e7eb;
+  --app-button-secondary-background: #f3f4f6;
+  --app-button-foreground: #1f2937;
+  --app-transparent-inner-border: rgba(0, 0, 0, 0.1);
+  --app-warning-foreground: #b45309;
 }
 
 body {
@@ -30,7 +87,7 @@ body {
   width: 100%;
   padding: 16px 24px;
   border-bottom: 1px solid var(--border-color);
-  background-color: rgba(24, 24, 27, 0.95);
+  background-color: var(--header-bg);
   backdrop-filter: blur(8px);
   position: sticky;
   top: 0;
@@ -45,6 +102,44 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.theme-toggle:hover {
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
+.theme-toggle:active {
+  transform: scale(0.95);
 }
 
 .logo-icon {
@@ -141,7 +236,7 @@ body {
 }
 
 .meta-label {
-  color: #71717a;
+  color: var(--text-secondary);
 }
 
 ::-webkit-scrollbar {
@@ -160,7 +255,7 @@ body {
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: var(--scrollbar-thumb-hover);
 }
 
 @media (max-width: 768px) {
@@ -171,14 +266,6 @@ body {
 
   .header {
     padding: 12px 16px;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .header-left {
-    width: 100%;
-    justify-content: space-between;
   }
 
   .meta {
@@ -256,7 +343,7 @@ body {
 
 .metadata-item-empty {
   font-size: 12px;
-  color: #71717a;
+  color: var(--text-secondary);
   margin: 0;
   padding: 4px 0;
 }
@@ -270,7 +357,7 @@ body {
 
 .metadata-content .metadata-label {
   font-size: 10px;
-  color: #71717a;
+  color: var(--text-secondary);
 }
 
 .metadata-content .metadata-value {

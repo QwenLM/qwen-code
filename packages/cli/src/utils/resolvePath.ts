@@ -16,6 +16,14 @@ export function resolvePath(p: string): string {
     expandedPath = os.homedir() + p.substring('%userprofile%'.length);
   } else if (p === '~' || p.startsWith('~/')) {
     expandedPath = os.homedir() + p.substring(1);
+  } else if (p.startsWith('~\\')) {
+    expandedPath = path.join(
+      os.homedir(),
+      ...p
+        .substring(2)
+        .split(/[/\\]+/)
+        .filter(Boolean),
+    );
   }
   return path.normalize(expandedPath);
 }

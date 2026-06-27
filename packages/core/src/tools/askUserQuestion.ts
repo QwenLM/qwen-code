@@ -19,10 +19,27 @@ import {
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { CAP_ESCALATION_LABELS } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { InputFormat } from '../output/types.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
+
+function parseAnswerQuestionIndex(
+  key: string,
+  questionCount: number,
+): number | undefined {
+  const index = Number(key);
+  if (
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index >= questionCount ||
+    String(index) !== key
+  ) {
+    return undefined;
+  }
+  return index;
+}
 
 export interface QuestionOption {
   label: string;
@@ -33,7 +50,7 @@ export interface Question {
   question: string;
   header: string;
   options: QuestionOption[];
-  multiSelect: boolean;
+  multiSelect?: boolean;
 }
 
 export interface AskUserQuestionParams {
@@ -113,7 +130,7 @@ const askUserQuestionToolSchemaData: FunctionDeclaration = {
               type: 'boolean',
             },
           },
-          required: ['question', 'header', 'options', 'multiSelect'],
+          required: ['question', 'header', 'options'],
           additionalProperties: false,
         },
       },
@@ -232,15 +249,26 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 
       // Format the answers for LLM consumption
       const answersContent = Object.entries(this.userAnswers)
-        .map(([key, value]) => {
-          const questionIndex = parseInt(key, 10);
-          const question = this.params.questions[questionIndex];
-          return `**${question?.header || `Question ${questionIndex + 1}`}**: ${value}`;
+        .flatMap(([key, value]) => {
+          const questionIndex = parseAnswerQuestionIndex(
+            key,
+            this.params.questions.length,
+          );
+          if (questionIndex === undefined) return [];
+          const question = this.params.questions[questionIndex]!;
+          return `**${question.header || `Question ${questionIndex + 1}`}**: ${value}`;
         })
         .join('\n');
 
-      const llmMessage = `User has provided the following answers:\n\n${answersContent}`;
-      const displayMessage = `User has provided the following answers:\n\n${answersContent}`;
+      // ── Plan gate metadata side effects ──────────────────────────
+      this.applyPlanGateMetadata();
+
+      const messageBody =
+        answersContent.length > 0
+          ? answersContent
+          : 'No valid answers were provided.';
+      const llmMessage = `User has provided the following answers:\n\n${messageBody}`;
+      const displayMessage = `User has provided the following answers:\n\n${messageBody}`;
 
       return {
         llmContent: llmMessage,
@@ -261,6 +289,62 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
       };
     }
   }
+
+  /**
+   * Updates Plan Approval Gate state based on the metadata.source field
+   * and the user's answer. Only acts on recognized gate metadata sources.
+   */
+  private applyPlanGateMetadata(): void {
+    const source = this.params.metadata?.source;
+    if (!source) return;
+
+    const gateState = this._config.getPlanGateState();
+    if (!gateState) return;
+
+    if (source === 'plan_gate_cap') {
+      // Cap escalation: only honor when a cap escalation actually
+      // occurred (prevents model from fabricating this metadata).
+      if (!gateState.capEscalationPending) {
+        debugLogger.warn(
+          '[applyPlanGateMetadata] plan_gate_cap ignored: no cap escalation pending',
+        );
+        return;
+      }
+
+      // The first answer determines the next gate mode.
+      // Match against the canonical labels from CAP_ESCALATION_LABELS.
+      const firstAnswer = Object.values(this.userAnswers)[0] ?? '';
+
+      if (firstAnswer === CAP_ESCALATION_LABELS.CONTINUE) {
+        gateState.gateMode = 'uncapped';
+      } else if (firstAnswer === CAP_ESCALATION_LABELS.APPROVE) {
+        gateState.gateMode = 'user_override';
+      } else {
+        // Free-text / Other: user takes manual control
+        gateState.gateMode = 'user_takeover';
+      }
+      gateState.capEscalationPending = false;
+    } else if (source === 'plan_gate_needs_user') {
+      // Only honor when the gate actually returned needs_user
+      // (prevents model from fabricating this metadata).
+      if (!gateState.needsUserPending) {
+        debugLogger.warn(
+          '[applyPlanGateMetadata] plan_gate_needs_user ignored: no needs_user pending',
+        );
+        return;
+      }
+      // User answered a gate-suggested question. Only reset the
+      // review count when the gate actually asked for user input
+      // (gateMode must still be active, not already overridden).
+      if (
+        gateState.gateMode === 'capped' ||
+        gateState.gateMode === 'uncapped'
+      ) {
+        gateState.reviewCount = 0;
+      }
+      gateState.needsUserPending = false;
+    }
+  }
 }
 
 export class AskUserQuestionTool extends BaseDeclarativeTool<
@@ -279,6 +363,9 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         string,
         unknown
       >,
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      false, // shouldDefer — kept always-visible so the model reaches for the structured clarification UX instead of asking in plain prose
     );
   }
 
@@ -345,7 +432,10 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         }
       }
 
-      if (typeof question.multiSelect !== 'boolean') {
+      if (
+        question.multiSelect !== undefined &&
+        typeof question.multiSelect !== 'boolean'
+      ) {
         return `Question ${i + 1}: "multiSelect" must be a boolean.`;
       }
     }

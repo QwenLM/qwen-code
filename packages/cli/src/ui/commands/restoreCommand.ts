@@ -20,7 +20,7 @@ async function restoreAction(
   args: string,
 ): Promise<void | SlashCommandActionReturn> {
   const { services, ui } = context;
-  const { config, git: gitService } = services;
+  const { config } = services;
   const { addItem, loadHistory } = ui;
 
   const checkpointDir = config?.storage.getProjectTempCheckpointsDir();
@@ -29,7 +29,7 @@ async function restoreAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: t('Could not determine the .qwen directory path.'),
+      content: 'Could not determine the .qwen directory path.',
     };
   }
 
@@ -44,7 +44,7 @@ async function restoreAction(
         return {
           type: 'message',
           messageType: 'info',
-          content: t('No restorable tool calls found.'),
+          content: 'No restorable tool calls found.',
         };
       }
       const truncatedFiles = jsonFiles.map((file) => {
@@ -59,7 +59,7 @@ async function restoreAction(
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Available tool calls to restore:') + '\n\n' + fileList,
+        content: `Available tool calls to restore:\n\n${fileList}`,
       };
     }
 
@@ -69,7 +69,7 @@ async function restoreAction(
       return {
         type: 'message',
         messageType: 'error',
-        content: t('File not found: {{file}}', { file: selectedFile }),
+        content: `File not found: ${selectedFile}`,
       };
     }
 
@@ -77,13 +77,71 @@ async function restoreAction(
     const data = await fs.readFile(filePath, 'utf-8');
     const toolCallData = JSON.parse(data);
 
-    if (toolCallData.history) {
-      if (!loadHistory) {
-        // This should not happen
+    if (toolCallData.commitHash && !toolCallData.promptId) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content:
+          'This checkpoint uses a legacy format that is no longer supported. Please create a new checkpoint.',
+      };
+    }
+
+    const toolCall = toolCallData.toolCall;
+    if (
+      !toolCall ||
+      typeof toolCall !== 'object' ||
+      typeof toolCall.name !== 'string'
+    ) {
+      throw new Error('Checkpoint is missing a valid toolCall.');
+    }
+
+    if (toolCallData.promptId) {
+      if (!config) {
         return {
           type: 'message',
           messageType: 'error',
-          content: t('loadHistory function is not available.'),
+          content: 'Configuration is not available.',
+        };
+      }
+      try {
+        const result = await config
+          .getFileHistoryService()
+          .rewind(toolCallData.promptId, true);
+        if (result.filesFailed.length > 0) {
+          addItem(
+            {
+              type: 'warning',
+              text: `Partially restored: ${result.filesChanged.length} file(s) reverted, ${result.filesFailed.length} file(s) failed. Aborting tool replay.`,
+            },
+            Date.now(),
+          );
+          return;
+        }
+        addItem(
+          {
+            type: 'info',
+            text: 'Restored project to the state at the start of this turn.',
+          },
+          Date.now(),
+        );
+      } catch (error) {
+        addItem(
+          {
+            type: 'warning',
+            text: `Could not restore files: ${error instanceof Error ? error.message : String(error)}`,
+          },
+          Date.now(),
+        );
+        return;
+      }
+    }
+
+    if (toolCallData.history) {
+      if (!loadHistory) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: 'loadHistory function is not available.',
         };
       }
       loadHistory(toolCallData.history);
@@ -93,29 +151,16 @@ async function restoreAction(
       await config?.getGeminiClient()?.setHistory(toolCallData.clientHistory);
     }
 
-    if (toolCallData.commitHash) {
-      await gitService?.restoreProjectFromSnapshot(toolCallData.commitHash);
-      addItem(
-        {
-          type: 'info',
-          text: t('Restored project to the state before the tool call.'),
-        },
-        Date.now(),
-      );
-    }
-
     return {
       type: 'tool',
-      toolName: toolCallData.toolCall.name,
-      toolArgs: toolCallData.toolCall.args,
+      toolName: toolCall.name,
+      toolArgs: toolCall.args,
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: t('Could not read restorable tool calls. This is the error: {{error}}', {
-        error: error instanceof Error ? error.message : String(error),
-      }),
+      content: `Could not read restorable tool calls. This is the error: ${error}`,
     };
   }
 }
@@ -141,7 +186,7 @@ async function completion(
 }
 
 export const restoreCommand = (config: Config | null): SlashCommand | null => {
-  if (!config?.getCheckpointingEnabled()) {
+  if (!config?.getFileCheckpointingEnabled()) {
     return null;
   }
 
@@ -153,6 +198,7 @@ export const restoreCommand = (config: Config | null): SlashCommand | null => {
       );
     },
     kind: CommandKind.BUILT_IN,
+    supportedModes: ['interactive'] as const,
     action: restoreAction,
     completion,
   };

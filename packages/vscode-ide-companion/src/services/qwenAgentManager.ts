@@ -14,6 +14,7 @@ import type {
 import type {
   AuthenticateUpdateNotification,
   AskUserQuestionRequest,
+  SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
@@ -82,6 +83,7 @@ interface AgentConnectOptions {
 }
 interface AgentSessionOptions {
   autoAuthenticate?: boolean;
+  forceNew?: boolean;
 }
 
 export class QwenAgentManager {
@@ -243,10 +245,10 @@ export class QwenAgentManager {
       return { optionId: 'cancel' };
     };
 
-    this.connection.onEndTurn = (reason?: string) => {
+    this.connection.onEndTurn = (reason?: string, source?: string) => {
       try {
         if (this.callbacks.onEndTurn) {
-          this.callbacks.onEndTurn(reason);
+          this.callbacks.onEndTurn(reason, source);
         } else if (this.callbacks.onStreamChunk) {
           // Fallback: send a zero-length chunk then rely on streamEnd elsewhere
           this.callbacks.onStreamChunk('');
@@ -270,15 +272,26 @@ export class QwenAgentManager {
       }
     };
 
+    this.connection.onSlashCommandNotification = (
+      data: SlashCommandNotification,
+    ) => {
+      this.callbacks.onSlashCommandNotification?.(data);
+    };
+
     // Initialize callback to surface available modes and current mode to UI
     this.connection.onInitialized = (init: unknown) => {
       try {
         const obj = (init || {}) as Record<string, unknown>;
         const modes = obj['modes'] as
           | {
-              currentModeId?: 'plan' | 'default' | 'auto-edit' | 'yolo';
+              currentModeId?:
+                | 'plan'
+                | 'default'
+                | 'auto-edit'
+                | 'auto'
+                | 'yolo';
               availableModes?: Array<{
-                id: 'plan' | 'default' | 'auto-edit' | 'yolo';
+                id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
                 name: string;
                 description: string;
               }>;
@@ -383,6 +396,16 @@ export class QwenAgentManager {
     await this.connection.sendPrompt(message);
   }
 
+  async rewindSession(
+    targetTurnIndex: number,
+  ): Promise<{ historyBeforeRewind?: unknown[] }> {
+    return this.connection.rewindSession(targetTurnIndex);
+  }
+
+  async restoreSessionHistory(history: unknown[]): Promise<void> {
+    await this.connection.restoreSessionHistory(history);
+  }
+
   /**
    * Set approval mode from UI
    */
@@ -422,6 +445,15 @@ export class QwenAgentManager {
       console.error('[QwenAgentManager] Failed to set model:', err);
       throw err;
     }
+  }
+
+  async getAccountInfo(): Promise<{
+    authType: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    apiKeyEnvKey: string | null;
+  }> {
+    return this.connection.getAccountInfo();
   }
 
   /**
@@ -696,6 +728,32 @@ export class QwenAgentManager {
         error,
       );
       return [];
+    }
+  }
+
+  /**
+   * Delete a session by ID via ACP.
+   */
+  async deleteSession(sessionId: string): Promise<boolean> {
+    try {
+      const res = await this.connection.deleteSession(sessionId);
+      return res.success;
+    } catch (error) {
+      console.error('[QwenAgentManager] Failed to delete session:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Rename a session via ACP.
+   */
+  async renameSession(sessionId: string, title: string): Promise<boolean> {
+    try {
+      const res = await this.connection.renameSession(sessionId, title);
+      return res.success;
+    } catch (error) {
+      console.error('[QwenAgentManager] Failed to rename session:', error);
+      return false;
     }
   }
 
@@ -1190,8 +1248,10 @@ export class QwenAgentManager {
     options?: AgentSessionOptions,
   ): Promise<string | null> {
     const autoAuthenticate = options?.autoAuthenticate ?? true;
-    // Reuse existing session if present
-    if (this.connection.currentSessionId) {
+    const forceNew = options?.forceNew ?? false;
+    // Reuse the current session for implicit session bootstrap paths.
+    // Explicit "new session" actions must bypass this and call session/new.
+    if (!forceNew && this.connection.currentSessionId) {
       console.log(
         '[QwenAgentManager] createNewSession: reusing existing session',
         this.connection.currentSessionId,
@@ -1203,7 +1263,10 @@ export class QwenAgentManager {
       console.log(
         '[QwenAgentManager] createNewSession: session creation already in flight',
       );
-      return this.sessionCreateInFlight;
+      if (!forceNew) {
+        return this.sessionCreateInFlight;
+      }
+      await this.sessionCreateInFlight;
     }
 
     console.log('[QwenAgentManager] Creating new session...');
@@ -1366,7 +1429,7 @@ export class QwenAgentManager {
    *
    * @param callback - Called when ACP stopReason is reported
    */
-  onEndTurn(callback: (reason?: string) => void): void {
+  onEndTurn(callback: (reason?: string, source?: string) => void): void {
     this.callbacks.onEndTurn = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
@@ -1376,9 +1439,9 @@ export class QwenAgentManager {
    */
   onModeInfo(
     callback: (info: {
-      currentModeId?: 'plan' | 'default' | 'auto-edit' | 'yolo';
+      currentModeId?: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
       availableModes?: Array<{
-        id: 'plan' | 'default' | 'auto-edit' | 'yolo';
+        id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
         name: string;
         description: string;
       }>;
@@ -1392,7 +1455,9 @@ export class QwenAgentManager {
    * Register mode changed callback
    */
   onModeChanged(
-    callback: (modeId: 'plan' | 'default' | 'auto-edit' | 'yolo') => void,
+    callback: (
+      modeId: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo',
+    ) => void,
   ): void {
     this.callbacks.onModeChanged = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
@@ -1431,10 +1496,25 @@ export class QwenAgentManager {
   }
 
   /**
+   * Register callback for available skills updates (from ACP available_skills_update)
+   */
+  onAvailableSkills(callback: (skills: string[]) => void): void {
+    this.callbacks.onAvailableSkills = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
    * Register callback for available models updates (from session/new response)
    */
   onAvailableModels(callback: (models: ModelInfo[]) => void): void {
     this.callbacks.onAvailableModels = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  onSlashCommandNotification(
+    callback: (event: SlashCommandNotification) => void,
+  ): void {
+    this.callbacks.onSlashCommandNotification = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
 

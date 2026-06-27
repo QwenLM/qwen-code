@@ -7,9 +7,41 @@ import type { OpenAICompatibleProvider } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
   tokenLimit,
-  DEFAULT_OUTPUT_TOKEN_LIMIT,
   hasExplicitOutputLimit,
+  parsePositiveIntegerEnvValue,
 } from '../../tokenLimits.js';
+
+type AssistantMessageWithReasoningFields =
+  OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+    reasoning_content?: string | null;
+    reasoning?: string | null;
+  };
+
+function shouldMirrorReasoningContentForQwen3(model: string): boolean {
+  return model.toLowerCase().includes('qwen3');
+}
+
+function mirrorReasoningContentToReasoning(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): OpenAI.Chat.ChatCompletionMessageParam {
+  if (message.role !== 'assistant') {
+    return message;
+  }
+
+  const assistant = message as AssistantMessageWithReasoningFields;
+  if (
+    typeof assistant.reasoning_content !== 'string' ||
+    assistant.reasoning_content.length === 0 ||
+    typeof assistant.reasoning === 'string'
+  ) {
+    return message;
+  }
+
+  return {
+    ...assistant,
+    reasoning: assistant.reasoning_content,
+  } as OpenAI.Chat.ChatCompletionMessageParam;
+}
 
 /**
  * Default provider for standard OpenAI-compatible APIs
@@ -49,8 +81,9 @@ export class DefaultOpenAICompatibleProvider
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
-    // Configure fetch options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),
@@ -74,9 +107,13 @@ export class DefaultOpenAICompatibleProvider
     // Apply output token limits to ensure max_tokens is set appropriately
     // This prevents occupying too much context window with output reservation
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
+    const messages = shouldMirrorReasoningContentForQwen3(request.model)
+      ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
+      : requestWithTokenLimits.messages;
 
     return {
       ...requestWithTokenLimits,
+      messages,
       ...(extraBody ? extraBody : {}),
     };
   }
@@ -101,18 +138,18 @@ export class DefaultOpenAICompatibleProvider
    *    - For unknown models (deployment aliases, self-hosted): respect user's
    *      configured value entirely (backend may support larger limits)
    * 2. If user didn't configure max_tokens:
-   *    - Use min(modelLimit, DEFAULT_OUTPUT_TOKEN_LIMIT)
-   *    - This provides a conservative default (32K) that avoids truncating output
-   *      while preserving input quota (not occupying too much context window)
+   *    - Check QWEN_CODE_MAX_OUTPUT_TOKENS env var first
+   *    - Otherwise use the model's output limit
    * 3. If model has no specific limit (tokenLimit returns default):
-   *    - Still apply DEFAULT_OUTPUT_TOKEN_LIMIT as safeguard
+   *    - Use DEFAULT_OUTPUT_TOKEN_LIMIT
    *
    * Examples:
    * - User sets 4K, known model limit 64K → uses 4K (respects user preference)
    * - User sets 100K, known model limit 64K → uses 64K (capped to avoid API error)
    * - User sets 100K, unknown model → uses 100K (respects user, backend may support it)
-   * - User not set, model limit 64K → uses 32K (conservative default)
-   * - User not set, model limit 8K → uses 8K (model limit is lower)
+   * - User not set, model limit 64K → uses 64K
+   * - User not set, model limit 4K → uses 4K (model limit is lower)
+   * - User not set, env QWEN_CODE_MAX_OUTPUT_TOKENS=16000 -> uses 16K
    *
    * @param request - The chat completion request parameters
    * @returns The request with max_tokens adjusted according to the logic
@@ -120,6 +157,12 @@ export class DefaultOpenAICompatibleProvider
   protected applyOutputTokenLimit<
     T extends { max_tokens?: number | null; model: string },
   >(request: T): T {
+    // When samplingParams is set, it is the source of truth for the wire shape.
+    // Don't inject a max_tokens default — honor the user's explicit choice.
+    if (this.contentGeneratorConfig.samplingParams !== undefined) {
+      return request;
+    }
+
     const userMaxTokens = request.max_tokens;
 
     // Get model-specific output limit and check if model is known
@@ -140,9 +183,17 @@ export class DefaultOpenAICompatibleProvider
         effectiveMaxTokens = userMaxTokens;
       }
     } else {
-      // User didn't configure, use conservative default:
-      // min(model-specific limit, DEFAULT_OUTPUT_TOKEN_LIMIT)
-      effectiveMaxTokens = Math.min(modelLimit, DEFAULT_OUTPUT_TOKEN_LIMIT);
+      // No explicit user config — check env var, then use the model limit.
+      const envMaxTokens = parsePositiveIntegerEnvValue(
+        process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+      );
+      if (envMaxTokens !== undefined) {
+        effectiveMaxTokens = isKnownModel
+          ? Math.min(envMaxTokens, modelLimit)
+          : envMaxTokens;
+      } else {
+        effectiveMaxTokens = modelLimit;
+      }
     }
 
     return {

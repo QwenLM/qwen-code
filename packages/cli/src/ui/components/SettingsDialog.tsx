@@ -26,13 +26,20 @@ import {
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
+  validateSettingValue,
 } from '../../utils/settingsUtils.js';
-import { updateOutputLanguageFile } from '../../utils/languageUtils.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
+import {
+  useVimModeState,
+  useVimModeActions,
+} from '../contexts/VimModeContext.js';
+import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
-import chalk from 'chalk';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import {
   type SettingsValue,
   TOGGLE_TYPES,
@@ -58,7 +65,11 @@ export function SettingsDialog({
   config,
 }: SettingsDialogProps): React.JSX.Element {
   // Get vim mode context to sync vim mode changes
-  const { vimEnabled, toggleVimEnabled } = useVimMode();
+  const { vimEnabled } = useVimModeState();
+  const { toggleVimEnabled } = useVimModeActions();
+  // Get compact mode context to sync compact mode changes
+  const { compactMode, setCompactMode } = useCompactMode();
+  const uiActions = useUIActions();
 
   // Mode state: 'settings' or 'scope' (view switching like ThemeDialog)
   const [mode, setMode] = useState<'settings' | 'scope'>('settings');
@@ -130,6 +141,9 @@ export function SettingsDialog({
           : key,
         value: key,
         type: definition?.type,
+        description: definition?.description
+          ? t(definition.description) || definition.description
+          : undefined,
         toggle: () => {
           if (!TOGGLE_TYPES.has(definition?.type)) {
             return;
@@ -181,6 +195,13 @@ export function SettingsDialog({
               toggleVimEnabled().catch((error) => {
                 debugLogger.error('Failed to toggle vim mode:', error);
               });
+            }
+
+            // Special handling for compact mode to sync with CompactModeContext
+            // and refresh static content so already-rendered history updates.
+            if (key === 'ui.compactMode' && newValue !== compactMode) {
+              setCompactMode?.(newValue as boolean);
+              uiActions.refreshStatic();
             }
 
             // Special handling for approval mode to apply to current session
@@ -305,6 +326,16 @@ export function SettingsDialog({
       }
     }
 
+    if (definition) {
+      const validationError = validateSettingValue(definition, parsed);
+      if (validationError) {
+        setEditingKey(null);
+        setEditBuffer('');
+        setEditCursorPos(0);
+        return;
+      }
+    }
+
     // Update pending
     setPendingSettings((prev) =>
       parsed === undefined
@@ -364,7 +395,7 @@ export function SettingsDialog({
 
       // Update output language rule file immediately (no restart needed for LLM effect)
       if (key === 'general.outputLanguage' && typeof parsed === 'string') {
-        updateOutputLanguageFile(parsed);
+        writeOutputLanguageAndRegisterPath(parsed, config);
       }
 
       // Mark as needing restart and show prompt
@@ -385,10 +416,17 @@ export function SettingsDialog({
     setMode('settings');
   };
 
+  // Get the description for the currently active setting
+  const activeDescription =
+    mode === 'settings' && items[activeSettingIndex]?.description
+      ? items[activeSettingIndex].description
+      : undefined;
+
   // Height constraint calculations similar to ThemeDialog
   const DIALOG_PADDING = 2;
   const SETTINGS_TITLE_HEIGHT = 2; // "Settings" title + spacing
   const SCROLL_ARROWS_HEIGHT = 2; // Up and down arrows
+  const DESCRIPTION_HEIGHT = 2; // Description line + margin
   const BOTTOM_HELP_TEXT_HEIGHT = 1; // Help text
   const RESTART_PROMPT_HEIGHT = showRestartPrompt ? 1 : 0;
 
@@ -401,6 +439,7 @@ export function SettingsDialog({
     DIALOG_PADDING +
     SETTINGS_TITLE_HEIGHT +
     SCROLL_ARROWS_HEIGHT +
+    DESCRIPTION_HEIGHT +
     BOTTOM_HELP_TEXT_HEIGHT +
     RESTART_PROMPT_HEIGHT;
 
@@ -523,8 +562,8 @@ export function SettingsDialog({
           // Block other keys while editing
           return;
         }
-        if (name === 'up' || name === 'k') {
-          // If editing, commit first
+        if (keyMatchers[Command.SELECTION_UP](key)) {
+          // ↑/k/Ctrl+P all move selection up. If editing, commit first.
           if (editingKey) {
             commitEdit(editingKey);
           }
@@ -539,8 +578,8 @@ export function SettingsDialog({
           } else if (newIndex < scrollOffset) {
             setScrollOffset(newIndex);
           }
-        } else if (name === 'down' || name === 'j') {
-          // If editing, commit first
+        } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
+          // ↓/j/Ctrl+N all move selection down. If editing, commit first.
           if (editingKey) {
             commitEdit(editingKey);
           }
@@ -567,6 +606,18 @@ export function SettingsDialog({
             }
             return;
           }
+          if (currentItem?.value === 'fastModel') {
+            if (name === 'return') {
+              onSelect('fastModel', selectedScope);
+            }
+            return;
+          }
+          if (currentItem?.value === 'visionModel') {
+            if (name === 'return') {
+              onSelect('visionModel', selectedScope);
+            }
+            return;
+          }
           if (
             currentItem?.type === 'number' ||
             currentItem?.type === 'string'
@@ -574,6 +625,17 @@ export function SettingsDialog({
             startEditing(currentItem.value);
           } else {
             currentItem?.toggle();
+          }
+        } else if (name === 'right') {
+          // Right arrow opens sub-dialog settings (like a sub-menu)
+          const currentItem = items[activeSettingIndex];
+          if (
+            currentItem?.value === 'ui.theme' ||
+            currentItem?.value === 'general.preferredEditor' ||
+            currentItem?.value === 'fastModel' ||
+            currentItem?.value === 'visionModel'
+          ) {
+            onSelect(currentItem.value, selectedScope);
           }
         } else if (/^[0-9]$/.test(key.sequence || '') && !editingKey) {
           const currentItem = items[activeSettingIndex];
@@ -777,15 +839,22 @@ export function SettingsDialog({
                 );
                 const afterCursor = cpSlice(editBuffer, editCursorPos + 1);
                 displayValue =
-                  beforeCursor + chalk.inverse(atCursor) + afterCursor;
+                  beforeCursor + renderSoftwareCursor(atCursor) + afterCursor;
               } else if (cursorVisible && editCursorPos >= cpLen(editBuffer)) {
-                // Cursor is at the end - show inverted space
-                displayValue = editBuffer + chalk.inverse(' ');
+                // Cursor is at the end - show software cursor space
+                displayValue = editBuffer + renderSoftwareCursor(' ');
               } else {
                 // Cursor not visible
                 displayValue = editBuffer;
               }
             } else if (item.type === 'number' || item.type === 'string') {
+              // Settings that open a sub-dialog on Enter
+              const isSubDialogSetting =
+                item.value === 'ui.theme' ||
+                item.value === 'general.preferredEditor' ||
+                item.value === 'fastModel' ||
+                item.value === 'visionModel';
+
               // For numbers/strings, get the actual current value from pending settings
               const path = item.value.split('.');
               const currentValue = getNestedValue(pendingSettings, path);
@@ -812,6 +881,11 @@ export function SettingsDialog({
 
               if (isDifferentFromDefault || isModified) {
                 displayValue += '*';
+              }
+
+              // Append ▸ for sub-dialog settings to hint Enter opens a picker
+              if (isSubDialogSetting) {
+                displayValue = displayValue ? displayValue + ' ▸' : '▸';
               }
             } else {
               // For booleans and other types, use existing logic
@@ -881,7 +955,14 @@ export function SettingsDialog({
           initialScope={selectedScope}
         />
       )}
-      <Box marginTop={1}>
+      {activeDescription && mode === 'settings' && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} wrap="truncate-end" italic>
+            {activeDescription}
+          </Text>
+        </Box>
+      )}
+      <Box marginTop={activeDescription && mode === 'settings' ? 0 : 1}>
         <Text color={theme.text.secondary} wrap="truncate">
           {mode === 'settings'
             ? t('(Use Enter to select, Tab to configure scope)')

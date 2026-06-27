@@ -103,8 +103,16 @@ qwen -p "run the test suite"
 
 - **CLI flag**: `--sandbox-image <image>`
 - **Environment variable**: `QWEN_SANDBOX_IMAGE=<image>`
+- **Settings file**: `tools.sandboxImage` in your `settings.json` (e.g., `{"tools": {"sandboxImage": "ghcr.io/qwenlm/qwen-code:0.14.1"}}`)
 
-If you don’t set either, Qwen Code uses the default image configured in the CLI package (for example `ghcr.io/qwenlm/qwen-code:<version>`).
+Priority order (highest to lowest):
+
+1. `--sandbox-image`
+2. `QWEN_SANDBOX_IMAGE`
+3. `tools.sandboxImage`
+4. Built-in default image from the CLI package (for example `ghcr.io/qwenlm/qwen-code:<version>`)
+
+`settings.env.QWEN_SANDBOX_IMAGE` also works as a generic env injection mechanism, but `tools.sandboxImage` is the preferred persistent setting.
 
 ### macOS Seatbelt profiles
 
@@ -155,7 +163,7 @@ If you want to restrict outbound network access to an allowlist, you can run a l
 
 This is especially useful with `*-proxied` Seatbelt profiles.
 
-For a working allowlist-style proxy example, see: [Example Proxy Script](/developers/examples/proxy-script).
+For a working allowlist-style proxy example, see: [Example Proxy Script](../../developers/examples/proxy-script.md).
 
 ## Linux UID/GID handling
 
@@ -202,7 +210,7 @@ Then rebuild the sandbox image:
 QWEN_SANDBOX=docker BUILD_SANDBOX=1 qwen -s
 ```
 
-For more details on customizing the sandbox, see [Customizing the sandbox environment](/developers/tools/sandbox).
+For more details on customizing the sandbox, see [Customizing the sandbox environment](../../developers/tools/sandbox.md).
 
 **Network issues**
 

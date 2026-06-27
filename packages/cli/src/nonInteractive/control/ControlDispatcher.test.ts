@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ControlDispatcher } from './ControlDispatcher.js';
 import type { IControlContext } from './ControlContext.js';
+import { createMinimalSettings } from '../../config/settings.js';
 import type { SystemController } from './controllers/systemController.js';
 import type { StreamJsonOutputAdapter } from '../io/StreamJsonOutputAdapter.js';
 import type {
@@ -18,6 +19,7 @@ import type {
   CLIControlInterruptRequest,
   CLIControlSetModelRequest,
   CLIControlSupportedCommandsRequest,
+  CLIControlGetContextUsageRequest,
 } from '../types.js';
 
 /**
@@ -39,6 +41,7 @@ function createMockContext(debugMode: boolean = false): IControlContext {
     sessionId: 'test-session-id',
     abortSignal: abortController.signal,
     debugMode,
+    settings: createMinimalSettings(),
     permissionMode: 'default',
     sdkMcpServers: new Set<string>(),
     mcpClients: new Map(),
@@ -237,6 +240,41 @@ describe('ControlDispatcher', () => {
         response: {
           subtype: 'success',
           request_id: 'req-4',
+          response: mockResponse,
+        },
+      });
+    });
+
+    it('should route get_context_usage request to system controller', async () => {
+      const request: CLIControlRequest = {
+        type: 'control_request',
+        request_id: 'req-ctx',
+        request: {
+          subtype: 'get_context_usage',
+          show_details: false,
+        } as CLIControlGetContextUsageRequest,
+      };
+
+      const mockResponse = {
+        subtype: 'get_context_usage',
+        totalTokens: 1000,
+      };
+
+      vi.mocked(mockSystemController.handleRequest).mockResolvedValue(
+        mockResponse,
+      );
+
+      await dispatcher.dispatch(request);
+
+      expect(mockSystemController.handleRequest).toHaveBeenCalledWith(
+        request.request,
+        'req-ctx',
+      );
+      expect(mockContext.streamJson.send).toHaveBeenCalledWith({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: 'req-ctx',
           response: mockResponse,
         },
       });

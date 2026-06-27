@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { resolveEnvVars, parseChannelConfig } from './config-utils.js';
 
 // Mock the channel-registry so we don't pull in real plugins
 vi.mock('./channel-registry.js', () => ({
-  getPlugin: (type: string) => {
+  getPlugin: async (type: string) => {
     const plugins: Record<
       string,
       { channelType: string; requiredConfigFields?: string[] }
@@ -17,7 +19,7 @@ vi.mock('./channel-registry.js', () => ({
     };
     return plugins[type];
   },
-  supportedTypes: () => ['telegram', 'dingtalk', 'bare'],
+  supportedTypes: async () => ['telegram', 'dingtalk', 'bare'],
 }));
 
 describe('resolveEnvVars', () => {
@@ -49,26 +51,49 @@ describe('resolveEnvVars', () => {
 });
 
 describe('parseChannelConfig', () => {
-  it('throws when type is missing', () => {
-    expect(() => parseChannelConfig('bot', {})).toThrow(
+  it('throws when type is missing', async () => {
+    await expect(parseChannelConfig('bot', {})).rejects.toThrow(
       'missing required field "type"',
     );
   });
 
-  it('throws for unsupported channel type', () => {
-    expect(() => parseChannelConfig('bot', { type: 'slack' })).toThrow(
+  it('throws for unsupported channel type', async () => {
+    await expect(parseChannelConfig('bot', { type: 'slack' })).rejects.toThrow(
       '"slack" is not supported',
     );
   });
 
-  it('throws when plugin-required fields are missing', () => {
-    expect(() => parseChannelConfig('bot', { type: 'telegram' })).toThrow(
-      'requires "token"',
-    );
+  it('throws when plugin-required fields are missing', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'telegram' }),
+    ).rejects.toThrow('requires "token"');
   });
 
-  it('parses minimal valid config with defaults', () => {
-    const result = parseChannelConfig('bot', {
+  it('throws a clear error when token is not a string', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'telegram', token: 123 }),
+    ).rejects.toThrow('Channel "bot" field "token" must be a string.');
+  });
+
+  it('throws a clear error when dingtalk credentials are not strings', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 123,
+        clientSecret: 'secret',
+      }),
+    ).rejects.toThrow('Channel "bot" field "clientId" must be a string.');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: false,
+      }),
+    ).rejects.toThrow('Channel "bot" field "clientSecret" must be a string.');
+  });
+
+  it('parses minimal valid config with defaults', async () => {
+    const result = await parseChannelConfig('bot', {
       type: 'bare',
     });
 
@@ -82,12 +107,12 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({});
   });
 
-  it('resolves env vars in token, clientId, clientSecret', () => {
+  it('resolves env vars in token, clientId, clientSecret', async () => {
     process.env['TEST_TOKEN'] = 'tok123';
     process.env['TEST_CID'] = 'cid456';
     process.env['TEST_SEC'] = 'sec789';
 
-    const result = parseChannelConfig('bot', {
+    const result = await parseChannelConfig('bot', {
       type: 'bare',
       token: '$TEST_TOKEN',
       clientId: '$TEST_CID',
@@ -103,8 +128,8 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_SEC'];
   });
 
-  it('preserves explicit config values over defaults', () => {
-    const result = parseChannelConfig('bot', {
+  it('preserves explicit config values over defaults', async () => {
+    const result = await parseChannelConfig('bot', {
       type: 'bare',
       token: 'literal-tok',
       senderPolicy: 'open',
@@ -130,11 +155,44 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
   });
 
-  it('spreads extra fields from raw config', () => {
-    const result = parseChannelConfig('bot', {
+  it('spreads extra fields from raw config', async () => {
+    const result = await parseChannelConfig('bot', {
       type: 'bare',
       customField: 42,
     });
     expect((result as Record<string, unknown>)['customField']).toBe(42);
+  });
+
+  it('expands tilde in cwd (~/x → $HOME/x)', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: '~/xomo',
+    });
+    expect(result.cwd).toBe(path.join(os.homedir(), 'xomo'));
+  });
+
+  it('expands bare tilde (~) in cwd to home directory', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: '~',
+    });
+    expect(result.cwd).toBe(os.homedir());
+  });
+
+  it('resolves relative cwd against process.cwd', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: 'relative/dir',
+    });
+    expect(result.cwd).toBe(path.resolve('relative/dir'));
+  });
+
+  it('leaves absolute cwd unchanged', async () => {
+    const abs = path.resolve('/custom');
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: abs,
+    });
+    expect(result.cwd).toBe(abs);
   });
 });

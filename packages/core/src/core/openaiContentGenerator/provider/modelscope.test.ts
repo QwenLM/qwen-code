@@ -35,22 +35,38 @@ describe('ModelScopeOpenAICompatibleProvider', () => {
   });
 
   describe('isModelScopeProvider', () => {
-    it('should return true if baseUrl includes "modelscope"', () => {
-      const config = { baseUrl: 'https://api.modelscope.cn/v1' };
-      expect(
-        ModelScopeOpenAICompatibleProvider.isModelScopeProvider(
-          config as ContentGeneratorConfig,
-        ),
-      ).toBe(true);
+    it('should return true for ModelScope hostnames', () => {
+      const configs = [
+        { baseUrl: 'https://api-inference.modelscope.cn/v1' },
+        { baseUrl: 'https://api.modelscope.cn/v1' },
+        { baseUrl: 'https://modelscope.cn/v1' },
+      ];
+
+      configs.forEach((config) => {
+        expect(
+          ModelScopeOpenAICompatibleProvider.isModelScopeProvider(
+            config as ContentGeneratorConfig,
+          ),
+        ).toBe(true);
+      });
     });
 
-    it('should return false if baseUrl does not include "modelscope"', () => {
-      const config = { baseUrl: 'https://api.openai.com/v1' };
-      expect(
-        ModelScopeOpenAICompatibleProvider.isModelScopeProvider(
-          config as ContentGeneratorConfig,
-        ),
-      ).toBe(false);
+    it('should return false for non-ModelScope hostnames', () => {
+      const configs = [
+        { baseUrl: 'https://api.openai.com/v1' },
+        { baseUrl: 'https://example.com/modelscope/v1' },
+        { baseUrl: 'https://modelscope.cn.evil.example/v1' },
+        { baseUrl: 'not a url with modelscope' },
+        { baseUrl: undefined },
+      ];
+
+      configs.forEach((config) => {
+        expect(
+          ModelScopeOpenAICompatibleProvider.isModelScopeProvider(
+            config as ContentGeneratorConfig,
+          ),
+        ).toBe(false);
+      });
     });
   });
 

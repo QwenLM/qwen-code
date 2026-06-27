@@ -40,6 +40,8 @@ describe('resolveToolName', () => {
     expect(resolveToolName('ReadFile')).toBe('read_file');
     expect(resolveToolName('ReadFileTool')).toBe('read_file');
     expect(resolveToolName('EditTool')).toBe('edit');
+    expect(resolveToolName('NotebookEdit')).toBe('notebook_edit');
+    expect(resolveToolName('NotebookEditTool')).toBe('notebook_edit');
     expect(resolveToolName('WriteFileTool')).toBe('write_file');
   });
 
@@ -61,6 +63,16 @@ describe('resolveToolName', () => {
     expect(resolveToolName('TaskTool')).toBe('agent');
   });
 
+  it('resolves TodoList aliases (incl. legacy TodoWrite) to todo_write', async () => {
+    expect(resolveToolName('todo_write')).toBe('todo_write');
+    // The display name shown in the UI; a user writing allow: ["TodoList"]
+    // must resolve to the tool, not be silently dropped.
+    expect(resolveToolName('TodoList')).toBe('todo_write');
+    // Legacy display name (renamed from TodoWrite) keeps resolving.
+    expect(resolveToolName('TodoWrite')).toBe('todo_write');
+    expect(resolveToolName('TodoWriteTool')).toBe('todo_write');
+  });
+
   it('returns unknown names unchanged', async () => {
     expect(resolveToolName('my_mcp_tool')).toBe('my_mcp_tool');
     expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
@@ -77,6 +89,7 @@ describe('getSpecifierKind', () => {
   it('returns "path" for file read/edit tools', async () => {
     expect(getSpecifierKind('read_file')).toBe('path');
     expect(getSpecifierKind('edit')).toBe('path');
+    expect(getSpecifierKind('notebook_edit')).toBe('path');
     expect(getSpecifierKind('write_file')).toBe('path');
     expect(getSpecifierKind('grep_search')).toBe('path');
     expect(getSpecifierKind('glob')).toBe('path');
@@ -108,8 +121,17 @@ describe('toolMatchesRuleToolName', () => {
     expect(toolMatchesRuleToolName('read_file', 'list_directory')).toBe(true);
   });
 
-  it('"Edit" (edit) covers write_file', async () => {
+  it('"Edit" (edit) covers write_file and notebook_edit', async () => {
     expect(toolMatchesRuleToolName('edit', 'write_file')).toBe(true);
+    expect(toolMatchesRuleToolName('edit', 'notebook_edit')).toBe(true);
+  });
+
+  it('"Bash" (run_shell_command) covers monitor', async () => {
+    expect(toolMatchesRuleToolName('run_shell_command', 'monitor')).toBe(true);
+  });
+
+  it('monitor rules do not cover run_shell_command', async () => {
+    expect(toolMatchesRuleToolName('monitor', 'run_shell_command')).toBe(false);
   });
 
   it('does not cross categories', async () => {
@@ -132,15 +154,27 @@ describe('parseRule', () => {
     expect(r.specifierKind).toBeUndefined();
   });
 
-  it('parses Bash alias (Claude Code compat)', async () => {
+  it('parses Bash alias', async () => {
     const r = parseRule('Bash');
     expect(r.toolName).toBe('run_shell_command');
+  });
+
+  it('parses Monitor alias', async () => {
+    const r = parseRule('Monitor');
+    expect(r.toolName).toBe('monitor');
   });
 
   it('parses a shell tool with a specifier', async () => {
     const r = parseRule('Bash(git *)');
     expect(r.toolName).toBe('run_shell_command');
     expect(r.specifier).toBe('git *');
+    expect(r.specifierKind).toBe('command');
+  });
+
+  it('parses Monitor with command specifier', async () => {
+    const r = parseRule('Monitor(tail -f *)');
+    expect(r.toolName).toBe('monitor');
+    expect(r.specifier).toBe('tail -f *');
     expect(r.specifierKind).toBe('command');
   });
 
@@ -186,7 +220,32 @@ describe('parseRule', () => {
 
   it('handles malformed pattern (no closing paren)', async () => {
     const r = parseRule('Bash(git status');
+    expect(r.invalid).toBe(true);
+    expect(r.toolName).toBe('run_shell_command');
     expect(r.specifier).toBeUndefined();
+    // Must not match any command
+    expect(matchesRule(r, 'run_shell_command', 'git status')).toBe(false);
+    expect(matchesRule(r, 'run_shell_command', 'rm -rf /')).toBe(false);
+  });
+
+  it('handles malformed pattern with trailing junk after paren', async () => {
+    const r = parseRule('Bash(rm -rf /)*');
+    expect(r.invalid).toBe(true);
+    expect(matchesRule(r, 'run_shell_command', 'git status')).toBe(false);
+    expect(matchesRule(r, 'run_shell_command', 'rm -rf /')).toBe(false);
+  });
+
+  it('handles malformed pattern with only open paren', async () => {
+    const r = parseRule('Bash(');
+    expect(r.invalid).toBe(true);
+    expect(matchesRule(r, 'run_shell_command', 'ls')).toBe(false);
+  });
+
+  it('still parses well-formed rules correctly', async () => {
+    const r = parseRule('Bash(rm -rf /)');
+    expect(r.invalid).toBeUndefined();
+    expect(matchesRule(r, 'run_shell_command', 'rm -rf /')).toBe(true);
+    expect(matchesRule(r, 'run_shell_command', 'git status')).toBe(false);
   });
 });
 
@@ -226,6 +285,24 @@ describe('matchesCommandPattern', () => {
       expect(matchesCommandPattern('git *', 'git status')).toBe(true);
       expect(matchesCommandPattern('git *', 'git commit -m "test"')).toBe(true);
       expect(matchesCommandPattern('npm run *', 'npm run build')).toBe(true);
+    });
+
+    it('matches commands with leading env var assignments', async () => {
+      expect(
+        matchesCommandPattern(
+          'python3 *',
+          'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+        ),
+      ).toBe(true);
+    });
+
+    it('matches commands containing embedded newlines (dotAll)', async () => {
+      expect(
+        matchesCommandPattern(
+          'python3 *',
+          'python3 -c "\nimport sys\nprint(sys.version)\n"',
+        ),
+      ).toBe(true);
     });
 
     it('space-star requires word boundary (ls * does not match lsof)', async () => {
@@ -450,7 +527,7 @@ describe('resolvePathPattern', () => {
   });
 
   it('/Users/alice/file is relative to project root, NOT absolute', async () => {
-    // This is a gotcha from the Claude Code docs
+    // Leading slash patterns are project-root relative.
     expect(resolvePathPattern('/Users/alice/file', projectRoot, cwd)).toBe(
       '/project/Users/alice/file',
     );
@@ -602,6 +679,27 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'run_shell_command', 'echo hello')).toBe(false);
   });
 
+  // Monitor command specifier
+  it('Monitor rule matches monitor invocations with command specifier', async () => {
+    const rule = parseRule('Monitor(tail -f *)');
+    expect(matchesRule(rule, 'monitor')).toBe(false); // no command
+    expect(matchesRule(rule, 'monitor', 'tail -f /var/log/app.log')).toBe(true);
+    expect(matchesRule(rule, 'monitor', 'echo hello')).toBe(false);
+  });
+
+  it('Monitor rule does not match run_shell_command', async () => {
+    const rule = parseRule('Monitor(tail -f *)');
+    expect(
+      matchesRule(rule, 'run_shell_command', 'tail -f /var/log/app.log'),
+    ).toBe(false);
+  });
+
+  it('Bash rule also covers monitor (shell deny rules block monitor)', async () => {
+    const rule = parseRule('Bash(tail -f *)');
+    expect(matchesRule(rule, 'monitor', 'tail -f /var/log/app.log')).toBe(true);
+    expect(matchesRule(rule, 'monitor', 'echo hello')).toBe(false);
+  });
+
   it('matchesRule checks individual simple commands (compound splitting is at PM level)', async () => {
     const rule = parseRule('Bash(git *)');
     // matchesRule receives a simple command (already split by PM)
@@ -620,10 +718,11 @@ describe('matchesRule', () => {
   });
 
   // Meta-category matching: Edit
-  it('Edit rule matches edit and write_file', async () => {
+  it('Edit rule matches edit, write_file, and notebook_edit', async () => {
     const rule = parseRule('Edit');
     expect(matchesRule(rule, 'edit')).toBe(true);
     expect(matchesRule(rule, 'write_file')).toBe(true);
+    expect(matchesRule(rule, 'notebook_edit')).toBe(true);
     expect(matchesRule(rule, 'read_file')).toBe(false); // not an edit tool
   });
 
@@ -675,6 +774,31 @@ describe('matchesRule', () => {
         'write_file',
         undefined,
         '/project/docs/readme.md',
+        undefined,
+        pathCtx,
+      ),
+    ).toBe(false);
+  });
+
+  it('Edit path specifier matches notebook_edit too', async () => {
+    const rule = parseRule('Edit(/src/**/*.ipynb)');
+    const pathCtx = { projectRoot: '/project', cwd: '/project' };
+    expect(
+      matchesRule(
+        rule,
+        'notebook_edit',
+        undefined,
+        '/project/src/analysis.ipynb',
+        undefined,
+        pathCtx,
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'notebook_edit',
+        undefined,
+        '/project/docs/analysis.ipynb',
         undefined,
         pathCtx,
       ),
@@ -765,6 +889,7 @@ function makeConfig(
     coreTools: string[];
     projectRoot: string;
     cwd: string;
+    approvalMode: string;
   }> = {},
 ): PermissionManagerConfig {
   return {
@@ -774,6 +899,7 @@ function makeConfig(
     getCoreTools: () => opts.coreTools,
     getProjectRoot: () => opts.projectRoot ?? '/project',
     getCwd: () => opts.cwd ?? '/project',
+    getApprovalMode: () => opts.approvalMode ?? 'default',
   };
 }
 
@@ -882,11 +1008,309 @@ describe('PermissionManager', () => {
       ).toBe('ask');
     });
 
+    // Regression coverage for issue #4093: command substitution must never
+    // produce a hard 'deny' from resolveDefaultPermission. Before the fix
+    // the L4 default branch returned 'deny' for any command containing
+    // $(), backticks, <(), or >(), which:
+    //   1. could not be overridden by YOLO mode, and
+    //   2. fired inconsistently — only when hasRelevantRules() happened to
+    //      be true (e.g. a compound command where another sub-command
+    //      matched an unrelated allow rule). Standalone substitution
+    //      commands with no relevant rule skipped L4 entirely and got
+    //      'ask' from L3, producing surprising asymmetry.
+    // Both shapes must now resolve to 'ask' regardless of rule shape.
+    describe('command substitution (issue #4093)', () => {
+      it('returns ask for a standalone command with $() substitution', async () => {
+        // No 'python3' rule is configured, but the substitution must not
+        // trip a deny — the only acceptable answer is 'ask'.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'python3 -c "print($(echo hello))"',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for a compound command where one sub-command matches an allow rule and another contains $()', async () => {
+        // Structurally equivalent to the scenario reported in issue #4093:
+        // the first sub-command (`git status`) matches the surrounding
+        // describe's `Bash(git *)` allow rule, which makes
+        // hasRelevantRules() return true and triggers full PM evaluation;
+        // the second sub-command (`python3 -c "..."`) contains command
+        // substitution and does not match any rule, so it falls into
+        // resolveDefaultPermission. Before the fix, that path returned
+        // 'deny' for the substitution sub-command and the most-restrictive
+        // combine made the whole compound deny. After the fix it returns
+        // 'ask' and the compound resolves to 'ask'.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'git status && python3 -c "print($(echo hello))"',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for backtick command substitution', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo `whoami`',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for process substitution <()', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'diff <(ls /a) <(ls /b)',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for >() output process substitution', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo data > >(tee log.txt)',
+          }),
+        ).toBe('ask');
+      });
+
+      it('still honors explicit deny rules over substitution-bearing commands', async () => {
+        // The 'ask' from substitution must never downgrade a real deny rule.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'rm -rf "$(pwd)/build"',
+          }),
+        ).toBe('deny');
+      });
+    });
+
     it('isCommandAllowed delegates to evaluate', async () => {
       expect(await pm.isCommandAllowed('git commit')).toBe('allow');
       expect(await pm.isCommandAllowed('rm -rf /')).toBe('deny');
       // 'ls' is readonly, resolves to 'allow' when no rule matches
       expect(await pm.isCommandAllowed('ls')).toBe('allow');
+    });
+
+    it('resolves shell virtual file operations relative to the explicit cwd', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Read(./subdir/secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('allow');
+    });
+
+    it('applies relative virtual file rules using the shell invocation cwd', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Read(./secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('deny');
+    });
+  });
+
+  describe('monitor command-level evaluation', () => {
+    it('Monitor(...) allow rule matches monitor invocations', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(tail -f *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'tail -f /var/log/app.log',
+        }),
+      ).toBe('allow');
+    });
+
+    it('Monitor(...) allow rule matches wrapped monitor invocations', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(tail -f *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: `/bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
+        }),
+      ).toBe('allow');
+    });
+
+    it('exact Monitor(...) allow rule matches wrapped fallback commands', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(FOO="bar baz" tail -f /var/log/app.log)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
+        }),
+      ).toBe('allow');
+    });
+
+    it('Monitor(...) deny rule sees shell wrapper suffix commands', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(tail -f *)'],
+          permissionsDeny: ['Monitor(rm *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: `/bin/bash -c 'tail -f /var/log/app.log' && rm -rf /tmp/owned`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('Monitor(...) deny rule blocks monitor invocations', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Monitor(rm *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'rm -rf /',
+        }),
+      ).toBe('deny');
+    });
+
+    it('Monitor approval does NOT allow run_shell_command', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Monitor(npm *)'],
+        }),
+      );
+      pm2.initialize();
+      // Same command via shell tool should NOT be allowed by Monitor rule
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npm install',
+        }),
+      ).not.toBe('allow');
+    });
+
+    it('Bash approval also allows monitor (shell rules cover monitor)', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(npm *)'],
+        }),
+      );
+      pm2.initialize();
+      // Same command via monitor tool should be allowed by Bash rule
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'npm install',
+        }),
+      ).toBe('allow');
+    });
+
+    it('Bash deny rule blocks equivalent monitor command', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'rm -rf /',
+        }),
+      ).toBe('deny');
+    });
+
+    it('resolves default to allow for readonly monitor commands', async () => {
+      const pm2 = new PermissionManager(makeConfig({}));
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'echo hello',
+        }),
+      ).toBe('allow');
+    });
+
+    it('applies relative virtual file deny rules using the monitor cwd', async () => {
+      // Mirrors the run_shell_command coverage above: when a monitor is
+      // started with an explicit `directory` (forwarded as `cwd` via
+      // buildPermissionCheckContext), relative-path deny rules must resolve
+      // against that directory rather than the global config cwd. Without
+      // this propagation a `Read(./secret.txt)` rule could be silently
+      // bypassed by switching the monitor's working directory.
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Read(./secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('deny');
+    });
+
+    it('resolves monitor virtual file allow rules relative to the explicit cwd', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Read(./subdir/secret.txt)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'cat ./secret.txt',
+          cwd: '/project/subdir',
+        }),
+      ).toBe('allow');
     });
   });
 
@@ -1200,6 +1624,12 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
     });
 
+    it('Edit deny rule disables notebook_edit', async () => {
+      pm = new PermissionManager(makeConfig({ permissionsDeny: ['Edit'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+    });
+
     it('coreTools allowlist: listed tool is enabled', async () => {
       pm = new PermissionManager(
         makeConfig({ coreTools: ['read_file', 'Bash'] }),
@@ -1215,6 +1645,24 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('read_file')).toBe(true);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
       expect(await pm.isToolEnabled('edit')).toBe(false);
+      expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+    });
+
+    it('coreTools allowlist: NotebookEdit alias enables notebook_edit', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['NotebookEdit'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('notebook_edit')).toBe(true);
+      expect(await pm.isToolEnabled('edit')).toBe(false);
+    });
+
+    it('coreTools allowlist gates loop_wakeup as a core scheduling tool', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('loop_wakeup')).toBe(false);
+
+      pm = new PermissionManager(makeConfig({ coreTools: ['loop_wakeup'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('loop_wakeup')).toBe(true);
     });
 
     it('coreTools with specifier: tool-level check strips specifier', async () => {
@@ -1290,6 +1738,20 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('ask_user_question')).toBe(true);
     });
 
+    it('structured_output tool bypasses coreTools allowlist check', async () => {
+      // structured_output is a synthetic tool that only exists when the
+      // user opts into --json-schema. Treating it like agent/skill/
+      // exit_plan_mode (bypass the coreTools allowlist) is the right
+      // default: a run that combines `--json-schema X --core-tools read_file`
+      // intends "restrict the model's pluggable toolbelt to read_file"
+      // while still receiving the structured payload — silently dropping
+      // structured_output here would leave --json-schema with no terminal
+      // contract, so the run would loop until maxTurns.
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('structured_output')).toBe(true);
+    });
+
     it('Non-core tools still respect deny rules', async () => {
       pm = new PermissionManager(
         makeConfig({
@@ -1335,6 +1797,29 @@ describe('PermissionManager', () => {
       pm.addSessionDenyRule('run_shell_command');
       expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
     });
+
+    it('malformed session allow rule is silently ignored', async () => {
+      pm.addSessionAllowRule('Bash(git commit');
+      // 'git commit' is not readonly, so default is 'ask'.
+      // The malformed rule must not act as catch-all allow.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git commit',
+        }),
+      ).toBe('ask');
+    });
+
+    it('malformed session deny rule is silently ignored', async () => {
+      pm.addSessionDenyRule('Bash(rm -rf /)*');
+      // Should NOT deny — the malformed rule must not act as catch-all
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git status',
+        }),
+      ).not.toBe('deny');
+    });
   });
 
   describe('allowedTools via permissionsAllow', () => {
@@ -1370,6 +1855,21 @@ describe('PermissionManager', () => {
         (r) => r.scope === 'session' && r.type === 'allow',
       );
       expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
+    });
+
+    it('excludes malformed rules from listing', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['ReadFileTool'],
+          permissionsDeny: ['Bash(rm -rf /)*'],
+        }),
+      );
+      pm.initialize();
+
+      const rules = pm.listRules();
+      // The malformed deny rule should be filtered out
+      expect(rules.length).toBe(1);
+      expect(rules[0]!.rule.toolName).toBe('read_file');
     });
   });
 
@@ -1417,6 +1917,7 @@ describe('getRuleDisplayName', () => {
   it('maps edit tools to "Edit" meta-category', async () => {
     expect(getRuleDisplayName('edit')).toBe('Edit');
     expect(getRuleDisplayName('write_file')).toBe('Edit');
+    expect(getRuleDisplayName('notebook_edit')).toBe('Edit');
   });
 
   it('maps shell to "Bash"', async () => {
@@ -1488,6 +1989,14 @@ describe('buildPermissionRules', () => {
       const rules = buildPermissionRules({
         toolName: 'write_file',
         filePath: '/tmp/output.txt',
+      });
+      expect(rules).toEqual(['Edit(//tmp/**)']);
+    });
+
+    it('generates Edit rule scoped to parent directory for notebook_edit', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'notebook_edit',
+        filePath: '/tmp/analysis.ipynb',
       });
       expect(rules).toEqual(['Edit(//tmp/**)']);
     });
@@ -1610,6 +2119,19 @@ describe('buildPermissionRules', () => {
       const rules = buildPermissionRules({ toolName: 'run_shell_command' });
       expect(rules).toEqual(['Bash']);
     });
+
+    it('generates Monitor rule with command specifier', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'monitor',
+        command: 'tail -f /var/log/app.log',
+      });
+      expect(rules).toEqual(['Monitor(tail -f /var/log/app.log)']);
+    });
+
+    it('falls back to bare Monitor display name when no command', async () => {
+      const rules = buildPermissionRules({ toolName: 'monitor' });
+      expect(rules).toEqual(['Monitor']);
+    });
   });
 
   describe('literal-specifier tools', () => {
@@ -1660,8 +2182,8 @@ describe('buildHumanReadableRuleLabel', () => {
     expect(buildHumanReadableRuleLabel(['Bash'])).toBe('run commands');
   });
 
-  it('converts bare WebSearch rule to "search the web"', () => {
-    expect(buildHumanReadableRuleLabel(['WebSearch'])).toBe('search the web');
+  it('converts bare Monitor rule to "monitor commands"', () => {
+    expect(buildHumanReadableRuleLabel(['Monitor'])).toBe('monitor commands');
   });
 
   it('converts Read with absolute path specifier', () => {
@@ -1682,6 +2204,11 @@ describe('buildHumanReadableRuleLabel', () => {
   it('converts Bash with command specifier', () => {
     const label = buildHumanReadableRuleLabel(['Bash(git *)']);
     expect(label).toBe("run 'git *' commands");
+  });
+
+  it('converts Monitor with command specifier', () => {
+    const label = buildHumanReadableRuleLabel(['Monitor(tail -f *)']);
+    expect(label).toBe("monitor 'tail -f *' commands");
   });
 
   it('converts WebFetch with domain specifier', () => {
@@ -1813,5 +2340,342 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     });
     // rule.raw preserves the original rule string as written in config
     expect(result).toBe('ShellTool');
+  });
+});
+
+// ─── AUTO mode dangerous-rule stash ────────────────────────────────────
+
+describe('PermissionManager — strip/restore for AUTO mode', () => {
+  it('strips Bash interpreter wildcards and stashes them', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(python:*)', 'Bash(git status)'],
+      }),
+    );
+    pm.initialize();
+
+    const stash = pm.stripDangerousRulesForAutoMode();
+    expect(stash.persistent).toHaveLength(1);
+    expect(stash.persistent[0].raw).toBe('Bash(python:*)');
+
+    // The safe rule remains: git status still auto-allowed.
+    return expect(
+      pm.evaluate({ toolName: 'run_shell_command', command: 'git status' }),
+    ).resolves.toBe('allow');
+  });
+
+  it('strips bare tool-level Bash allow', async () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash'] }),
+    );
+    pm.initialize();
+
+    // Before strip: any Bash command is auto-allowed.
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'rm -rf /',
+      }),
+    ).toBe('allow');
+
+    pm.stripDangerousRulesForAutoMode();
+
+    // After strip: Bash falls through to default (which AST analysis turns
+    // into ask for non-readonly commands).
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'rm -rf /',
+      }),
+    ).not.toBe('allow');
+  });
+
+  it('strips Agent / Skill any-allow rules', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Agent(coder)', 'Skill(pdf)', 'ReadFileTool'],
+      }),
+    );
+    pm.initialize();
+
+    const stash = pm.stripDangerousRulesForAutoMode();
+    expect(stash.persistent).toHaveLength(2);
+    expect(stash.persistent.map((r) => r.toolName).sort()).toEqual(
+      ['agent', 'skill'].sort(),
+    );
+    // Safe Read rule untouched.
+    expect(pm.getAllowRawStrings()).toEqual(['ReadFileTool']);
+  });
+
+  it('is idempotent — second strip returns the same stash without re-removal', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
+    );
+    pm.initialize();
+
+    const first = pm.stripDangerousRulesForAutoMode();
+    const second = pm.stripDangerousRulesForAutoMode();
+    expect(first).toBe(second);
+    expect(pm.getAllowRawStrings()).toEqual([]);
+  });
+
+  it('restoreDangerousRules reattaches stripped rules to their original scope', async () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
+    );
+    pm.initialize();
+
+    pm.stripDangerousRulesForAutoMode();
+    expect(pm.getAllowRawStrings()).toEqual([]);
+
+    pm.restoreDangerousRules();
+    expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
+
+    // And the rule works again: python anything is auto-allowed.
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'python foo.py',
+      }),
+    ).toBe('allow');
+  });
+
+  it('never strips deny rules — user intent for deny is honored', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Bash', 'Agent'],
+        permissionsAllow: ['Bash(git log)'],
+      }),
+    );
+    pm.initialize();
+
+    pm.stripDangerousRulesForAutoMode();
+    // Bash deny still applies — no allow rule can override it after strip.
+    return expect(
+      pm.evaluate({ toolName: 'run_shell_command', command: 'git log' }),
+    ).resolves.toBe('deny');
+  });
+
+  it('auto-strips on initialize when approvalMode is "auto"', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(python:*)'],
+        approvalMode: 'auto',
+      }),
+    );
+    pm.initialize();
+    expect(pm.getAllowRawStrings()).toEqual([]);
+    expect(pm.getStrippedDangerousRules()?.persistent).toHaveLength(1);
+  });
+
+  it('does NOT auto-strip when approvalMode is the default', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
+    );
+    pm.initialize();
+    expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
+    expect(pm.getStrippedDangerousRules()).toBeUndefined();
+  });
+});
+
+// ─── Compound shell + cd + wrapper → virtual-op rule matching ───────────────
+//
+// Regression coverage for compound shell writes reaching protected paths
+// through `cd` and shell wrappers.
+
+describe('PermissionManager — compound shell write attribution', () => {
+  it('deny rule matches a write after `cd` into a subdir', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && echo '{}' > settings.json",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('deny rule matches a write through a `bash -lc` wrapper after `cd`', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('ask rule matches a write through nested shell wrappers', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['WriteFileTool(.mcp.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'bash -lc "sh -c \'echo hi > .mcp.json\'"',
+        cwd: '/repo',
+      }),
+    ).toBe('ask');
+  });
+
+  it('allow rule on the same shell command does NOT downgrade a virtual-op deny', async () => {
+    // The Bash allow rule covers the literal command, but the cross-command
+    // virtual-op pass surfaces the write target and the deny rule on
+    // .qwen/settings.json escalates the verdict. Allow + virtual-op deny
+    // → deny, matching the "deny > ask > allow" priority.
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "cd src && bash -lc 'echo ok > generated.txt'",
+        cwd: '/repo',
+      }),
+    ).toBe(false);
+  });
+
+  it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('hasRelevantRules sees protected writes after `cd` before compound recursion', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('hasMatchingAskRule sees writes after `cd` into a subdir', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasMatchingAskRule({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('escalates dynamic-cd writes when path-specific deny rules may apply', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > ../settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > ../settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe('ask');
+  });
+
+  it('preserves wildcard deny rules for dynamic-cd writes', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(*)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
   });
 });

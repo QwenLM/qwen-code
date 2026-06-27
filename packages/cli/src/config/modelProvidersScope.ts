@@ -6,7 +6,7 @@
 
 import { SettingScope, type LoadedSettings } from './settings.js';
 
-function hasOwnModelProviders(settingsObj: unknown): boolean {
+export function hasOwnModelProviders(settingsObj: unknown): boolean {
   if (!settingsObj || typeof settingsObj !== 'object') {
     return false;
   }

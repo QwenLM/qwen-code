@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, beforeEach, expect, test, vi } from 'vitest';
+import { describe, beforeEach, afterEach, expect, test, vi } from 'vitest';
 import { NativeLspService } from './NativeLspService.js';
 import { EventEmitter } from 'events';
 import type { Config as CoreConfig } from '../config/config.js';
@@ -142,6 +142,96 @@ describe('NativeLspService', () => {
 
     // 检查服务是否已准备就绪
     expect(status).toBeDefined();
+  });
+
+  test('should expose a detailed status snapshot for configured servers', () => {
+    const serverManager = {
+      getHandles: () =>
+        new Map([
+          [
+            'clangd',
+            {
+              config: {
+                name: 'clangd',
+                languages: ['c', 'cpp'],
+                command: 'clangd',
+                args: ['--background-index'],
+                transport: 'stdio',
+                rootUri: 'file:///test/workspace',
+                workspaceFolder: '/test/workspace',
+              },
+              status: 'READY',
+              process: { pid: 12345 },
+              warmedUp: true,
+              restartAttempts: 1,
+              processDiagnostics: {
+                stderrTail: 'clangd: unknown argument\n',
+                exitCode: 7,
+                exitSignal: null,
+              },
+            },
+          ],
+          [
+            'pyright',
+            {
+              config: {
+                name: 'pyright',
+                languages: ['python'],
+                command: 'pyright-langserver',
+                args: ['--stdio'],
+                transport: 'stdio',
+                rootUri: 'file:///test/workspace',
+                workspaceFolder: '/test/workspace',
+              },
+              status: 'FAILED',
+              error: new Error('startup failed'),
+            },
+          ],
+        ]),
+    };
+
+    (lspService as unknown as { serverManager: unknown }).serverManager =
+      serverManager;
+
+    const snapshot = lspService.getStatusSnapshot();
+
+    expect(snapshot).toEqual({
+      enabled: true,
+      configuredServers: 2,
+      readyServers: 1,
+      failedServers: 1,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'clangd',
+          status: 'READY',
+          languages: ['c', 'cpp'],
+          transport: 'stdio',
+          command: 'clangd',
+          args: ['--background-index'],
+          rootUri: 'file:///test/workspace',
+          workspaceFolder: '/test/workspace',
+          pid: 12345,
+          warmedUp: true,
+          restartAttempts: 1,
+          stderrTail: 'clangd: unknown argument\n',
+          exitCode: 7,
+          exitSignal: null,
+        },
+        {
+          name: 'pyright',
+          status: 'FAILED',
+          languages: ['python'],
+          transport: 'stdio',
+          command: 'pyright-langserver',
+          args: ['--stdio'],
+          rootUri: 'file:///test/workspace',
+          workspaceFolder: '/test/workspace',
+          error: 'startup failed',
+        },
+      ],
+    });
   });
 
   test('should open document before hover requests', async () => {
@@ -1098,5 +1188,141 @@ describe('NativeLspService', () => {
       vi.useRealTimers();
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  // PR #4333 review fold-in: cover the two error branches added in
+  // applyTextEdits — only-ENOENT read guard and the W_OK access check.
+  // The branches are reached via the private applyTextEdits, accessed
+  // through a typed cast since making them public-for-test would inflate
+  // the API surface for one verification.
+  describe('applyTextEdits — error branches', () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-edits-error-'));
+      // Override the workspace mock so any path inside tmpDir is in-scope.
+      (
+        mockWorkspace as unknown as {
+          isPathWithinWorkspace: (p: string) => boolean;
+        }
+      ).isPathWithinWorkspace = (p: string) => p.startsWith(tmpDir);
+    });
+
+    afterEach(() => {
+      try {
+        // Restore perms before rm so cleanup can traverse 0o000 / 0o444 files.
+        for (const f of fs.readdirSync(tmpDir)) {
+          try {
+            fs.chmodSync(path.join(tmpDir, f), 0o644);
+          } catch {
+            /* ignore */
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+      'read failure on chmod 0000 file propagates EACCES (does not silently become empty content)',
+      async () => {
+        const filePath = path.join(tmpDir, 'unreadable.txt');
+        fs.writeFileSync(filePath, 'original content');
+        fs.chmodSync(filePath, 0o000);
+
+        const uri = pathToFileURL(filePath).toString();
+        const edit = {
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 0 },
+          },
+          newText: 'INJECTED ',
+        };
+        const applyTextEdits = (
+          lspService as unknown as {
+            applyTextEdits: (
+              uri: string,
+              edits: Array<typeof edit>,
+            ) => Promise<void>;
+          }
+        ).applyTextEdits.bind(lspService);
+
+        let caught: NodeJS.ErrnoException | undefined;
+        try {
+          await applyTextEdits(uri, [edit]);
+        } catch (err) {
+          caught = err as NodeJS.ErrnoException;
+        }
+        expect(caught?.code).toBe('EACCES');
+
+        // File is unchanged — read fail should NOT have triggered the
+        // pre-fix "treat as empty, overwrite with edits" path.
+        fs.chmodSync(filePath, 0o644);
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('original content');
+      },
+    );
+
+    test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+      'chmod 0444 read-only file is rejected before write (W_OK check)',
+      async () => {
+        const filePath = path.join(tmpDir, 'readonly.txt');
+        fs.writeFileSync(filePath, 'do not modify me');
+        fs.chmodSync(filePath, 0o444);
+
+        const uri = pathToFileURL(filePath).toString();
+        const edit = {
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 0 },
+          },
+          newText: 'BAD ',
+        };
+        const applyTextEdits = (
+          lspService as unknown as {
+            applyTextEdits: (
+              uri: string,
+              edits: Array<typeof edit>,
+            ) => Promise<void>;
+          }
+        ).applyTextEdits.bind(lspService);
+
+        let caught: NodeJS.ErrnoException | undefined;
+        try {
+          await applyTextEdits(uri, [edit]);
+        } catch (err) {
+          caught = err as NodeJS.ErrnoException;
+        }
+        expect(caught?.code).toMatch(/^E(ACCES|PERM)$/);
+
+        // Original content untouched — atomic rename did NOT bypass perms.
+        fs.chmodSync(filePath, 0o644);
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('do not modify me');
+      },
+    );
+
+    test('nonexistent file is accepted (LSP can create via edits)', async () => {
+      const filePath = path.join(tmpDir, 'new-file.txt');
+      const uri = pathToFileURL(filePath).toString();
+      const edit = {
+        range: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        newText: 'created via edit',
+      };
+      const applyTextEdits = (
+        lspService as unknown as {
+          applyTextEdits: (
+            uri: string,
+            edits: Array<typeof edit>,
+          ) => Promise<void>;
+        }
+      ).applyTextEdits.bind(lspService);
+
+      await applyTextEdits(uri, [edit]);
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('created via edit');
+    });
   });
 });

@@ -9,6 +9,7 @@
  */
 
 import toml from '@iarna/toml';
+import { stringify as stringifyYaml } from './yaml-parser.js';
 
 export interface TomlCommandFormat {
   prompt: string;
@@ -47,8 +48,13 @@ export function convertTomlToMarkdown(tomlContent: string): string {
 
   // Generate Markdown
   if (description) {
+    const frontmatter = stringifyYaml(
+      { description },
+      { lineWidth: 0 },
+    ).trimEnd();
+
     return `---
-description: ${description}
+${frontmatter}
 ---
 
 ${prompt}

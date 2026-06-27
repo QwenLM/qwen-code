@@ -112,7 +112,6 @@ function createFollowupController(
         suggestion_length: text.length,
       });
     } catch (e: unknown) {
-       
       console.error('[followup] onOutcome callback threw:', e);
     }
 
@@ -122,7 +121,6 @@ function createFollowupController(
       try {
         getOnAccept?.()?.(text);
       } catch (error: unknown) {
-         
         console.error('[followup] onAccept callback threw:', error);
       } finally {
         if (acceptTimeoutId) {
@@ -154,7 +152,6 @@ function createFollowupController(
           suggestion_length: currentState.suggestion.length,
         });
       } catch (e: unknown) {
-         
         console.error('[followup] onOutcome callback threw:', e);
       }
     }
@@ -195,7 +192,12 @@ export interface UseFollowupSuggestionsReturn {
   state: FollowupState;
   getPlaceholder: (defaultPlaceholder: string) => string;
   setSuggestion: (text: string | null) => void;
-  accept: (method?: 'tab' | 'enter' | 'right') => void;
+  /** Accept the current suggestion */
+  accept: (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ) => void;
+  /** Dismiss the current suggestion */
   dismiss: () => void;
   clear: () => void;
 }

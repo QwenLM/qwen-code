@@ -19,12 +19,14 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import path from 'node:path';
+const { join, dirname } = path;
 import stripJsonComments from 'strip-json-comments';
 import os from 'node:os';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import dotenv from 'dotenv';
+import { bootstrapHomeEnv, resolvePath } from './lib/qwen-home-bootstrap.js';
 
 const argv = yargs(hideBin(process.argv)).option('q', {
   alias: 'quiet',
@@ -34,8 +36,13 @@ const argv = yargs(hideBin(process.argv)).option('q', {
 
 let qwenSandbox = process.env.QWEN_SANDBOX;
 
+bootstrapHomeEnv();
+
 if (!qwenSandbox) {
-  const userSettingsFile = join(os.homedir(), '.qwen', 'settings.json');
+  const configDir = process.env.QWEN_HOME
+    ? resolvePath(process.env.QWEN_HOME)
+    : join(os.homedir(), '.qwen');
+  const userSettingsFile = join(configDir, 'settings.json');
   if (existsSync(userSettingsFile)) {
     const settings = JSON.parse(
       stripJsonComments(readFileSync(userSettingsFile, 'utf-8')),
@@ -47,15 +54,33 @@ if (!qwenSandbox) {
 }
 
 if (!qwenSandbox) {
+  // Walk up from cwd to find a project-level .env. Parse manually and copy
+  // only QWEN_SANDBOX — calling dotenv.config() here would inject every key,
+  // including QWEN_HOME / QWEN_RUNTIME_DIR that the main CLI hard-blocks via
+  // PROJECT_ENV_HARDCODED_EXCLUSIONS. A project file must not be able to
+  // redirect global state through this back door.
   let currentDir = process.cwd();
   while (true) {
     const qwenEnv = join(currentDir, '.qwen', '.env');
     const regularEnv = join(currentDir, '.env');
+    let candidate = null;
     if (existsSync(qwenEnv)) {
-      dotenv.config({ path: qwenEnv, quiet: true });
-      break;
+      candidate = qwenEnv;
     } else if (existsSync(regularEnv)) {
-      dotenv.config({ path: regularEnv, quiet: true });
+      candidate = regularEnv;
+    }
+    if (candidate) {
+      try {
+        const parsed = dotenv.parse(readFileSync(candidate, 'utf-8'));
+        if (
+          parsed.QWEN_SANDBOX &&
+          !Object.hasOwn(process.env, 'QWEN_SANDBOX')
+        ) {
+          process.env.QWEN_SANDBOX = parsed.QWEN_SANDBOX;
+        }
+      } catch (_e) {
+        // Match dotenv's quiet-mode behavior used elsewhere.
+      }
       break;
     }
     const parentDir = dirname(currentDir);

@@ -190,6 +190,91 @@ describe('createFollowupController', () => {
     ctrl.cleanup();
   });
 
+  it('accept with fallbackText logs telemetry and inserts when there is no live suggestion', async () => {
+    const onStateChange = vi.fn();
+    const onOutcome = vi.fn();
+    const onAccept = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      onOutcome,
+      getOnAccept: () => onAccept,
+    });
+
+    // No setSuggestion + advance, so currentState.suggestion stays null —
+    // mirrors the InputPrompt type-then-delete / pre-delay fallback where the
+    // placeholder text only lives in the `promptSuggestion` prop.
+    ctrl.accept('right', { fallbackText: 'commit this' });
+
+    expect(onOutcome).toHaveBeenCalledTimes(1);
+    expect(onOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'accepted',
+        accept_method: 'right',
+        accept_source: 'fallback',
+        suggestion_length: 11,
+      }),
+    );
+
+    // onAccept still fires via microtask with the fallback text
+    await Promise.resolve();
+    expect(onAccept).toHaveBeenCalledTimes(1);
+    expect(onAccept).toHaveBeenCalledWith('commit this');
+
+    ctrl.cleanup();
+  });
+
+  it('accept prefers the live suggestion over fallbackText and reports source "live"', async () => {
+    const onStateChange = vi.fn();
+    const onOutcome = vi.fn();
+    const onAccept = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      onOutcome,
+      getOnAccept: () => onAccept,
+    });
+
+    ctrl.setSuggestion('live suggestion');
+    vi.advanceTimersByTime(300);
+
+    // A live suggestion is present; fallbackText must be ignored. Guards the
+    // `currentState.suggestion ?? options.fallbackText` ordering — a flip would
+    // silently corrupt the accepted text and telemetry length.
+    ctrl.accept('tab', { fallbackText: 'fallback text' });
+
+    expect(onOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'accepted',
+        accept_source: 'live',
+        suggestion_length: 'live suggestion'.length,
+      }),
+    );
+
+    await Promise.resolve();
+    expect(onAccept).toHaveBeenCalledTimes(1);
+    expect(onAccept).toHaveBeenCalledWith('live suggestion');
+
+    ctrl.cleanup();
+  });
+
+  it('accept without a live suggestion or fallbackText is a no-op', async () => {
+    const onStateChange = vi.fn();
+    const onOutcome = vi.fn();
+    const onAccept = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      onOutcome,
+      getOnAccept: () => onAccept,
+    });
+
+    ctrl.accept('tab');
+
+    await Promise.resolve();
+    expect(onOutcome).not.toHaveBeenCalled();
+    expect(onAccept).not.toHaveBeenCalled();
+
+    ctrl.cleanup();
+  });
+
   it('onOutcome fires with ignored on dismiss', () => {
     const onStateChange = vi.fn();
     const onOutcome = vi.fn();
@@ -290,6 +375,37 @@ describe('createFollowupController', () => {
     await Promise.resolve();
 
     expect(onAccept).toHaveBeenCalledTimes(1);
+
+    ctrl.cleanup();
+  });
+
+  it('accept with skipOnAccept skips onAccept callback but still clears state and fires telemetry', async () => {
+    const onStateChange = vi.fn();
+    const onAccept = vi.fn();
+    const onOutcome = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      getOnAccept: () => onAccept,
+      onOutcome,
+    });
+
+    ctrl.setSuggestion('run tests');
+    vi.advanceTimersByTime(300);
+    onStateChange.mockClear();
+
+    ctrl.accept('enter', { skipOnAccept: true });
+
+    // State should be cleared
+    expect(onStateChange).toHaveBeenCalledWith(INITIAL_FOLLOWUP_STATE);
+
+    // Telemetry should still fire
+    expect(onOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'accepted', accept_method: 'enter' }),
+    );
+
+    // Flush microtask — onAccept should NOT be called
+    await Promise.resolve();
+    expect(onAccept).not.toHaveBeenCalled();
 
     ctrl.cleanup();
   });

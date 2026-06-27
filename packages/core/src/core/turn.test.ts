@@ -9,11 +9,17 @@ import type {
   ServerGeminiToolCallRequestEvent,
   ServerGeminiErrorEvent,
 } from './turn.js';
-import { Turn, GeminiEventType } from './turn.js';
+import {
+  CompressionStatus,
+  Turn,
+  GeminiEventType,
+  findRepeatedDuplicateProviderToolCall,
+} from './turn.js';
 import type { GenerateContentResponse, Part, Content } from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
+import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
@@ -35,6 +41,54 @@ vi.mock('@google/genai', async (importOriginal) => {
 vi.mock('../utils/errorReporting', () => ({
   reportError: vi.fn(),
 }));
+
+describe('findRepeatedDuplicateProviderToolCall', () => {
+  const getProviderCallId = (item: { providerCallId?: string }) =>
+    item.providerCallId;
+
+  it('finds a handled provider id that already received a synthetic response', () => {
+    const items = [{ providerCallId: 'fresh' }, { providerCallId: 'handled' }];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set(['handled']),
+      ),
+    ).toBe(items[1]);
+  });
+
+  it('finds a handled provider id repeated within the same batch', () => {
+    const items = [
+      { providerCallId: 'handled' },
+      { providerCallId: 'fresh' },
+      { providerCallId: 'handled' },
+    ];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set<string>(),
+      ),
+    ).toBe(items[0]);
+  });
+
+  it('ignores unhandled repeated ids', () => {
+    const items = [{ providerCallId: 'fresh' }, { providerCallId: 'fresh' }];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set<string>(),
+      ),
+    ).toBeUndefined();
+  });
+});
 
 describe('Turn', () => {
   let turn: Turn;
@@ -63,9 +117,8 @@ describe('Turn', () => {
   });
 
   describe('constructor', () => {
-    it('should initialize pendingToolCalls and debugResponses', () => {
+    it('should initialize pendingToolCalls', () => {
       expect(turn.pendingToolCalls).toEqual([]);
-      expect(turn.getDebugResponses()).toEqual([]);
     });
   });
 
@@ -110,7 +163,6 @@ describe('Turn', () => {
         { type: GeminiEventType.Content, value: 'Hello' },
         { type: GeminiEventType.Content, value: ' world' },
       ]);
-      expect(turn.getDebugResponses().length).toBe(2);
     });
 
     it('should emit Thought events when a thought part is present', async () => {
@@ -264,7 +316,6 @@ describe('Turn', () => {
         expect.stringMatching(/^tool2-\d{13}-\w{10,}$/),
       );
       expect(turn.pendingToolCalls[1]).toEqual(event2.value);
-      expect(turn.getDebugResponses().length).toBe(1);
     });
 
     it('should yield UserCancelled event if signal is aborted', async () => {
@@ -305,7 +356,6 @@ describe('Turn', () => {
         { type: GeminiEventType.Content, value: 'First part' },
         { type: GeminiEventType.UserCancelled },
       ]);
-      expect(turn.getDebugResponses().length).toBe(1);
     });
 
     it('should yield Error event and report if sendMessageStream throws', async () => {
@@ -332,7 +382,6 @@ describe('Turn', () => {
       expect(errorEvent.value).toEqual({
         error: { message: 'API Error', status: undefined },
       });
-      expect(turn.getDebugResponses().length).toBe(0);
       expect(reportError).toHaveBeenCalledWith(
         error,
         'Error when talking to API',
@@ -392,6 +441,93 @@ describe('Turn', () => {
       });
     });
 
+    it('should preserve provider tool-call ids separately from generated call ids', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [],
+            functionCalls: [
+              { id: 'fc1', name: 'tool1', args: { arg1: 'val1' } },
+              { name: 'tool2', args: { arg2: 'val2' } },
+            ],
+          },
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Test provider ids' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events.length).toBe(2);
+
+      const event1 = events[0] as ServerGeminiToolCallRequestEvent;
+      expect(event1.value).toMatchObject({
+        callId: 'fc1',
+        providerCallId: 'fc1',
+        name: 'tool1',
+        args: { arg1: 'val1' },
+      });
+
+      const event2 = events[1] as ServerGeminiToolCallRequestEvent;
+      expect(event2.value.callId).toMatch(/^tool2-/);
+      expect(event2.value.providerCallId).toBeUndefined();
+      expect(event2.value).toMatchObject({
+        name: 'tool2',
+        args: { arg2: 'val2' },
+      });
+    });
+
+    it('should preserve raw provider ids for suffixed function call ids', async () => {
+      const [normalizedPart] = normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'fc1',
+              name: 'tool1',
+              args: { arg1: 'val1' },
+            },
+          },
+        ],
+        new Set(['fc1']),
+        new Set<string>(),
+      );
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [],
+            functionCalls: [normalizedPart!.functionCall],
+          },
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Test suffixed provider id' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events.length).toBe(1);
+      const event = events[0] as ServerGeminiToolCallRequestEvent;
+      expect(event.value).toMatchObject({
+        callId: 'fc1__qwen_dup_2',
+        providerCallId: 'fc1',
+        name: 'tool1',
+        args: { arg1: 'val1' },
+      });
+    });
+
     it('should yield finished event when response has finish reason', async () => {
       const mockResponseStream = (async function* () {
         yield {
@@ -408,7 +544,6 @@ describe('Turn', () => {
               candidatesTokenCount: 50,
               cachedContentTokenCount: 10,
               thoughtsTokenCount: 5,
-              toolUsePromptTokenCount: 2,
             },
           } as GenerateContentResponse,
         };
@@ -435,7 +570,6 @@ describe('Turn', () => {
               candidatesTokenCount: 50,
               cachedContentTokenCount: 10,
               thoughtsTokenCount: 5,
-              toolUsePromptTokenCount: 2,
             },
           },
         },
@@ -847,30 +981,37 @@ describe('Turn', () => {
         { type: GeminiEventType.Content, value: 'Success' },
       ]);
     });
-  });
 
-  describe('getDebugResponses', () => {
-    it('should return collected debug responses', async () => {
-      const resp1 = {
-        candidates: [{ content: { parts: [{ text: 'Debug 1' }] } }],
-      } as unknown as GenerateContentResponse;
-      const resp2 = {
-        functionCalls: [{ name: 'debugTool' }],
-      } as unknown as GenerateContentResponse;
+    it('bridges a compressed stream event to a ChatCompressed event', async () => {
+      const compressionInfo = {
+        originalTokenCount: 1000,
+        newTokenCount: 200,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      };
       const mockResponseStream = (async function* () {
-        yield { type: StreamEventType.CHUNK, value: resp1 };
-        yield { type: StreamEventType.CHUNK, value: resp2 };
+        yield { type: StreamEventType.COMPRESSED, info: compressionInfo };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [{ content: { parts: [{ text: 'after' }] } }],
+          },
+        };
       })();
       mockSendMessageStream.mockResolvedValue(mockResponseStream);
-      const reqParts: Part[] = [{ text: 'Hi' }];
-      for await (const _ of turn.run(
+
+      const events = [];
+      for await (const event of turn.run(
         'test-model',
-        reqParts,
+        [],
         new AbortController().signal,
       )) {
-        // consume stream
+        events.push(event);
       }
-      expect(turn.getDebugResponses()).toEqual([resp1, resp2]);
+
+      expect(events).toEqual([
+        { type: GeminiEventType.ChatCompressed, value: compressionInfo },
+        { type: GeminiEventType.Content, value: 'after' },
+      ]);
     });
   });
 

@@ -23,6 +23,7 @@ export interface AcpBridgeOptions {
 export interface AvailableCommand {
   name: string;
   description: string;
+  input?: { hint: string } | null;
 }
 
 export interface ToolCallEvent {
@@ -52,7 +53,11 @@ export class AcpBridge extends EventEmitter {
   async start(): Promise<void> {
     const { cliEntryPath, cwd } = this.options;
 
-    const args = [cliEntryPath, '--acp'];
+    const args = [
+      ...process.execArgv.filter((a) => !/^--inspect(-brk)?($|=)/.test(a)),
+      cliEntryPath,
+      '--acp',
+    ];
     if (this.options.model) {
       args.push('--model', this.options.model);
     }

@@ -4,44 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { StreamingState } from '../types.js';
-
-export interface UseMessageQueueOptions {
-  isConfigInitialized: boolean;
-  streamingState: StreamingState;
-  submitQuery: (query: string) => void;
-}
+import { useCallback, useRef, useState } from 'react';
+import { isSlashCommand } from '../utils/commandUtils.js';
 
 export interface UseMessageQueueReturn {
   messageQueue: string[];
   addMessage: (message: string) => void;
   clearQueue: () => void;
   getQueuedMessagesText: () => string;
-  /**
-   * Atomically drain all queued messages. Returns the drained messages
-   * and clears both the synchronous ref and React state. Safe to call
-   * from non-React contexts (e.g., tool completion callbacks).
-   */
+  /** Drain the entire queue joined with `\n\n`. For Ctrl+C / ESC / Up edit-restore. */
+  popAllMessages: () => string | null;
+  /** Drain plain-text prompts; leave slash commands queued. Safe from non-React callbacks. */
   drainQueue: () => string[];
+  /** Pop the first item from the queue. */
+  popNextSegment: () => string | null;
 }
 
-/**
- * Hook for managing message queuing during streaming responses.
- * Allows users to queue messages while the AI is responding and automatically
- * sends them when streaming completes.
- */
-export function useMessageQueue({
-  isConfigInitialized,
-  streamingState,
-  submitQuery,
-}: UseMessageQueueOptions): UseMessageQueueReturn {
+export function useMessageQueue(): UseMessageQueueReturn {
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
-  // Synchronous ref mirrors React state so non-React callbacks (e.g.,
-  // mid-turn drain in handleCompletedTools) always see the latest queue.
+  // Synchronous mirror so non-React callbacks see the latest queue.
   const queueRef = useRef<string[]>([]);
 
-  // Add a message to the queue
   const addMessage = useCallback((message: string) => {
     const trimmedMessage = message.trim();
     if (trimmedMessage.length > 0) {
@@ -50,53 +33,51 @@ export function useMessageQueue({
     }
   }, []);
 
-  // Clear the entire queue
   const clearQueue = useCallback(() => {
     queueRef.current = [];
     setMessageQueue([]);
   }, []);
 
-  // Get all queued messages as a single text string
   const getQueuedMessagesText = useCallback(() => {
     if (messageQueue.length === 0) return '';
     return messageQueue.join('\n\n');
   }, [messageQueue]);
 
-  // Atomically drain all queued messages (synchronous, safe from callbacks).
-  const drainQueue = useCallback((): string[] => {
-    const drained = queueRef.current;
-    if (drained.length === 0) return [];
+  const popAllMessages = useCallback((): string | null => {
+    const current = queueRef.current;
+    if (current.length === 0) return null;
     queueRef.current = [];
     setMessageQueue([]);
+    return current.join('\n\n');
+  }, []);
+
+  const drainQueue = useCallback((): string[] => {
+    const current = queueRef.current;
+    if (current.length === 0) return [];
+    const drained = current.filter((message) => !isSlashCommand(message));
+    if (drained.length === 0) return [];
+    const rest = current.filter((message) => isSlashCommand(message));
+    queueRef.current = rest;
+    setMessageQueue(rest);
     return drained;
   }, []);
 
-  // Process queued messages when streaming becomes idle
-  useEffect(() => {
-    if (
-      isConfigInitialized &&
-      streamingState === StreamingState.Idle &&
-      messageQueue.length > 0
-    ) {
-      // Combine all messages with double newlines for clarity
-      const combinedMessage = messageQueue.join('\n\n');
-      // Clear the queue and submit
-      clearQueue();
-      submitQuery(combinedMessage);
-    }
-  }, [
-    isConfigInitialized,
-    streamingState,
-    messageQueue,
-    submitQuery,
-    clearQueue,
-  ]);
+  const popNextSegment = useCallback((): string | null => {
+    const current = queueRef.current;
+    if (current.length === 0) return null;
+    const [head, ...rest] = current;
+    queueRef.current = rest;
+    setMessageQueue(rest);
+    return head;
+  }, []);
 
   return {
     messageQueue,
     addMessage,
     clearQueue,
     getQueuedMessagesText,
+    popAllMessages,
     drainQueue,
+    popNextSegment,
   };
 }

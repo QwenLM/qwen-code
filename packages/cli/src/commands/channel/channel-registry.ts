@@ -1,13 +1,34 @@
 import type { ChannelPlugin } from '@qwen-code/channel-base';
-import { plugin as telegramPlugin } from '@qwen-code/channel-telegram';
-import { plugin as weixinPlugin } from '@qwen-code/channel-weixin';
-import { plugin as dingtalkPlugin } from '@qwen-code/channel-dingtalk';
 
 const registry = new Map<string, ChannelPlugin>();
+let builtinsPromise: Promise<void> | null = null;
 
-// Register built-in channel types
-for (const p of [telegramPlugin, weixinPlugin, dingtalkPlugin]) {
-  registry.set(p.channelType, p);
+function ensureBuiltins(): Promise<void> {
+  if (!builtinsPromise) {
+    builtinsPromise = (async () => {
+      const labelled = [
+        { name: 'telegram', promise: import('@qwen-code/channel-telegram') },
+        { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
+        { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
+        { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
+        { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
+      ];
+
+      const results = await Promise.allSettled(labelled.map((l) => l.promise));
+
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i]!;
+        if (result.status === 'fulfilled') {
+          registry.set(result.value.plugin.channelType, result.value.plugin);
+        } else {
+          process.stderr.write(
+            `[channel-registry] Failed to load "${labelled[i]!.name}" channel: ${result.reason}\n`,
+          );
+        }
+      }
+    })();
+  }
+  return builtinsPromise;
 }
 
 export function registerPlugin(plugin: ChannelPlugin): void {
@@ -19,10 +40,14 @@ export function registerPlugin(plugin: ChannelPlugin): void {
   registry.set(plugin.channelType, plugin);
 }
 
-export function getPlugin(channelType: string): ChannelPlugin | undefined {
+export async function getPlugin(
+  channelType: string,
+): Promise<ChannelPlugin | undefined> {
+  await ensureBuiltins();
   return registry.get(channelType);
 }
 
-export function supportedTypes(): string[] {
+export async function supportedTypes(): Promise<string[]> {
+  await ensureBuiltins();
   return [...registry.keys()];
 }

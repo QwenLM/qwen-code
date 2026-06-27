@@ -42,7 +42,7 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   SdkControlServerTransport,
   type SdkControlServerTransportOptions,
-} from '../mcp/SdkControlServerTransport.js';
+} from '../daemon-mcp/SdkControlServerTransport.js';
 import { ControlRequestType } from '../types/protocol.js';
 
 interface PendingControlRequest {
@@ -293,6 +293,9 @@ export class Query implements AsyncIterable<SDKMessage> {
 
       await this.sendControlRequest(ControlRequestType.INITIALIZE, {
         hooks: null,
+        timeout: this.options.timeout?.canUseTool
+          ? { canUseTool: this.options.timeout.canUseTool }
+          : undefined,
         sdkMcpServers:
           Object.keys(sdkMcpServersForCli).length > 0
             ? sdkMcpServersForCli
@@ -905,6 +908,21 @@ export class Query implements AsyncIterable<SDKMessage> {
 
   async setModel(model: string): Promise<void> {
     await this.sendControlRequest(ControlRequestType.SET_MODEL, { model });
+  }
+
+  /**
+   * Get context usage breakdown from the CLI
+   *
+   * @param showDetails Display hint for per-item breakdowns (data is always complete)
+   * @returns Promise resolving to context usage data
+   * @throws Error if query is closed
+   */
+  async getContextUsage(
+    showDetails: boolean = false,
+  ): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_CONTEXT_USAGE, {
+      show_details: showDetails,
+    });
   }
 
   /**

@@ -6,7 +6,7 @@ Scheduled tasks let Qwen Code re-run a prompt automatically on an interval. Use 
 
 Tasks are session-scoped: they live in the current Qwen Code process and are gone when you exit. Nothing is written to disk.
 
-> **Note:** Scheduled tasks are an experimental feature. Enable them with `experimental.cron: true` in your [settings](../configuration/settings.md), or set `QWEN_CODE_ENABLE_CRON=1` in your environment.
+> **Tip:** Scheduled tasks are enabled by default. To disable them, set `experimental.cron: false` in your [settings](../configuration/settings.md), or set `QWEN_CODE_DISABLE_CRON=1` in your environment.
 
 ## Schedule a recurring prompt with /loop
 

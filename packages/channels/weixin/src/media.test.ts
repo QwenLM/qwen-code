@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createDecipheriv, createCipheriv } from 'node:crypto';
+import { encryptAesEcb, computeMd5 } from './media.js';
 
 /**
  * Test the AES key parsing and decryption logic used in media.ts.
@@ -87,5 +88,55 @@ describe('Weixin media crypto', () => {
       const decrypted = decryptAesEcb(ciphertext, key);
       expect(decrypted.length).toBe(0);
     });
+  });
+});
+
+describe('encryptAesEcb', () => {
+  it('encrypts data deterministically', () => {
+    const key = Buffer.alloc(16, 0xab);
+    const plaintext = Buffer.from('test data for encryption');
+    const ciphertext1 = encryptAesEcb(plaintext, key);
+    const ciphertext2 = encryptAesEcb(plaintext, key);
+    expect(ciphertext1).toEqual(ciphertext2);
+  });
+
+  it('encrypts then decrypts round-trip', () => {
+    const key = Buffer.alloc(16, 0x42);
+    const plaintext = Buffer.from('Hello, WeChat media upload!');
+
+    const ciphertext = encryptAesEcb(plaintext, key);
+    const decipher = createDecipheriv('aes-128-ecb', key, null);
+    const decrypted = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]);
+    expect(decrypted.toString()).toBe(plaintext.toString());
+  });
+
+  it('handles empty plaintext', () => {
+    const key = Buffer.alloc(16, 0x01);
+    const ciphertext = encryptAesEcb(Buffer.alloc(0), key);
+    // ECB with empty input produces empty output (no padding block needed
+    // when input is exactly 0 bytes — behavior varies by implementation)
+    // At minimum the result should be decryptable
+    const decipher = createDecipheriv('aes-128-ecb', key, null);
+    const decrypted = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]);
+    expect(decrypted.length).toBe(0);
+  });
+});
+
+describe('computeMd5', () => {
+  it('computes expected MD5', () => {
+    const data = Buffer.from('hello world');
+    expect(computeMd5(data)).toBe('5eb63bbbe01eeed093cb22bb8f5acdc3');
+  });
+
+  it('computes MD5 of empty buffer', () => {
+    expect(computeMd5(Buffer.alloc(0))).toBe(
+      'd41d8cd98f00b204e9800998ecf8427e',
+    );
   });
 });

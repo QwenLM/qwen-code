@@ -36,6 +36,14 @@ export function convertGeminiToQwenConfig(
   extensionDir: string,
 ): ExtensionConfig {
   const configFilePath = path.join(extensionDir, 'gemini-extension.json');
+  // The manifest may be a symlink in an untrusted clone; refuse to follow it
+  // outside the extension (would read an arbitrary JSON-shaped host file),
+  // matching the Claude-format manifest guards.
+  if (!realPathWithin(configFilePath, extensionDir)) {
+    throw new Error(
+      `Gemini extension config at ${configFilePath} resolves through a symlink outside the extension`,
+    );
+  }
   const configContent = fs.readFileSync(configFilePath, 'utf-8');
   const geminiConfig: GeminiExtensionConfig = JSON.parse(configContent);
   // Validate required fields
@@ -109,17 +117,58 @@ export async function convertGeminiExtensionPackage(
 }
 
 /**
+ * True when `child` equals or is nested under `parent`. Both must already be
+ * absolute, resolved paths. Shared containment primitive for the symlink
+ * confinement guards (kept in one place so the rule can't drift between files).
+ */
+export function isPathWithin(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
+/**
+ * True when `target` exists and its real (symlink-resolved) path stays within
+ * `root`'s real path. Both sides are resolved with `fs.realpathSync` so a
+ * symlink in an untrusted source cannot point a read/copy at a file outside
+ * the package. Returns false for missing or broken paths.
+ */
+export function realPathWithin(target: string, root: string): boolean {
+  try {
+    return isPathWithin(fs.realpathSync(target), fs.realpathSync(root));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Recursively copies a directory and its contents.
  * @param source Source directory path
  * @param destination Destination directory path
+ * @param confineRoot If set, any symlink whose real target escapes this
+ *   directory is skipped. Defaults to `fs.realpathSync(source)` when omitted.
+ *   Always pass this explicitly when `source` originates from untrusted input.
  */
 export async function copyDirectory(
   source: string,
   destination: string,
+  confineRoot?: string,
 ): Promise<void> {
   // Create destination directory if it doesn't exist
   if (!fs.existsSync(destination)) {
     fs.mkdirSync(destination, { recursive: true });
+  }
+
+  // Symlinks in an (untrusted) source are dereferenced and their *target*
+  // content is copied below, so a link escaping the package — e.g.
+  // `skills/leak.txt -> ~/.ssh/id_rsa` — would otherwise pull host files into
+  // the output. Pin a confinement root (the package's real path) on the first
+  // call and thread it through recursion to reject escaping symlink targets.
+  let root = confineRoot;
+  if (root === undefined) {
+    try {
+      root = fs.realpathSync(source);
+    } catch {
+      root = path.resolve(source);
+    }
   }
 
   const entries = fs.readdirSync(source, { withFileTypes: true });
@@ -129,14 +178,21 @@ export async function copyDirectory(
     const destPath = path.join(destination, entry.name);
 
     if (entry.isDirectory()) {
-      await copyDirectory(sourcePath, destPath);
+      await copyDirectory(sourcePath, destPath, root);
     } else if (entry.isSymbolicLink()) {
-      // Resolve symlink and copy the target content
+      // Resolve symlink and copy the target content, but only when the target
+      // stays inside the package root.
       try {
         const realPath = fs.realpathSync(sourcePath);
+        if (!isPathWithin(realPath, root)) {
+          debugLogger.warn(
+            `Skipping symlink that escapes the package: ${sourcePath} -> ${realPath}`,
+          );
+          continue;
+        }
         const targetStat = fs.statSync(realPath);
         if (targetStat.isDirectory()) {
-          await copyDirectory(realPath, destPath);
+          await copyDirectory(realPath, destPath, root);
         } else if (targetStat.isFile()) {
           fs.copyFileSync(realPath, destPath);
         }
@@ -200,6 +256,10 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
 export function isGeminiExtensionConfig(extensionDir: string) {
   const configFilePath = path.join(extensionDir, 'gemini-extension.json');
   if (!fs.existsSync(configFilePath)) {
+    return false;
+  }
+  // Don't read through a symlink that escapes the extension during detection.
+  if (!realPathWithin(configFilePath, extensionDir)) {
     return false;
   }
 

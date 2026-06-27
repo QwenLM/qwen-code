@@ -8,6 +8,7 @@ import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
+  proxy?: string;
 }
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
@@ -20,6 +21,8 @@ export abstract class ChannelBase {
   protected gate: SenderGate;
   protected router: SessionRouter;
   protected name: string;
+  /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
+  protected proxy?: string;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
@@ -45,6 +48,7 @@ export abstract class ChannelBase {
     this.name = name;
     this.config = config;
     this.bridge = bridge;
+    this.proxy = options?.proxy;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
 
@@ -265,6 +269,48 @@ export abstract class ChannelBase {
       envelope.threadId,
       this.config.cwd,
     );
+
+    // 3.5. Bang (!) shell command — direct execution, no LLM
+    if (envelope.text.startsWith('!')) {
+      const cmd = envelope.text.slice(1).trim();
+      const bridgeShellCommand = (
+        this.bridge as unknown as Record<string, unknown>
+      )['shellCommand'];
+      if (cmd && typeof bridgeShellCommand === 'function') {
+        try {
+          const result = (await bridgeShellCommand(sessionId, cmd)) as {
+            exitCode: number | null;
+            output: string;
+            aborted: boolean;
+          };
+          const longestRun = Math.max(
+            0,
+            ...Array.from(
+              (result.output || '').matchAll(/`+/g),
+              (m) => m[0].length,
+            ),
+          );
+          const fence = '`'.repeat(Math.max(3, longestRun + 1));
+          const output = result.output
+            ? `${fence}\n${result.output}\n${fence}`
+            : '(no output)';
+          const exitLine =
+            result.exitCode !== null && result.exitCode !== 0
+              ? `\nExit code: ${result.exitCode}`
+              : '';
+          await this.sendMessage(
+            envelope.chatId,
+            `$ ${cmd}\n${output}${exitLine}`,
+          );
+        } catch (error) {
+          await this.sendMessage(
+            envelope.chatId,
+            `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        return;
+      }
+    }
 
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;

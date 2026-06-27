@@ -35,7 +35,54 @@ export interface ToolCallLocation {
 /**
  * Tool call status type
  */
-export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+export type ToolCallStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type AgentExecutionStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type AgentToolCallStatus =
+  | 'executing'
+  | 'awaiting_approval'
+  | 'success'
+  | 'failed';
+
+export interface AgentExecutionSummary {
+  totalToolCalls: number;
+  totalTokens: number;
+  totalDurationMs: number;
+  successfulToolCalls?: number;
+  failedToolCalls?: number;
+  successRate?: number;
+}
+
+export interface AgentExecutionToolCall {
+  callId: string;
+  name: string;
+  status: AgentToolCallStatus;
+  error?: string;
+  description?: string;
+}
+
+export interface AgentExecutionRawOutput {
+  type: 'task_execution';
+  subagentName: string;
+  subagentColor?: string;
+  taskDescription: string;
+  taskPrompt: string;
+  status: AgentExecutionStatus;
+  terminateReason?: string;
+  result?: string;
+  executionSummary?: AgentExecutionSummary;
+  toolCalls?: AgentExecutionToolCall[];
+}
 
 /**
  * Base tool call data interface
@@ -46,9 +93,19 @@ export interface ToolCallData {
   title: string | object;
   status: ToolCallStatus;
   rawInput?: string | object;
+  rawOutput?: unknown;
   content?: ToolCallContent[];
   locations?: ToolCallLocation[];
   timestamp?: number;
+  /**
+   * Optional markdown summary projection of the tool's preview (file
+   * diff, MCP invocation, tabular, etc.) — populated by
+   * `daemonTranscriptToUnifiedMessages` when
+   * `enrichToolDetailsWithPreview: true`. Renderers can show it
+   * alongside `rawOutput` (which is now preserved verbatim, addressing
+   * a code review).
+   */
+  previewMarkdown?: string;
 }
 
 /**

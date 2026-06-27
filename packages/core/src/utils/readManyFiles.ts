@@ -26,6 +26,14 @@ export interface ReadManyFilesOptions {
    * Optional AbortSignal for cancellation support.
    */
   signal?: AbortSignal;
+
+  /**
+   * When true and the vision bridge is enabled, keep images inline for a
+   * text-only model (instead of an "unsupported" note) so the bridge can
+   * transcribe them. Set only by the interactive `@`-resolution path, not by
+   * the agent `read_many_files` tool.
+   */
+  preserveUnsupportedImageForBridge?: boolean;
 }
 
 /**
@@ -38,6 +46,14 @@ export interface FileReadInfo {
   content: PartListUnion;
   /** Whether this is a directory listing rather than file content */
   isDirectory: boolean;
+  /**
+   * Error message when the read failed (e.g. missing pdftotext,
+   * password-protected PDF, file too large). When present, `content`
+   * holds the user-facing guidance string that was surfaced to the LLM,
+   * and callers should render this entry as a failed read rather than a
+   * successful one.
+   */
+  error?: string;
 }
 
 /**
@@ -84,7 +100,7 @@ export async function readManyFiles(
   config: Config,
   options: ReadManyFilesOptions,
 ): Promise<ReadManyFilesResult> {
-  const { paths: inputPatterns } = options;
+  const { paths: inputPatterns, preserveUnsupportedImageForBridge } = options;
 
   const seenFiles = new Set<string>();
   const contentParts: Part[] = [];
@@ -110,7 +126,11 @@ export async function readManyFiles(
 
       if (stats?.isFile() && !seenFiles.has(fullPath)) {
         seenFiles.add(fullPath);
-        const readResult = await readFileContent(config, fullPath);
+        const readResult = await readFileContent(
+          config,
+          fullPath,
+          preserveUnsupportedImageForBridge,
+        );
         if (readResult) {
           contentParts.push(...readResult.contentParts);
           files.push(readResult.info);
@@ -165,18 +185,42 @@ async function readDirectory(
 async function readFileContent(
   config: Config,
   filePath: string,
+  preserveUnsupportedImage = false,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
-    const fileReadResult = await processSingleFileContent(filePath, config);
-    if (fileReadResult.error) {
-      return null;
-    }
+    const fileReadResult = await processSingleFileContent(filePath, config, {
+      preserveUnsupportedImage,
+    });
 
     const prefixText: Part = { text: `\nContent from ${filePath}:\n` };
 
+    // Surface any error produced by processSingleFileContent instead of
+    // silently skipping the file. This preserves actionable guidance
+    // (e.g. "pdftotext is not installed, install poppler-utils...",
+    // password-protected PDFs, file-too-large) across batch reads.
+    if (fileReadResult.error) {
+      const errorText =
+        typeof fileReadResult.llmContent === 'string'
+          ? fileReadResult.llmContent
+          : `Failed to read ${filePath}: ${fileReadResult.error}`;
+      return {
+        contentParts: [prefixText, { text: errorText }],
+        info: {
+          filePath,
+          content: errorText,
+          isDirectory: false,
+          error: fileReadResult.error,
+        },
+      };
+    }
+
     if (typeof fileReadResult.llmContent === 'string') {
       let fileContentForLlm = '';
-      if (fileReadResult.isTruncated) {
+      if (
+        fileReadResult.isTruncated &&
+        fileReadResult.linesShown &&
+        fileReadResult.originalLineCount !== undefined
+      ) {
         const [start, end] = fileReadResult.linesShown!;
         const total = fileReadResult.originalLineCount!;
         fileContentForLlm = `Showing lines ${start}-${end} of ${total} total lines.\n---\n${fileReadResult.llmContent}`;
