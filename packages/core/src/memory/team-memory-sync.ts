@@ -24,6 +24,9 @@ export interface TeamMemorySyncResult {
   skippedReason?:
     | 'not-a-git-repo'
     | 'no-upstream'
+    // HEAD is detached: a commit would be orphaned (no branch to advance), so we
+    // skip without committing rather than stranding it.
+    | 'detached-head'
     | 'pull-failed'
     | 'push-failed'
     // The branch carried commits unrelated to this sync, so pushing would
@@ -41,14 +44,23 @@ async function tryGit(cwd: string, args: string[]): Promise<string | null> {
       cwd,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
-      // SIGTERM may leave a blocked `ssh` child orphaned; SIGKILL reaps it.
-      killSignal: 'SIGKILL',
+      // Graceful kill: SIGTERM lets git release index.lock and finish cleanup,
+      // so a timeout mid-commit/-pull can't corrupt the index. The
+      // non-interactive ssh guards below already bound the network-hang case, so
+      // a hard SIGKILL (which would skip that cleanup) isn't needed.
+      killSignal: 'SIGTERM',
       env: {
         ...process.env,
         // Force non-interactive git so a missing credential / askpass prompt
         // fails fast instead of hanging session start on the network steps.
         GIT_TERMINAL_PROMPT: '0',
-        GIT_SSH_COMMAND: 'ssh -oBatchMode=yes -oConnectTimeout=5',
+        // Non-interactive ssh, but APPEND onto a user's GIT_SSH_COMMAND rather
+        // than clobbering it — their custom identity (`-i`), proxy jump (`-J`),
+        // or port stays intact; we only add the batch guards (theirs win on any
+        // duplicate option, since ssh takes the first value).
+        GIT_SSH_COMMAND: process.env['GIT_SSH_COMMAND']
+          ? `${process.env['GIT_SSH_COMMAND']} -oBatchMode=yes -oConnectTimeout=5`
+          : 'ssh -oBatchMode=yes -oConnectTimeout=5',
       },
     });
     return stdout;
@@ -127,6 +139,18 @@ export async function syncTeamMemory(
     return result;
   }
   const relPath = path.relative(gitRoot, teamRoot) || '.';
+
+  // Detached HEAD: there is no branch to advance, so a commit here would be
+  // orphaned (unreachable, never pushable). Skip the whole sync cleanly instead
+  // of stranding a commit. (A branch with no upstream is different — that commit
+  // still lands on the user's branch — and is handled by `no-upstream` below.)
+  const branch = (
+    await tryGit(gitRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  )?.trim();
+  if (!branch) {
+    result.skippedReason = 'detached-head';
+    return result;
+  }
 
   // Resolve upstream up-front: it gates both the reconcile-before-commit pull
   // and whether a push is even possible.

@@ -207,6 +207,23 @@ describe('syncTeamMemory', () => {
     expect(result.skippedReason).toBe('no-upstream');
   });
 
+  it('skips cleanly on a detached HEAD instead of orphaning a commit', async () => {
+    const { repo } = freshRemoteAndClone('alice');
+    // Detach HEAD onto the current commit — there is no branch to advance, so a
+    // commit here would be orphaned (unreachable, never pushable).
+    const head = git(repo, 'rev-parse', 'HEAD').trim();
+    git(repo, 'checkout', '--detach', head);
+
+    writeTeamMemory(repo, 'feedback/x.md', 'note');
+    const result = await syncTeamMemory(repo, { message: 'sync' });
+
+    expect(result.committed).toBe(false);
+    expect(result.pushed).toBe(false);
+    expect(result.skippedReason).toBe('detached-head');
+    // HEAD is unmoved: the team change is left uncommitted, not stranded on top.
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(head);
+  }, 30_000);
+
   it('unstages the team path when the commit fails (e.g. a failing hook)', async () => {
     const { repo } = freshRemoteAndClone('alice');
     // A pre-commit hook that always fails forces the commit step to error out.
