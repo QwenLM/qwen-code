@@ -611,6 +611,27 @@ describe('standalone-update', () => {
       }
     });
 
+    it('escapes single quotes in fish PATH entries', () => {
+      const binDir = path.join(tempDir, "o'brien", 'bin');
+      const fishDir = path.join(tempDir, '.config', 'fish');
+      const fishConfig = path.join(fishDir, 'config.fish');
+      fs.mkdirSync(fishDir, { recursive: true });
+      fs.writeFileSync(fishConfig, '# existing config\n');
+      const origShell = process.env['SHELL'];
+      const origHome = process.env['HOME'];
+      process.env['SHELL'] = '/usr/bin/fish';
+      process.env['HOME'] = tempDir;
+      try {
+        ensurePathInShellRc(binDir);
+        const content = fs.readFileSync(fishConfig, 'utf-8');
+        expect(content).toContain("set -gx PATH '");
+        expect(content).toContain("o\\'brien");
+      } finally {
+        process.env['SHELL'] = origShell;
+        process.env['HOME'] = origHome;
+      }
+    });
+
     it('creates fish config parent directories before appending PATH', () => {
       const binDir = path.join(tempDir, 'bin');
       const fishConfig = path.join(tempDir, '.config', 'fish', 'config.fish');

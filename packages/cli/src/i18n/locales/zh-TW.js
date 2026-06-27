@@ -2107,6 +2107,9 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     '更新已下載。將在結束目前工作階段後套用。',
   'Update failed: {{error}}': '更新失敗：{{error}}',
+  'Downloading update...': '正在下載更新...',
+  'Automatic update failed. Please try updating manually.':
+    '自動更新失敗。請嘗試手動更新。',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     '自動更新失敗：{{error}}。請重新執行安裝程式以手動更新。',
   'Running from a local git clone. Please update with "git pull".':

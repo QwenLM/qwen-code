@@ -18,6 +18,9 @@ import { performStandaloneUpdate } from './standalone-update.js';
 import { t } from '../i18n/index.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('AUTO_UPDATE');
 
 const UPDATE_SUCCESS_MESSAGE =
   'Update successful! Please restart Qwen Code to use the new version. ' +
@@ -93,7 +96,9 @@ export function handleAutoUpdate(
   const isWindows = os.platform() === 'win32';
   const shell = isWindows ? 'cmd.exe' : 'bash';
   const shellArgs = isWindows ? ['/c', updateCommand] : ['-c', updateCommand];
-  const updateProcess = spawnFn(shell, shellArgs, { stdio: 'pipe' });
+  const updateProcess = spawnFn(shell, shellArgs, {
+    stdio: ['pipe', 'ignore', 'pipe'],
+  });
   let errorOutput = '';
   updateProcess.stderr.on('data', (data) => {
     errorOutput += data.toString();
@@ -105,15 +110,19 @@ export function handleAutoUpdate(
         message: UPDATE_SUCCESS_MESSAGE,
       });
     } else {
+      debugLogger.warn(
+        `Automatic update command failed: ${updateCommand}; stderr: ${errorOutput.trim()}`,
+      );
       updateEventEmitter.emit('update-failed', {
-        message: `${UPDATE_FAILED_MESSAGE} (command: ${updateCommand}, stderr: ${errorOutput.trim()})`,
+        message: t(UPDATE_FAILED_MESSAGE),
       });
     }
   });
 
   updateProcess.on('error', (err) => {
+    debugLogger.warn('Automatic update command failed to start:', err);
     updateEventEmitter.emit('update-failed', {
-      message: `${UPDATE_FAILED_MESSAGE} (error: ${err.message})`,
+      message: t(UPDATE_FAILED_MESSAGE),
     });
   });
   return updateProcess;

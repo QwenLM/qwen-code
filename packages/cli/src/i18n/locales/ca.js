@@ -2076,6 +2076,9 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     "Actualització descarregada. S'aplicarà després de sortir d'aquesta sessió.",
   'Update failed: {{error}}': 'Actualització fallida: {{error}}',
+  'Downloading update...': "S'està baixant l'actualització...",
+  'Automatic update failed. Please try updating manually.':
+    "L'actualització automàtica ha fallat. Proveu d'actualitzar manualment.",
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     'Ha fallat l’actualització automàtica: {{error}}. Torneu a executar l’instal·lador per actualitzar manualment.',
   'Running from a local git clone. Please update with "git pull".':

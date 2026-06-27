@@ -2120,6 +2120,9 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'Update heruntergeladen. Es wird nach dem Beenden dieser Sitzung angewendet.',
   'Update failed: {{error}}': 'Update fehlgeschlagen: {{error}}',
+  'Downloading update...': 'Update wird heruntergeladen...',
+  'Automatic update failed. Please try updating manually.':
+    'Automatisches Update fehlgeschlagen. Bitte versuchen Sie, manuell zu aktualisieren.',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     'Automatisches Update fehlgeschlagen: {{error}}. Führen Sie das Installationsprogramm erneut aus, um manuell zu aktualisieren.',
   'Running from a local git clone. Please update with "git pull".':

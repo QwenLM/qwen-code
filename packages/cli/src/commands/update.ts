@@ -9,7 +9,9 @@ import { initializeI18n, resolveLanguageSetting, t } from '../i18n/index.js';
 
 export const updateCommand: CommandModule = {
   command: 'update',
-  describe: t('Check for Qwen Code updates and install if available'),
+  get describe() {
+    return t('Check for Qwen Code updates and install if available');
+  },
   handler: async () => {
     const [
       { loadSettings },
@@ -80,6 +82,7 @@ export const updateCommand: CommandModule = {
       isAutoUpdateEnabled
     ) {
       try {
+        writeStdoutLine(t('Downloading update...'));
         const result = await performStandaloneUpdate(
           installationInfo.standaloneDir,
           info.update.latest,

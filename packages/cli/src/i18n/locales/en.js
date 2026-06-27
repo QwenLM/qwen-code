@@ -2516,6 +2516,9 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'Update downloaded. It will be applied after you exit this session.',
   'Update failed: {{error}}': 'Update failed: {{error}}',
+  'Downloading update...': 'Downloading update...',
+  'Automatic update failed. Please try updating manually.':
+    'Automatic update failed. Please try updating manually.',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     'Automatic update failed: {{error}}. Re-run the installer to update manually.',
   'Running from a local git clone. Please update with "git pull".':

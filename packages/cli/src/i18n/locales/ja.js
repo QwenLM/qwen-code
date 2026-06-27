@@ -1879,6 +1879,9 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'アップデートをダウンロードしました。現在のセッション終了後に適用されます。',
   'Update failed: {{error}}': 'アップデート失敗：{{error}}',
+  'Downloading update...': 'アップデートをダウンロードしています...',
+  'Automatic update failed. Please try updating manually.':
+    '自動アップデートに失敗しました。手動で更新してください。',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     '自動更新に失敗しました: {{error}}。手動で更新するにはインストーラーを再実行してください。',
   'Running from a local git clone. Please update with "git pull".':

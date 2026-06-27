@@ -2309,6 +2309,9 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     '更新已下载。将在退出当前会话后应用。',
   'Update failed: {{error}}': '更新失败：{{error}}',
+  'Downloading update...': '正在下载更新...',
+  'Automatic update failed. Please try updating manually.':
+    '自动更新失败。请尝试手动更新。',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     '自动更新失败：{{error}}。请重新运行安装程序以手动更新。',
   'Running from a local git clone. Please update with "git pull".':

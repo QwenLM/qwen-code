@@ -2094,6 +2094,9 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
   'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
+  'Downloading update...': 'Загрузка обновления...',
+  'Automatic update failed. Please try updating manually.':
+    'Автоматическое обновление не удалось. Попробуйте обновить вручную.',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     'Автоматическое обновление не удалось: {{error}}. Повторно запустите установщик, чтобы обновить вручную.',
   'Running from a local git clone. Please update with "git pull".':

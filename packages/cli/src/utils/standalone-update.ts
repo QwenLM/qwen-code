@@ -17,6 +17,8 @@ import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { verifySignature } from './standalone-update-verify.js';
+import { updateEventEmitter } from './updateEventEmitter.js';
+import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('STANDALONE_UPDATE');
 
@@ -282,7 +284,16 @@ function validateExtractedPaths(
       String(entry.parentPath || entry.path),
       entry.name,
     );
-    const resolved = fs.realpathSync(fullPath);
+    let resolved: string;
+    try {
+      resolved = fs.realpathSync(fullPath);
+    } catch (err) {
+      fs.rmSync(resolvedDest, { recursive: true, force: true });
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Invalid archive entry: ${entry.name} could not be resolved (${detail})`,
+      );
+    }
     if (!isPathInside(resolvedDest, resolved)) {
       fs.rmSync(resolvedDest, { recursive: true, force: true });
       throw new Error(
@@ -479,6 +490,10 @@ function assertSafeForSingleQuotedShellPath(p: string, context: string): void {
 
 function shellQuoteForSh(p: string): string {
   return `'${p.replace(/'/g, "'\\''")}'`;
+}
+
+function shellQuoteForFish(p: string): string {
+  return `'${p.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -690,12 +705,9 @@ export function ensurePathInShellRc(binDir: string): void {
     if (content.includes(beginMarker) && content.includes(endMarker)) return;
     if (content.includes(legacyMarker)) return;
 
-    // shell_quote equivalent: wrap in single quotes, escape any embedded single quotes
-    const quotedBinDir = shellQuoteForSh(binDir);
-
     const exportLine = shell.endsWith('/fish')
-      ? `set -gx PATH ${quotedBinDir} $PATH`
-      : `export PATH=${quotedBinDir}:$PATH`;
+      ? `set -gx PATH ${shellQuoteForFish(binDir)} $PATH`
+      : `export PATH=${shellQuoteForSh(binDir)}:$PATH`;
 
     const block = `\n${beginMarker}\n${exportLine}\n${endMarker}\n`;
     fs.mkdirSync(path.dirname(rcFile), { recursive: true });
@@ -791,6 +803,9 @@ export async function performStandaloneUpdate(
   try {
     const archivePath = path.join(tempDir, filename);
     debugLogger.info(`Downloading ${filename} (${versionPath})...`);
+    updateEventEmitter.emit('update-info', {
+      message: t('Downloading update...'),
+    });
     const archiveHash = await downloadToFile(
       versionPath,
       filename,

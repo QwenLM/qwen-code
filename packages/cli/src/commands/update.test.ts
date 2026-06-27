@@ -65,8 +65,9 @@ vi.mock('../i18n/index.js', () => ({
   initializeI18n,
   resolveLanguageSetting,
   t: (key: string, params?: Record<string, string>) =>
-    key.replace(/\{\{(\w+)\}\}/g, (_, param: string) =>
-      params?.[param] ?? `{{${param}}}`,
+    key.replace(
+      /\{\{(\w+)\}\}/g,
+      (_, param: string) => params?.[param] ?? `{{${param}}}`,
     ),
 }));
 
@@ -133,6 +134,7 @@ describe('update command', () => {
       '/tmp/qwen-code',
       '1.2.3',
     );
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
     expect(writeStderrLine).toHaveBeenCalledWith('Update failed: boom');
     expect(process.exitCode).toBe(1);
   });
@@ -175,6 +177,7 @@ describe('update command', () => {
 
     await updateCommand.handler(updateArgs);
 
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
     expect(writeStdoutLine).toHaveBeenCalledWith(
       'Update successful! The new version will be used on your next run.',
     );
@@ -189,6 +192,7 @@ describe('update command', () => {
 
     await updateCommand.handler(updateArgs);
 
+    expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
     expect(writeStdoutLine).toHaveBeenCalledWith(
       'Update downloaded. It will be applied after you exit this session.',
     );

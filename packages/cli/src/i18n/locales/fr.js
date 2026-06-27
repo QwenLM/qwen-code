@@ -2117,6 +2117,9 @@ export default {
   'Update downloaded. It will be applied after you exit this session.':
     'Mise à jour téléchargée. Elle sera appliquée après avoir quitté cette session.',
   'Update failed: {{error}}': 'Échec de la mise à jour : {{error}}',
+  'Downloading update...': 'Téléchargement de la mise à jour...',
+  'Automatic update failed. Please try updating manually.':
+    'La mise à jour automatique a échoué. Essayez de mettre à jour manuellement.',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     'Échec de la mise à jour automatique : {{error}}. Relancez le programme d’installation pour mettre à jour manuellement.',
   'Running from a local git clone. Please update with "git pull".':
