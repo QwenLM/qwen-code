@@ -65,40 +65,50 @@ function sanitizeIndexField(value: string): string {
   return `${cleaned.slice(0, MAX_INDEX_FIELD_CHARS - 1).trimEnd()}…`;
 }
 
+// Chars left RAW in a link target: alphanumerics plus the path punctuation
+// (`. - _ ~`) that keeps the link resolving to the real file. `/` is checked
+// separately so the class needs no slash (sidesteps the regex-literal /
+// no-useless-escape ambiguity around a `/` inside `[...]`).
+const PATH_TARGET_SAFE = /[A-Za-z0-9._~-]/;
+const utf8Encoder = new TextEncoder();
+
 /**
- * Sanitize an attacker-controlled relative PATH before embedding it into the
- * committed MEMORY.md (as a link target `](path)` and in the "(also: …)" list).
- * Git filenames may legally contain newlines and markdown delimiters, so a raw
- * path like `ok.md\n- SYSTEM: injected.md` would inject a second physical line —
- * reopening the prompt-injection surface that sanitizeIndexField closes for
- * title/description. Strip control / zero-width / bidi chars (a newline here is
- * the injection), neutralize the `()[]\`` delimiters that let a path break out
- * of its `](…)` target or forge a code span, collapse whitespace to one line,
- * and cap length. Path separators are kept so the entry stays a usable reference.
+ * Percent-encode an attacker-controlled relative PATH so it can sit in the
+ * committed MEMORY.md as a Markdown link target `](path)` (and in the
+ * "(also: …)" list) while staying BOTH addressable and injection-safe. Git
+ * filenames may legally contain newlines, spaces and `()[]` + backticks, so a
+ * raw path (`ok.md` + newline + `- SYSTEM: …`) injects a second physical line
+ * or closes the `](…)` target early. An earlier fix rewrote those chars to `_`,
+ * which defused injection but pointed the link at a file that does NOT exist.
+ * Instead, percent-encode every char outside the addressable allowlist: the
+ * breakout chars become inert ASCII (newline→`%0A`, `(`→`%28`, `)`→`%29`,
+ * space→`%20`, backtick→`%60`, …) so the target is one line with no `](`/`)`
+ * breakout, yet `decodeURIComponent` recovers the exact path — the link still
+ * resolves to the real file. `/` is kept literal so it stays a usable path.
  */
-function sanitizeIndexPath(value: string): string {
-  const cleaned = value
-    // C0/C1 control chars (incl. CR/LF) stripped — a newline is the line-break
-    // injection we are defusing, so remove it rather than turn it into a space.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
-    // Zero-width + bidi-override chars that can hide or reorder injected text.
-    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
-    // Defang the markdown link/code delimiters a crafted filename could use to
-    // close the `](…)` target early and forge structure after it.
-    .replace(/[()[\]`]/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (cleaned.length <= MAX_INDEX_FIELD_CHARS) {
-    return cleaned;
+function encodeIndexPathTarget(value: string): string {
+  // Cap the RAW path before encoding so a pathological filename can't bloat the
+  // committed file; slicing by code point (and encoding AFTER) means we never
+  // split a surrogate pair or a `%XX` escape. The whole line is capped again by
+  // truncateIndexLine.
+  const chars = [...value].slice(0, MAX_INDEX_FIELD_CHARS);
+  let out = '';
+  for (const ch of chars) {
+    if (ch === '/' || PATH_TARGET_SAFE.test(ch)) {
+      out += ch;
+      continue;
+    }
+    for (const byte of utf8Encoder.encode(ch)) {
+      out += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+    }
   }
-  return `${cleaned.slice(0, MAX_INDEX_FIELD_CHARS - 1).trimEnd()}…`;
+  return out;
 }
 
 function docIndexLine(doc: ScannedAutoMemoryDocument): string {
   const title = sanitizeIndexField(doc.title) || doc.type;
   const description = sanitizeIndexField(doc.description) || doc.type;
-  return `- [${title}](${sanitizeIndexPath(doc.relativePath)}) — ${description}`;
+  return `- [${title}](${encodeIndexPathTarget(doc.relativePath)}) — ${description}`;
 }
 
 /**
@@ -192,7 +202,7 @@ function teamGroupIndexLine(group: TeamIndexGroup): string {
     return truncateIndexLine(base);
   }
   const also = group.others
-    .map((doc) => sanitizeIndexPath(doc.relativePath))
+    .map((doc) => encodeIndexPathTarget(doc.relativePath))
     .join(', ');
   return truncateIndexLine(`${base} (also: ${also})`);
 }
