@@ -7318,6 +7318,12 @@ class QwenAgent implements Agent {
         .restoreFromSnapshots(sessionData.fileHistorySnapshots);
     }
 
+    if (sessionData?.conversation.messages) {
+      config
+        .getChatRecordingService()
+        ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+    }
+
     if (options.replayHistory !== false && sessionData?.conversation.messages) {
       await session.replayHistory(sessionData.conversation.messages);
     }
