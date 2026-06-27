@@ -15,6 +15,7 @@ import {
   detectLoopSentinel,
 } from './loop-tick-resolver.js';
 import { LOOP_TASK_FILE_MAX_BYTES } from './loop-task-file.js';
+import { tildeifyPath } from '../../../utils/paths.js';
 
 // Make only realpath observable; every other fs call stays real so the temp-dir
 // fixtures keep working. The default impl calls through, so behavior is unchanged
@@ -291,6 +292,48 @@ describe('LoopTickResolver', () => {
     );
     // Exactly one H1 — the heading isn't duplicated by the body.
     expect(dynTick.modelText.match(/^# /gm)).toHaveLength(1);
+  });
+
+  it('names the real home loop.md in the absent reminder (QWEN_HOME-aware, not a hardcoded ~/.qwen)', async () => {
+    // Regression: the absent body hardcoded `~/.qwen/loop.md (home)`, which is
+    // wrong once the global dir is relocated (QWEN_HOME) — the resolver actually
+    // checks `<homeQwenDir>/loop.md`, so the message must name THAT path.
+    const relocated = path.join(tempDir, 'relocated-qwen');
+    const relocatedTick = await new LoopTickResolver({
+      projectRoot,
+      homeDir: relocated,
+      homeQwenDir: relocated,
+      allowProjectFile: () => true,
+    }).resolve('cron');
+
+    expect(relocatedTick.full).toBe(false);
+    expect(relocatedTick.modelText).toContain(
+      'loop.md is not currently present',
+    );
+    expect(relocatedTick.modelText).toContain(
+      `${tildeifyPath(path.join(relocated, 'loop.md'))} (home)`,
+    );
+    // The old hardcoded home location is gone; the project label stays relative.
+    expect(relocatedTick.modelText).not.toContain('~/.qwen/loop.md');
+    expect(relocatedTick.modelText).toContain('.qwen/loop.md (project)');
+
+    // Under the real OS home (the QWEN_HOME-unset case) the home prefix tilde-
+    // abbreviates, so the message reads `~/…/loop.md`, never the absolute $HOME.
+    const underHome = path.join(
+      os.homedir(),
+      `.qwen-loop-absent-${process.pid}`,
+    );
+    const homeTick = await new LoopTickResolver({
+      projectRoot,
+      homeDir: os.homedir(),
+      homeQwenDir: underHome,
+      allowProjectFile: () => true,
+    }).resolve('dynamic');
+
+    expect(homeTick.modelText).toContain(
+      `~/${path.basename(underHome)}/loop.md (home)`,
+    );
+    expect(homeTick.modelText).not.toContain(os.homedir());
   });
 
   it('re-expands after delete→recreate even when the recreated content is identical', async () => {

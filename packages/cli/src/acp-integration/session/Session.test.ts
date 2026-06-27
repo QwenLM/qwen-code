@@ -4887,6 +4887,97 @@ describe('Session', () => {
         }
       });
 
+      it('propagates a sentinel resolve() error (EACCES) instead of swallowing it into a normal tick', async () => {
+        // #executeCronPrompt: when resolve() throws (e.g. EACCES on
+        // .qwen/loop.md) it logs a loop.md-specific warn and RE-THROWS into the
+        // cron catch. Regression guard: the failure must PROPAGATE (surface as a
+        // cron error, never degrade to a default/normal tick sent to the model)
+        // and the loop.md-tagged warn must fire so a resolution failure stays
+        // distinguishable from a model-call failure in logs.
+        debugLoggerWarnSpy.mockClear();
+        const eacces = Object.assign(
+          new Error("EACCES: permission denied, open '.qwen/loop.md'"),
+          { code: 'EACCES' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The loop.md-specific warn fired, tagged with the sentinel mode and
+          // the EACCES code (proving the failure was logged as a resolution
+          // failure, not a generic model error).
+          await vi.waitFor(() => {
+            expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+              'loop.md sentinel resolution failed (mode=cron, code=EACCES) — check .qwen/loop.md permissions/IO',
+            );
+          });
+
+          // The error PROPAGATED to the cron catch and surfaced to the client.
+          const sessionUpdateMock = mockClient.sessionUpdate as ReturnType<
+            typeof vi.fn
+          >;
+          const cronErrorEmitted = () =>
+            sessionUpdateMock.mock.calls.some((call) => {
+              const update = (
+                call[0] as {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: { text?: string };
+                  };
+                }
+              ).update;
+              const text = update?.content?.text ?? '';
+              return (
+                update?.sessionUpdate === 'agent_message_chunk' &&
+                text.includes('[cron error]') &&
+                text.includes('EACCES')
+              );
+            });
+          await vi.waitFor(() => expect(cronErrorEmitted()).toBe(true));
+
+          // It was NOT swallowed into a normal tick: resolve() threw before any
+          // model send, so neither an expanded `# /loop tick` block nor the raw
+          // sentinel ever reached the model (the model is only sent the user
+          // prompt, never a degraded default tick).
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          expect(sentToModel()).not.toContain('# /loop tick');
+          expect(sentToModel()).not.toContain('<<loop.md>>');
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
       it('echoes the absent label when a sentinel fires with no loop.md present', async () => {
         // The `loopTick && !loopTick.sourceLabel` branch: a sentinel fires but no
         // project or home loop.md exists, so the tick is a labelled no-op.

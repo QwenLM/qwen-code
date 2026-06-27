@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
+import { tildeifyPath } from '../../../utils/paths.js';
 import {
   LOOP_TASK_FILE_MAX_BYTES,
   readLoopTaskFile,
@@ -110,13 +112,23 @@ const SOURCE_LABELS: Record<LoopTaskFileSource, string> = {
   home: 'home loop.md',
 };
 
+// Per-mode tail of the absent reminder. The shared prefix (built in absentBody)
+// names BOTH candidate locations; only this no-op/re-arm guidance differs by mode.
+const ABSENT_TAIL: Record<LoopMode, string> = {
+  cron: 'Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
+  dynamic:
+    'Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
+};
+
 // Body of the absent reminder — the H1 is supplied by tickHeading() so the
 // absent tick shares the same heading style as the full block and reminder.
-const SHORT_ABSENT_BODY: Record<LoopMode, string> = {
-  cron: 'loop.md is not currently present at .qwen/loop.md (project) or ~/.qwen/loop.md (home). Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
-  dynamic:
-    'loop.md is not currently present at .qwen/loop.md (project) or ~/.qwen/loop.md (home). Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
-};
+// `homeLabel` is the resolver's REAL home loop.md location (so a $QWEN_HOME-
+// relocated home is reported accurately instead of a hardcoded, wrong `~/.qwen`);
+// its OS-home prefix is tilde-abbreviated so the common case still reads
+// `~/.qwen/loop.md`.
+function absentBody(mode: LoopMode, homeLabel: string): string {
+  return `loop.md is not currently present at .qwen/loop.md (project) or ${homeLabel} (home). ${ABSENT_TAIL[mode]}`;
+}
 
 /** Detect whether a scheduled prompt is a loop.md sentinel, and which mode. */
 export function detectLoopSentinel(prompt: string): LoopMode | null {
@@ -175,6 +187,15 @@ export class LoopTickResolver {
     }
   }
 
+  /** The real home loop.md path for user-facing messages, OS-home tilde-
+   * abbreviated. Mirrors readLoopTaskFile's home-candidate path exactly so the
+   * absent reminder names the location actually checked (QWEN_HOME-aware). */
+  #homeLoopLabel(): string {
+    const homeQwenDir =
+      this.deps.homeQwenDir ?? path.join(this.deps.homeDir, '.qwen');
+    return tildeifyPath(path.join(homeQwenDir, 'loop.md'));
+  }
+
   async resolve(mode: LoopMode): Promise<LoopTickResult> {
     const result = await readLoopTaskFile({
       projectRoot: this.deps.projectRoot,
@@ -194,7 +215,7 @@ export class LoopTickResolver {
       this.#pendingContent = null;
       this.#lastContent = null;
       return {
-        modelText: `${tickHeading(mode, { absent: true })}\n${SHORT_ABSENT_BODY[mode]}`,
+        modelText: `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.#homeLoopLabel())}`,
         full: false,
       };
     }
