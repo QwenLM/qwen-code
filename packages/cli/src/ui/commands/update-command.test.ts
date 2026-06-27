@@ -9,6 +9,7 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 
 const checkForUpdatesDetailed = vi.fn();
 const handleAutoUpdate = vi.fn();
+const performStandaloneUpdate = vi.fn();
 const getInstallationInfo = vi.fn();
 const resolveUpdateCommand = vi.fn(
   (updateCommand: string, latestVersion: string) =>
@@ -43,6 +44,9 @@ const formatUpdateInstructions = vi.fn(
 );
 vi.mock('../utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
 vi.mock('../../utils/handleAutoUpdate.js', () => ({ handleAutoUpdate }));
+vi.mock('../../utils/standalone-update.js', () => ({
+  performStandaloneUpdate,
+}));
 vi.mock('../../utils/installationInfo.js', () => ({
   formatUpdateInstructions,
   getInstallationInfo,
@@ -85,6 +89,9 @@ describe('updateCommand', () => {
 
   it('delegates to handleAutoUpdate in interactive mode', async () => {
     const commandContext = context('interactive');
+    handleAutoUpdate.mockImplementation((_info, settings) => {
+      expect(settings.merged.general?.enableAutoUpdate).toBe(true);
+    });
 
     const result = await updateCommand.action!(commandContext, '');
 
@@ -94,6 +101,9 @@ describe('updateCommand', () => {
       commandContext.services.settings,
       '/repo',
     );
+    expect(
+      commandContext.services.settings.merged.general?.enableAutoUpdate,
+    ).toBeUndefined();
   });
 
   it('returns the manual update command in non-interactive mode', async () => {
@@ -108,19 +118,23 @@ describe('updateCommand', () => {
     expect(handleAutoUpdate).not.toHaveBeenCalled();
   });
 
-  it('returns the manual update command in interactive mode when auto-update is disabled', async () => {
-    const result = await updateCommand.action!(
-      context('interactive', false),
-      '',
-    );
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content:
-        'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
+  it('delegates to handleAutoUpdate in interactive mode when auto-update is disabled', async () => {
+    const commandContext = context('interactive', false);
+    handleAutoUpdate.mockImplementation((_info, settings) => {
+      expect(settings.merged.general?.enableAutoUpdate).toBe(true);
     });
-    expect(handleAutoUpdate).not.toHaveBeenCalled();
+
+    const result = await updateCommand.action!(commandContext, '');
+
+    expect(result).toBeUndefined();
+    expect(handleAutoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Update available: 1.2.3' }),
+      commandContext.services.settings,
+      '/repo',
+    );
+    expect(
+      commandContext.services.settings.merged.general?.enableAutoUpdate,
+    ).toBe(false);
   });
 
   it('returns the manual update command in ACP mode', async () => {
@@ -162,6 +176,43 @@ describe('updateCommand', () => {
       messageType: 'info',
       content:
         'Update available: 1.2.3\nUnable to auto-update this standalone installation. Please reinstall from:\n  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh',
+    });
+  });
+
+  it('updates standalone installs in non-interactive mode', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('done');
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(performStandaloneUpdate).toHaveBeenCalledWith(
+      '/tmp/qwen-code',
+      '1.2.3',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nUpdate successful! The new version will be used on your next run.',
+    });
+  });
+
+  it('returns an error when standalone update fails in non-interactive mode', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockRejectedValue(new Error('boom'));
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Update failed: boom',
     });
   });
 

@@ -111,7 +111,7 @@ describe('update command', () => {
 
     expect(resolveLanguageSetting).toHaveBeenCalledWith('zh');
     expect(initializeI18n).toHaveBeenCalledWith('zh');
-    expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), false);
+    expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), true);
     expect(writeStdoutLine).toHaveBeenCalledWith('Update available: 1.2.3');
     expect(writeStdoutLine).toHaveBeenCalledWith(
       'Run the following to update:',
@@ -137,6 +137,26 @@ describe('update command', () => {
     expect(writeStdoutLine).toHaveBeenCalledWith('Downloading update...');
     expect(writeStderrLine).toHaveBeenCalledWith('Update failed: boom');
     expect(process.exitCode).toBe(1);
+  });
+
+  it('updates standalone installs even when auto-update is disabled', async () => {
+    loadSettings.mockReturnValue(settings(false));
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('done');
+
+    await updateCommand.handler(updateArgs);
+
+    expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), true);
+    expect(performStandaloneUpdate).toHaveBeenCalledWith(
+      '/tmp/qwen-code',
+      '1.2.3',
+    );
+    expect(writeStdoutLine).toHaveBeenCalledWith(
+      'Update successful! The new version will be used on your next run.',
+    );
   });
 
   it('does not print generic fallback when installation info has updateMessage', async () => {

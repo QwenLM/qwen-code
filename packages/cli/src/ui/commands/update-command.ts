@@ -19,10 +19,12 @@ export const updateCommand: SlashCommand = {
     const [
       { checkForUpdatesDetailed },
       { handleAutoUpdate },
+      { performStandaloneUpdate },
       installationInfo,
     ] = await Promise.all([
       import('../utils/updateCheck.js'),
       import('../../utils/handleAutoUpdate.js'),
+      import('../../utils/standalone-update.js'),
       import('../../utils/installationInfo.js'),
     ]);
     const { formatUpdateInstructions, getInstallationInfo } = installationInfo;
@@ -65,24 +67,51 @@ export const updateCommand: SlashCommand = {
 
     const info = updateCheck.info;
 
-    // In interactive mode (TUI), route through handleAutoUpdate which emits
-    // events the TUI already listens to (UpdateNotification, etc.).
-    const isAutoUpdateEnabled =
-      settings.merged.general?.enableAutoUpdate !== false;
+    const installInfo = getInstallationInfo(projectRoot || process.cwd(), true);
 
-    if (
-      context.executionMode === 'interactive' &&
-      projectRoot &&
-      isAutoUpdateEnabled
-    ) {
-      handleAutoUpdate(info, settings, projectRoot);
+    if (context.executionMode === 'interactive' && projectRoot) {
+      const previousEnableAutoUpdate =
+        settings.merged.general?.enableAutoUpdate;
+      settings.merged.general ??= {};
+      settings.merged.general.enableAutoUpdate = true;
+      try {
+        handleAutoUpdate(info, settings, projectRoot);
+      } finally {
+        settings.merged.general.enableAutoUpdate = previousEnableAutoUpdate;
+      }
       return;
     }
 
-    const installInfo = getInstallationInfo(
-      projectRoot || process.cwd(),
-      isAutoUpdateEnabled,
-    );
+    if (installInfo.isStandalone && installInfo.standaloneDir) {
+      try {
+        const result = await performStandaloneUpdate(
+          installInfo.standaloneDir,
+          info.update.latest,
+        );
+        const message =
+          result === 'done'
+            ? t(
+                'Update successful! The new version will be used on your next run.',
+              )
+            : t(
+                'Update downloaded. It will be applied after you exit this session.',
+              );
+        return {
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: `${info.message}\n${message}`,
+        };
+      } catch (err) {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: t('Update failed: {{error}}', {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        };
+      }
+    }
+
     const lines = [
       info.message,
       ...formatUpdateInstructions(installInfo, info.update.latest).map((line) =>

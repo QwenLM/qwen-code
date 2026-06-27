@@ -72,15 +72,9 @@ export const updateCommand: CommandModule = {
     const info = updateCheck.info;
     writeStdoutLine(info.message);
 
-    const isAutoUpdateEnabled =
-      settings.merged.general?.enableAutoUpdate !== false;
-    const installationInfo = getInstallationInfo(cwd, isAutoUpdateEnabled);
+    const installationInfo = getInstallationInfo(cwd, true);
 
-    if (
-      installationInfo.isStandalone &&
-      installationInfo.standaloneDir &&
-      isAutoUpdateEnabled
-    ) {
+    if (installationInfo.isStandalone && installationInfo.standaloneDir) {
       try {
         writeStdoutLine(t('Downloading update...'));
         const result = await performStandaloneUpdate(
