@@ -3293,6 +3293,7 @@ export class Config {
     oldStorage: Storage,
     newStorage: Storage,
     oldDir: string,
+    opts?: { skipProcessChdir?: boolean },
   ): Promise<void> {
     this.chatRecordingService?.finalize();
     await this.chatRecordingService?.flush();
@@ -3300,13 +3301,15 @@ export class Config {
     try {
       this.moveCurrentSessionArtifacts(oldStorage, newStorage);
     } catch (error) {
-      try {
-        process.chdir(oldDir);
-      } catch (rollbackError) {
-        this.debugLogger.warn(
-          'Failed to roll back working directory after session artifact migration failed',
-          rollbackError,
-        );
+      if (!opts?.skipProcessChdir) {
+        try {
+          process.chdir(oldDir);
+        } catch (rollbackError) {
+          this.debugLogger.warn(
+            'Failed to roll back working directory after session artifact migration failed',
+            rollbackError,
+          );
+        }
       }
       throw error;
     }
@@ -3315,8 +3318,11 @@ export class Config {
   async relocateWorkingDirectory(
     newDir: string,
     expectedCanonicalDir?: string,
+    opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
   ): Promise<{ memoryRefreshError?: unknown }> {
-    const oldDir = fs.realpathSync(process.cwd());
+    const oldDir = opts?.skipProcessChdir
+      ? this.cwd
+      : fs.realpathSync(process.cwd());
     const targetPath = path.resolve(newDir);
     const expected = expectedCanonicalDir ?? fs.realpathSync(targetPath);
     if (!fs.statSync(targetPath).isDirectory()) {
@@ -3327,23 +3333,42 @@ export class Config {
       this.explicitIncludeDirectories,
     );
 
-    process.chdir(targetPath);
-    const actualCwd = fs.realpathSync(process.cwd());
-    if (actualCwd !== expected) {
-      process.chdir(oldDir);
-      throw new Error(
-        `Changed directory to ${actualCwd}, expected ${expected}.`,
-      );
+    if (!opts?.skipProcessChdir) {
+      process.chdir(targetPath);
+      const actualCwd = fs.realpathSync(process.cwd());
+      if (actualCwd !== expected) {
+        process.chdir(oldDir);
+        throw new Error(
+          `Changed directory to ${actualCwd}, expected ${expected}.`,
+        );
+      }
+    } else {
+      // ACP path: validate realpath matches expected without calling
+      // process.chdir — guards against TOCTOU swaps between the trust
+      // check and the config state update.
+      const actualCanonical = fs.realpathSync(targetPath);
+      if (actualCanonical !== expected) {
+        throw new Error(
+          `Realpath mismatch: resolved ${actualCanonical}, expected ${expected}.`,
+        );
+      }
     }
 
     const oldStorage = this.storage;
-    const newStorage = new Storage(expected);
-    await this.prepareSessionArtifactMigration(oldStorage, newStorage, oldDir);
+    if (!opts?.skipArtifactMigration) {
+      const newStorage = new Storage(expected);
+      await this.prepareSessionArtifactMigration(
+        oldStorage,
+        newStorage,
+        oldDir,
+        opts,
+      );
+      this.storage = newStorage;
+      this.chatRecordingService?.resetStoragePaths();
+    }
 
     this.targetDir = expected;
     this.cwd = expected;
-    this.storage = newStorage;
-    this.chatRecordingService?.resetStoragePaths();
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
