@@ -8,23 +8,20 @@
  * run. The extension has no UI of its own — it's a CDP-tunnel pipe — so the
  * panel just frames the daemon once one is reachable and permits framing.
  *
- * Static asset (no bundler); loaded as an ES module so it can import the pure
- * helpers in onboarding-logic.js. Constants intentionally duplicate
- * daemon/config.ts (which the bundled service worker uses) to stay standalone.
+ * Static asset (no bundler). Constants intentionally duplicate daemon/config.ts
+ * (which the bundled service worker uses) to stay standalone.
  */
-/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, clearInterval */
+/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval */
 
-import {
-  DEFAULT_BASE_URL,
-  resolveBaseUrl,
-  allowOriginCommand,
-  decideState,
-} from './onboarding-logic.js';
-
+const DEFAULT_BASE_URL = 'http://127.0.0.1:4170';
 const STORAGE_KEY = 'qwen.daemon';
 const POLL_MS = 2000;
 const PROBE_TIMEOUT_MS = 2000;
 const FRAMED_MISS_LIMIT = 2;
+
+/** The command to start a daemon that allows this extension's own origin. */
+const allowOriginCommand = (extensionId) =>
+  `qwen serve --allow-origin chrome-extension://${extensionId}`;
 
 const els = {
   iframe: document.getElementById('ui'),
@@ -43,7 +40,9 @@ async function readConfig() {
     const stored = await chrome.storage.local.get(STORAGE_KEY);
     const cfg = (stored && stored[STORAGE_KEY]) || {};
     return {
-      baseUrl: resolveBaseUrl(cfg.baseUrl),
+      baseUrl:
+        (typeof cfg.baseUrl === 'string' && cfg.baseUrl.trim()) ||
+        DEFAULT_BASE_URL,
       token: (typeof cfg.token === 'string' && cfg.token.trim()) || undefined,
     };
   } catch {
@@ -74,11 +73,8 @@ async function probeState(baseUrl, token) {
   const health = await probeJson(`${baseUrl}/health`, token);
   if (!health) return 'down';
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
-  const features = caps && Array.isArray(caps.features) ? caps.features : [];
-  return decideState({
-    healthOk: true,
-    allowOriginActive: features.includes('allow_origin'),
-  });
+  const features = Array.isArray(caps?.features) ? caps.features : [];
+  return features.includes('allow_origin') ? 'ready' : 'needs-allow-origin';
 }
 
 /** Render the welcome screen for a non-ready state. */
@@ -115,7 +111,6 @@ function showShell(baseUrl) {
   els.iframe.classList.remove('hidden');
 }
 
-let pollTimer = null;
 /**
  * One probe → render. Keep probing after framing so a stopped daemon falls
  * back to the welcome screen instead of exposing Chrome's localhost error page.
@@ -169,4 +164,4 @@ els.cmdRow.addEventListener('keydown', (e) => {
 els.cmd.textContent = allowOriginCommand(chrome.runtime.id);
 
 tick();
-pollTimer = setInterval(tick, POLL_MS);
+setInterval(tick, POLL_MS);
