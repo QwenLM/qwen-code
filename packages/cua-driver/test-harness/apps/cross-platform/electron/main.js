@@ -14,7 +14,7 @@ const rawCdpPort = process.env.CUA_ELECTRON_CDP_PORT ?? '9223';
 const cdpPortNum = Number(rawCdpPort);
 if (!Number.isInteger(cdpPortNum) || cdpPortNum < 1 || cdpPortNum > 65535) {
   throw new Error(
-    `Invalid CUA_ELECTRON_CDP_PORT: "${rawCdpPort}". Expected an integer in 1-65535.`,
+    `Invalid CUA_ELECTRON_CDP_PORT: "${rawCdpPort}". Expected an integer in 1-65535.`
   );
 }
 const CDP_PORT = String(cdpPortNum);
@@ -39,7 +39,7 @@ function createWindow() {
   // cua-driver tests can find the window by substring match. Without this,
   // Electron syncs window.title to document.title which would be
   // 'cua-driver Web Harness' (the page's title).
-  mainWindow.on('page-title-updated', (e) => e.preventDefault());
+  mainWindow.on('page-title-updated', e => e.preventDefault());
   mainWindow.setTitle(fixedTitle);
 
   mainWindow
@@ -52,7 +52,7 @@ function createWindow() {
         mainWindow.setTitle(fixedTitle);
       }
     })
-    .catch((err) => {
+    .catch(err => {
       // Fail deterministically rather than leaving the harness window
       // up with no content — the integration tests would then time out
       // waiting for the DOM markers to render.

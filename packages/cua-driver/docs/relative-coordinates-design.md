@@ -35,7 +35,6 @@ Phase-1 对用户提供的 qwen 出错轨迹
 ## 1. 核心架构决策
 
 ### 1.1 唯一拦截点 = `ToolRegistry::invoke`（不是 handle_request）
-
 - `cua-driver-core/src/tool.rs:377` `pub async fn invoke(&self, name:&str, args:Value) -> ToolResult`
   是 **所有传输的唯一收口点**：stdio、HTTP（经 `server.rs:64 handle_request`）、
   **UDS daemon（`serve.rs:692/1206` 直调 invoke，绕过 handle_request）**、
@@ -47,7 +46,6 @@ Phase-1 对用户提供的 qwen 出错轨迹
   `content / is_error / structured_content`，入参出参都可在此 wrap。
 
 ### 1.2 尺寸基准 = core 自建 per-(pid,window_id) 缓存
-
 - `invoke` 入参只有 pid/window_id，**没有截图尺寸**。
 - 不能复用 `resize_registry`/`zoom_registry`：它们在 `platform-macos`（core 不可见），
   且 key 仅 pid（多窗口串扰）、只存 ratio 不存绝对宽高。
@@ -58,7 +56,6 @@ Phase-1 对用户提供的 qwen 出错轨迹
   （`get_window_state.rs:286-287` 三平台同名 emit）→ 直接 ×/÷1000，无需再过 resize ratio。
 
 ### 1.3 开关
-
 - core 全局（仿 `main.rs:50 CLAUDE_CODE_COMPAT: AtomicBool`）。
 - env `CUA_DRIVER_RS_COORDINATE_SPACE=1` 开启（`0`/未设/其他值 = `pixels` 默认关；
   经 `is_env_truthy`，也接受 `true`/`yes`/`on`）。另有 `CUA_DRIVER_RS_COORDINATE_SCALE`
@@ -69,12 +66,10 @@ Phase-1 对用户提供的 qwen 出错轨迹
 ---
 
 ## 2. 换算公式
-
 ```
 入参 norm→px:  px_x = round(norm_x / DIV * sw)   px_y = round(norm_y / DIV * sh)
 出参 px→norm:  norm_x = round(px_x / sw * DIV)    norm_y = round(px_y / sh * DIV)
 ```
-
 - `sw,sh` = `SIZE_CACHE[(pid,window_id)]`；缺失则透传并 warn（不猜）。
 - `DIV` 默认 **1000**（computer_use cookbook，qwen3.6-plus 场景）；做成可配以应对 999 分歧。
 - 取整用 `round`（与 mobile_use 一致、对称），避免 floor 的系统性半像素偏左上。
@@ -84,15 +79,15 @@ Phase-1 对用户提供的 qwen 出错轨迹
 
 ## 3. 输入坐标字段表（纳入转换）
 
-| 工具                                             | 字段                            | 平台          | 基准                                                                           |
-| ------------------------------------------------ | ------------------------------- | ------------- | ------------------------------------------------------------------------------ |
-| click / double_click / right_click               | `x`,`y`                         | mac/win/linux | **window**：(pid,window_id) 截图尺寸                                           |
-| drag                                             | `from_x`,`from_y`,`to_x`,`to_y` | mac/win/linux | **window**：同上                                                               |
-| zoom                                             | `x1`,`y1`,`x2`,`y2`             | mac/win/linux | **window**：裁剪框两角同样落在窗口截图 0–1000 网格（见下方 resize-ratio 注意） |
-| move_cursor                                      | `x`,`y`                         | mac/win/linux | **screen**：overlay 是屏幕全局坐标，按 `get_screen_size` 逻辑点尺寸归一化      |
-| mouse_button_down / mouse_drag / mouse_button_up | `x`,`y`                         | linux only    | window：同 click                                                               |
+| 工具 | 字段 | 平台 | 基准 |
+|---|---|---|---|
+| click / double_click / right_click | `x`,`y` | mac/win/linux | **window**：(pid,window_id) 截图尺寸 |
+| drag | `from_x`,`from_y`,`to_x`,`to_y` | mac/win/linux | **window**：同上 |
+| zoom | `x1`,`y1`,`x2`,`y2` | mac/win/linux | **window**：裁剪框两角同样落在窗口截图 0–1000 网格（见下方 resize-ratio 注意） |
+| move_cursor | `x`,`y` | mac/win/linux | **screen**：overlay 是屏幕全局坐标，按 `get_screen_size` 逻辑点尺寸归一化 |
+| mouse_button_down / mouse_drag / mouse_button_up | `x`,`y` | linux only | window：同 click |
 
-字段命名跨平台统一（`click.rs:80-81`、`drag.rs:58-61`、`zoom.rs`、`move_cursor.rs`、各平台 impl\_.rs 一致）。
+字段命名跨平台统一（`click.rs:80-81`、`drag.rs:58-61`、`zoom.rs`、`move_cursor.rs`、各平台 impl_.rs 一致）。
 
 **zoom 的 resize-ratio 修正**（实测发现的上游不一致）：`get_window_state` 把物理截图
 （如 Retina 2400×1640）**降采样**到 `max_dim`（约 1567×1071）后才返回，并据此报告
@@ -104,7 +99,6 @@ Phase-1 对用户提供的 qwen 出错轨迹
 pixel 模式逐字节不变。非降采样窗口 `ratio==None`，无副作用。
 
 **两种基准**（`input_coord_fields` 的第三元 `screen_basis`）：
-
 - **window basis**（click/drag/zoom 等）：按 per-(pid,window_id) 缓存的截图尺寸换算，
   与 qwen 看到的窗口截图 0–1000 网格对齐。
 - **screen basis**（仅 move_cursor）：overlay 光标走屏幕全局逻辑点，无 window 截图基准，
@@ -116,12 +110,12 @@ pixel 模式逐字节不变。非降采样窗口 `ratio==None`，无副作用。
 
 ## 4. 排除项（首版不转换，均有据）
 
-| 排除                                   | 原因                                                                                                 |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `from_zoom=true` 的 click/drag         | 坐标在 zoom 图空间，core 拿不到 crop 尺寸；`denormalize_args` 见到 `from_zoom=true` 直接 return 透传 |
-| `get_screen_size` 返回值本身           | 是 points 尺寸，非坐标（但其 width/height 被 ingest 进 SCREEN_SIZE 缓存供 move_cursor 用）           |
-| `elements[].frame{x,y,w,h}` 等输出坐标 | screen-global，core 拿不到 window_origin + scale，见 §5                                              |
-| `parallel_mouse_drag` 的 `path`/`fn`   | linux，数组嵌坐标 + 字符串表达式，非线性，低优先级                                                   |
+| 排除 | 原因 |
+|---|---|
+| `from_zoom=true` 的 click/drag | 坐标在 zoom 图空间，core 拿不到 crop 尺寸；`denormalize_args` 见到 `from_zoom=true` 直接 return 透传 |
+| `get_screen_size` 返回值本身 | 是 points 尺寸，非坐标（但其 width/height 被 ingest 进 SCREEN_SIZE 缓存供 move_cursor 用） |
+| `elements[].frame{x,y,w,h}` 等输出坐标 | screen-global，core 拿不到 window_origin + scale，见 §5 |
+| `parallel_mouse_drag` 的 `path`/`fn` | linux，数组嵌坐标 + 字符串表达式，非线性，低优先级 |
 
 > **zoom / move_cursor 已纳入转换**（见 §3）。zoom 是 window basis（裁剪框两角同窗口网格），
 > 且 `from_zoom=true` 链路通过 early-return 保护不被二次归一化；move_cursor 是 screen basis。
@@ -134,12 +128,12 @@ pixel 模式逐字节不变。非降采样窗口 `ratio==None`，无副作用。
 
 ## 5. 输出处理（首版降级，理由充分）
 
-| 字段                                           | 处理                                   | 理由                                                                                                                                                                                                                                                    |
-| ---------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `screenshot_width/height`                      | 改成 `1000/1000`（可选保留 `*_px`）    | qwen 视整图为 0–1000 网格                                                                                                                                                                                                                               |
-| `elements[].frame{x,y,w,h}`                    | **首版保持像素**，文档标注为 screen px | frame 是 **screen-global** 坐标（`ax/tree.rs:325 element_screen_rect`、win UIA `BoundingRectangle`、linux `GetExtents(Screen)`），要映射回截图空间需 window_origin + Retina scale，**core 拿不到**；三平台 points/px 语义还不一致。强行转换会引入错误。 |
-| `get_cursor_position` x,y                      | 保持像素                               | screen 坐标，无 window 上下文，工具不收 window_id                                                                                                                                                                                                       |
-| `list_windows`/`launch_app` 的 window `bounds` | 保持像素                               | screen 绝对坐标，不是 qwen 用来点击的坐标                                                                                                                                                                                                               |
+| 字段 | 处理 | 理由 |
+|---|---|---|
+| `screenshot_width/height` | 改成 `1000/1000`（可选保留 `*_px`） | qwen 视整图为 0–1000 网格 |
+| `elements[].frame{x,y,w,h}` | **首版保持像素**，文档标注为 screen px | frame 是 **screen-global** 坐标（`ax/tree.rs:325 element_screen_rect`、win UIA `BoundingRectangle`、linux `GetExtents(Screen)`），要映射回截图空间需 window_origin + Retina scale，**core 拿不到**；三平台 points/px 语义还不一致。强行转换会引入错误。 |
+| `get_cursor_position` x,y | 保持像素 | screen 坐标，无 window 上下文，工具不收 window_id |
+| `list_windows`/`launch_app` 的 window `bounds` | 保持像素 | screen 绝对坐标，不是 qwen 用来点击的坐标 |
 
 > 首版只归一化 **输入点击坐标**（qwen 的主路径）。输出 frame 的准确归一化是
 > 后续增强项，需要 platform 侧额外 emit window_origin + scale（破坏"只改 core"），
@@ -152,7 +146,6 @@ pixel 模式逐字节不变。非降采样窗口 `ratio==None`，无副作用。
 ## 6. 文案改写（list 出口字符串替换，不改源 schema）
 
 在 normalized 模式下，于 **两处 list 出口** 套同一个 `rewrite_coord_desc()`：
-
 - `tool.rs:335 tools_list()`（stdio/HTTP 直连）
 - `serve.rs:585` 与 `serve.rs:1125` daemon `list` 分支（用 `def.description` 裸字段，
   **不经 to_list_entry**，必须单独覆盖，否则生产 daemon→proxy 路径看不到改写）
@@ -185,18 +178,15 @@ MCP `instructions`（`protocol.rs:191` "Prefer element_index … over pixel coor
 ## 8. 测试与验证
 
 ### 8.1 单测（TDD 主战场，无 app 依赖，基线 98 passed/0.02s）
-
 `cargo test -p cua-driver-core` —— 对 `denormalize_args`/`normalize_result` 做 round-trip
 纯函数单测（0–1000 + 截图尺寸 ↔ 像素；边界 0/1000；除数/取整）。
 
 ### 8.2 e2e 协议测试
-
 `crates/cua-driver/tests/mcp_protocol_test.rs` 模板（子进程 + JSON-RPC）。
 注意 `:67`/`:2039` 预存红（断言 serverInfo `"cua-driver-rs"`，实际 `"cua-driver"`），
 与本任务无关，勿误判。
 
 ### 8.3 真机（替换 qwen 的 binary）
-
 1. 编译：`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer cargo build -p cua-driver --bin cua-driver`
    （**必须 DEVELOPER_DIR=完整 Xcode**，否则 Swift 链接失败）。
 2. 覆盖 qwen 实际 spawn 的 binary（不改 installed.json 版本号，借壳 0.5.2 路径）：
@@ -213,20 +203,19 @@ MCP `instructions`（`protocol.rs:191` "Prefer element_index … over pixel coor
 
 ## 9. 风险与未决（按严重度）
 
-| #   | 风险                                                        | 缓解                                                               |
-| --- | ----------------------------------------------------------- | ------------------------------------------------------------------ |
-| R0  | qwen 实际坐标空间未经真机确认（轨迹反证，§0）               | §8.3 验证 B，先实测再定默认值                                      |
-| R1  | 除数 1000 vs 999、是否 round                                | §8.3 验证 A 四角实测；DIV 可配                                     |
-| R2  | replay 双重换算（`recording_tools.rs:391` 再过 invoke）     | record 存 denormalize 后像素值 + bypass 标记                       |
-| R3  | 输出 frame 是 screen 坐标，无法在 core 准确归一化           | 首版降级保持像素（§5）                                             |
-| R4  | SIZE_CACHE 无 TTL、pid 复用陈旧尺寸                         | ingest 总是覆盖；依赖"每回合先 get_window_state"既有 INVARIANT     |
-| R5  | qwen-code pin 0.5.2 vs driver 0.6.7，工具 schema 可能不兼容 | 借壳测试时 diff 两版 tools/list；必要时在 qwen-code fork 重跑 sync |
-| R6  | from_zoom / parallel_mouse_drag fn 坐标语义                 | 首版排除并文档化                                                   |
+| # | 风险 | 缓解 |
+|---|---|---|
+| R0 | qwen 实际坐标空间未经真机确认（轨迹反证，§0） | §8.3 验证 B，先实测再定默认值 |
+| R1 | 除数 1000 vs 999、是否 round | §8.3 验证 A 四角实测；DIV 可配 |
+| R2 | replay 双重换算（`recording_tools.rs:391` 再过 invoke） | record 存 denormalize 后像素值 + bypass 标记 |
+| R3 | 输出 frame 是 screen 坐标，无法在 core 准确归一化 | 首版降级保持像素（§5） |
+| R4 | SIZE_CACHE 无 TTL、pid 复用陈旧尺寸 | ingest 总是覆盖；依赖"每回合先 get_window_state"既有 INVARIANT |
+| R5 | qwen-code pin 0.5.2 vs driver 0.6.7，工具 schema 可能不兼容 | 借壳测试时 diff 两版 tools/list；必要时在 qwen-code fork 重跑 sync |
+| R6 | from_zoom / parallel_mouse_drag fn 坐标语义 | 首版排除并文档化 |
 
 ---
 
 ## 10. 交付物状态
-
 - [x] Phase-1 全面理解（8 路）
 - [x] Phase-2 实现（TDD，125 core 单测绿）
   - [x] `coord_norm.rs`：换算 + 字段表 + 排除项 + 尺寸缓存 + ingest + 默认种子 + 文案改写（22 单测）
@@ -242,12 +231,10 @@ MCP `instructions`（`protocol.rs:191` "Prefer element_index … over pixel coor
 - [ ] mac app 证书签名（待用户提供）
 
 ### 启用方式
-
 `CUA_DRIVER_RS_COORDINATE_SPACE=1` 开启（`0` / 不设 / 其他非真值 = pixels，零行为变化）。
 满量程可选 `CUA_DRIVER_RS_COORDINATE_SCALE=<N>`（默认 1000）。
 
 ### 本次改动文件（fork rebase 友好，集中在 core + bin 入口）
-
 - `crates/cua-driver-core/src/coord_norm.rs`（新增：换算/缓存/ingest/文案改写/种子）
 - `crates/cua-driver-core/src/lib.rs`（注册 module）
 - `crates/cua-driver-core/src/tool.rs`（ToolRegistry 字段 + setter/getter + invoke hook + tools_list 改写 + 接线测试）

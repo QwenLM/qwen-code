@@ -90,9 +90,8 @@ forbidden-list / launch / click details.
 ### Linux
 
 The full tool surface is supported on X11 (background input via AT-SPI
-
-- XSendEvent, screenshots, recording); native Wayland input/capture is
-  opt-in and still preview. See `LINUX.md`. Install:
++ XSendEvent, screenshots, recording); native Wayland input/capture is
+opt-in and still preview. See `LINUX.md`. Install:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)"

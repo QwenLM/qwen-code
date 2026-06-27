@@ -47,7 +47,6 @@ binary_path = get_binary_path()
 ## What is cua-driver?
 
 `cua-driver` is a cross-platform MCP server that provides 40+ tools for:
-
 - Screen capture and window management
 - Mouse and keyboard automation
 - Accessibility tree interaction
@@ -57,12 +56,12 @@ It enables AI agents to interact with desktop applications through the Model Con
 
 ## Platform Support
 
-| Platform | Architecture               | Status       |
-| -------- | -------------------------- | ------------ |
+| Platform | Architecture | Status |
+|----------|-------------|---------|
 | macOS    | Universal (ARM64 + x86_64) | ✅ Supported |
-| Linux    | x86_64                     | ✅ Supported |
-| Windows  | x86_64                     | ✅ Supported |
-| Windows  | ARM64                      | ✅ Supported |
+| Linux    | x86_64 | ✅ Supported |
+| Windows  | x86_64 | ✅ Supported |
+| Windows  | ARM64 | ✅ Supported |
 
 ## License
 

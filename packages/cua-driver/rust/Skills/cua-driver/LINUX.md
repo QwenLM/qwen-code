@@ -25,7 +25,7 @@ AT-SPI is talked to natively over D-Bus (the `atspi`/zbus crate) — no
 - **Element click** (`element_index`) — AT-SPI `do_action` on the
   accessible. Toolkit-native, focus-free.
 - **type_text** — AT-SPI EditableText first (focus-free; lands in an
-  _unfocused_ window's editable for Qt6 / GTK4). When a **non-editable**
+  *unfocused* window's editable for Qt6 / GTK4). When a **non-editable**
   widget holds focus — a spreadsheet cell, a terminal, a canvas — it
   synth-types into the focused widget via XTest, and terminals take a
   focus-free pty-injection path. So background typing into an editable
@@ -63,7 +63,7 @@ If a tool call surprises you on Linux:
    else XWayland.
 3. Empty / partial AT-SPI tree — make sure the a11y bus is enabled
    (`gsettings set org.gnome.desktop.interface toolkit-accessibility
-true`). GTK4 / Qt6 also populate lazily, so re-snapshot after an
+   true`). GTK4 / Qt6 also populate lazily, so re-snapshot after an
    interaction.
 
 ## Forbidden vectors
@@ -80,17 +80,17 @@ ask the user.
 
 ## What to expect
 
-| Intent                  | Status                                                                                                                                                                                       |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Snapshot AT-SPI tree    | ✅ GTK3/4, Qt5/6, wxWidgets, Electron (GTK4/Qt6 can be partial — re-snapshot)                                                                                                                |
-| Pixel click             | ✅ background `XSendEvent`, no focus steal, no pointer move — but GTK menus/popups, SDL and Allegro filter synthetic events, so prefer **element-indexed click** for those (trycua/cua#2022) |
-| Element-indexed click   | ✅ AT-SPI `do_action`                                                                                                                                                                        |
-| Type text               | ✅ AT-SPI focus-free, with XTest / pty fallback for the focused widget                                                                                                                       |
-| Hotkey / `press_key`    | ✅                                                                                                                                                                                           |
-| Screenshot full-display | ✅ X11; ✅ Wayland via `grim`                                                                                                                                                                |
-| Screenshot per-window   | ✅ X11                                                                                                                                                                                       |
-| `launch_app`            | ✅ env-scrubbed launch (no workspace steal)                                                                                                                                                  |
-| Recording (video)       | ✅ X11 (`x11grab`); ⚠️ Wayland not yet supported (preview)                                                                                                                                   |
+| Intent | Status |
+|---|---|
+| Snapshot AT-SPI tree | ✅ GTK3/4, Qt5/6, wxWidgets, Electron (GTK4/Qt6 can be partial — re-snapshot) |
+| Pixel click | ✅ background `XSendEvent`, no focus steal, no pointer move — but GTK menus/popups, SDL and Allegro filter synthetic events, so prefer **element-indexed click** for those (trycua/cua#2022) |
+| Element-indexed click | ✅ AT-SPI `do_action` |
+| Type text | ✅ AT-SPI focus-free, with XTest / pty fallback for the focused widget |
+| Hotkey / `press_key` | ✅ |
+| Screenshot full-display | ✅ X11; ✅ Wayland via `grim` |
+| Screenshot per-window | ✅ X11 |
+| `launch_app` | ✅ env-scrubbed launch (no workspace steal) |
+| Recording (video) | ✅ X11 (`x11grab`); ⚠️ Wayland not yet supported (preview) |
 
 See `SKILL.md` for the cross-platform loop (snapshot-before-AND-after,
 pixel-click contract, failure modes) and `RECORDING.md` for session

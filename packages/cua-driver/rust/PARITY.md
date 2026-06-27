@@ -17,14 +17,14 @@ cd libs/cua-driver/rust/tests/integration
 
 ### Known parity gaps (as of 2026-05-13, macOS)
 
-| Gap                              | Rust                                                                                | Swift                      |
-| -------------------------------- | ----------------------------------------------------------------------------------- | -------------------------- |
-| `type_text_chars`                | ✅                                                                                  | missing                    |
-| `get_accessibility_tree`         | ✅                                                                                  | missing                    |
-| `page` tool                      | ✅ (cross-platform: Apple-Events on macOS, UIA+CDP on Windows, AT-SPI+CDP on Linux) | ✅ (macOS only)            |
-| `--version` flag                 | ✅                                                                                  | ✅                         |
-| `call check_permissions` JSON    | ✅ JSON                                                                             | human-readable text        |
-| `call screenshot` (no window_id) | ✅ full-display default                                                             | error (requires window_id) |
+| Gap | Rust | Swift |
+|-----|------|-------|
+| `type_text_chars` | ✅ | missing |
+| `get_accessibility_tree` | ✅ | missing |
+| `page` tool | ✅ (cross-platform: Apple-Events on macOS, UIA+CDP on Windows, AT-SPI+CDP on Linux) | ✅ (macOS only) |
+| `--version` flag | ✅ | ✅ |
+| `call check_permissions` JSON | ✅ JSON | human-readable text |
+| `call screenshot` (no window_id) | ✅ full-display default | error (requires window_id) |
 
 ---
 
@@ -34,7 +34,6 @@ Rust source location, divergences (intentional vs. accidental), and the
 deterministic test that locks the verified behavior in.
 
 Format per entry:
-
 ```
 ## <surface>
 - Swift: <path:line>
@@ -47,14 +46,13 @@ Format per entry:
 ---
 
 ## MCP tool: `move_cursor`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/MoveCursorTool.swift:6-60`
 - Rust:
   - macOS=`crates/platform-macos/src/tools/move_cursor.rs`
   - windows=`crates/platform-windows/src/tools/impl_.rs` (MoveCursorTool)
   - linux=`crates/platform-linux/src/tools/impl_.rs` (MoveCursorTool)
 - Status: INTENTIONAL_DIVERGENCE (semantic) + VERIFIED (overlay behavior)
-- Test: `crates/platform-windows/examples/cursor_visibility.rs`
+- Test:  `crates/platform-windows/examples/cursor_visibility.rs`
 
 ### Intentional semantic divergence
 
@@ -70,7 +68,6 @@ type_text, etc.). The Rust port treats `move_cursor` as "show the agent's
 attention" — visual only.
 
 Consequences:
-
 - Schema accepts an extra optional `cursor_id: string` (multi-cursor support
   doesn't exist in Swift).
 - Schema accepts floats (`number`) for `x`/`y`; Swift only accepts integers.
@@ -83,7 +80,6 @@ Consequences:
 ### Cross-platform consistency (verified)
 
 All three Rust platforms now send:
-
 ```
 OverlayCommand::MoveTo { x, y, end_heading_radians: FRAC_PI_4 }
 ```
@@ -103,14 +99,13 @@ Unix socket).
 ---
 
 ## MCP tool: `get_cursor_position`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/GetCursorPositionTool.swift:6-37`
 - Rust:
   - macOS=`crates/platform-macos/src/tools/get_cursor_position.rs`
   - windows=`crates/platform-windows/src/tools/impl_.rs` (GetCursorPositionTool)
   - linux=`crates/platform-linux/src/tools/impl_.rs` (GetCursorPositionTool)
 - Status: VERIFIED
-- Test: `crates/platform-windows/examples/get_cursor_position_parity.rs`
+- Test:  `crates/platform-windows/examples/get_cursor_position_parity.rs`
 
 ### Fixed divergences
 
@@ -122,7 +117,7 @@ Unix socket).
    integers like Swift, consistent with Windows/Linux Rust.
 3. **Description text** — was inconsistent across Rust platforms. All
    three now use Swift's wording: `"Return the current mouse cursor
-position in screen points (origin top-left)."`.
+   position in screen points (origin top-left)."`.
 
 ### Intentional additions (Rust-only)
 
@@ -135,11 +130,11 @@ position in screen points (origin top-left)."`.
 
 ### Underlying API per platform
 
-| Platform | Swift                           | Rust                                                     |
-| -------- | ------------------------------- | -------------------------------------------------------- |
-| macOS    | `CGEvent(source: nil).location` | `CGEvent::new(CGEventSource(HIDSystemState)).location()` |
-| Windows  | n/a                             | `GetCursorPos` (Win32)                                   |
-| Linux    | n/a                             | `xproto::query_pointer` on the root window               |
+| Platform | Swift                              | Rust                                       |
+|----------|------------------------------------|--------------------------------------------|
+| macOS    | `CGEvent(source: nil).location`    | `CGEvent::new(CGEventSource(HIDSystemState)).location()` |
+| Windows  | n/a                                | `GetCursorPos` (Win32)                     |
+| Linux    | n/a                                | `xproto::query_pointer` on the root window |
 
 All three return screen-coordinate space, top-left origin, matching the
 documented Swift behavior.
@@ -147,14 +142,14 @@ documented Swift behavior.
 ---
 
 ## MCP tool: `get_screen_size`
-
-- Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/GetScreenSizeTool.swift:6-46` + `libs/cua-driver/Sources/CuaDriverCore/Capture/ScreenInfo.swift`
+- Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/GetScreenSizeTool.swift:6-46`
+        + `libs/cua-driver/Sources/CuaDriverCore/Capture/ScreenInfo.swift`
 - Rust:
   - macOS=`crates/platform-macos/src/tools/get_screen_size.rs`
   - windows=`crates/platform-windows/src/tools/impl_.rs` (GetScreenSizeTool)
   - linux=`crates/platform-linux/src/tools/impl_.rs` (GetScreenSizeTool)
 - Status: VERIFIED
-- Test: `crates/platform-windows/examples/get_screen_size_parity.rs`
+- Test:  `crates/platform-windows/examples/get_screen_size_parity.rs`
 
 ### Fixed divergences
 
@@ -168,7 +163,7 @@ documented Swift behavior.
 2. **Text format** — was `"Screen: W×H"` (no checkmark, no scale, ×
    unicode); now `"✅ Main display: WxH points @ Sx"` matching Swift.
 3. **Error case** — macOS now returns `ToolResult::error("No main display
-detected.")` when `NSScreen.mainScreen` is nil, matching Swift's
+   detected.")` when `NSScreen.mainScreen` is nil, matching Swift's
    `isError: true` response.
 4. **Description** — standardized to Swift's wording across all three.
 5. **`structuredContent.scale_factor` key** is snake_case to match
@@ -177,7 +172,6 @@ detected.")` when `NSScreen.mainScreen` is nil, matching Swift's
 ### Verified on Windows
 
 `get_screen_size_parity.exe` round-trips the pipe and asserts:
-
 - Text matches `"✅ Main display: 1680x1050 points @ 1x"` exactly.
 - `structuredContent.width / height / scale_factor` agree with the text.
 - All three agree with native `GetSystemMetrics` + `GetDpiForSystem` /96.
@@ -185,15 +179,15 @@ detected.")` when `NSScreen.mainScreen` is nil, matching Swift's
 ### Intentional Rust-only
 
 `structuredContent: { width, height, scale_factor }` is included alongside
-the text response. Swift returns text only. Same rationale as
+the text response.  Swift returns text only.  Same rationale as
 `get_cursor_position` — backwards-compatible MCP enrichment, text format
 still matches Swift exactly.
 
 ---
 
 ## MCP tool: `check_permissions`
-
-- Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/CheckPermissionsTool.swift:6-59` + `libs/cua-driver/Sources/CuaDriverCore/Permissions/Permissions.swift`
+- Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/CheckPermissionsTool.swift:6-59`
+        + `libs/cua-driver/Sources/CuaDriverCore/Permissions/Permissions.swift`
 - Rust:
   - macOS=`crates/platform-macos/src/tools/check_permissions.rs` (FIXED, pending macOS run)
   - windows=`crates/platform-windows/src/tools/impl_.rs` (CheckPermissionsTool)
@@ -211,7 +205,7 @@ still matches Swift exactly.
 2. **Default behavior** — Swift defaults `prompt: true` and raises
    the macOS Accessibility + Screen Recording TCC prompts via
    `AXIsProcessTrustedWithOptions({"AXTrustedCheckOptionPrompt": true})`
-   and `CGRequestScreenCaptureAccess()`. Rust previously never prompted.
+   and `CGRequestScreenCaptureAccess()`.  Rust previously never prompted.
    Both APIs are now wired up via `link(name = "ApplicationServices"|"CoreGraphics")`.
 3. **Text format** — was `"Accessibility API: ✅ granted\nScreen Recording: ✅ granted"`;
    now matches Swift exactly: `"✅ Accessibility: granted.\n✅ Screen Recording: granted."`.
@@ -221,22 +215,22 @@ still matches Swift exactly.
 6. **Screen Recording probe** — Swift uses `SCShareableContent.excludingDesktopWindows`
    (ScreenCaptureKit), which is hard to call from Rust without large bindings.
    Approximation: `CGPreflightScreenCaptureAccess()` (preflight C API) with
-   fallback to the existing window-enumeration heuristic. May report
+   fallback to the existing window-enumeration heuristic.  May report
    false negatives for some subprocess-launched apps (same caveat that
-   prompted Swift to switch to SCShareableContent). Documented as a
+   prompted Swift to switch to SCShareableContent).  Documented as a
    known approximation.
 
 ### Windows / Linux intentional divergence
 
 `check_permissions` on macOS is fundamentally about TCC (Apple's per-app
-permission database). Neither Windows nor Linux have an equivalent. The
+permission database).  Neither Windows nor Linux have an equivalent.  The
 Rust ports retain the tool name and the read-only-status structure, but
 return platform-specific content:
 
 - **Windows** reports process elevation (admin vs standard) and confirms
-  PostMessage + UIA work without elevated rights. The whole premise of
+  PostMessage + UIA work without elevated rights.  The whole premise of
   cua-driver-rs on Windows is that background automation needs no
-  special permissions, so the tool's role is to _confirm_ that.
+  special permissions, so the tool's role is to *confirm* that.
 - **Linux** reports X11 display reachability, D-Bus session presence,
   and XSendEvent availability — the inputs the X11 backends actually
   need to work.
@@ -248,9 +242,8 @@ status).
 ---
 
 ## Startup flow: permissions gate (`serve`)
-
 - Swift: `libs/cua-driver/Sources/CuaDriverCore/Permissions/PermissionsGate.swift`
-  (SwiftUI panel + AppKit window + 1 Hz polling)
+        (SwiftUI panel + AppKit window + 1 Hz polling)
 - Rust:
   - macos=`crates/platform-macos/src/permissions/gate.rs`
     (CLI banner + auto-open System Settings + 1 Hz polling)
@@ -262,8 +255,8 @@ status).
 
 ### Intentional UX divergence
 
-Swift surfaces a branded SwiftUI window on first launch. The Rust port
-ships a terminal-driven banner instead. Rationale:
+Swift surfaces a branded SwiftUI window on first launch.  The Rust port
+ships a terminal-driven banner instead.  Rationale:
 
 1. cua-driver-rs already drives an AppKit run loop on the main thread
    for the cursor overlay; bolting on a second window invites
@@ -273,7 +266,7 @@ ships a terminal-driven banner instead. Rationale:
    already has a terminal attached.
 3. Headless / CI use cases need an opt-out; a CLI flow with
    `--no-permissions-gate` + `CUA_DRIVER_RS_PERMISSIONS_GATE=0` is the
-   straight-line approach. Replicating Swift's window only to suppress
+   straight-line approach.  Replicating Swift's window only to suppress
    it under headless would be more code with no UX upside.
 
 The CLI gate still preserves the substantive Swift behaviours:
@@ -281,7 +274,7 @@ The CLI gate still preserves the substantive Swift behaviours:
 - Lists exactly which TCC grants are missing (Accessibility / Screen
   Recording), with the same rationale strings the SwiftUI panel uses.
 - Opens both `x-apple.systempreferences:` URLs at once so the user can
-  grant both in a single Settings visit. (Swift's "chain to next pane
+  grant both in a single Settings visit.  (Swift's "chain to next pane
   when one flips green" trick is unnecessary when both panes are
   pre-opened.)
 - Polls at 1 Hz, identical cadence to the Swift `Timer`.
@@ -289,14 +282,14 @@ The CLI gate still preserves the substantive Swift behaviours:
 
 ### Opt-out signals
 
-| Signal                                 | Effect       |
-| -------------------------------------- | ------------ |
-| `--no-permissions-gate` flag           | gate skipped |
-| `CUA_DRIVER_RS_PERMISSIONS_GATE=0`     | gate skipped |
-| `CUA_DRIVER_RS_PERMISSIONS_GATE=false` | gate skipped |
-| `CUA_DRIVER_RS_PERMISSIONS_GATE=no`    | gate skipped |
-| `CUA_DRIVER_RS_PERMISSIONS_GATE=off`   | gate skipped |
-| any other env value                    | gate active  |
+| Signal                                  | Effect      |
+| --------------------------------------- | ----------- |
+| `--no-permissions-gate` flag            | gate skipped |
+| `CUA_DRIVER_RS_PERMISSIONS_GATE=0`      | gate skipped |
+| `CUA_DRIVER_RS_PERMISSIONS_GATE=false`  | gate skipped |
+| `CUA_DRIVER_RS_PERMISSIONS_GATE=no`     | gate skipped |
+| `CUA_DRIVER_RS_PERMISSIONS_GATE=off`    | gate skipped |
+| any other env value                     | gate active  |
 
 Default deadline is 10 minutes; on timeout the gate logs an error and
 `serve` continues to start, mirroring the Swift "user closed the
@@ -309,12 +302,14 @@ terminal-only flow proves insufficient; the CLI is the MVP.
 ---
 
 ## MCP tool: `list_apps`
-
-- Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/ListAppsTool.swift:6-71` + `libs/cua-driver/Sources/CuaDriverCore/Apps/AppInfo.swift`
+- Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/ListAppsTool.swift:6-71`
+        + `libs/cua-driver/Sources/CuaDriverCore/Apps/AppInfo.swift`
 - Rust:
   - macOS=`crates/platform-macos/src/tools/list_apps.rs` + `apps.rs:format_app_list`
-  - windows=`crates/platform-windows/src/tools/impl_.rs` (ListAppsTool) + `crates/platform-windows/src/win32/installed_apps.rs`
-  - linux=`crates/platform-linux/src/tools/impl_.rs` (ListAppsTool) + `crates/platform-linux/src/installed_apps.rs`
+  - windows=`crates/platform-windows/src/tools/impl_.rs` (ListAppsTool)
+           + `crates/platform-windows/src/win32/installed_apps.rs`
+  - linux=`crates/platform-linux/src/tools/impl_.rs` (ListAppsTool)
+         + `crates/platform-linux/src/installed_apps.rs`
 - Status:
   - macOS: VERIFIED — unified shape + installed-app scan + running merge
   - windows: VERIFIED live — Win11 24H2 in Session 0 returns ~150 apps
@@ -324,7 +319,8 @@ terminal-only flow proves insufficient; the CLI is the MVP.
     `launch_path`, `last_used`, `windows`, `running`, `active`).
     Validated against `list_apps_parity` example.
   - linux: code ready (cross-target check pending Linux host)
-- Test: `tests/integration/test_api_parity.py::RustParityTests::test_call_list_apps_*` + `crates/platform-windows/examples/list_apps_parity.rs`
+- Test: `tests/integration/test_api_parity.py::RustParityTests::test_call_list_apps_*`
+        + `crates/platform-windows/examples/list_apps_parity.rs`
 
 ### Unified response shape (cross-platform)
 
@@ -335,17 +331,17 @@ platform; values that don't apply to a given platform are `null`.
 {
   "apps": [
     {
-      "pid": 47291, // 0 when running=false
+      "pid": 47291,                         // 0 when running=false
       "name": "Visual Studio Code",
-      "bundle_id": "com.microsoft.VSCode", // macOS bundle id, Win32 .exe path, or Linux desktop file id
+      "bundle_id": "com.microsoft.VSCode",  // macOS bundle id, Win32 .exe path, or Linux desktop file id
       "running": true,
-      "active": false, // true for the system-frontmost app (only one at a time)
-      "kind": "desktop", // "desktop" | "uwp" | null
+      "active": false,                       // true for the system-frontmost app (only one at a time)
+      "kind": "desktop",                    // "desktop" | "uwp" | null
       "launch_path": "/Applications/Visual Studio Code.app",
       "last_used": "2026-05-15T12:34:56Z", // RFC3339, null if unreadable
-      "windows": [], // reserved — kept cheap; query list_windows for per-window state
-    },
-  ],
+      "windows": []                          // reserved — kept cheap; query list_windows for per-window state
+    }
+  ]
 }
 ```
 
@@ -384,7 +380,6 @@ running-only shape keep working.
 ### Verification recipes
 
 **macOS** (verified live):
-
 ```bash
 cargo build --release -p cua-driver
 ./target/release/cua-driver call list_apps | python3 -c "
@@ -401,26 +396,22 @@ print('shape OK')
 ```
 
 **Windows** (cross-target check on macOS host succeeds; live run on a Windows host):
-
 ```powershell
 cargo build --release -p cua-driver
 .\target\release\cua-driver.exe call list_apps | ConvertFrom-Json | ForEach-Object {
     $_.apps | Group-Object kind | Format-Table Name, Count
 }
 ```
-
 Expect at least one `desktop` group (Start-Menu hits) and on Win10+
 at least one `uwp` group (WinRT packages). Every entry should have
 a `launch_path` that's either an absolute `.exe` path or
 `shell:appsFolder\...`.
 
 **Linux**:
-
 ```bash
 cargo build --release -p cua-driver
 ./target/release/cua-driver call list_apps | jq '.apps | group_by(.running) | map({running: .[0].running, n: length})'
 ```
-
 Expect two groups: one with `running: true` (live processes that
 matched a `.desktop` launcher), one with `running: false` (the
 installed-but-not-running tail).
@@ -428,7 +419,6 @@ installed-but-not-running tail).
 ---
 
 ## MCP tool: `list_windows`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/ListWindowsTool.swift:6-245`
 - Rust:
   - macOS=`crates/platform-macos/src/tools/list_windows.rs` (TBD audit)
@@ -492,13 +482,13 @@ a flat `{window_id, pid, title, x, y, width, height}`. Now matches Swift:
    inverted so higher = closer to front per Swift convention.
 5. **`is_on_screen: true`** — currently always true because the Win32
    `list_windows` source filter only returns `IsWindowVisible && !IsIconic`
-   windows. See limitation below.
+   windows.  See limitation below.
 6. **Top-level `current_space_id: null`** — Windows has no Spaces.
 7. **`on_current_space` / `space_ids` omitted** — matching Swift's
    else-branch when SkyLight SPIs are unavailable; the text header
    explicitly says so.
 8. **Text format** — header now reads `"✅ Found N window(s) across M
-app(s); X on-screen. (SkyLight Space SPIs unavailable — ...)"`.
+   app(s); X on-screen. (SkyLight Space SPIs unavailable — ...)"`.
    Per-record line: `"- {app_name} (pid {pid}) {"title"|(no title)} [window_id: {id}]{[off-screen]?}"`.
 9. **Pid-filter warning** — when a pid filter returns zero windows,
    the response is `"⚠️ No windows found for pid X. ..."` with a hint
@@ -523,7 +513,6 @@ refactor `list_windows` to return everything and filter at the tool layer.
 ---
 
 ## MCP tool: `click`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/ClickTool.swift:29-595`
 - Rust:
   - macOS=`crates/platform-macos/src/tools/click.rs` (focus-suppression wrap VERIFIED; full audit pending)
@@ -547,7 +536,7 @@ refactor `list_windows` to return everything and filter at the tool layer.
    element_index + screen coords for traceability; future work: populate
    the UIA cache with name/control-type and include them).
 3. **Missing-target error wording** — Swift: `"Provide element_index or
-(x, y) to address the click target."` — Windows previously said
+   (x, y) to address the click target."` — Windows previously said
    `"Provide element_index or (x + y). pid is always required."` Now
    matches Swift verbatim.
 4. **Description** — multi-paragraph, ported from Swift, with explicit
@@ -556,15 +545,15 @@ refactor `list_windows` to return everything and filter at the tool layer.
 ### Intentional Rust-only schema divergences
 
 Swift's `click` takes `{action: enum, modifier: [string], debug_image_out: string}`;
-Windows's `click` takes `{button: enum}` instead. Rationale:
+Windows's `click` takes `{button: enum}` instead.  Rationale:
 
-- **`button: left|right|middle`** — Windows convenience. Swift exposes
+- **`button: left|right|middle`** — Windows convenience.  Swift exposes
   right-click as a separate `right_click` tool (which we also have as
-  `right_click`), so `button: right` overlaps that tool. Windows
+  `right_click`), so `button: right` overlaps that tool.  Windows
   keeps both shapes; the standalone tool matches Swift's per-tool
   decomposition while `button` gives single-call flexibility.
 - **`action: enum`** — AX-specific (AXPress / AXShowMenu / AXPick /
-  AXConfirm / AXCancel / AXOpen). UIA has no clean 1:1 mapping (Invoke
+  AXConfirm / AXCancel / AXOpen).  UIA has no clean 1:1 mapping (Invoke
   pattern handles most cases; ShowMenu doesn't exist as a UIA pattern).
   Not exposed on Windows yet; a future Windows port could map a subset
   to UIA patterns (Invoke ≈ press, but show_menu has no analogue).
@@ -577,7 +566,6 @@ Windows's `click` takes `{button: enum}` instead. Rationale:
 ### Verified on Windows
 
 `click_parity.exe` against Chrome (pid 62156, window_id 4464038):
-
 - Missing-target: `"Provide element_index or (x, y) to address the click target."` ✓
 - Pixel click: `"✅ Posted click to pid 62156."` ✓
 - Double-click (`count: 2`): `"✅ Posted double-click to pid 62156."` ✓
@@ -585,7 +573,6 @@ Windows's `click` takes `{button: enum}` instead. Rationale:
 ---
 
 ## MCP tool: `launch_app`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/LaunchAppTool.swift:6-490`
 - Rust:
   - windows=`crates/platform-windows/src/tools/impl_.rs` (LaunchAppTool)
@@ -614,13 +601,13 @@ Windows's `click` takes `{button: enum}` instead. Rationale:
 ### Fixed (Windows)
 
 1. **pid capture** — was using `ShellExecuteW` which returns only an
-   HINSTANCE that's useless for pid lookup. Now uses
+   HINSTANCE that's useless for pid lookup.  Now uses
    `ShellExecuteExW` with `SEE_MASK_NOCLOSEPROCESS` so we read the
    spawned process handle and call `GetProcessId` → real pid in the
    response, matching Swift's `AppLauncher.launch.info.pid`.
-2. **Structured response** — was missing entirely. Now returns
+2. **Structured response** — was missing entirely.  Now returns
    `{pid, bundle_id, name, running, active, windows}` matching Swift's
-   `LaunchResult` shape exactly. `bundle_id` is null on Windows.
+   `LaunchResult` shape exactly.  `bundle_id` is null on Windows.
 3. **Text format** — was `"Launched 'X' (no focus steal)."`; now
    `"✅ Launched <name> (pid <N>) in background."` + a `Windows:` block
    listing per-window `"- <title|(no title)> [window_id: ID]"` lines
@@ -634,16 +621,16 @@ Windows's `click` takes `{button: enum}` instead. Rationale:
    built-in apps (Notepad, Calculator, Paint, …) return the pid of
    the ~7 KB System32 stub that exits within milliseconds — useless
    for `list_windows`, `get_window_state`, etc.
-   4a. **`name` → packaged-app lookup (Win11)** — `name` is now first
-   resolved against `shell:AppsFolder` (the Start Menu's "all apps"
-   index, cached for the lifetime of the driver process). On a hit
-   the lookup yields an AUMID and goes through the packaged path
-   (see #4); on a miss it falls back to `ShellExecuteExW`'s PATH
-   search. `.exe` suffix is stripped before matching so `"notepad"`
-   and `"notepad.exe"` both resolve to the packaged Notepad.
-   4b. **`aumid` parameter** — optional explicit AUMID; cleaner than
-   overloading `bundle_id` when the caller has the AUMID in hand.
-   Takes precedence over `bundle_id`/`name`.
+4a. **`name` → packaged-app lookup (Win11)** — `name` is now first
+    resolved against `shell:AppsFolder` (the Start Menu's "all apps"
+    index, cached for the lifetime of the driver process). On a hit
+    the lookup yields an AUMID and goes through the packaged path
+    (see #4); on a miss it falls back to `ShellExecuteExW`'s PATH
+    search. `.exe` suffix is stripped before matching so `"notepad"`
+    and `"notepad.exe"` both resolve to the packaged Notepad.
+4b. **`aumid` parameter** — optional explicit AUMID; cleaner than
+    overloading `bundle_id` when the caller has the AUMID in hand.
+    Takes precedence over `bundle_id`/`name`.
 5. **`additional_arguments`** — honored, passed as `lpParameters` to
    `ShellExecuteExW` (Win32 path) or as the activation `arguments`
    string to `ActivateApplication` (packaged path).
@@ -651,7 +638,7 @@ Windows's `click` takes `{button: enum}` instead. Rationale:
    retry to absorb Win32 window-creation lag after `ShellExecuteEx`
    returns.
 7. **Error wording** — `"Provide either bundle_id or name to identify
-the app to launch."` matches Swift's `errorResult` text.
+   the app to launch."` matches Swift's `errorResult` text.
 8. **`active: false`** — hardcoded; `SW_SHOWNOACTIVATE` is the
    Windows-equivalent of Swift's background-launch invariant.
 9. **Description** — multi-paragraph port from Swift with explicit
@@ -679,14 +666,13 @@ the app to launch."` matches Swift's `errorResult` text.
 ### Intentional Rust-only fields accepted (no-op)
 
 - `electron_debugging_port`, `webkit_inspector_port`,
-  `creates_new_application_instance` — Swift-specific. Accepted in
+  `creates_new_application_instance` — Swift-specific.  Accepted in
   the schema so cross-platform callers can pass them; currently
   no-ops on Windows. Documented as follow-up.
 
 ### Verified on Windows
 
 `launch_app_parity.exe` launches Notepad:
-
 - Header `"✅ Launched notepad.exe (pid 30612) in background."` ✓
 - `structuredContent.pid` is the actual ShellExecuteEx pid (Win10)
   or the real packaged-app pid (Win11, after AppsFolder lookup) ✓
@@ -732,7 +718,6 @@ the app to launch."` matches Swift's `errorResult` text.
 ### Verified on macOS
 
 `tests/integration/test_focus_steal_parity.py` covers:
-
 - Passive app launch (Calculator) — frontmost unchanged ✓
 - Self-activating app launch (Safari) — frontmost restored within 1.5s ✓
 - Launch with `urls=["about:blank"]` — frontmost preserved ✓
@@ -744,7 +729,6 @@ the app to launch."` matches Swift's `errorResult` text.
 ---
 
 ## MCP tool: `press_key`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/PressKeyTool.swift:20-202`
 - Rust:
   - windows=`crates/platform-windows/src/tools/impl_.rs` (PressKeyTool)
@@ -761,9 +745,9 @@ the app to launch."` matches Swift's `errorResult` text.
    - Missing pid: `"Missing required integer field pid."` (was generic)
    - Missing key: `"Missing required string field key."` (was generic)
    - element_index without window_id: `"window_id is required when
-element_index is used — the element_index cache is scoped per
-(pid, window_id). Pass the same window_id you used in
-get_window_state."` (was previously not validated; added the
+     element_index is used — the element_index cache is scoped per
+     (pid, window_id). Pass the same window_id you used in
+     get_window_state."` (was previously not validated; added the
      same Swift guard).
 3. **Schema** — added `element_index` field (accepted; currently no-op
    on Windows since UIA SetFocus isn't wired up yet — documented).
@@ -775,14 +759,13 @@ get_window_state."` (was previously not validated; added the
 - `element_index` is accepted but currently no-op (Swift focuses the
   element via `AXSetAttribute(kAXFocused, true)` first; Windows UIA
   `IUIAutomationElement::SetFocus` exists but is not yet wired up
-  here). Documented as a follow-up; using `press_key` without
+  here).  Documented as a follow-up; using `press_key` without
   `element_index` already works for scroll keys / shortcuts on the
   already-focused element.
 
 ### Verified on Windows
 
 `press_key_parity.exe` against Chrome:
-
 - Missing-key error: `"Missing required string field key."` ✓
 - Element-without-window error: matches Swift's wording ✓
 - End key: `"✅ Pressed end on pid 85676."` ✓
@@ -790,7 +773,6 @@ get_window_state."` (was previously not validated; added the
 ---
 
 ## MCP tool: `hotkey`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/HotkeyTool.swift:6-142`
 - Rust:
   - windows=`crates/platform-windows/src/tools/impl_.rs` (HotkeyTool)
@@ -818,14 +800,12 @@ get_window_state."` (was previously not validated; added the
 ### Verified on Windows
 
 `hotkey_parity.exe` against Chrome:
-
 - Missing-pid / missing-keys errors ✓
 - `ctrl+end` → `"✅ Pressed ctrl+end on pid 85676."` ✓
 
 ---
 
 ## MCP tool: `double_click`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/DoubleClickTool.swift:28-327`
 - Rust:
   - windows=`crates/platform-windows/src/tools/impl_.rs` (DoubleClickTool)
@@ -840,15 +820,15 @@ get_window_state."` (was previously not validated; added the
    matching Swift verbatim.
 2. **Text format element path** — was `"✅ Double-clicked element [N] at screen (X,Y)."`;
    now `"✅ Posted double-click to [N] at screen-point (X, Y)."` matching
-   Swift's pixel-fallback element wording. (UIA role/title placeholder
+   Swift's pixel-fallback element wording.  (UIA role/title placeholder
    pending element-cache enrichment.)
 3. **Validation guards added** — ports Swift's full set:
    - `"Provide both x and y together, not just one."`
    - `"Provide either element_index or (x, y), not both."`
    - `"Provide element_index or (x, y) to address the double-click target."`
    - `"window_id is required when element_index is used — the element_index
- cache is scoped per (pid, window_id). Pass the same window_id you used
- in get_window_state."`
+      cache is scoped per (pid, window_id). Pass the same window_id you used
+      in get_window_state."`
 4. **Error wording for missing pid** — `"Missing required integer field pid."`
    matches Swift (schema-layer catches this first; tool-layer fallback uses
    Swift wording).
@@ -863,23 +843,20 @@ get_window_state."` (was previously not validated; added the
 ### Verified on Windows
 
 `double_click_parity.exe` against Chrome:
-
 - 4 error paths (missing-target, partial-xy, both-modes,
   element-without-window) ✓
 - Pixel double-click: `"✅ Posted double-click to pid 85676 at
-window-pixel (300, 300) → screen-point (462, 456)."` ✓
+  window-pixel (300, 300) → screen-point (462, 456)."` ✓
 
 ---
 
 ## MCP tool: `right_click`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/RightClickTool.swift:27-324`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (RightClickTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/right_click_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Pixel-path text** — was `"✅ Right-clicked at (X.X, Y.Y)."`; now
    `"✅ Posted right-click to pid X at window-pixel (a, b) → screen-point (c, d)."`
    matching Swift.
@@ -894,24 +871,20 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
    AXShowMenu-not-advertised fallback).
 
 ### Verified on Windows
-
 `right_click_parity.exe` against Chrome:
-
 - 4 error paths ✓
 - Pixel right-click: `"✅ Posted right-click to pid 62156 at window-pixel
-(300, 300) → screen-point (301, 368)."` ✓
+  (300, 300) → screen-point (301, 368)."` ✓
 
 ---
 
 ## MCP tool: `screenshot`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/ScreenshotTool.swift:5-170`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (ScreenshotTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/screenshot_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Text format** — was `"Screenshot (window): WxH png."`; now matches
    Swift verbatim: `"✅ Window screenshot — WxH png [window_id: ID]"`
    (em-dash, checkmark, window-id suffix). Display fallback uses
@@ -929,9 +902,9 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 ### Intentional Rust-only
 
 - **Optional `window_id`** — Swift requires it; Windows allows omission
-  for whole-display capture (`screenshot_display_bytes`). Useful
+  for whole-display capture (`screenshot_display_bytes`).  Useful
   Windows-only convenience that Swift can't easily provide because
-  macOS Screen Recording requires per-window grants. Schema accepts
+  macOS Screen Recording requires per-window grants.  Schema accepts
   both shapes; description explains.
 - **Default `format`** — Swift defaults `png`; all 3 Rust platforms now
   default `jpeg`. Rationale: agents typically want compact images for
@@ -947,9 +920,8 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 ### Verified on Windows
 
 `screenshot_parity.exe`:
-
 - Window screenshot: text matches `"✅ Window screenshot — 1087x644 png
-[window_id: 4464038]"` ✓
+  [window_id: 4464038]"` ✓
 - Image content block present ✓
 - structuredContent has `width`, `height`, `format` ✓
 - JPEG format: `mimeType: image/jpeg`, `format: "jpeg"` ✓
@@ -957,17 +929,15 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 ---
 
 ## MCP tool: `scroll`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/ScrollTool.swift:23-211`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (ScrollTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/scroll_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Text format** — was `"Scrolled DIR Nx GRAN."`; now matches Swift
    shape `"✅ Scrolled pid X DIR via Nx SB_LINEDOWN message(s)."` (Swift uses key
-   names; Rust uses Win32 SB\_\* constants since the actual transport is
+   names; Rust uses Win32 SB_* constants since the actual transport is
    WM_VSCROLL/WM_HSCROLL, not keystrokes — text reflects mechanism).
 2. **Error wording** — `"Missing required integer field pid."` /
    `"Missing required string field direction."` matches Swift.
@@ -990,7 +960,6 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 ### Verified on Windows
 
 `scroll_parity.exe` against Chrome:
-
 - Missing-direction error ✓
 - Element-without-window error ✓
 - Page-down × 2: `"✅ Scrolled pid 62156 down via 2× SB_PAGEDOWN message(s)."` ✓
@@ -998,14 +967,12 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 ---
 
 ## MCP tool: `type_text`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/TypeTextTool.swift:13-225`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (TypeTextTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/type_text_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Text format** — was `"Typed N character(s)."`; now matches Swift's
    CGEvent-fallback shape `"✅ Typed N char(s) on pid X via PostMessage (Yms delay)."`
    (Swift says `CGEvent`; Windows says `PostMessage` since that's the
@@ -1020,16 +987,14 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 ### Intentional Rust-only
 
 - **No AX-fast-path attempt**: Swift tries `AXSetAttribute(kAXSelectedText)`
-  first for bulk insert, falls back to CGEvent when AX rejects. Windows
+  first for bulk insert, falls back to CGEvent when AX rejects.  Windows
   always takes the character-by-character path (no UIA equivalent of
-  AXSelectedText wired up yet). User-visible behavior matches Swift's
+  AXSelectedText wired up yet).  User-visible behavior matches Swift's
   fallback path, just without the fast-path optimization.
 - **`element_index`** accepted; no-op on Windows (no UIA SetFocus path).
 
 ### Verified on Windows
-
 `type_text_parity.exe` against Chrome:
-
 - Missing-text error ✓
 - Element-without-window error ✓
 - 5-char type: `"✅ Typed 5 char(s) on pid 62156 via PostMessage (10ms delay)."` ✓
@@ -1037,14 +1002,12 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 ---
 
 ## MCP tool: `set_value`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/SetValueTool.swift:8-336`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (SetValueTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/set_value_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Text format** — was `"Set value of element N."`; now matches Swift's
    default-write shape `"✅ Set AXValue on [N] (UIA ValuePattern)."` (UIA
    role/title placeholder pending element-cache enrichment).
@@ -1061,36 +1024,32 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 
 - **No AXPopUpButton special-case** yet — Swift specifically iterates
   AX children to AXPress the matching option (bypassing the native
-  popup menu). UIA has `IUIAutomationSelectionPattern` /
+  popup menu).  UIA has `IUIAutomationSelectionPattern` /
   `IUIAutomationSelectionItemPattern` which would be the equivalent;
-  documented as a follow-up. For now `set_value` on a combo box
+  documented as a follow-up.  For now `set_value` on a combo box
   delegates to `IUIAutomationValuePattern::SetValue` which works on
   most native ComboBoxes.
 
 ### Verified on Windows
-
 `set_value_parity.exe`:
-
 - Missing-value error (schema layer): mentions `value` + `required` ✓
 - Cache-miss error: `"Element 99999 not in cache."` ✓
 
 ---
 
 ## MCP tools: `get_config` + `set_config`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/GetConfigTool.swift:13-79`
-  - `libs/cua-driver/Sources/CuaDriverServer/Tools/SetConfigTool.swift:25-167`
+  + `libs/cua-driver/Sources/CuaDriverServer/Tools/SetConfigTool.swift:25-167`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (GetConfigTool, SetConfigTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/config_parity.rs`
 
 ### Fixed (Windows)
-
 1. **get_config text** — was `"cua-driver-rs configuration"`; now matches
    Swift's `"✅ <pretty JSON>"` format with `schema_version`, `version`,
    `platform`, `capture_mode`, `max_image_dimension`.
 2. **set_config schema** — now accepts Swift's `{key: <dotted-path>, value: <json>}`
-   shape AND keeps the legacy per-field shape. Unknown keys return
+   shape AND keeps the legacy per-field shape.  Unknown keys return
    `"Unknown config key 'X'. Known: capture_mode, max_image_dimension."`.
 3. **set_config response** — was `"Config updated: ..."`; now echoes the
    full updated config in the same pretty-JSON `"✅ {...}"` format as
@@ -1100,17 +1059,15 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 
 ### Intentional Rust-only
 
-- **No `agent_cursor.*` subtree** in the Windows config struct. Swift
+- **No `agent_cursor.*` subtree** in the Windows config struct.  Swift
   exposes `agent_cursor.enabled` + `agent_cursor.motion.*` (start_handle,
   end_handle, arc_size, arc_flow, spring) as persistent config; Windows
-  currently has only `capture_mode` and `max_image_dimension`. Cursor
+  currently has only `capture_mode` and `max_image_dimension`.  Cursor
   config lives separately in `cursor-overlay` crate config and is set
-  via CLI flags, not this tool yet. Documented as a follow-up.
+  via CLI flags, not this tool yet.  Documented as a follow-up.
 
 ### Verified on Windows
-
 `config_parity.exe`:
-
 - get_config: `"✅ {<pretty JSON>}"` with all keys ✓
 - set_config {key, value}: capture_mode=vision applied ✓
 - set_config legacy: capture_mode=som + max_image_dimension=1024 applied ✓
@@ -1120,18 +1077,16 @@ window-pixel (300, 300) → screen-point (462, 456)."` ✓
 ---
 
 ## MCP tool: `get_agent_cursor_state`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/GetAgentCursorStateTool.swift:9-68`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (GetAgentCursorStateTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/get_agent_cursor_state_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Text format** — was `"N cursor instance(s)."`; now matches Swift's
    single-line camelCase output:
    `"✅ cursor: enabled=true startHandle=0.3 endHandle=0.3 arcSize=0.25
-arcFlow=0 spring=0.72 glideDurationMs=0 dwellAfterClickMs=80 idleHideMs=20000"`
+   arcFlow=0 spring=0.72 glideDurationMs=0 dwellAfterClickMs=80 idleHideMs=20000"`
 2. **`current_motion()`** helper added to `overlay.rs` — mirrors macOS
    `current_motion()` so the tool can snapshot live motion values.
 3. **Description** — ported from Swift verbatim.
@@ -1144,32 +1099,28 @@ arcFlow=0 spring=0.72 glideDurationMs=0 dwellAfterClickMs=80 idleHideMs=20000"`
   Swift's single-cursor vocabulary.
 
 ### Verified on Windows
-
 `get_agent_cursor_state_parity.exe`:
-
 - Text: `"✅ cursor: enabled=true startHandle=0.3 endHandle=0.3 arcSize=0.25
-arcFlow=0 spring=0.72 glideDurationMs=0 dwellAfterClickMs=80 idleHideMs=20000"` ✓
+  arcFlow=0 spring=0.72 glideDurationMs=0 dwellAfterClickMs=80 idleHideMs=20000"` ✓
 - structuredContent has all 9 fields + `cursors` array ✓
 
 ---
 
 ## MCP tools: `set_agent_cursor_enabled` + `set_agent_cursor_motion`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/SetAgentCursorEnabledTool.swift:8-85`
-  - `libs/cua-driver/Sources/CuaDriverServer/Tools/SetAgentCursorMotionTool.swift:11-187`
+  + `libs/cua-driver/Sources/CuaDriverServer/Tools/SetAgentCursorMotionTool.swift:11-187`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs`; macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/agent_cursor_setters_parity.rs`
 
 ### Fixed (Windows)
-
 1. **set_agent_cursor_enabled text** — was `"Agent cursor 'default' enabled."`;
    now matches Swift verbatim `"✅ Agent cursor enabled."` (or `"disabled"`).
 2. **set_agent_cursor_enabled error** — was `"Missing required parameter: enabled"`;
    now Swift's `"Missing required boolean field \`enabled\`."`.
 3. **set_agent_cursor_motion was silently dropping all motion knobs** —
    tool accepted them in schema but only forwarded appearance fields to
-   the cursor registry. Now applies each motion knob via
+   the cursor registry.  Now applies each motion knob via
    `MotionConfig::with_overrides()` and sends `OverlayCommand::SetMotion`
    to the live render state — matches Swift's
    `AgentCursor.shared.defaultMotionOptions = opts`.
@@ -1183,48 +1134,42 @@ arcFlow=0 spring=0.72 glideDurationMs=0 dwellAfterClickMs=80 idleHideMs=20000"` 
    SetAgentCursorStyleTool surface).
 
 ### Intentional Rust-only
-
 - **`cursor_id`** parameter for both tools — selects an instance from
-  the Rust-only multi-cursor registry. Swift has a single
+  the Rust-only multi-cursor registry.  Swift has a single
   `AgentCursor.shared`.
 
 ### Verified on Windows
-
 `agent_cursor_setters_parity.exe`:
-
 - Missing-enabled error ✓
 - `enabled: true` → `"✅ Agent cursor enabled."` ✓
 - `enabled: false` → `"✅ Agent cursor disabled."` ✓
 - Motion update: `"✅ cursor motion: startHandle=0.4 endHandle=0.3 arcSize=0.3
-arcFlow=0 spring=0.8 glideDurationMs=500 dwellAfterClickMs=80 idleHideMs=20000"` ✓
+  arcFlow=0 spring=0.8 glideDurationMs=500 dwellAfterClickMs=80 idleHideMs=20000"` ✓
 
 ---
 
 ## MCP tools: `get_recording_state` + `set_recording`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/GetRecordingStateTool.swift:11-72`
-  - `libs/cua-driver/Sources/CuaDriverServer/Tools/SetRecordingTool.swift:12-160`
+  + `libs/cua-driver/Sources/CuaDriverServer/Tools/SetRecordingTool.swift:12-160`
 - Rust: shared `crates/mcp-server/src/recording_tools.rs` (cross-platform)
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/recording_parity.rs`
 
 ### Fixed
-
 1. **get_recording_state text** — was `"recording: enabled  output_dir=X  next_turn=N"`
    (double-space-separated); now Swift's `"✅ recording: enabled output_dir=X next_turn=N"`
    single-space. Disabled case: `"✅ recording: disabled"`.
 2. **set_recording text** — was `"Recording enabled → X"` (Unicode arrow);
    now Swift's `"✅ Recording enabled -> X"` (ASCII arrow). Disabled:
    `"✅ Recording disabled."`.
-3. **Error wording** — Swift's `"Missing required boolean field \`enabled\`."`and`"`output_dir` is required when enabling recording."`.
+3. **Error wording** — Swift's `"Missing required boolean field \`enabled\`."`
+   and `"`output_dir` is required when enabling recording."`.
 4. **`idempotent: true`** — was `false`; Swift uses `true`.
 5. **Descriptions** — both ported from Swift verbatim with full turn-folder
    layout details.
 
 ### Verified on Windows
-
 `recording_parity.exe`:
-
 - `"✅ recording: disabled"` ✓
 - Missing-enabled error ✓
 - Missing-output_dir error ✓
@@ -1235,14 +1180,12 @@ arcFlow=0 spring=0.8 glideDurationMs=500 dwellAfterClickMs=80 idleHideMs=20000"`
 ---
 
 ## CLI subcommand: `list-tools`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverCLI/CallCommand.swift:298-322`
 - Rust: `libs/cua-driver/rust/crates/cua-driver/src/cli.rs::run_list_tools`
 - Status: VERIFIED
 - Test: `crates/platform-windows/examples/list_tools_parity.rs`
 
 ### Fixed
-
 **Sort order** — Swift sorts tools alphabetically by name
 (`tools.sorted(by: { $0.name < $1.name })`). Rust was iterating in
 registration order (HashMap-backed Vec). Now sorts alphabetically
@@ -1250,9 +1193,7 @@ before printing, matching Swift's output byte-for-byte modulo per-tool
 description content.
 
 ### Verified on Windows
-
 `list_tools_parity.exe`:
-
 - Names sorted ascending ✓
 - All 23 core tools present (click, double_click, right_click, type_text,
   press_key, hotkey, scroll, screenshot, list_apps, list_windows,
@@ -1265,27 +1206,22 @@ description content.
 ---
 
 ## CLI subcommand: `describe`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverCLI/CallCommand.swift:324-366`
-  - `printUnknownTool:552`
+  + `printUnknownTool:552`
 - Rust: `libs/cua-driver/rust/crates/cua-driver/src/cli.rs::run_describe`
 - Status: VERIFIED
 - Test: `crates/platform-windows/examples/describe_parity.rs`
 
 ### Fixed
-
 **Unknown-tool listing order** — Swift sorts available tools
 alphabetically in the error stderr block. Rust was using
 `tool_names()` which is registration order. Now sorts to match.
 Exit code 64 (EX_USAGE) and known-tool output shape (`name: X`
-
-- `description:` + `input_schema:` pretty JSON) already matched
-  Swift.
++ `description:` + `input_schema:` pretty JSON) already matched
+Swift.
 
 ### Verified on Windows
-
 `describe_parity.exe`:
-
 - `describe click`: stdout starts with `"name: click\n"`, contains
   `"description:"` + pretty-printed `"input_schema:"` ✓
 - `describe this_tool_does_not_exist`: exit code 64, stderr lists
@@ -1295,23 +1231,21 @@ Exit code 64 (EX_USAGE) and known-tool output shape (`name: X`
 ---
 
 ## MCP tool: `get_window_state`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/GetWindowStateTool.swift:5-end`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (GetWindowStateTool); macOS/linux OPEN
 - Status: windows VERIFIED (error wording + validation); response shape already verified
 - Test: `crates/platform-windows/examples/get_window_state_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Error wording** — Swift's verbatim messages now used:
    - `"Missing required integer field pid."`
-   - `"Missing required integer field window_id. Use `list_windows`to enumerate the target app's windows, or read`launch_app`'s `windows` array."`
+   - `"Missing required integer field window_id. Use `list_windows` to enumerate the target app's windows, or read `launch_app`'s `windows` array."`
 2. **Window-belongs-to-pid validation** — Swift hard-errors when the
    window_id doesn't belong to pid. Windows now validates the same way:
    - Window doesn't exist anywhere: `"No window with window_id N exists.
-Call list_windows({pid: P}) for candidates."`
+     Call list_windows({pid: P}) for candidates."`
    - Window exists under a different pid: `"window_id N belongs to pid Q,
-not pid P. Call list_windows({pid: P}) to get this pid's own windows."`
+     not pid P. Call list_windows({pid: P}) to get this pid's own windows."`
 3. **`idempotent: false`** — was `true`; Swift uses `false` (each call
    is a fresh snapshot).
 4. **Description** — multi-paragraph port from Swift covering invariant,
@@ -1320,15 +1254,12 @@ not pid P. Call list_windows({pid: P}) to get this pid's own windows."`
    fields).
 
 ### Intentional Rust-only schema absences
-
 - **`javascript`** — macOS-only AppleScript hook for Chromium/Safari.
 - **`screenshot_out_file`** — could be added later; not currently
   implemented on Windows.
 
 ### Verified on Windows
-
 `get_window_state_parity.exe`:
-
 - Missing-pid error ✓
 - Missing-window_id error (with Swift's full hint) ✓
 - Mismatched pid+window_id: `"window_id N belongs to pid Q, not pid P..."` ✓
@@ -1337,45 +1268,38 @@ not pid P. Call list_windows({pid: P}) to get this pid's own windows."`
 ---
 
 ## MCP tool: `drag`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/DragTool.swift:21-327`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (DragTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/drag_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Text format** — was `"✅ Posted drag (BUTTON) to pid P from (x,y) → (x,y) in Nms / Ssteps."`;
    now Swift's `"✅ Posted drag[ (BUTTON button)] to pid P from window-pixel (a, b) → (c, d), screen (e, f) → (g, h) in Nms / Ssteps."`
    (window-pixel + screen-coord pair; button suffix only for non-left).
 2. **Missing-coordinates error** — was `"Missing: from_y"` (one field at a
    time); now Swift's `"from_x, from_y, to_x, and to_y are all required
-(window-local pixels)."` even if only one is missing.
+   (window-local pixels)."` even if only one is missing.
 3. **Missing-pid error** — `"Missing required integer field pid."`
    matches Swift.
 
 ### Intentional Rust-only
-
 - Schema unchanged; all Swift fields supported. No divergences in shape.
 
 ### Verified on Windows
-
 `drag_parity.exe`:
-
 - Missing-coordinates error ✓
 - Real drag: `"✅ Posted drag to pid 62156 from window-pixel (100, 100) → (102, 102), screen (101, 168) → (103, 170) in 50ms / 2 steps."` ✓
 
 ---
 
 ## MCP tool: `replay_trajectory`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/ReplayTrajectoryTool.swift:18-end`
 - Rust: shared `crates/mcp-server/src/recording_tools.rs` (cross-platform)
 - Status: VERIFIED
 - Test: `crates/platform-windows/examples/replay_trajectory_parity.rs`
 
 ### Fixed
-
 1. **Error wording** — was `"Missing required parameter: dir"`; now Swift's
    `"Missing required string field \`dir\`."`. Empty-string `dir` now also
    rejected (was silently passing the empty path through).
@@ -1386,16 +1310,13 @@ not pid P. Call list_windows({pid: P}) to get this pid's own windows."`
    recording-during-replay deliberate).
 
 ### Verified on Windows
-
 `replay_trajectory_parity.exe`:
-
 - Empty-dir: `"Missing required string field \`dir\`."` ✓
 - Nonexistent dir: `"Trajectory directory does not exist: <path>"` ✓
 
 ---
 
 ## CLI subcommand: `mcp` (TCC auto-relaunch / daemon proxy)
-
 - Swift:
   - `libs/cua-driver/Sources/CuaDriverCLI/CuaDriverCommand.swift` —
     `MCPCommand`, `shouldUseDaemonProxy`, `runViaDaemonProxy`,
@@ -1427,10 +1348,9 @@ not pid P. Call list_windows({pid: P}) to get this pid's own windows."`
   before merge.
 
 ### Why this exists
-
 When `cua-driver-rs mcp` is invoked from an IDE terminal (Claude
 Code, Cursor, VS Code, Warp), macOS attributes the spawned process
-to the parent terminal's TCC responsibility chain — _not_ to
+to the parent terminal's TCC responsibility chain — *not* to
 `com.trycua.driver`. AX probes against the process silently
 fail because the user granted Accessibility to the bundle, not to
 the IDE terminal. The Swift driver hit the same pathology and fixed
@@ -1438,20 +1358,17 @@ it in PR #1479; the Rust port hit it on the macOS GA flip path and
 fixed it here. See issue #1525 for the full background.
 
 ### Bundle id divergence (intentional)
-
 Swift `CuaDriver.app` → `com.trycua.driver`.
 Rust `CuaDriver.app` → `com.trycua.driver`.
 The two bundles coexist on disk and in TCC; a user can grant
 Accessibility + Screen Recording to each independently. The Rust
 port has its own bundle name + identifier so:
-
-- `open -n -g -a CuaDriverRs --args serve` never accidentally
-  relaunches into the Swift bundle (and vice versa).
-- TCC grants are per-cdhash, so granting one doesn't carry into
-  the other — users explicitly opt in to each binary.
+  - `open -n -g -a CuaDriverRs --args serve` never accidentally
+    relaunches into the Swift bundle (and vice versa).
+  - TCC grants are per-cdhash, so granting one doesn't carry into
+    the other — users explicitly opt in to each binary.
 
 ### Escape hatches
-
 - `--no-daemon-relaunch` flag — same flag Swift exposes.
 - `CUA_DRIVER_RS_MCP_NO_RELAUNCH=1` env var — Rust-specific name
   (Swift uses `CUA_DRIVER_MCP_NO_RELAUNCH`).
@@ -1465,7 +1382,6 @@ port has its own bundle name + identifier so:
   `--socket`.
 
 ### Daemon protocol divergence
-
 The daemon's `list` method now returns full `ToolDef`
 (`input_schema` + annotation hints), not just `{name, description}`.
 The proxy uses this to build a complete `tools/list` from one
@@ -1473,7 +1389,6 @@ round-trip instead of N+1 list+describe calls. Backwards compatible:
 older clients that only read name/description still work.
 
 ### Manual smoke test (macOS)
-
 1. `cua-driver serve --socket /tmp/test.sock &`
 2. `CUA_DRIVER_RS_MCP_FORCE_PROXY=1 cua-driver mcp --socket /tmp/test.sock`
 3. From an MCP client, run the standard initialize → tools/list →
@@ -1560,29 +1475,24 @@ older clients that only read name/description still work.
 ---
 
 ## CLI subcommands: `status` + `stop`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverCLI/ServeCommand.swift:368-470`
 - Rust: `libs/cua-driver/rust/crates/cua-driver/src/serve.rs::run_status_cmd, run_stop_cmd`
 - Status: VERIFIED
 - Test: `crates/platform-windows/examples/daemon_lifecycle_parity.rs`
 
 ### Fixed
-
 **`stop` silent on success** — Rust was printing a daemon-stopped line
-on stdout after a successful stop. Swift's `stop` exits silently with
-status 0. Now matches Swift byte-for-byte.
+on stdout after a successful stop.  Swift's `stop` exits silently with
+status 0.  Now matches Swift byte-for-byte.
 
 ### Already correct
-
 - `status` output: `"Cua Driver daemon is running\n  socket: <path>\n  pid: <N>\n"` ✓
 - `status` exit code: 0 when running, 1 when not ✓
 - `stop` exit code: 0 when ran, 1 when no daemon ✓
 - Error wording on stderr: `"Cua Driver daemon is not running"` ✓
 
 ### Verified on Windows
-
 `daemon_lifecycle_parity.exe`:
-
 - `status` running: 3-line output ✓
 - `stop` running: silent stdout (was printing extra line) ✓
 - `status` not-running: exit 1 + stderr message ✓
@@ -1591,15 +1501,13 @@ status 0. Now matches Swift byte-for-byte.
 ---
 
 ## MCP tool alias: `type_text_chars` → `type_text`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/ToolRegistry.swift:55-70`
 - Rust: `libs/cua-driver/rust/crates/cua-driver/src/serve.rs` (both pipe variants)
-  - `libs/cua-driver/rust/crates/mcp-server/src/tool.rs::ToolRegistry::invoke`
+  + `libs/cua-driver/rust/crates/mcp-server/src/tool.rs::ToolRegistry::invoke`
 - Status: VERIFIED
 - Test: `crates/platform-windows/examples/type_text_chars_alias_parity.rs`
 
 ### Fixed
-
 Swift treats `type_text_chars` as a **deprecated alias** for `type_text`:
 the aliased name is NOT in `tools/list`, but invoking it with the old name
 works (resolves to `type_text`) AND emits a stderr deprecation warning.
@@ -1607,7 +1515,6 @@ Rust was previously registering `type_text_chars` as a fully-fledged
 separate tool with its own description and a different text format.
 
 Changes:
-
 - Remove `TypeTextCharsTool` from the registration in
   `platform-windows/src/tools/impl_.rs::build_registry` (the struct is
   kept in the crate for now via a no-op binding to avoid the dead-code
@@ -1619,9 +1526,7 @@ Changes:
   alias as a defense-in-depth for direct in-process callers.
 
 ### Verified on Windows
-
 `type_text_chars_alias_parity.exe`:
-
 - `tools/list` does NOT contain `"type_text_chars"` ✓
 - Invoking `type_text_chars` with a 1-char text resolves to `type_text`'s
   response: `"✅ Typed 1 char(s) on pid 62156 via PostMessage (30ms delay)."` ✓
@@ -1629,14 +1534,12 @@ Changes:
 ---
 
 ## MCP tool: `set_agent_cursor_style`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/SetAgentCursorStyleTool.swift:10-111`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (SetAgentCursorStyleTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/set_agent_cursor_style_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Text format** — was `"cursor style: gradient_colors=[X, Y] bloom_color=Z image_path=(unchanged)"`
    (always lists all three fields with `(unchanged)`/`(reverted)` placeholders,
    space after comma). Now Swift's exact wording: `"✅ cursor style: gradient_colors=[X,Y] bloom_color=Z"`
@@ -1645,26 +1548,22 @@ Changes:
    now `"✅ cursor style: reverted to default"` matching Swift's `parts.isEmpty` branch.
 
 ### Verified on Windows
-
 `set_agent_cursor_style_parity.exe`:
-
 - Set gradient + bloom: `"✅ cursor style: gradient_colors=[#FF6B6B,#FF8E53] bloom_color=#A855F7"` ✓
 - Revert all: `"✅ cursor style: reverted to default"` ✓
 
 ---
 
 ## MCP tool: `zoom`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverServer/Tools/ZoomTool.swift:12-end`
 - Rust: windows=`crates/platform-windows/src/tools/impl_.rs` (ZoomTool); macOS/linux OPEN
 - Status: windows VERIFIED
 - Test: `crates/platform-windows/examples/zoom_parity.rs`
 
 ### Fixed (Windows)
-
 1. **Text format** — was `"Zoom (X,Y)–(X,Y) → WxH px JPEG."`; now Swift's
    verbatim multi-line message starting `"✅ Zoomed region captured at
-native resolution."` with the `from_zoom=true` integration hint.
+   native resolution."` with the `from_zoom=true` integration hint.
 2. **Error wording**: `"Missing required integer field pid."` /
    `"Missing required integer field window_id."` /
    `"Missing required region coordinates (x1, y1, x2, y2)."` /
@@ -1674,26 +1573,22 @@ native resolution."` with the `from_zoom=true` integration hint.
 4. **`idempotent: false`** — was `true`; Swift uses `false`.
 
 ### Intentional Rust-only
-
 - **`window_id` required** — Swift uses pid+frontmost-window; Windows
   uses HWND directly since there's no clean Win32 analogue without an
   explicit HWND.
 
 ### Verified on Windows
-
 `zoom_parity.exe`: invalid-region, too-wide, and real-zoom paths all OK.
 
 ---
 
 ## CLI subcommand: `mcp-config`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverCLI/CuaDriverCommand.swift:37-150`
 - Rust: `libs/cua-driver/rust/crates/cua-driver/src/cli.rs::run_mcp_config`
 - Status: VERIFIED (no fixes needed — already matched Swift)
 - Test: `crates/platform-windows/examples/mcp_config_parity.rs`
 
 ### Already correct
-
 - Default (no `--client`): generic mcpServers JSON snippet ✓
 - `--client claude`: `claude mcp add --transport stdio cua-driver -- <bin> mcp` ✓
 - `--client codex`: `codex mcp add cua-driver -- <bin> mcp` ✓
@@ -1705,7 +1600,6 @@ native resolution."` with the `from_zoom=true` integration hint.
 - Unknown client: exit 2 + stderr message ✓
 
 ### Verified on Windows
-
 `mcp_config_parity.exe` runs all 8 client variants + the unknown-client
 error path against the in-process binary, asserting each output contains
 the right needles. All pass on first try.
@@ -1713,14 +1607,12 @@ the right needles. All pass on first try.
 ---
 
 ## CLI subcommand: `update`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverCLI/CuaDriverCommand.swift:638-686`
 - Rust: `libs/cua-driver/rust/crates/cua-driver/src/cli.rs::run_update_cmd`
 - Status: VERIFIED (bug fix)
 - Test: `crates/platform-windows/examples/update_parity.rs`
 
 ### Fixed — REAL BUG
-
 Rust was looking for release tag prefix `cua-driver-v` (Swift's prefix)
 when fetching the latest version from `trycua/cua`. That would match the
 Swift `cua-driver-v0.1.9` release and report it as an available upgrade
@@ -1729,9 +1621,7 @@ for the Rust port — confusing users into installing the WRONG binary.
 Now uses prefix `cua-driver-rs-v` (Rust port's actual tag prefix).
 
 ### Verified on Windows
-
 `update_parity.exe`:
-
 - Always-present lines: `Current version:` and `Checking for updates…` ✓
 - Outcome is one of: `Already up to date.`, `New version available: <v>`,
   or `Could not reach GitHub` ✓
@@ -1741,15 +1631,14 @@ Now uses prefix `cua-driver-rs-v` (Rust port's actual tag prefix).
 ---
 
 ## CLI subcommand: `doctor`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverCLI/DoctorCommand.swift` (legacy-cleanup only — single
   `Nothing to clean — install is up to date.` codepath, no diagnostics)
 - Rust: `libs/cua-driver/rust/crates/cua-driver/src/doctor.rs` +
-  `libs/cua-driver/rust/crates/cua-driver/src/cli.rs::run_doctor_cmd`
+        `libs/cua-driver/rust/crates/cua-driver/src/cli.rs::run_doctor_cmd`
 - Status: INTENTIONAL_DIVERGENCE (Rust adds full diagnostic surface)
 - Test: `crates/cua-driver/src/doctor.rs` `#[cfg(test)] mod tests`
-  (5 unit tests: text rendering, JSON rendering, status-tag mapping,
-  cross-platform probe smoke path)
+        (5 unit tests: text rendering, JSON rendering, status-tag mapping,
+        cross-platform probe smoke path)
 
 ### Behavior
 
@@ -1759,7 +1648,6 @@ tagged `[ok]`, `[warn]`, or `[err]` so the output is grep-friendly.
 suppresses the update-available banner so JSON output stays parseable).
 
 **Cross-platform probes:**
-
 - `binary` — version + `<arch>-<os>` target triple
 - `install dir` — `current_exe()` resolved through symlinks
 - `home dir` — `~/.cua-driver-rs` existence + cached release-dir count
@@ -1767,7 +1655,6 @@ suppresses the update-available banner so JSON output stays parseable).
   (presence only — UUID value never read)
 
 **Windows probes:**
-
 - `interactive session` — `ProcessIdToSessionId(GetCurrentProcessId())`.
   Session 0 → `[warn]` with explicit guidance ("re-run from an
   interactive logon — RDP, console, or a scheduled task in the user's
@@ -1776,19 +1663,17 @@ suppresses the update-available banner so JSON output stays parseable).
 - `UI Automation` — `CoCreateInstance(CUIAutomation)` succeeds → `[ok]`,
   else `[err]`.
 - `EnumWindows visible` — top-level visible-window count. When zero
-  _and_ Session 0 was warned above, the probe appends a "consistent
+  *and* Session 0 was warned above, the probe appends a "consistent
   with Session 0" detail so the two findings read as one.
 
 **Linux probes:**
-
 - `display server` — `DISPLAY` / `WAYLAND_DISPLAY` matrix (X11 only,
   Wayland only with XWayland hint, both set, neither set).
 - `X11 connection` — quick handshake via `platform_linux::x11::list_windows(None)`.
 - `AT-SPI` — `AT_SPI_BUS` env var, fallback to `gdbus introspect
---session --dest org.a11y.Bus`.
+  --session --dest org.a11y.Bus`.
 
 **macOS probes:**
-
 - `legacy LaunchAgent` — opportunistic removal of
   `~/Library/LaunchAgents/com.trycua.cua_driver_updater.plist` (preserves
   the old DoctorCommand cleanup behavior, now as a structured probe).
@@ -1812,7 +1697,7 @@ render the report still expect exit 0.
 The Swift port's `DoctorCommand` only handles legacy install-bit
 cleanup on macOS. The Rust port runs on Windows + Linux as well, where
 the analogous misconfigurations (Session 0 on Windows, missing
-`DISPLAY` on Linux, no AT-SPI on Linux) are _the_ source of "the tools
+`DISPLAY` on Linux, no AT-SPI on Linux) are *the* source of "the tools
 are broken" reports. Folding diagnostics into `doctor` mirrors what
 users instinctively try first when something silently returns empty
 arrays.
@@ -1820,14 +1705,12 @@ arrays.
 ---
 
 ## CLI subcommand: `dump-docs`
-
 - Swift: `libs/cua-driver/Sources/CuaDriverCLI/DumpDocsCommand.swift`
 - Rust: `libs/cua-driver/rust/crates/cua-driver/src/cli.rs::run_dump_docs_with_type`
 - Status: VERIFIED (with caveat about CLI extraction)
 - Test: `crates/platform-windows/examples/dump_docs_parity.rs`
 
 ### Fixed
-
 1. **Top-level JSON shape** — was `{mcp_tools: [...]}`; now matches Swift's
    `CombinedDocs` shape: `--type=all` → `{cli: {...}, mcp: {...}}`,
    `--type=mcp` → `{version, tools: [...]}`, `--type=cli` → CLI section.
@@ -1837,11 +1720,10 @@ arrays.
    `MCPDocumentation`.
 
 ### Intentional Rust-only
-
 - **CLI section is a stub** — Swift extracts via swift-argument-parser
   introspection; Rust uses hand-rolled arg matching in `cli.rs` so there's
   no equivalent introspection. Stub returns `{version, commands: [],
-_note: "..."}` directing users to `--help` for CLI docs. Full CLI
+  _note: "..."}` directing users to `--help` for CLI docs. Full CLI
   introspection would require either clap migration or a parallel
   hand-maintained doc table.
 - **Extra MCP fields** — `read_only`, `destructive`, `idempotent` per
@@ -1849,9 +1731,7 @@ _note: "..."}` directing users to `--help` for CLI docs. Full CLI
   the extras as a documented enrichment.
 
 ### Verified on Windows
-
 `dump_docs_parity.exe`:
-
 - Default (`--type=all`): `{cli, mcp}` with 30 tools ✓
 - `--type=mcp`: top-level `{version, tools}` ✓
 - `--type=cli`: stub section ✓
@@ -1870,14 +1750,14 @@ setup per client / docs link) is sourced from a single shared file:
 - **Renderers**: each of the 4 Rust installers reads the .txt, swaps
   `{{BINARY}}` for the installed binary path, prints it, then appends
   an OS-specific autostart hint inline:
-  - `libs/cua-driver/scripts/_install-rust.sh` — `curl` from
-    raw.githubusercontent.com (remote install path) + bash `sed`.
-  - `libs/cua-driver/scripts/install.ps1` — `Invoke-WebRequest` from
-    raw.githubusercontent.com + PowerShell `-replace`.
-  - `libs/cua-driver/scripts/install-local.sh` — direct disk read
-    from `../cua-driver/scripts/post-install-hints.txt` + `sed`.
-  - `libs/cua-driver/rust/scripts/install-local.ps1` — direct disk read
-    from `..\cua-driver\scripts\post-install-hints.txt` + `-replace`.
+    - `libs/cua-driver/scripts/_install-rust.sh` — `curl` from
+      raw.githubusercontent.com (remote install path) + bash `sed`.
+    - `libs/cua-driver/scripts/install.ps1` — `Invoke-WebRequest` from
+      raw.githubusercontent.com + PowerShell `-replace`.
+    - `libs/cua-driver/scripts/install-local.sh` — direct disk read
+      from `../cua-driver/scripts/post-install-hints.txt` + `sed`.
+    - `libs/cua-driver/rust/scripts/install-local.ps1` — direct disk read
+      from `..\cua-driver\scripts\post-install-hints.txt` + `-replace`.
 
 If the .txt is unreachable (network failure on remote installs, repo
 layout change on local), each installer falls back to a one-line
@@ -2000,8 +1880,8 @@ helpers wired into ClickTool / TypeTextTool / SetValueTool.
     result_suffix branches) and `focus_guard::tests` (4 cases —
     arm/skip lifecycle).
   - Integration: existing `tests/integration/test_focus_steal_parity.py`
-    - `tests/integration/test_api_parity.py` — confirmed no regression
-      after the action-tool wiring (identical pass/fail to main).
+    + `tests/integration/test_api_parity.py` — confirmed no regression
+    after the action-tool wiring (identical pass/fail to main).
 
 ### Snapshot → action → detect cycle
 
@@ -2043,7 +1923,7 @@ The `Changes.result_suffix()` wording matches Swift's
   `,` (comma followed by a space); multiple apps joined with a `;`
   (semicolon followed by a space); alphabetical by app name).
 - Foreground-only change (no new windows): `"\n\n🔀 Action caused a
-different app to become frontmost."`.
+  different app to become frontmost."`.
 - No change: empty string.
 
 MCP callers can string-match on either lead emoji to detect a
@@ -2072,12 +1952,12 @@ side-effect without per-binary special-casing.
 ## Telemetry (PostHog)
 
 - Swift: `libs/cua-driver/Sources/CuaDriverCore/Telemetry/TelemetryClient.swift`
-- Rust: `crates/cua-driver/src/telemetry.rs`
+- Rust:  `crates/cua-driver/src/telemetry.rs`
 - Status: VERIFIED (events emit on entry-point dispatch + install)
-- Test: `crates/cua-driver/src/telemetry.rs` `#[cfg(test)] mod tests`
-  (8 unit tests: env parsing, opt-out default, CI detection,
-  payload shape, payload-key collision, install-id idempotent
-  persistence, ISO-8601 format, arch mapping)
+- Test:  `crates/cua-driver/src/telemetry.rs` `#[cfg(test)] mod tests`
+         (8 unit tests: env parsing, opt-out default, CI detection,
+         payload shape, payload-key collision, install-id idempotent
+         persistence, ISO-8601 format, arch mapping)
 
 ### Endpoint + event names (identical to Swift)
 
@@ -2099,15 +1979,15 @@ in the same PostHog project; `$lib = "cua-driver-rs"` vs
 
 Each event sends:
 
-| Key                  | Value                                    | Source                                                       |
-| -------------------- | ---------------------------------------- | ------------------------------------------------------------ |
-| `cua_driver_version` | CARGO_PKG_VERSION (e.g. `"0.1.3"`)       | build-time                                                   |
-| `os`                 | `"macos"` / `"linux"` / `"windows"`      | `std::env::consts::OS`                                       |
-| `os_version`         | OS-reported version string               | `sw_vers -productVersion` / `/etc/os-release` / `cmd /c ver` |
-| `arch`               | `"arm64"` / `"x86_64"` (aarch64 → arm64) | `std::env::consts::ARCH`                                     |
-| `is_ci`              | bool                                     | env-var probe (see below)                                    |
-| `$lib`               | `"cua-driver-rs"`                        | hard-coded                                                   |
-| `$lib_version`       | CARGO_PKG_VERSION                        | build-time                                                   |
+| Key | Value | Source |
+|-----|-------|--------|
+| `cua_driver_version` | CARGO_PKG_VERSION (e.g. `"0.1.3"`) | build-time |
+| `os` | `"macos"` / `"linux"` / `"windows"` | `std::env::consts::OS` |
+| `os_version` | OS-reported version string | `sw_vers -productVersion` / `/etc/os-release` / `cmd /c ver` |
+| `arch` | `"arm64"` / `"x86_64"` (aarch64 → arm64) | `std::env::consts::ARCH` |
+| `is_ci` | bool | env-var probe (see below) |
+| `$lib` | `"cua-driver-rs"` | hard-coded |
+| `$lib_version` | CARGO_PKG_VERSION | build-time |
 
 CI-environment detection probes the same vars Swift does: `CI`,
 `CONTINUOUS_INTEGRATION`, `GITHUB_ACTIONS`, `GITLAB_CI`, `JENKINS_URL`,
@@ -2144,15 +2024,14 @@ so re-running `install.sh` doesn't re-fire it.
 The Rust port is deliberately partitioned from the Swift port at the
 filesystem + env-var layer:
 
-| Layer           | Swift                                  | Rust                                      |
-| --------------- | -------------------------------------- | ----------------------------------------- |
-| Install dir     | `~/.cua-driver/`                       | `~/.cua-driver-rs/`                       |
-| Install UUID    | `~/.cua-driver/.telemetry_id`          | `~/.cua-driver-rs/.telemetry_id`          |
-| Install marker  | `~/.cua-driver/.installation_recorded` | `~/.cua-driver-rs/.installation_recorded` |
-| Opt-out env var | `CUA_DRIVER_TELEMETRY_ENABLED`         | `CUA_DRIVER_RS_TELEMETRY_ENABLED`         |
+| Layer | Swift | Rust |
+|-------|-------|------|
+| Install dir | `~/.cua-driver/` | `~/.cua-driver-rs/` |
+| Install UUID | `~/.cua-driver/.telemetry_id` | `~/.cua-driver-rs/.telemetry_id` |
+| Install marker | `~/.cua-driver/.installation_recorded` | `~/.cua-driver-rs/.installation_recorded` |
+| Opt-out env var | `CUA_DRIVER_TELEMETRY_ENABLED` | `CUA_DRIVER_RS_TELEMETRY_ENABLED` |
 
 This means:
-
 - A machine with both installed shows up as two distinct adoption events
   (we can count Rust adoption separately from Swift).
 - A user who opts out of one port stays opted-in for the other unless
@@ -2186,13 +2065,13 @@ surfaced to stdout/stderr unless `CUA_DRIVER_RS_TELEMETRY_DEBUG=true`.
 ## Startup flow: update-available banner (`mcp` / `serve` / `doctor`)
 
 - Swift: not present (the Swift port has no analogous banner today)
-- Rust: `crates/cua-driver/src/version_check.rs`
+- Rust:  `crates/cua-driver/src/version_check.rs`
 - Status: INTENTIONAL_ADDITION (Rust-only)
-- Test: `crates/cua-driver/src/version_check.rs` `#[cfg(test)] mod tests`
-  (22 unit tests: semver edge cases, cache round-trip in a
-  tempdir, dismissal persistence, 20-hour refresh threshold,
-  env-var + config opt-out, JSON release-list filtering,
-  banner format, ISO-8601 timestamp)
+- Test:   `crates/cua-driver/src/version_check.rs` `#[cfg(test)] mod tests`
+          (22 unit tests: semver edge cases, cache round-trip in a
+          tempdir, dismissal persistence, 20-hour refresh threshold,
+          env-var + config opt-out, JSON release-list filtering,
+          banner format, ISO-8601 timestamp)
 
 ### Behavior
 
@@ -2309,7 +2188,7 @@ resolve the release tag in the same priority order as the Swift
    after each `cua-driver-rs-v*` tag push. Matches the Swift driver's
    `CUA_DRIVER_BAKED_VERSION` shape.
 3. **GitHub Releases API fallback** —
-   only consulted when the env override is absent _and_ the baked
+   only consulted when the env override is absent *and* the baked
    line hasn't been updated yet (dev branches, pre-release checkouts).
 
 #### Why this exists
@@ -2357,10 +2236,10 @@ install scripts` step at the end of the `release` job after each
 and the equivalent Swift step runs on `macos-15` (BSD sed), so the
 two workflows use slightly different `sed -i` syntax:
 
-| Workflow                        | Runner          | `sed -i` form                 |
-| ------------------------------- | --------------- | ----------------------------- |
-| `cd-rust-cua-driver.yml` (this) | `ubuntu-latest` | `sed -i 's/.../.../` (GNU)    |
-| `cd-swift-cua-driver.yml`       | `macos-15`      | `sed -i '' 's/.../.../` (BSD) |
+| Workflow | Runner | `sed -i` form |
+|---|---|---|
+| `cd-rust-cua-driver.yml` (this) | `ubuntu-latest` | `sed -i 's/.../.../`  (GNU) |
+| `cd-swift-cua-driver.yml` | `macos-15` | `sed -i '' 's/.../.../`  (BSD) |
 
 Both push the rewritten files back to `main` using a GitHub App
 token (`RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY`) so the push
@@ -2418,7 +2297,7 @@ post-install GC pass to trim oldest dirs back to a configurable cap.
   the excess past the keep window.
 - `install.ps1` — `Invoke-OldReleasesGc` uses
   `Get-ChildItem -Directory | Where-Object Name -like "*-$target" |
-Sort-Object LastWriteTime -Descending`, resolves
+  Sort-Object LastWriteTime -Descending`, resolves
   `Get-JunctionTarget $CurrentDir` to find and exempt the active
   install, and `Remove-Item -Recurse -Force`s the excess.
 
@@ -2471,17 +2350,17 @@ Serialize installs per `$HOME_DIR` with a process-level mutex.
 
 #### Primitive
 
-| Platform                  | Mutex                                                                                                                                                                                            |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Linux (and Linux-via-WSL) | `mkdir $HOME_DIR/packages/.install.lock.d` — atomic on POSIX, no `flock` dependency. First install wins; concurrent attempts get `EEXIST` and poll.                                              |
-| Windows                   | `System.IO.FileStream` opened on `$HomeDir\install.lock` with `FileShare::None`. Windows kernel rejects a second open until the first handle closes, so the open call itself is the acquisition. |
+| Platform | Mutex |
+|---|---|
+| Linux (and Linux-via-WSL) | `mkdir $HOME_DIR/packages/.install.lock.d` — atomic on POSIX, no `flock` dependency. First install wins; concurrent attempts get `EEXIST` and poll. |
+| Windows | `System.IO.FileStream` opened on `$HomeDir\install.lock` with `FileShare::None`. Windows kernel rejects a second open until the first handle closes, so the open call itself is the acquisition. |
 
 Both primitives are unprivileged — no admin / sudo / Developer Mode.
 
 #### Wait + stale-detection UX
 
 - **Wait** — polls every 1s, prints `another cua-driver-rs install is
-already in progress (lock at <path>); waiting...` exactly once.
+  already in progress (lock at <path>); waiting...` exactly once.
 - **Stale threshold** — 600 seconds. Named constant in both scripts
   (`LOCK_STALE_AFTER_SECONDS` / `$Script:LockStaleAfterSeconds`), not
   a magic number, so future tuning is grep-able.

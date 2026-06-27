@@ -184,26 +184,13 @@
     },
     "description": "WPF host with Microsoft.Edge.WebView2 control. Loads shared/web/index.html. Exposes Chromium DevTools Protocol at default_cdp_port for cua-driver's `page` tool.",
     "shared_dom_aids": [
-      "btn-increment",
-      "btn-reset",
-      "lbl-counter",
-      "txt-input",
-      "lbl-input-mirror",
-      "sld-value",
-      "lbl-slider-value",
-      "border-click-target",
-      "lbl-last-action",
-      "lbl-click-count",
-      "chk-agreed",
-      "rdo-low",
-      "rdo-med",
-      "rdo-high",
-      "lbl-chk-state",
-      "cbo-color",
-      "lbl-combo-value",
-      "lnk-anchor",
-      "lbl-nav-state",
-      "section-target"
+      "btn-increment", "btn-reset", "lbl-counter",
+      "txt-input", "lbl-input-mirror",
+      "sld-value", "lbl-slider-value",
+      "border-click-target", "lbl-last-action", "lbl-click-count",
+      "chk-agreed", "rdo-low", "rdo-med", "rdo-high", "lbl-chk-state",
+      "cbo-color", "lbl-combo-value",
+      "lnk-anchor", "lbl-nav-state", "section-target"
     ]
   },
   "electron": {

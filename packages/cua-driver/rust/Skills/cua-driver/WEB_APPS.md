@@ -5,8 +5,7 @@
 > on macOS. For Windows web-app automation (Edge, Chrome with
 > PostMessage / WebView2), see `WINDOWS.md` → "Web apps on Windows". For
 > Linux: `LINUX.md` (the cross-platform `page` tool below uses AT-SPI
->
-> - CDP the same way).
+> + CDP the same way).
 >
 > The `page` tool itself is **cross-platform** — Windows + Linux back
 > `get_text` / `query_dom` with UIA / AT-SPI respectively, and
@@ -59,7 +58,7 @@ pixels:
    (often AX-exposed), toolbar buttons in the window chrome.
 2. Use keyboard shortcuts delivered straight to the pid —
    `hotkey({pid, keys: ["cmd", "enter"]})`, `hotkey({pid, keys:
-["cmd", "k"]})`, etc. Posted via `CGEvent.postToPid`, reaches the
+   ["cmd", "k"]})`, etc. Posted via `CGEvent.postToPid`, reaches the
    target regardless of AX state, no activation required.
 3. For typing into web inputs, use `type_text` — it automatically
    falls back to CGEvent synthesis when the input doesn't implement
@@ -118,7 +117,6 @@ itself honors.
 
 Minor caveats for the rare case a `⌘L` flow is still needed
 (last-resort only, with user buy-in on the focus flash):
-
 - Don't drop `delay_ms` below ~25 for keystroked typing on
   Chromium — below that, autocomplete insertions interleave with
   your characters and you get garbage like `"exuample.comn"`
@@ -156,7 +154,7 @@ in a specific tab" (rare).
 tab-strip in the AX tree for `AXTab` / `AXRadioButton` elements
 and read their `AXTitle`s. You can discover which tabs exist and
 what URLs/titles they carry without switching to any of them.
-Only _activating_ a specific tab is visible.
+Only *activating* a specific tab is visible.
 
 ## Keyboard commits on minimized windows
 
@@ -257,14 +255,14 @@ the target is AX-addressable.
 
 ## Enable "Allow JavaScript from Apple Events" — browser support matrix
 
-| Browser | `execute javascript` supported | Setting needed | Programmatic path                                |
-| ------- | ------------------------------ | -------------- | ------------------------------------------------ |
-| Chrome  | ✅ Full                        | ✅ Yes         | Edit Preferences JSON (see below)                |
-| Brave   | ✅ Full                        | ✅ Yes         | Edit Preferences JSON (same key, different path) |
-| Edge    | ✅ Full                        | ✅ Yes         | Edit Preferences JSON (same key, different path) |
-| Safari  | ✅ Full (`do JavaScript`)      | ✅ Yes         | UI automation only — `defaults write` broken     |
-| Arc     | ⚠️ No return values            | No toggle      | No reliable path                                 |
-| Firefox | ❌ Not supported               | N/A            | N/A                                              |
+| Browser | `execute javascript` supported | Setting needed | Programmatic path |
+|---|---|---|---|
+| Chrome | ✅ Full | ✅ Yes | Edit Preferences JSON (see below) |
+| Brave | ✅ Full | ✅ Yes | Edit Preferences JSON (same key, different path) |
+| Edge | ✅ Full | ✅ Yes | Edit Preferences JSON (same key, different path) |
+| Safari | ✅ Full (`do JavaScript`) | ✅ Yes | UI automation only — `defaults write` broken |
+| Arc | ⚠️ No return values | No toggle | No reliable path |
+| Firefox | ❌ Not supported | N/A | N/A |
 
 ### Chrome / Brave / Edge — Preferences JSON
 
