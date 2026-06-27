@@ -750,12 +750,22 @@ export class CronScheduler {
         // load (claw-code parity) — one model turn and one confirmation
         // flow instead of N separate prompts. The carrier job exists to
         // satisfy the onFire shape; consumers only read prompt/missed.
-        onFire({
-          ...durableTaskToJob(pending.tasks[0]!),
-          prompt: buildMissedCronNotification(pending.tasks),
-          missed: true,
-        });
-        this.removeMissedFromDisk(pending.tasks.map((t) => t.id));
+        // Same skip as catch-up/final: partition out durable one-shots
+        // this consumer can't run (e.g. a loop.md sentinel in a headless
+        // run). They are not notified and, critically, left on disk (not
+        // in removeMissedFromDisk) so the owning interactive session still
+        // surfaces and runs them instead of losing the task permanently.
+        const runnable = pending.tasks.filter(
+          (t) => !this.skipDurableFire?.(durableTaskToJob(t)),
+        );
+        if (runnable.length > 0) {
+          onFire({
+            ...durableTaskToJob(runnable[0]!),
+            prompt: buildMissedCronNotification(runnable),
+            missed: true,
+          });
+          this.removeMissedFromDisk(runnable.map((t) => t.id));
+        }
         break;
       }
       case 'catch-up': {

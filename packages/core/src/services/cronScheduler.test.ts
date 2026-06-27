@@ -963,6 +963,137 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('deliverPending missed branch: skips a sentinel one-shot (no fire, left on disk), fires a sibling', async () => {
+      // CRITICAL regression lock. A missed durable <<loop.md>> sentinel a
+      // headless consumer can't run must NOT be fired NOR removed from disk —
+      // deleting it would lose the task forever though no consumer ran the
+      // loop.md work. The skip is selective: a co-missed non-sentinel one-shot
+      // in the SAME batch is still fired (batched notice) and removed.
+      // Mutation check: revert the missed-branch partition and this fails
+      // (sentinel gets batched into the notice AND deleted from disk).
+      // Past createdAt so each one-shot's single fire already elapsed (missed).
+      const past = Date.now() - 10 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'loopmd',
+          cron: '* * * * *',
+          prompt: '<<loop.md>>',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+        {
+          id: 'normal',
+          cron: '* * * * *',
+          prompt: 'normal one-shot',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+      await scheduler.enableDurable('session-1');
+
+      // Only the runnable sibling is notified; the sentinel is partitioned out.
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.missed).toBe(true);
+      expect(fired[0]!.prompt).toContain('normal one-shot');
+      expect(fired[0]!.prompt).not.toContain('<<loop.md>>');
+
+      // The sentinel survives on disk; only the fired sibling is removed.
+      await vi.waitFor(async () => {
+        expect((await readCronTasks(tmpDir)).map((t) => t.id)).toEqual([
+          'loopmd',
+        ]);
+      });
+    });
+
+    it('deliverPending catch-up branch: skips a sentinel overdue-recurring (stamp left on disk), fires a sibling', async () => {
+      // 3h overdue, past any jitter window. The sentinel must not be fired and
+      // must keep its on-disk lastFiredAt (left out of persistCatchUpStamps) so
+      // the owning session re-detects the catch-up; the sibling fires raw and
+      // its advanced stamp persists.
+      const createdAt = Date.now() - 3 * 60 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'loopmd-c',
+          cron: '0 * * * *',
+          prompt: '<<loop.md>>',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+        {
+          id: 'normal-c',
+          cron: '0 * * * *',
+          prompt: 'overdue recurring',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+      await scheduler.enableDurable('session-1');
+
+      expect(fired.map((j) => j.prompt)).toEqual(['overdue recurring']);
+
+      // Sibling's catch-up stamp lands; once it does, the sentinel's untouched
+      // disk stamp is race-free, not a timing gap. Both stay on disk.
+      await vi.waitFor(async () => {
+        const byId = Object.fromEntries(
+          (await readCronTasks(tmpDir)).map((t) => [t.id, t]),
+        );
+        expect(byId['normal-c']!.lastFiredAt).toBeGreaterThan(createdAt);
+        expect(byId['loopmd-c']!.lastFiredAt).toBe(createdAt);
+      });
+    });
+
+    it('deliverPending final branch: skips a sentinel aged-recurring (no final fire, left on disk), fires a sibling', async () => {
+      // Aged past the 7-day max age → final raw fire + delete. The sentinel is
+      // left on disk (not in removeMissedFromDisk) for the owning session; the
+      // sibling gets its one final fire and is deleted.
+      const createdAt = Date.now() - 8 * 24 * 60 * 60_000;
+      const lastFiredAt = Date.now() - 2 * 60 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'loopmd-f',
+          cron: '0 * * * *',
+          prompt: '<<loop.md>>',
+          recurring: true,
+          createdAt,
+          lastFiredAt,
+        },
+        {
+          id: 'normal-f',
+          cron: '0 * * * *',
+          prompt: 'aged recurring',
+          recurring: true,
+          createdAt,
+          lastFiredAt,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+      await scheduler.enableDurable('session-1');
+
+      expect(fired.map((j) => j.prompt)).toEqual(['aged recurring']);
+
+      // The fired sibling is deleted; the skipped sentinel stays on disk.
+      await vi.waitFor(async () => {
+        expect((await readCronTasks(tmpDir)).map((t) => t.id)).toEqual([
+          'loopmd-f',
+        ]);
+      });
+    });
+
     it('rolls back the in-memory job when the durable persist fails', async () => {
       // A corrupted tasks file makes updateCronTasks throw inside
       // addCronTask, after the job was provisionally installed in memory.

@@ -161,6 +161,38 @@ describe('readLoopTaskFile', () => {
     });
   });
 
+  it('refuses a project loop.md resolving to a SIBLING dir that shares a name prefix', async () => {
+    // isWithin appends path.sep before startsWith, so root `<ws>/foo` must NOT
+    // accept a candidate under the sibling `<ws>/foobar`. Make projectRoot
+    // `<ws>/foo` and symlink its `.qwen` to `<ws>/foobar/.qwen`; realpath then
+    // resolves loop.md into `foobar`, whose canonical path bare-startsWith
+    // `<ws>/foo` yet is NOT a descendant. A regression to a bare
+    // `real.startsWith(root)` (no separator) would wave this cross-workspace
+    // read through — this test fails the moment that separator is dropped.
+    const fooRoot = path.join(tempDir, 'foo');
+    const siblingQwen = path.join(tempDir, 'foobar', '.qwen');
+    await fs.mkdir(fooRoot, { recursive: true });
+    await fs.mkdir(siblingQwen, { recursive: true });
+    await fs.writeFile(path.join(siblingQwen, 'loop.md'), 'sibling tasks');
+    await fs.symlink(siblingQwen, path.join(fooRoot, '.qwen'));
+    await writeHome('user tasks');
+
+    const result = await readLoopTaskFile({
+      projectRoot: fooRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    // Refused → falls through to home; the sibling content is never returned.
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
+      content: 'user tasks',
+      truncated: false,
+    });
+  });
+
   it('does not read a project loop.md symlinked to an in-workspace file (exfiltration guard)', async () => {
     // The dangerous case confinement alone misses: a repo-committed
     // `.qwen/loop.md -> ../.env` resolves INSIDE the workspace, so the realpath
