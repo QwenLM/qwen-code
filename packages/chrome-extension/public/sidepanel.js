@@ -11,7 +11,7 @@
  * Static asset (no bundler). Constants intentionally duplicate daemon/config.ts
  * (which the bundled service worker uses) to stay standalone.
  */
-/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval */
+/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL */
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4170';
 const STORAGE_KEY = 'qwen.daemon';
@@ -34,15 +34,32 @@ const els = {
   copyLabel: document.getElementById('copy-label'),
 };
 
+/** Whether a URL points at the local loopback interface. */
+function isLoopback(baseUrl) {
+  try {
+    const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
 /** Read daemon base URL + optional bearer token from chrome.storage. */
 async function readConfig() {
   try {
     const stored = await chrome.storage.local.get(STORAGE_KEY);
     const cfg = (stored && stored[STORAGE_KEY]) || {};
+    const baseUrl =
+      (typeof cfg.baseUrl === 'string' && cfg.baseUrl.trim()) ||
+      DEFAULT_BASE_URL;
+    // Fail closed: never send the bearer token off-loopback. A tampered stored
+    // baseUrl pointing at a remote host would otherwise exfiltrate it on every
+    // probe (fetch from this panel isn't constrained by host_permissions).
+    if (!isLoopback(baseUrl)) {
+      return { baseUrl: DEFAULT_BASE_URL, token: undefined };
+    }
     return {
-      baseUrl:
-        (typeof cfg.baseUrl === 'string' && cfg.baseUrl.trim()) ||
-        DEFAULT_BASE_URL,
+      baseUrl,
       token: (typeof cfg.token === 'string' && cfg.token.trim()) || undefined,
     };
   } catch {
@@ -115,23 +132,34 @@ function showShell(baseUrl) {
  * One probe → render. Keep probing after framing so a stopped daemon falls
  * back to the welcome screen instead of exposing Chrome's localhost error page.
  */
+let ticking = false;
 async function tick() {
-  const { baseUrl, token } = await readConfig();
-  const state = await probeState(baseUrl, token);
-  if (state === 'ready') {
-    // Pass the bearer token through the Web Shell URL fragment — the iframe
-    // reads its token from the URL, so a token-gated daemon would otherwise
-    // 401 every embedded request after the probe passed.
-    showShell(
-      token ? `${baseUrl}#token=${encodeURIComponent(token)}` : baseUrl,
-    );
-  } else {
-    if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
-      framedMisses += 1;
-      return;
+  // Reentrancy guard: probeState runs two sequential fetches (up to ~4s) but
+  // setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
+  // burning the FRAMED_MISS_LIMIT tolerance at ~2× and flashing the welcome
+  // screen (clearing the user's in-flight chat) while the daemon is just slow.
+  if (ticking) return;
+  ticking = true;
+  try {
+    const { baseUrl, token } = await readConfig();
+    const state = await probeState(baseUrl, token);
+    if (state === 'ready') {
+      // Pass the bearer token through the Web Shell URL fragment — the iframe
+      // reads its token from the URL, so a token-gated daemon would otherwise
+      // 401 every embedded request after the probe passed.
+      showShell(
+        token ? `${baseUrl}#token=${encodeURIComponent(token)}` : baseUrl,
+      );
+    } else {
+      if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
+        framedMisses += 1;
+        return;
+      }
+      framedMisses = 0;
+      showWelcome(state, allowOriginCommand(chrome.runtime.id));
     }
-    framedMisses = 0;
-    showWelcome(state, allowOriginCommand(chrome.runtime.id));
+  } finally {
+    ticking = false;
   }
 }
 

@@ -168,10 +168,14 @@ async function connect(): Promise<void> {
 
   ws.onclose = () => {
     console.log(LOG_PREFIX, 'Disconnected');
-    if (socket === ws) socket = null;
-    // Drop any CDP-tunnel debugger attachment so a closed daemon socket doesn't
-    // leave the debugger banner stuck on the user's tab.
-    shutdownCdpBridge();
+    // Only the *active* socket's close tears down the bridge. If the daemon
+    // force-closed a stale socket after the extension already opened a new one,
+    // that stale close must NOT detach the new connection's debugger — doing so
+    // would yank the debugger banner and break the live `/cdp` client.
+    if (socket === ws) {
+      socket = null;
+      shutdownCdpBridge();
+    }
     scheduleReconnect();
   };
 }

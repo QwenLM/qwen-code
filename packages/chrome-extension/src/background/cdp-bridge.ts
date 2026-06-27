@@ -76,6 +76,8 @@ let attachedTabId: number | null = null;
 let activeSend: CdpSend | null = null;
 /** While set, keeps the MV3 worker awake during an attachment (see startAttachKeepalive). */
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+/** True while a `handleAttach` is mid-flight (guards against overlapping attaches). */
+let attaching = false;
 
 /**
  * Keep the MV3 worker alive while the debugger is attached: it idles out after
@@ -194,6 +196,19 @@ async function handleAttach(
   frame: CdpAttachFrame,
   send: CdpSend,
 ): Promise<void> {
+  // Reentrancy guard: handleAttach awaits twice (attach + tabs.get) and is
+  // dispatched fire-and-forget. A second cdp_attach mid-flight would interleave
+  // teardownAttachment() with the first attach and corrupt attachedTabId. Only
+  // one puppeteer client binds today, but the guard keeps the next caller safe.
+  if (attaching) {
+    send({
+      type: 'cdp_attached',
+      id: frame.id,
+      error: { message: 'attach already in progress' },
+    });
+    return;
+  }
+  attaching = true;
   try {
     const tabId = await getActiveTabId();
 
@@ -257,6 +272,8 @@ async function handleAttach(
     const message = e instanceof Error ? e.message : String(e);
     console.warn(LOG_PREFIX, 'attach failed:', message);
     send({ type: 'cdp_attached', id: frame.id, error: { message } });
+  } finally {
+    attaching = false;
   }
 }
 

@@ -22,14 +22,36 @@ export const DEFAULT_DAEMON_BASE_URL = 'http://127.0.0.1:4170';
 
 const STORAGE_KEY = 'qwen.daemon';
 
-/** Read the daemon config, falling back to the loopback default. */
+/* global console */
+
+/** Whether a URL points at the local loopback interface. */
+function isLoopbackUrl(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the daemon config, falling back to the loopback default.
+ *
+ * The bearer token rides every `/acp` WS handshake and `/health` probe, and
+ * background-context fetch/WebSocket are NOT constrained by `host_permissions`.
+ * So a tampered `chrome.storage.local.baseUrl` pointing at a remote host would
+ * exfiltrate the token on every poll. Fail closed: ignore any non-loopback
+ * `baseUrl` (and its token) and use the loopback default instead.
+ */
 export async function getDaemonConfig(): Promise<DaemonConfig> {
   const stored = await chrome.storage.local.get(STORAGE_KEY);
   const cfg = (stored?.[STORAGE_KEY] ?? {}) as Partial<DaemonConfig>;
-  return {
-    baseUrl: cfg.baseUrl?.trim() || DEFAULT_DAEMON_BASE_URL,
-    token: cfg.token?.trim() || undefined,
-  };
+  const baseUrl = cfg.baseUrl?.trim() || DEFAULT_DAEMON_BASE_URL;
+  if (!isLoopbackUrl(baseUrl)) {
+    console.warn('[DaemonConfig] ignoring non-loopback baseUrl:', baseUrl);
+    return { baseUrl: DEFAULT_DAEMON_BASE_URL, token: undefined };
+  }
+  return { baseUrl, token: cfg.token?.trim() || undefined };
 }
 
 /** Persist a partial daemon config override. */
