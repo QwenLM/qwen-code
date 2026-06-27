@@ -1062,6 +1062,7 @@ const EN: Messages = {
     const n = v?.count ?? 0;
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
+  'message.renderError': 'This message could not be displayed.',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
   'tasks.refreshStale': 'Task status may be stale; reconnecting...',
@@ -2209,6 +2210,7 @@ const ZH: Messages = {
   'turn.executionSteps': (v) => `${v?.count ?? 0} 步`,
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
+  'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
   'tasks.refreshStale': '任务状态可能已过期，正在重连...',
