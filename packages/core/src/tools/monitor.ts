@@ -18,6 +18,7 @@
 
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { WINDOWS_TASKKILL } from '../utils/windowsTaskkill.js';
 import { randomUUID } from 'node:crypto';
 import stripAnsi from 'strip-ansi';
 import type { Config } from '../config/config.js';
@@ -455,8 +456,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
       if (process.platform === 'win32') {
         const tk = spawn(
-          'taskkill',
-          ['/pid', child.pid.toString(), '/f', '/t'],
+          WINDOWS_TASKKILL,
+          ['/f', '/t', '/pid', child.pid.toString()],
           { stdio: 'ignore' },
         );
         tk.on('error', (err) =>

@@ -10,6 +10,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import * as Diff from 'diff';
+import { WINDOWS_TASKKILL } from '../utils/windowsTaskkill.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
@@ -2775,11 +2776,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (pid !== undefined) {
         if (os.platform() === 'win32') {
           try {
-            const taskkillChild = childProcess.spawn('taskkill', [
-              '/pid',
-              String(pid),
+            const taskkillChild = childProcess.spawn(WINDOWS_TASKKILL, [
               '/f',
               '/t',
+              '/pid',
+              String(pid),
             ]);
             taskkillChild.on('error', () => {
               /* swallow — already in error path */
@@ -2925,11 +2926,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (pid !== undefined) {
         if (os.platform() === 'win32') {
           try {
-            const taskkillChild = childProcess.spawn('taskkill', [
-              '/pid',
-              String(pid),
+            const taskkillChild = childProcess.spawn(WINDOWS_TASKKILL, [
               '/f',
               '/t',
+              '/pid',
+              String(pid),
             ]);
             // Without an 'error' listener on the spawned ChildProcess,
             // a taskkill spawn failure (binary missing, permission

@@ -24,6 +24,7 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { WINDOWS_TASKKILL } from '../utils/windowsTaskkill.js';
 const { Terminal } = pkg;
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
@@ -482,21 +483,6 @@ interface ProcessCleanupStrategy {
  * Callers that need the kill to actually land must provide their own fallback —
  * see performCancelKill. See #5873.
  */
-// Resolve taskkill by absolute System32 path, never the bare name. On Windows
-// child_process spawn resolves a bare command through the executable search
-// path AND the current directory, so a taskkill.exe/.bat planted in the
-// workspace or on PATH could run from these cleanup paths with the CLI's
-// environment — arbitrary code execution out of a benign teardown. See #5873.
-// Only trust SystemRoot if it's an absolute drive path. A relative-poisoned
-// value (e.g. SystemRoot=Windows) would otherwise make the resolved taskkill
-// path relative and re-open CWD resolution — the very planting vector this
-// closes. Fall back to the canonical absolute path otherwise.
-const WINDOWS_SYSTEM_ROOT = process.env['SystemRoot'];
-const WINDOWS_TASKKILL =
-  WINDOWS_SYSTEM_ROOT && /^[A-Za-z]:[\\/]/.test(WINDOWS_SYSTEM_ROOT)
-    ? `${WINDOWS_SYSTEM_ROOT}\\System32\\taskkill.exe`
-    : 'C:\\Windows\\System32\\taskkill.exe';
-
 // Bound the *synchronous* taskkill calls so a hung taskkill (antivirus /
 // endpoint-security hooking the spawn, extreme I/O pressure) can't block the
 // Node event loop indefinitely — the POSIX path has its SIGKILL escalation as a

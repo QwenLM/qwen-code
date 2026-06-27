@@ -8,6 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
+import { WINDOWS_TASKKILL } from '../utils/windowsTaskkill.js';
 
 // Mock child_process.spawn
 const mockSpawn = vi.hoisted(() => vi.fn());
@@ -791,8 +792,8 @@ describe('MonitorTool', () => {
         expect(result.returnDisplay).toContain('limit reached');
         if (process.platform === 'win32') {
           expect(mockSpawn).toHaveBeenCalledWith(
-            'taskkill',
-            ['/pid', '12345', '/f', '/t'],
+            WINDOWS_TASKKILL,
+            ['/f', '/t', '/pid', '12345'],
             expect.objectContaining({ stdio: 'ignore' }),
           );
         } else {
@@ -827,8 +828,8 @@ describe('MonitorTool', () => {
 
         if (process.platform === 'win32') {
           expect(mockSpawn).toHaveBeenCalledWith(
-            'taskkill',
-            ['/pid', '12345', '/f', '/t'],
+            WINDOWS_TASKKILL,
+            ['/f', '/t', '/pid', '12345'],
             expect.objectContaining({ stdio: 'ignore' }),
           );
         } else {
@@ -865,8 +866,8 @@ describe('MonitorTool', () => {
 
         if (process.platform === 'win32') {
           expect(mockSpawn).toHaveBeenCalledWith(
-            'taskkill',
-            ['/pid', '12345', '/f', '/t'],
+            WINDOWS_TASKKILL,
+            ['/f', '/t', '/pid', '12345'],
             expect.objectContaining({ stdio: 'ignore' }),
           );
         } else {
