@@ -54,6 +54,7 @@ import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { rebuildTeamAutoMemoryIndex } from '../memory/indexer.js';
+import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
@@ -2233,6 +2234,49 @@ describe('Server Config (config.ts)', () => {
     // The shareability check is gated on the active tier, so an inactive
     // (untrusted) tier must never probe git.
     expect(getTeamMemoryShareabilityWarning).not.toHaveBeenCalled();
+  });
+
+  it('refreshHierarchicalMemory must not sync when the team-root safety check rejects', async () => {
+    // The indexer THROWS when the team root is a symlink that could redirect the
+    // committed index outside the repo. Sync must respect that refusal: it must
+    // never git add/commit/push a dir that failed the safety check.
+    const prevSync = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+    try {
+      const config = new Config({
+        ...baseParams,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+      });
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      // Mirror the indexer's symlink-escape rejection (see indexer.ts).
+      vi.mocked(rebuildTeamAutoMemoryIndex).mockRejectedValueOnce(
+        new Error(
+          'Refusing to write team memory index: /tmp/.qwen/team-memory is a ' +
+            'symlink, which could redirect the committed index outside the repository.',
+        ),
+      );
+
+      await config.refreshHierarchicalMemory();
+
+      // Gate proof: sync is enabled, yet the rejection must skip it entirely.
+      // Remove `teamRootSafe &&` from the sync guard and this assertion fails.
+      expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledTimes(1);
+      expect(syncTeamMemory).not.toHaveBeenCalled();
+    } finally {
+      if (prevSync === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = prevSync;
+      }
+    }
   });
 
   it('refreshHierarchicalMemory surfaces a one-time warning when team memory is not git-shareable', async () => {

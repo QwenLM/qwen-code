@@ -2339,10 +2339,24 @@ export class Config {
       // PULLED new files, rebuild once more so the in-prompt index reflects them.
       let teamAutoMemoryIndex: string | null = null;
       if (teamMemoryEnabled) {
-        teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
-          teamProjectRoot,
-        ).catch(() => null);
-        if (this.getTeamMemorySyncEnabled()) {
+        // rebuildTeamAutoMemoryIndex THROWS when the team root is a symlink that
+        // could redirect the committed index outside the repo. That escape must
+        // also block sync: otherwise syncTeamMemory would still git add/commit/
+        // push that out-of-repo dir, defeating the indexer's refusal. So gate
+        // sync on the rebuild succeeding — never share a dir that failed the
+        // safety check.
+        let teamRootSafe = false;
+        try {
+          teamAutoMemoryIndex =
+            await rebuildTeamAutoMemoryIndex(teamProjectRoot);
+          teamRootSafe = true;
+        } catch (err) {
+          this.debugLogger.warn(
+            'team memory index rebuild failed; skipping sync',
+            err,
+          );
+        }
+        if (teamRootSafe && this.getTeamMemorySyncEnabled()) {
           const syncResult = await syncTeamMemory(teamProjectRoot, {
             message: 'chore(memory): sync team memory',
           }).catch((err) => {
