@@ -169,6 +169,47 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('rewindRecording', () => {
+    it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        lastCompletedUuid: 'assistant-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      chatRecordingService = new ChatRecordingService(mockConfig);
+
+      chatRecordingService.rebuildTurnBoundaries([
+        {
+          uuid: 'user-1',
+          parentUuid: 'pre-resume-parent',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:00.000Z',
+          type: 'user',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'first resumed turn' }] },
+        },
+        {
+          uuid: 'assistant-1',
+          parentUuid: 'user-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:01.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'response' }] },
+          model: 'gemini-pro',
+        },
+      ]);
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 2 });
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(rewind.subtype).toBe('rewind');
+      expect(rewind.parentUuid).toBe('pre-resume-parent');
+    });
+  });
+
   describe('recordAtCommand', () => {
     it('should record @-command metadata as a system payload', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
