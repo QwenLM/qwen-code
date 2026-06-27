@@ -882,6 +882,25 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).toContain('Copy TSV');
   });
 
+  it('ignores stale selection copy feedback after selection changes', async () => {
+    const clipboard = mockClipboardDelayed();
+    const container = renderTable();
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+    act(() => {
+      textButton(container, 'Copy TSV').click();
+    });
+    dragCells(dataCell(container, 1, 0), dataCell(container, 1, 0));
+
+    await act(async () => {
+      clipboard.resolveCopy();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain('Copied!');
+    expect(container.textContent).toContain('Copy TSV');
+  });
+
   it('resets interactive state when table columns change', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

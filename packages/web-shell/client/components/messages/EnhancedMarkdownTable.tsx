@@ -1189,6 +1189,8 @@ function InteractiveMarkdownTable({
   }, [resetCopiedSelection, selection]);
 
   useEffect(() => {
+    // StrictMode simulates an unmount/remount without re-running useRef's
+    // initializer, so restore this before clipboard callbacks can run.
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
