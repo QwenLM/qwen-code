@@ -612,6 +612,12 @@ export function SettingsDialog({
             }
             return;
           }
+          if (currentItem?.value === 'visionModel') {
+            if (name === 'return') {
+              onSelect('visionModel', selectedScope);
+            }
+            return;
+          }
           if (
             currentItem?.type === 'number' ||
             currentItem?.type === 'string'
@@ -626,7 +632,8 @@ export function SettingsDialog({
           if (
             currentItem?.value === 'ui.theme' ||
             currentItem?.value === 'general.preferredEditor' ||
-            currentItem?.value === 'fastModel'
+            currentItem?.value === 'fastModel' ||
+            currentItem?.value === 'visionModel'
           ) {
             onSelect(currentItem.value, selectedScope);
           }
@@ -845,7 +852,8 @@ export function SettingsDialog({
               const isSubDialogSetting =
                 item.value === 'ui.theme' ||
                 item.value === 'general.preferredEditor' ||
-                item.value === 'fastModel';
+                item.value === 'fastModel' ||
+                item.value === 'visionModel';
 
               // For numbers/strings, get the actual current value from pending settings
               const path = item.value.split('.');

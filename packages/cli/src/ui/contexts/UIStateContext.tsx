@@ -68,6 +68,7 @@ export interface UIState {
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
   isVoiceModelMode: boolean;
+  isVisionModelMode: boolean;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;

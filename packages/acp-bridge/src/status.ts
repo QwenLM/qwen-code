@@ -155,6 +155,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * result: `{ payload }`.
    */
   clientMcpMessage: 'qwen/control/client_mcp/message',
+  sessionCd: 'qwen/control/session/cd',
 } as const;
 
 export type ServeStatus =

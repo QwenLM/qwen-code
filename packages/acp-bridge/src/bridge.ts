@@ -48,6 +48,7 @@ import {
 } from './status.js';
 import {
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
   InvalidSessionScopeError,
@@ -81,6 +82,8 @@ import type {
   AcpSessionBridge,
   MidTurnQueueEntry,
   BridgeDaemonStatusSnapshot,
+  ChangeSessionCwdRequest,
+  ChangeSessionCwdResult,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -3479,6 +3482,95 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         () => undefined,
       );
       return branchResult;
+    },
+
+    async changeSessionCwd(
+      sessionId: string,
+      req: ChangeSessionCwdRequest,
+      context?: BridgeClientRequestContext,
+    ): Promise<ChangeSessionCwdResult> {
+      if (shuttingDown) throw new Error('AcpSessionBridge is shutting down');
+
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+
+      // Chain onto promptQueue and update tail — ensures:
+      // 1. cd waits for any in-flight prompt to complete
+      // 2. Subsequent prompts wait for cd to complete (prevents stale config.cwd)
+      const cdPromise = entry.promptQueue.then(async () => {
+        if (entry.promptActive) {
+          throw new CdWhilePromptActiveError(sessionId);
+        }
+
+        const ci = await ensureChannel();
+        const raw = await ci.connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionCd,
+          {
+            sessionId,
+            path: req.path,
+          },
+        );
+        const extResult = raw as {
+          previousCwd: string;
+          newCwd: string;
+          warnings: string[];
+        };
+        if (
+          typeof extResult?.previousCwd !== 'string' ||
+          typeof extResult?.newCwd !== 'string' ||
+          !Array.isArray(extResult?.warnings)
+        ) {
+          throw new Error(
+            `changeSessionCwd: unexpected response shape from agent: ${JSON.stringify(raw)}`,
+          );
+        }
+
+        // State update inside the queue lambda — always executes when
+        // the extMethod settles, regardless of caller timeout.
+        if (extResult.previousCwd !== extResult.newCwd) {
+          entry.events.publish({
+            type: 'session_cwd_changed',
+            data: {
+              sessionId,
+              previousCwd: extResult.previousCwd,
+              newCwd: extResult.newCwd,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+
+        return extResult;
+      });
+
+      // Queue tail tied to the raw extMethod settlement — subsequent
+      // operations wait for the actual cd to finish, not the timeout.
+      entry.promptQueue = cdPromise.then(
+        () => undefined,
+        () => undefined,
+      );
+
+      // Timeout is caller-facing only: surfaces a deadline exceeded error
+      // to the HTTP client without advancing the queue prematurely.
+      const result = await withTimeout(
+        cdPromise,
+        Math.max(initTimeoutMs, 30_000),
+        'changeSessionCwd',
+      );
+
+      writeStderrLine(
+        `qwen serve: session ${sessionId} cwd changed: ` +
+          `${result.previousCwd} -> ${result.newCwd}` +
+          (result.warnings.length > 0
+            ? ` (warnings: ${result.warnings.join('; ')})`
+            : ''),
+      );
+
+      return { sessionId, ...result };
     },
 
     async closeSession(sessionId, context, closeOpts) {
