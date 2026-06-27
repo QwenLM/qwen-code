@@ -7320,7 +7320,9 @@ class QwenAgent implements Agent {
     // CDP tunnel (Plan C, #5626): auto-register chrome-devtools-mcp when the
     // daemon forwarded the tunnel flag, so the agent can drive the real browser.
     const cdpTunnelMcp = buildCdpTunnelMcpServer();
-    if (cdpTunnelMcp) {
+    // Don't clobber a `chrome-devtools` server the user configured themselves —
+    // their explicit session config wins over the tunnel auto-wire.
+    if (cdpTunnelMcp && !sessionMcpServers['chrome-devtools']) {
       sessionMcpServers['chrome-devtools'] = cdpTunnelMcp;
     }
 

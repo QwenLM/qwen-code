@@ -29,6 +29,14 @@ const LOG_PREFIX = '[ServiceWorker]';
 /** Correlation id for the ACP `initialize` sent right after the socket opens. */
 const ACP_INIT_ID = 'browser-tools-acp-init';
 
+/**
+ * `clientInfo.name` this extension sends so the daemon routes the reverse CDP
+ * bridge to it. Must equal `CDP_BRIDGE_CLIENT_NAME` in
+ * `packages/cli/src/serve/acp-http/index.ts` (separate packages, no shared
+ * module).
+ */
+const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+
 /** Reconnect backoff bounds (ms). */
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -103,7 +111,15 @@ function scheduleReconnect(): void {
 /** Open the WebSocket and wire up handlers. */
 async function connect(): Promise<void> {
   if (!started) return;
-  if (socket && socket.readyState === WebSocket.OPEN) return;
+  // Skip when a socket is already OPEN *or* still CONNECTING — a rapid
+  // reconnect (e.g. config change) must not orphan an in-flight handshake.
+  if (
+    socket &&
+    (socket.readyState === WebSocket.OPEN ||
+      socket.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
 
   let url: string;
   try {
@@ -115,7 +131,10 @@ async function connect(): Promise<void> {
     return;
   }
 
-  console.log(LOG_PREFIX, 'Connecting to', url);
+  // Redact the bearer token (carried as a `?token=` query param) so it never
+  // lands in the extension's DevTools console.
+  const safeUrl = url.replace(/([?&]token=)[^&]*/i, '$1<redacted>');
+  console.log(LOG_PREFIX, 'Connecting to', safeUrl);
   let ws: WebSocket;
   try {
     ws = new WebSocket(url);
@@ -135,7 +154,9 @@ async function connect(): Promise<void> {
       method: 'initialize',
       // `clientInfo.name` gates which /acp connection becomes the CDP bridge
       // (vs web UI / Zed clients sharing /acp); must match the daemon's gate.
-      params: { clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' } },
+      params: {
+        clientInfo: { name: CDP_BRIDGE_CLIENT_NAME, version: '1.0.0' },
+      },
     });
   };
 

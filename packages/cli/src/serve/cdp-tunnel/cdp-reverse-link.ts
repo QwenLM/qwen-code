@@ -131,6 +131,8 @@ export class CdpReverseLink {
   constructor(
     private readonly sendToExtension: CdpSendToExtension,
     private readonly commandTimeoutMs: number = DEFAULT_COMMAND_TIMEOUT_MS,
+    /** Optional diagnostic sink for dropped/unexpected inbound frames. */
+    private readonly log?: (line: string) => void,
   ) {}
 
   /** Wire the emulator whose `forwardToTab` this link backs. */
@@ -257,7 +259,10 @@ export class CdpReverseLink {
 
   private handleResult(frame: CdpResultFrame): void {
     const id = typeof frame.id === 'number' ? frame.id : undefined;
-    if (id === undefined) return;
+    if (id === undefined) {
+      this.log?.('qwen serve: /cdp dropped cdp_result with non-numeric id');
+      return;
+    }
     if (frame.error) {
       this.settleReject(id, frame.error);
     } else {
@@ -266,13 +271,24 @@ export class CdpReverseLink {
   }
 
   private handleEvent(frame: CdpEventFrame): void {
-    if (!this.emulator || typeof frame.method !== 'string') return;
+    // No emulator = the link is being torn down; that's a benign race, not a
+    // malformed frame, so don't log it.
+    if (!this.emulator) return;
+    if (typeof frame.method !== 'string') {
+      this.log?.('qwen serve: /cdp dropped cdp_event with non-string method');
+      return;
+    }
     this.emulator.emitTabEvent(frame.method, frame.params);
   }
 
   private handleAttached(frame: CdpAttachedFrame): void {
     const attach = this.pendingAttach;
-    if (!attach || attach.id !== frame.id) return;
+    if (!attach || attach.id !== frame.id) {
+      this.log?.(
+        `qwen serve: /cdp dropped unexpected cdp_attached (id=${String(frame.id)})`,
+      );
+      return;
+    }
     this.pendingAttach = undefined;
     clearTimeout(attach.pending.timer);
     if (frame.error) {

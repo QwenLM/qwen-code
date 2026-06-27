@@ -46,6 +46,14 @@ export const ACP_SESSION_HEADER = 'acp-session-id';
 const CDP_PATH = '/cdp';
 
 /**
+ * `clientInfo.name` an extension must send on `/acp` to claim the CDP bridge.
+ * Cross-package protocol constant — kept in sync with `CDP_BRIDGE_CLIENT_NAME`
+ * in `packages/chrome-extension/src/background/service-worker.ts` (the two
+ * packages can't share a module).
+ */
+const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+
+/**
  * Browsers cannot set an `Authorization` header on a WebSocket, so the Web
  * Shell authenticates the `/voice/stream` (and `/acp`) upgrade by offering the
  * bearer token as a `Sec-WebSocket-Protocol` subprotocol of the form
@@ -1012,7 +1020,7 @@ export function mountAcpHttp(
             if (
               opts.cdpTunnelOverWs === true &&
               opts.cdpTunnelRegistry !== undefined &&
-              clientName === 'qwen-cdp-bridge'
+              clientName === CDP_BRIDGE_CLIENT_NAME
             ) {
               cdpEndpoint = {
                 connectionId: conn.connectionId,

@@ -72,7 +72,11 @@ export function attachCdpClient(
   bridge.cdpBound = true;
 
   // Reverse link forwards page-domain commands to the extension's tab.
-  const link = new CdpReverseLink((frame) => bridge.send(frame));
+  const link = new CdpReverseLink(
+    (frame) => bridge.send(frame),
+    undefined,
+    log,
+  );
 
   // Emulator answers browser-level CDP locally; page-domain → reverse link.
   const emulator = new CdpBrowserEmulator({
