@@ -837,6 +837,7 @@ export interface ConfigParameters {
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
+  todosDirectory?: string;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -1435,6 +1436,7 @@ export class Config {
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
   private readonly plansDir: string;
+  private readonly todosDir: string;
   private readonly plansDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
@@ -1477,6 +1479,7 @@ export class Config {
     this.targetDir = path.resolve(params.targetDir);
     this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
     this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
+    this.todosDir = Storage.getTodosDir(this.targetDir, params.todosDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
     );
@@ -4101,6 +4104,10 @@ export class Config {
    */
   getPlansDir(): string {
     return this.plansDir;
+  }
+
+  getTodosDir(): string {
+    return this.todosDir;
   }
 
   private assertPlansDirWithinTargetDir(): void {

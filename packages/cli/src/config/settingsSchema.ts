@@ -337,6 +337,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: false,
   },
 
+  todosDirectory: {
+    type: 'string',
+    label: 'Todos Directory',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as string | undefined,
+    description:
+      'Custom directory for todo list files created by the todo-write tool. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to the global runtime todos directory (~/.qwen/todos).',
+    showInDialog: false,
+  },
+
   // Environment variables fallback
   env: {
     type: 'object',

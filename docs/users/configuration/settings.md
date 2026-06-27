@@ -73,7 +73,7 @@ When both legacy settings are present with different values, the migration follo
 
 ### Available settings in `settings.json`
 
-Settings are organized into categories. Most settings should be placed within their corresponding top-level category object in your `settings.json` file. A few top-level settings like `proxy` and `plansDirectory` remain direct root keys for compatibility.
+Settings are organized into categories. Most settings should be placed within their corresponding top-level category object in your `settings.json` file. A few top-level settings like `proxy`, `plansDirectory`, and `todosDirectory` remain direct root keys for compatibility.
 
 #### general
 
@@ -463,6 +463,7 @@ LSP server configuration is done through `.lsp.json` files in your project root 
 | `advanced.excludedEnvVars`     | array of strings | Environment variables to exclude from project context. Specifies environment variables that should be excluded from being loaded from project `.env` files. This prevents project-specific environment variables (like `DEBUG=true`) from interfering with the CLI behavior. Variables from `.qwen/.env` files are never excluded.       | `["DEBUG","DEBUG_MODE"]` |
 | `advanced.bugCommand`          | object           | Configuration for the bug report command. Overrides the default URL for the `/bug` command. Properties: `urlTemplate` (string): A URL that can contain `{title}` and `{info}` placeholders. Example: `"bugCommand": { "urlTemplate": "https://bug.example.com/new?title={title}&info={info}" }`                                          | `undefined`              |
 | `plansDirectory`               | string           | Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. If unset, plan files are stored in `~/.qwen/plans`. **Requires restart.** If the directory is inside the project root, add it to `.gitignore` to avoid committing plan files. | `undefined`              |
+| `todosDirectory`               | string           | Custom directory for todo list files created by the todo-write tool. Relative paths are resolved from the project root, and the resolved path must stay within the project root. If unset, todo files are stored in the global runtime todos directory (`~/.qwen/todos`). **Requires restart.**                                          | `undefined`              |
 
 #### experimental
 
@@ -519,6 +520,7 @@ Here is an example of a `settings.json` file with the nested structure, new as o
 {
   "proxy": "http://localhost:7890",
   "plansDirectory": "./.qwen/plans",
+  "todosDirectory": "./.qwen/todos",
   "general": {
     "vimMode": true,
     "preferredEditor": "code"

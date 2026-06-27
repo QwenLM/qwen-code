@@ -246,11 +246,7 @@ When new information changes your understanding of the task, update the todo str
 When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
 `;
 
-const TODO_SUBDIR = 'todos';
-
-function getTodoFilePath(sessionId?: string): string {
-  const todoDir = path.join(Storage.getRuntimeBaseDir(), TODO_SUBDIR);
-
+function getTodoFilePath(todoDir: string, sessionId?: string): string {
   // Use sessionId if provided, otherwise fall back to 'default'
   const filename = `${sessionId || 'default'}.json`;
   return path.join(todoDir, filename);
@@ -259,9 +255,12 @@ function getTodoFilePath(sessionId?: string): string {
 /**
  * Reads the current todos from the file system
  */
-async function readTodosFromFile(sessionId?: string): Promise<TodoItem[]> {
+async function readTodosFromFile(
+  todoDir: string,
+  sessionId?: string,
+): Promise<TodoItem[]> {
   try {
-    const todoFilePath = getTodoFilePath(sessionId);
+    const todoFilePath = getTodoFilePath(todoDir, sessionId);
     const content = await fs.readFile(todoFilePath, 'utf-8');
     const data = JSON.parse(content);
     return Array.isArray(data.todos) ? data.todos : [];
@@ -278,13 +277,14 @@ async function readTodosFromFile(sessionId?: string): Promise<TodoItem[]> {
  * Writes todos to the file system
  */
 async function writeTodosToFile(
+  todoDir: string,
   todos: TodoItem[],
   sessionId?: string,
 ): Promise<void> {
-  const todoFilePath = getTodoFilePath(sessionId);
-  const todoDir = path.dirname(todoFilePath);
+  const todoFilePath = getTodoFilePath(todoDir, sessionId);
+  const todoFileDir = path.dirname(todoFilePath);
 
-  await fs.mkdir(todoDir, { recursive: true });
+  await fs.mkdir(todoFileDir, { recursive: true });
 
   const data = {
     todos,
@@ -332,10 +332,11 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     const { todos, modified_by_user, modified_content } = this.params;
     const sessionId = this.config.getSessionId();
+    const todoDir = this.config.getTodosDir();
 
     try {
       // 1. Read current todos (for change detection)
-      const oldTodos = await readTodosFromFile(sessionId);
+      const oldTodos = await readTodosFromFile(todoDir, sessionId);
 
       let finalTodos: TodoItem[];
 
@@ -418,7 +419,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       }
 
       // 4. Write new todos AFTER all validation passes
-      await writeTodosToFile(finalTodos, sessionId);
+      await writeTodosToFile(todoDir, finalTodos, sessionId);
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted
@@ -533,7 +534,7 @@ Todo list modification failed with error: ${errorMessage}. You may need to retry
 export async function readTodosForSession(
   sessionId?: string,
 ): Promise<TodoItem[]> {
-  return readTodosFromFile(sessionId);
+  return readTodosFromFile(Storage.getTodosDir(), sessionId);
 }
 
 /**
@@ -541,7 +542,7 @@ export async function readTodosForSession(
  */
 export async function listTodoSessions(): Promise<string[]> {
   try {
-    const todoDir = path.join(Storage.getRuntimeBaseDir(), TODO_SUBDIR);
+    const todoDir = Storage.getTodosDir();
     const files = await fs.readdir(todoDir);
     return files
       .filter((file: string) => file.endsWith('.json'))
@@ -607,7 +608,7 @@ export class TodoWriteTool extends BaseDeclarativeTool<
   protected createInvocation(params: TodoWriteParams) {
     // Determine if this is a create or update operation by checking if todos file exists
     const sessionId = this.config.getSessionId();
-    const todoFilePath = getTodoFilePath(sessionId);
+    const todoFilePath = getTodoFilePath(this.config.getTodosDir(), sessionId);
     const operationType = fsSync.existsSync(todoFilePath) ? 'update' : 'create';
 
     return new TodoWriteToolInvocation(this.config, params, operationType);
