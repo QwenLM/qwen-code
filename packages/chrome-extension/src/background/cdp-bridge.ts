@@ -40,6 +40,15 @@ interface CdpAttachFrame {
   id: number;
 }
 
+/**
+ * Inbound `cdp_release` frame (daemon → extension): the `/cdp` puppeteer client
+ * disconnected, so detach the debugger and stop forwarding even though the
+ * `/acp` socket is still up.
+ */
+interface CdpReleaseFrame {
+  type: 'cdp_release';
+}
+
 /** Any outbound `cdp_*` frame (extension → daemon). */
 type CdpOutbound =
   | {
@@ -94,7 +103,9 @@ function stopAttachKeepalive(): void {
 
 /** Whether a frame `type` is one this bridge owns (daemon → extension). */
 export function isCdpBridgeFrame(type: unknown): boolean {
-  return type === 'cdp_command' || type === 'cdp_attach';
+  return (
+    type === 'cdp_command' || type === 'cdp_attach' || type === 'cdp_release'
+  );
 }
 
 /**
@@ -289,6 +300,16 @@ async function handleCommand(
 }
 
 /**
+ * Handle a `cdp_release` frame: the daemon's `/cdp` puppeteer client
+ * disconnected, so tear the bridge down (detach the debugger + stop forwarding)
+ * even though the `/acp` socket is still up.
+ */
+function handleRelease(_frame: CdpReleaseFrame): void {
+  console.log(LOG_PREFIX, 'cdp_release received; detaching debugger');
+  shutdownCdpBridge();
+}
+
+/**
  * Route one inbound `cdp_*` frame from the daemon. The caller filters with
  * {@link isCdpBridgeFrame} first. `send` pushes outbound frames down the same
  * socket; it is recorded as the active sink so events/detach reach the daemon.
@@ -299,6 +320,8 @@ export function handleCdpFrame(frame: { type?: unknown }, send: CdpSend): void {
     void handleAttach(frame as CdpAttachFrame, send);
   } else if (frame.type === 'cdp_command') {
     void handleCommand(frame as CdpCommandFrame, send);
+  } else if (frame.type === 'cdp_release') {
+    handleRelease(frame as CdpReleaseFrame);
   }
 }
 

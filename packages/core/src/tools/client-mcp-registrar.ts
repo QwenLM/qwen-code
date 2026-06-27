@@ -60,7 +60,9 @@ export interface ClientMcpFrame {
  * a rejected promise) fails the originating `sendSdkMcpMessage` call so the
  * agent's MCP client sees a transport error rather than hanging.
  */
-export type ClientMcpFrameSink = (frame: ClientMcpFrame) => void | Promise<void>;
+export type ClientMcpFrameSink = (
+  frame: ClientMcpFrame,
+) => void | Promise<void>;
 
 interface PendingRequest {
   resolve: (message: JSONRPCMessage) => void;
@@ -132,6 +134,11 @@ export class ClientMcpRegistrar {
     return [...this.servers];
   }
 
+  /** Count of currently-registered server names (for per-connection caps). */
+  serverCount(): number {
+    return this.servers.size;
+  }
+
   /** Count of in-flight `mcp_message` round-trips (for tests / accounting). */
   pendingCount(): number {
     return this.pending.size;
@@ -170,7 +177,11 @@ export class ClientMcpRegistrar {
     if (!isJsonRpcRequest(message)) {
       let sendResult: void | Promise<void>;
       try {
-        sendResult = this.sendFrame({ id, server: serverName, payload: message });
+        sendResult = this.sendFrame({
+          id,
+          server: serverName,
+          payload: message,
+        });
       } catch (err) {
         return Promise.reject(asError(err));
       }
@@ -179,7 +190,10 @@ export class ClientMcpRegistrar {
         id: 0,
         result: {},
       } as JSONRPCMessage;
-      if (sendResult && typeof (sendResult as Promise<void>).then === 'function') {
+      if (
+        sendResult &&
+        typeof (sendResult as Promise<void>).then === 'function'
+      ) {
         return (sendResult as Promise<void>).then(() => ack);
       }
       return Promise.resolve(ack);
@@ -203,12 +217,19 @@ export class ClientMcpRegistrar {
       // must fail THIS request (not leak a pending entry).
       let sendResult: void | Promise<void>;
       try {
-        sendResult = this.sendFrame({ id, server: serverName, payload: message });
+        sendResult = this.sendFrame({
+          id,
+          server: serverName,
+          payload: message,
+        });
       } catch (err) {
         this.failPending(id, asError(err));
         return;
       }
-      if (sendResult && typeof (sendResult as Promise<void>).then === 'function') {
+      if (
+        sendResult &&
+        typeof (sendResult as Promise<void>).then === 'function'
+      ) {
         (sendResult as Promise<void>).catch((err: unknown) => {
           this.failPending(id, asError(err));
         });
@@ -280,7 +301,5 @@ function asError(err: unknown): Error {
  */
 function isJsonRpcRequest(message: JSONRPCMessage): boolean {
   const m = message as { method?: unknown; id?: unknown };
-  return (
-    typeof m.method === 'string' && m.id !== undefined && m.id !== null
-  );
+  return typeof m.method === 'string' && m.id !== undefined && m.id !== null;
 }

@@ -7687,6 +7687,19 @@ function diffSettingsKeys(
  */
 export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
   if (process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] !== '1') return undefined;
+  // Auth-gated `/cdp`: the daemon requires a bearer token on the tunnel, but
+  // this ACP child can't inherit QWEN_SERVER_TOKEN (the spawn path scrubs it)
+  // and chrome-devtools-mcp is launched with `--wsEndpoint` only — it has no way
+  // to send `--wsHeaders` auth. Auto-registering the browser tools here would
+  // surface tools that can't connect, so skip with a clear diagnostic instead.
+  if (process.env['QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED'] === '1') {
+    process.stderr.write(
+      'qwen serve: browser tools (chrome-devtools-mcp) disabled — the /cdp ' +
+        'tunnel requires bearer auth, which is not yet supported for the ' +
+        'auto-registered browser MCP server.\n',
+    );
+    return undefined;
+  }
   const port = Number(process.env['QWEN_SERVE_CDP_TUNNEL_PORT']);
   if (!Number.isInteger(port) || port <= 0) return undefined;
   try {

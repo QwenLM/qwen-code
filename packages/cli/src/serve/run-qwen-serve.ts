@@ -1431,6 +1431,14 @@ export async function runQwenServe(
     QWEN_SERVE_CDP_TUNNEL_PORT: opts.cdpTunnelOverWs
       ? String(opts.port)
       : undefined,
+    // Tell the child whether `/cdp` requires bearer auth. The ACP child can't
+    // inherit QWEN_SERVER_TOKEN (the spawn path scrubs it) and chrome-devtools-
+    // mcp is launched with `--wsEndpoint` only, so it can't authenticate against
+    // an auth-gated `/cdp`. The child uses this flag to skip auto-registering the
+    // browser tools (with a diagnostic) instead of registering tools that can't
+    // connect. See buildCdpTunnelMcpServer in acpAgent.ts.
+    QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED:
+      opts.cdpTunnelOverWs && (token || opts.requireAuth) ? '1' : undefined,
   };
 
   const cliVersion = await getCliVersion();

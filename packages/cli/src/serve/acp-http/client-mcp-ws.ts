@@ -49,6 +49,13 @@ export const CLIENT_MCP_FRAME_TYPES = {
   unregister: 'mcp_unregister',
 } as const;
 
+/**
+ * Upper bound on client-hosted MCP servers per WS connection. Caps the runtime
+ * MCP add/discovery a single client can drive so a misbehaving (or hostile)
+ * client can't register an unbounded number of servers on one connection.
+ */
+const MAX_SERVERS_PER_CONNECTION = 10;
+
 /** Inbound `mcp_register` frame from a client. */
 export interface McpRegisterFrame {
   type: 'mcp_register';
@@ -201,6 +208,15 @@ export class ClientMcpWsConnection {
         message: `server '${server}' is already registered on this connection`,
       };
     }
+    // Cap the number of servers a single connection can register so a client
+    // can't drive unbounded runtime-MCP add/discovery (DoS guard).
+    if (this.registrar.serverCount() >= MAX_SERVERS_PER_CONNECTION) {
+      return {
+        kind: 'error',
+        code: 'too_many_servers',
+        message: `connection has reached the maximum of ${MAX_SERVERS_PER_CONNECTION} registered MCP servers`,
+      };
+    }
     if (!this.provider) {
       return {
         kind: 'error',
@@ -217,6 +233,19 @@ export class ClientMcpWsConnection {
         server,
         this.registrar.sendSdkMcpMessage,
       );
+      // The WS may have closed (dispose() ran) while we awaited the provider
+      // round-trip. dispose() snapshots its server set before this register
+      // resolves, so the provider would otherwise be left holding a zombie
+      // runtime MCP server. Re-check and tear it back down.
+      if (this.disposed) {
+        this.registrar.unregisterServer(server);
+        await this.provider.unregisterClientMcpServer(server);
+        return {
+          kind: 'error',
+          code: 'closed',
+          message: 'connection disposed during register',
+        };
+      }
       return { kind: 'registered', server, toolCount };
     } catch (err) {
       // Roll back the registrar advertisement on failure.
@@ -250,10 +279,7 @@ export class ClientMcpWsConnection {
     return { kind: 'unregistered', server };
   }
 
-  private handleMessage(
-    id: unknown,
-    payload: unknown,
-  ): ClientMcpHandleResult {
+  private handleMessage(id: unknown, payload: unknown): ClientMcpHandleResult {
     if (typeof id !== 'string' || id.length === 0) {
       return {
         kind: 'error',

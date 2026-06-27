@@ -136,6 +136,14 @@ const WS_READ_METHODS = new Set([
   '_qwen/file/glob',
 ]);
 
+/**
+ * Cap on concurrent fire-and-forget client-MCP register/unregister dispatches
+ * per WS connection. `mcp_register`/`mcp_unregister` are dispatched off the
+ * serialized message queue (not awaited), so without a guard a burst of frames
+ * would each independently trigger a provider round-trip — DoS amplification.
+ */
+const MAX_INFLIGHT_MCP_DISPATCH = 8;
+
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
   workspace: DaemonWorkspaceService;
@@ -738,6 +746,11 @@ export function mountAcpHttp(
         // Per-connection client-hosted MCP holder (issue #5626). Created
         // lazily on the first client-MCP frame; disposed on WS close.
         let clientMcp: ClientMcpWsConnection | undefined;
+        // In-flight fire-and-forget client-MCP register/unregister dispatches.
+        // `mcp_register`/`mcp_unregister` are dispatched off the message queue
+        // (not awaited), so a burst would otherwise spawn unbounded concurrent
+        // provider round-trips. Capped by MAX_INFLIGHT_MCP_DISPATCH below.
+        let clientMcpInflightDispatch = 0;
         // Per-connection CDP-tunnel bridge unregister (Plan C, issue #5626),
         // called on WS close.
         let cdpBridgeUnregister: (() => void) | undefined;
@@ -835,6 +848,32 @@ export function mountAcpHttp(
               );
               return;
             }
+
+            const frameType = (parsed as { type?: unknown }).type;
+
+            // Rate-limit the reverse client-MCP channel: an initialized client
+            // can otherwise spam mcp_register/mcp_unregister (each drives runtime
+            // MCP add/remove/discovery) without consuming the daemon's configured
+            // mutation budget. mcp_message is a correlation reply on the hot path,
+            // so it rides the lighter 'read' tier. Only enforced when a limiter
+            // is configured (mirrors the JSON-RPC checkRate block below).
+            if (opts.checkRate) {
+              const tier: RateLimitTier =
+                frameType === 'mcp_message' ? 'read' : 'mutation';
+              if (!opts.checkRate(wsKey, tier)) {
+                safeWsSend(
+                  ws,
+                  JSON.stringify({
+                    type: 'mcp_error',
+                    code: 'rate_limited',
+                    message: 'Rate limit exceeded',
+                  }),
+                  'client-MCP',
+                );
+                return;
+              }
+            }
+
             if (!clientMcp) {
               // Prefer the per-connection factory (production) so the
               // provider's runtime-MCP mutations are attributed to THIS
@@ -889,7 +928,6 @@ export function mountAcpHttp(
               }
             };
 
-            const frameType = (parsed as { type?: unknown }).type;
             // `mcp_register` / `mcp_unregister` await a provider round-trip
             // that ITSELF needs `mcp_message` response frames delivered on
             // THIS same serialized queue — awaiting it inline would deadlock
@@ -897,12 +935,34 @@ export function mountAcpHttp(
             // the `session/prompt` fire-and-forget pattern: dispatch off the
             // queue and ack when it resolves. `mcp_message` is a synchronous
             // correlation resolve, so it stays inline (keeps ordering).
+            const isFireAndForget = frameType !== 'mcp_message';
+            if (isFireAndForget) {
+              // DoS guard: the dispatch below is NOT awaited, so a burst of
+              // register/unregister frames would otherwise spawn unbounded
+              // concurrent provider round-trips. Reject once at the cap.
+              if (clientMcpInflightDispatch >= MAX_INFLIGHT_MCP_DISPATCH) {
+                safeWsSend(
+                  ws,
+                  JSON.stringify({
+                    type: 'mcp_error',
+                    code: 'too_many_inflight',
+                    message: `too many concurrent client-MCP registrations (max ${MAX_INFLIGHT_MCP_DISPATCH})`,
+                  }),
+                  'client-MCP',
+                );
+                return;
+              }
+              clientMcpInflightDispatch++;
+            }
             const handleP = clientMcp
               .handleFrame(parsed as Record<string, unknown>)
               .then(sendClientMcpAck, (err: unknown) => {
                 writeStderrLine(
                   `qwen serve: /acp client-mcp frame error: ${err instanceof Error ? err.message : String(err)}`,
                 );
+              })
+              .finally(() => {
+                if (isFireAndForget) clientMcpInflightDispatch--;
               });
             if (frameType === 'mcp_message') {
               await handleP;

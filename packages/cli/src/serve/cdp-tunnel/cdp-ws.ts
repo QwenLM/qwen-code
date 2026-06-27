@@ -22,7 +22,7 @@
 
 import type { WebSocket } from 'ws';
 import { CdpBrowserEmulator, type CdpFrame } from './cdp-browser-emulator.js';
-import { CdpReverseLink } from './cdp-reverse-link.js';
+import { CDP_FRAME_TYPES, CdpReverseLink } from './cdp-reverse-link.js';
 import type { CdpTunnelRegistry } from './cdp-tunnel-registry.js';
 
 /** WS close code for "no extension connected" (policy violation). */
@@ -114,9 +114,25 @@ export function attachCdpClient(
   };
 
   let disposed = false;
-  const dispose = (reason: string): void => {
+  const dispose = (reason: string, notifyExtension = true): void => {
     if (disposed) return;
     disposed = true;
+    // The puppeteer `/cdp` client dropped while the extension is still bound:
+    // tell the extension to release its `chrome.debugger` attachment, otherwise
+    // the tab keeps Chrome's "started debugging this browser" banner until the
+    // `/acp` socket itself dies. Skipped on the `onExtensionGone` path — the
+    // extension is already gone, so there's nothing left to notify.
+    if (notifyExtension && registry.getActive() === bridge) {
+      try {
+        bridge.send({ type: CDP_FRAME_TYPES.release });
+      } catch (err) {
+        log(
+          `qwen serve: /cdp release send failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     link.dispose(reason);
     // Detach this link from the bridge so a later `/cdp` client rebinds cleanly
     // and stray extension frames don't route into a dead link.
@@ -132,7 +148,8 @@ export function attachCdpClient(
   // this, puppeteer hangs until the ~170s CDP command timeout.
   bridge.onExtensionGone = () => {
     log('qwen serve: extension /acp dropped; closing puppeteer /cdp socket');
-    dispose('extension /acp disconnected');
+    // Don't send a release frame here — the extension is already gone.
+    dispose('extension /acp disconnected', false);
     try {
       ws.close(CLOSE_NORMAL, 'extension disconnected');
     } catch {

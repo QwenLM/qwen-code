@@ -34,6 +34,11 @@ export const CDP_FRAME_TYPES = {
   event: 'cdp_event',
   /** The tab/debugger detached (user opened DevTools, page crashed, …). */
   detach: 'cdp_detach',
+  /**
+   * Tell the extension to release its `chrome.debugger` attachment because the
+   * `/cdp` puppeteer client went away (the extension is still connected).
+   */
+  release: 'cdp_release',
 } as const;
 
 /** A `cdp_command` frame the daemon sends to the extension. */
@@ -52,8 +57,20 @@ export interface CdpAttachFrame {
   id: number;
 }
 
+/**
+ * A `cdp_release` frame the daemon sends when the bound `/cdp` puppeteer client
+ * disconnects while the extension is still connected. The extension responds by
+ * detaching `chrome.debugger` so the tab doesn't keep Chrome's debugging banner.
+ */
+export interface CdpReleaseFrame {
+  type: 'cdp_release';
+}
+
 /** Any outbound frame this link pushes to the extension socket. */
-export type CdpOutboundFrame = CdpCommandFrame | CdpAttachFrame;
+export type CdpOutboundFrame =
+  | CdpCommandFrame
+  | CdpAttachFrame
+  | CdpReleaseFrame;
 
 /** A `cdp_result` frame the extension sends back for a `cdp_command`. */
 export interface CdpResultFrame {
