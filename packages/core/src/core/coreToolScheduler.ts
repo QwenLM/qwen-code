@@ -3934,15 +3934,18 @@ export class CoreToolScheduler {
         if (this.onAllToolCallsComplete) {
           await this.onAllToolCallsComplete(completedCalls);
         }
-        this.notifyToolCallsUpdate();
       } finally {
-        this.isFinalizingToolCalls = false;
-        // Always drain the queue, even if completion callbacks throw.
-        if (this.requestQueue.length > 0) {
-          const next = this.requestQueue.shift()!;
-          this._schedule(next.request, next.signal)
-            .then(next.resolve)
-            .catch(next.reject);
+        try {
+          this.notifyToolCallsUpdate();
+        } finally {
+          this.isFinalizingToolCalls = false;
+          // Always drain the queue, even if completion callbacks throw.
+          if (this.requestQueue.length > 0) {
+            const next = this.requestQueue.shift()!;
+            this._schedule(next.request, next.signal)
+              .then(next.resolve)
+              .catch(next.reject);
+          }
         }
       }
     }
