@@ -2532,11 +2532,13 @@ export class Session implements SessionContext {
                   } source=${loopTick.sourceLabel ?? 'none'}`,
                 );
               }
-              // For a loop tick echo a stable label, never the bare sentinel or
-              // the full task dump; otherwise echo the prompt verbatim.
+              // For a loop tick echo a stable, relative label — never the bare
+              // sentinel, the full task dump, or the absolute sourcePath (which
+              // would leak the OS username / dir layout into the ACP client UI);
+              // otherwise echo the prompt verbatim.
               const echoText = loopTick
-                ? loopTick.sourcePath
-                  ? `Loop tick — tasks from ${loopTick.sourcePath}`
+                ? loopTick.sourceLabel
+                  ? `Loop tick — tasks from ${loopTick.sourceLabel}`
                   : 'Loop tick — loop.md not present'
                 : prompt;
 

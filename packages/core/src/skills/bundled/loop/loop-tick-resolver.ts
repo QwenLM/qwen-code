@@ -58,13 +58,21 @@ const TRUNCATION_WARNING = `> WARNING: loop.md was truncated to ${LOOP_TASK_FILE
 const INTRO =
   'The user configured a loop-tasks file. Work through the tasks defined below; these are the instructions for this tick and every subsequent tick (the reminder on later fires refers back to this message).';
 
-// Body of the unchanged-tick reminder — the H1 is supplied by tickHeading() so
-// the full block and the short reminder share exactly one heading style.
-const SHORT_REMINDER_BODY: Record<LoopMode, string> = {
-  cron: 'Work the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron fires the next tick automatically — do not call LoopWakeup from this tick.',
+// Mode-specific pacing guidance. Appended to BOTH the full block and the short
+// reminder — the no-op/re-arm instruction applies on every tick.
+const PACING_SUFFIX: Record<LoopMode, string> = {
+  cron: 'The recurring cron fires the next tick automatically — do not call LoopWakeup from this tick.',
   dynamic:
-    'Work the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. You scheduled this tick via LoopWakeup (not a recurring cron). To keep the loop alive, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
+    'You scheduled this tick via LoopWakeup (not a recurring cron). To keep the loop alive, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
 };
+
+// Preamble for the UNCHANGED-tick reminder, which points back to the full block
+// delivered on an earlier fire. NOT used on the first/changed full delivery,
+// where the block is present in THIS message — there is no "earlier" to refer
+// back to, so claiming the contents were established earlier would contradict
+// the INTRO that sits right above them.
+const SHORT_REMINDER_PREAMBLE =
+  'Work the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick.';
 
 /**
  * The single H1 for every tick variant (full block, short reminder, absent), so
@@ -117,6 +125,11 @@ export function detectLoopSentinel(prompt: string): LoopMode | null {
 /** Trim a truncated body back to its last full line before the warning tail. */
 function cutToLastNewline(content: string): string {
   const cut = content.lastIndexOf('\n');
+  // `> 0`, not `>= 0`: when the only newline is at index 0 (or there is none),
+  // there is no complete line to keep, so cutting would empty the body and leave
+  // the INTRO promising tasks that aren't there. Keep the (truncated) content
+  // instead — only a genuine trailing partial line (newline at index > 0) is
+  // dropped so the warning never glues onto a half-line.
   return cut > 0 ? content.slice(0, cut) : content;
 }
 
@@ -178,15 +191,18 @@ export class LoopTickResolver {
 
     if (this.#lastContent === content) {
       return {
-        modelText: `${tickHeading(mode)}\n${SHORT_REMINDER_BODY[mode]}`,
+        modelText: `${tickHeading(mode)}\n${SHORT_REMINDER_PREAMBLE} ${PACING_SUFFIX[mode]}`,
         full: false,
         sourcePath: result.path,
         sourceLabel,
       };
     }
 
+    // First/changed full delivery: INTRO + the block itself, then only the
+    // pacing suffix — no "established earlier" preamble, which would contradict
+    // the block sitting right here in this same message.
     return {
-      modelText: `${tickHeading(mode, { sourceLabel })}\n${INTRO}\n${content}\n${SHORT_REMINDER_BODY[mode]}`,
+      modelText: `${tickHeading(mode, { sourceLabel })}\n${INTRO}\n${content}\n${PACING_SUFFIX[mode]}`,
       full: true,
       sourcePath: result.path,
       sourceLabel,

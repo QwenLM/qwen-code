@@ -113,8 +113,12 @@ describe('LoopTickResolver', () => {
     expect(tick.modelText).not.toContain(projectFile());
     expect(tick.modelText).toContain('The user configured a loop-tasks file.');
     expect(tick.modelText).toContain('- ship the thing');
-    // The full block ends with the same short reminder an unchanged fire emits.
+    // The full block carries the mode-specific pacing suffix (dynamic re-arm)...
     expect(tick.modelText).toContain('(dynamic pacing)');
+    expect(tick.modelText).toContain('call LoopWakeup again');
+    // ...but NOT the "established earlier" reminder: the block is right here in
+    // this message, so that phrasing would contradict the INTRO above it.
+    expect(tick.modelText).not.toContain('established earlier');
     // Exactly one H1 in the whole message (no duplicated tick heading).
     expect(tick.modelText.match(/^# /gm)).toHaveLength(1);
   });
@@ -133,6 +137,9 @@ describe('LoopTickResolver', () => {
     expect(tick.modelText).not.toContain(
       'The user configured a loop-tasks file.',
     );
+    // A subsequent tick DOES point back to the earlier full block — that
+    // reminder semantics is intact (only the first delivery omits it).
+    expect(tick.modelText).toContain('established earlier');
     expect(tick.modelText).toContain(
       '# /loop tick — loop.md tasks (dynamic pacing)',
     );
@@ -283,6 +290,28 @@ describe('LoopTickResolver', () => {
     expect(beforeWarning.endsWith('task line padding padding padding')).toBe(
       true,
     );
+  });
+
+  it('keeps the body when the only newline is at index 0 (no empty truncated block)', async () => {
+    // A truncated file whose only newline is the leading byte: there is no
+    // complete line to keep, so cutting to the "last full line" would empty the
+    // body and leave the INTRO promising tasks that aren't there. The body must
+    // survive — guards cutToLastNewline against a `cut >= 0` regression that
+    // slices a position-0 newline down to "".
+    await writeProject('\n' + 'x'.repeat(LOOP_TASK_FILE_MAX_BYTES + 100));
+
+    const tick = await resolver.resolve('cron');
+
+    expect(tick.full).toBe(true);
+    const warning = `> WARNING: loop.md was truncated to ${LOOP_TASK_FILE_MAX_BYTES} bytes. Keep the task list concise.`;
+    expect(tick.modelText).toContain(`\n${warning}`);
+    // The x-run above the warning is non-empty; a `cut >= 0` regression would
+    // empty it, leaving only INTRO + warning.
+    const beforeWarning = tick.modelText.slice(
+      0,
+      tick.modelText.indexOf(`\n${warning}`),
+    );
+    expect(beforeWarning).toContain('xxxxxxxxxx');
   });
 
   it('names the home loop.md in the header and re-expands when the source switches', async () => {

@@ -47,24 +47,39 @@ export interface ReadLoopTaskFileOptions {
 }
 
 /**
- * Canonical `fs.realpath(projectRoot)` cache — the workspace-confinement
- * boundary for the project loop.md. It is stable for the process, so resolve it
- * once per root instead of every tick. Keyed by the TRUSTED projectRoot and
- * never accepted from a caller, so an external caller of this re-exported
- * function can't widen the boundary with a stale/broader path.
+ * `fs.realpath(dir)` cache for the two confinement boundaries — the workspace
+ * root and the home dir. Each is stable for the process, so resolve it once per
+ * dir instead of every tick. Keyed by the TRUSTED dir the caller passes (never a
+ * path derived from file contents), so an external caller of this re-exported
+ * function can't widen a boundary with a stale/broader path.
  */
-const realProjectRootCache = new Map<string, Promise<string>>();
+const realDirCache = new Map<string, Promise<string>>();
 
-function resolveRealProjectRoot(projectRoot: string): Promise<string> {
-  let real = realProjectRootCache.get(projectRoot);
+function resolveRealDir(dir: string): Promise<string> {
+  let real = realDirCache.get(dir);
   if (real === undefined) {
-    real = fs.realpath(projectRoot);
+    real = fs.realpath(dir);
     // Don't pin a rejection: a transient failure (EACCES, ENOENT) must be
     // retried next tick rather than cached, preserving per-tick error semantics.
-    real.catch(() => realProjectRootCache.delete(projectRoot));
-    realProjectRootCache.set(projectRoot, real);
+    real.catch(() => realDirCache.delete(dir));
+    realDirCache.set(dir, real);
   }
   return real;
+}
+
+/**
+ * True when `real` is `root` itself or a descendant of it — the prefix
+ * confinement shared by the project and home candidates. The separator isn't
+ * double-appended: at a filesystem root `root` is already `/` (or `C:\`), so
+ * `root + path.sep` would be `//` / `C:\\`, which no descendant startsWith,
+ * wrongly refusing everything — so `real === root` is allowed too.
+ */
+function isWithin(root: string, real: string): boolean {
+  if (real === root) {
+    return true;
+  }
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  return real.startsWith(prefix);
 }
 
 /**
@@ -122,7 +137,8 @@ async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
  *
  * Home candidate: the user's own dotfile, so a symlink IS followed (a common,
  * legitimate setup — e.g. into a synced dotfiles repo), but the resolved target
- * must be a regular file so a FIFO/device/dir can't hang the tick or be decoded.
+ * must be a regular file AND stay within $HOME so a FIFO/device/dir can't hang
+ * the tick and an escaping symlink (e.g. `-> /etc/passwd`) can't be exfiltrated.
  */
 export async function readLoopTaskFile({
   projectRoot,
@@ -171,16 +187,9 @@ export async function readLoopTaskFile({
         // A final-component lstat can't see an ANCESTOR symlink (e.g. a
         // checked-in `.qwen -> /outside`); realpath resolves it, so confine the
         // canonical path to the workspace root before reading.
-        const realRoot = await resolveRealProjectRoot(projectRoot);
+        const realRoot = await resolveRealDir(projectRoot);
         const real = await fs.realpath(filePath);
-        // Don't double-append the separator: at a filesystem root realRoot is
-        // already `/` (or `C:\`), so `realRoot + path.sep` would be `//` / `C:\\`
-        // — which no descendant startsWith, wrongly refusing every project
-        // loop.md when the CLI runs from the root. Allow real === realRoot too.
-        const prefix = realRoot.endsWith(path.sep)
-          ? realRoot
-          : realRoot + path.sep;
-        if (real !== realRoot && !real.startsWith(prefix)) {
+        if (!isWithin(realRoot, real)) {
           debugLogger.debug(
             'skipping project loop.md that escapes the workspace',
             {
@@ -201,14 +210,36 @@ export async function readLoopTaskFile({
           debugLogger.debug('skipping non-regular home loop.md', { filePath });
           continue;
         }
-        buffer = await readBoundedTaskFile(filePath);
+        // A home symlink IS followed, but its target must stay WITHIN $HOME:
+        // otherwise `~/.qwen/loop.md -> /etc/passwd` (or `-> /dev/...`) would be
+        // read and fed to the model every tick. In-home dotfile symlinks (e.g.
+        // `-> ~/dotfiles/loop.md`) still resolve inside $HOME and are allowed.
+        const realHome = await resolveRealDir(homeDir);
+        const real = await fs.realpath(filePath);
+        if (!isWithin(realHome, real)) {
+          debugLogger.debug(
+            'skipping home loop.md that escapes the home directory',
+            { filePath, resolved: real },
+          );
+          continue;
+        }
+        buffer = await readBoundedTaskFile(real);
       }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      // Absent (ENOENT), a directory (EISDIR), or a non-directory path component
-      // (ENOTDIR, e.g. a stray file where `.qwen` should be) → try the next
-      // candidate. Anything else (permissions, I/O) is a real error and surfaces.
-      if (code === 'ENOENT' || code === 'EISDIR' || code === 'ENOTDIR') {
+      // None of these name a readable loop.md, so try the next candidate:
+      // absent (ENOENT), a directory (EISDIR), a non-directory path component
+      // (ENOTDIR, e.g. a stray file where `.qwen` should be), a symlink loop
+      // (ELOOP, e.g. a self-referential `~/.qwen/loop.md`), or an over-long path
+      // (ENAMETOOLONG). Anything else (EACCES permissions, real I/O) surfaces
+      // rather than being silently swallowed.
+      if (
+        code === 'ENOENT' ||
+        code === 'EISDIR' ||
+        code === 'ENOTDIR' ||
+        code === 'ELOOP' ||
+        code === 'ENAMETOOLONG'
+      ) {
         continue;
       }
       throw error;

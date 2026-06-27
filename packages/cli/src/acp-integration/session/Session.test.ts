@@ -4481,7 +4481,8 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'hello' }],
           });
 
-          // The client sees a stable label, never the raw sentinel.
+          // The client sees a stable RELATIVE label, never the raw sentinel or
+          // the absolute path (which would leak the OS username / dir layout).
           await vi.waitFor(() => {
             expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
               sessionId: 'test-session-id',
@@ -4489,12 +4490,21 @@ describe('Session', () => {
                 sessionUpdate: 'user_message_chunk',
                 content: {
                   type: 'text',
-                  text: `Loop tick — tasks from ${loopMdPath}`,
+                  text: 'Loop tick — tasks from project loop.md',
                 },
                 _meta: { source: 'loop' },
               },
             });
           });
+          // The absolute loop.md path must not appear in any client echo.
+          for (const call of (
+            mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+          ).mock.calls) {
+            const text = call[0]?.update?.content?.text;
+            if (typeof text === 'string') {
+              expect(text).not.toContain(loopMdPath);
+            }
+          }
 
           // The model receives the expanded full task block, not the sentinel.
           let block = '';
@@ -4710,6 +4720,94 @@ describe('Session', () => {
           expect(sentToModel()).toContain('do the normal cron thing');
         });
         expect(sentToModel()).not.toContain('# /loop tick');
+      });
+
+      it('re-expands the full loop.md block after an auto-compaction resets the resolver cache', async () => {
+        // LoopTickResolver.resetCache() is unit-tested in isolation; this pins
+        // the Session-level wiring: an auto-compaction in the send path
+        // (#sendMessageStreamWithAutoCompression) must reset the resolver so the
+        // next unchanged tick re-delivers the FULL block (a short reminder would
+        // point back to a task block compaction just evicted from context).
+        //
+        // Three unchanged ticks: tick1 full (committed), tick2 would normally be
+        // a short reminder but COMPACTS mid-send, tick3 re-expands FULL purely
+        // because tick2's compaction reset the cache. The INTRO line therefore
+        // appears in exactly the two full deliveries (tick1 + tick3); without
+        // the reset it would appear only once.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-compact-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- stable task list');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+
+        // Compress on the SECOND cron tick only — keyed on the cron promptId so
+        // the user 'hello' prompt's compression check stays a no-op.
+        let cronCompressions = 0;
+        mockGeminiClient.tryCompressChat = vi
+          .fn()
+          .mockImplementation(async (promptId: string) => {
+            const isCron = String(promptId).includes('cron');
+            if (isCron) cronCompressions++;
+            const compressed = isCron && cronCompressions === 2;
+            return {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              compressionStatus: compressed
+                ? core.CompressionStatus.COMPRESSED
+                : core.CompressionStatus.NOOP,
+            };
+          });
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              // Three ticks of the same sentinel; the cron queue drains them
+              // serially against the one persistent resolver.
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const fullDeliveries = () =>
+            (
+              mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+            ).mock.calls.filter((c) =>
+              (Array.isArray(c[1]?.message) ? c[1].message : [])
+                .map((p: { text?: string }) => p.text ?? '')
+                .join('')
+                .includes('The user configured a loop-tasks file.'),
+            ).length;
+
+          // tick1 + tick3 re-expand; tick2 is the (compacting) short reminder.
+          await vi.waitFor(() => {
+            expect(fullDeliveries()).toBe(2);
+          });
+          // The compaction actually fired on a cron tick (sanity-check the setup).
+          expect(cronCompressions).toBeGreaterThanOrEqual(2);
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true });
+        }
       });
 
       it('stops cron-fired ACP prompt before sending when the session token limit is exceeded', async () => {

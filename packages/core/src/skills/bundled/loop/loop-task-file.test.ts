@@ -257,11 +257,13 @@ describe('readLoopTaskFile', () => {
     }
   });
 
-  it('reads a home loop.md that is a symlink to a real regular file', async () => {
+  it('reads a home loop.md that is a symlink to a real regular file inside $HOME', async () => {
     // The user's own dotfile may legitimately be a symlink (e.g. into a synced
-    // dotfiles repo). Follow it, as long as the target is a real regular file.
+    // dotfiles repo). Follow it, as long as the target is a real regular file
+    // that resolves WITHIN $HOME (the confinement added for escapes).
     await fs.mkdir(path.join(homeDir, '.qwen'), { recursive: true });
-    const target = path.join(tempDir, 'dotfiles-loop.md');
+    const target = path.join(homeDir, 'dotfiles', 'loop.md');
+    await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, 'symlinked user tasks');
     await fs.symlink(target, path.join(homeDir, '.qwen', 'loop.md'));
 
@@ -278,6 +280,85 @@ describe('readLoopTaskFile', () => {
       content: 'symlinked user tasks',
       truncated: false,
     });
+  });
+
+  it('skips a home loop.md whose symlink target escapes $HOME', async () => {
+    // Home symlinks are allowed (dotfiles repos), but only if they resolve
+    // WITHIN $HOME. A `~/.qwen/loop.md -> /etc/passwd`-style escape (here a
+    // sibling outside homeDir) must be skipped, not read and fed to the model.
+    await fs.mkdir(path.join(homeDir, '.qwen'), { recursive: true });
+    const outside = path.join(tempDir, 'outside-secret');
+    await fs.writeFile(outside, 'SECRET=should-not-be-read');
+    await fs.symlink(outside, path.join(homeDir, '.qwen', 'loop.md'));
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result).toEqual({
+      status: 'missing',
+      checkedPaths: [
+        path.join(projectRoot, '.qwen', 'loop.md'),
+        path.join(homeDir, '.qwen', 'loop.md'),
+      ],
+    });
+  });
+
+  it('skips a home loop.md that is a self-referential symlink (ELOOP) instead of throwing', async () => {
+    // fs.stat follows the home symlink; a self-referential link raises ELOOP.
+    // That must be treated as a skippable candidate (→ missing), not crash the
+    // tick — without ELOOP in the skip whitelist this rethrows and aborts.
+    await fs.mkdir(path.join(homeDir, '.qwen'), { recursive: true });
+    const loop = path.join(homeDir, '.qwen', 'loop.md');
+    await fs.symlink(loop, loop); // points at itself → ELOOP on stat
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result).toEqual({
+      status: 'missing',
+      checkedPaths: [path.join(projectRoot, '.qwen', 'loop.md'), loop],
+    });
+  });
+
+  it('skips a home loop.md that resolves to a non-regular file (directory/FIFO)', async () => {
+    // The home candidate follows symlinks via fs.stat; if the (possibly
+    // symlinked) target is a directory/FIFO it must be skipped — the project
+    // path proves this via lstat, but the home path's fs.stat needs its own
+    // coverage so a blocking open / directory read never happens.
+    const homeLoop = path.join(homeDir, '.qwen', 'loop.md');
+    await fs.mkdir(path.dirname(homeLoop), { recursive: true });
+    await fs.writeFile(homeLoop, '- user tasks'); // real file so realpath resolves
+    const actual =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    const dirStat = {
+      isFile: () => false,
+      isDirectory: () => true,
+    } as unknown as Awaited<ReturnType<typeof fs.stat>>;
+    vi.spyOn(fs, 'stat').mockImplementation(async (p) =>
+      String(p) === homeLoop ? dirStat : actual.stat(p as string),
+    );
+    const openSpy = vi.mocked(fs.open);
+    openSpy.mockClear();
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result.status).toBe('missing');
+    // The non-regular guard fired before any open() on the home path.
+    for (const call of openSpy.mock.calls) {
+      expect(String(call[0])).not.toBe(homeLoop);
+    }
   });
 
   it('defaults to fail-secure: omitting allowProjectFile skips the project file', async () => {
