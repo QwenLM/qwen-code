@@ -121,6 +121,70 @@ describe('CdpReverseLink (Plan C #5626)', () => {
     }
   });
 
+  it('forwardToTab waits for the attach gate before sending a command', async () => {
+    const { link, sent } = setup();
+    // Open the gate with an in-flight attach (no cdp_attached ack yet).
+    const attachP = link.attach();
+    const attachId = (sent[0] as { id: number }).id;
+
+    // A command issued while the gate is closed must NOT reach the extension
+    // yet — it parks behind the attach so it can't race chrome.debugger.attach.
+    const cmdP = link.forwardToTab('Runtime.evaluate', { expression: '1' });
+    await Promise.resolve();
+    expect(sent.some((f) => f.type === 'cdp_command')).toBe(false);
+
+    // Settle the attach → gate opens → the parked command now sends.
+    link.handleInbound({ type: 'cdp_attached', id: attachId });
+    await attachP;
+    await Promise.resolve();
+    const cmd = sent.find((f) => f.type === 'cdp_command');
+    expect(cmd).toMatchObject({ method: 'Runtime.evaluate' });
+
+    const cmdId = (cmd as { id: number }).id;
+    link.handleInbound({ type: 'cdp_result', id: cmdId, result: { ok: true } });
+    await expect(cmdP).resolves.toEqual({ ok: true });
+  });
+
+  it('attach rejects when its cdp_attach timer expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: CdpOutboundFrame[] = [];
+      const link = new CdpReverseLink((f) => sent.push(f), 50);
+      const p = link.attach();
+      let err: unknown;
+      p.catch((e) => {
+        err = e;
+      });
+      expect(sent[0]).toMatchObject({ type: 'cdp_attach' });
+
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(err).toMatchObject({ code: -32000 });
+      expect((err as { message: string }).message).toContain('timed out');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('opens the gate after an attach timeout so forwardToTab does not hang', async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: CdpOutboundFrame[] = [];
+      const link = new CdpReverseLink((f) => sent.push(f), 50);
+      link.attach().catch(() => undefined); // times out below
+      // Command parked behind the (failing) attach gate.
+      const cmdP = link.forwardToTab('Runtime.evaluate', undefined);
+      cmdP.catch(() => undefined);
+
+      // Attach timer fires → attach settles (failure) → gate opens → the parked
+      // command is sent rather than hanging forever.
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sent.some((f) => f.type === 'cdp_command')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('isCdpInboundFrameType recognizes extension->daemon frames only', () => {
     expect(isCdpInboundFrameType('cdp_result')).toBe(true);
     expect(isCdpInboundFrameType('cdp_event')).toBe(true);

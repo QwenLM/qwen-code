@@ -1953,10 +1953,19 @@ export async function loadCliConfig(
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through chrome-devtools-mcp (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.
-    computerUseEnabled:
-      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1'
-        ? false
-        : (settings.tools?.computerUse?.enabled ?? true),
+    computerUseEnabled: (() => {
+      const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
+      // Surface the override when it contradicts an explicit opt-in, so the
+      // effective config isn't a silent surprise during debugging.
+      if (tunnelOn && settings.tools?.computerUse?.enabled === true) {
+        writeStderrLine(
+          'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
+            'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
+            'through chrome-devtools-mcp, so computer-use stays disabled.',
+        );
+      }
+      return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);
+    })(),
     computerUseMaxImageDimension:
       settings.tools?.computerUse?.maxImageDimension,
     computerUseIdleTimeoutMs: settings.tools?.computerUse?.idleTimeoutMs,

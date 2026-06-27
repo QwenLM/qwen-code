@@ -276,6 +276,10 @@ export class ClientMcpWsConnection {
         // Best-effort teardown — the registrar already rejected pending.
       }
     }
+    // Idempotent on purpose: report `unregistered` whether or not the server
+    // was actually registered on this connection. The post-condition (server
+    // not registered here) holds either way, and a duplicate/retried unregister
+    // must not surface as an error — the WS client only needs to know it's gone.
     return { kind: 'unregistered', server };
   }
 
