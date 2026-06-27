@@ -135,7 +135,7 @@ The SDK supports different permission modes for controlling tool execution:
 
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
-- **`auto-edit`**: Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+- **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Transport Options
@@ -203,7 +203,7 @@ The `SessionEventConsumers` interface provides callbacks for different types of 
 The `AssistantContentConsumers` interface handles different types of content within assistant messages:
 
 - `onText`: Handles text content (receives Session and TextAssistantContent)
-- `onThinking`: Handles thinking content (receives Session and ThingkingAssistantContent)
+- `onThinking`: Handles thinking content (receives Session and ThinkingAssistantContent)
 - `onToolUse`: Handles tool use content (receives Session and ToolUseAssistantContent)
 - `onToolResult`: Handles tool result content (receives Session and ToolResultAssistantContent)
 - `onOtherContent`: Handles other content types (receives Session and AssistantContent)

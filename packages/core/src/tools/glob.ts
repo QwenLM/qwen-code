@@ -10,7 +10,12 @@ import { glob, escape } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { resolveAndValidatePath, isSubpath } from '../utils/paths.js';
+import {
+  resolveAndValidatePath,
+  resolvePath,
+  isSubpath,
+  unescapePath,
+} from '../utils/paths.js';
 import { getMemoryBaseDir } from '../memory/paths.js';
 import { type Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -110,7 +115,7 @@ class GlobToolInvocation extends BaseToolInvocation<
       return 'allow'; // Default workspace directory
     }
     const workspaceContext = this.config.getWorkspaceContext();
-    const resolvedPath = path.resolve(
+    const resolvedPath = resolvePath(
       this.config.getTargetDir(),
       this.params.path,
     );
@@ -272,6 +277,7 @@ class GlobToolInvocation extends BaseToolInvocation<
       return {
         llmContent: resultMessage,
         returnDisplay: `Found ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        resultFilePaths: sortedAbsolutePaths,
       };
     } catch (error) {
       const errorMessage =
@@ -298,6 +304,9 @@ class GlobToolInvocation extends BaseToolInvocation<
       respectQwenIgnore:
         options?.respectQwenIgnore ??
         DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore,
+      customIgnoreFiles:
+        options?.customIgnoreFiles ??
+        DEFAULT_FILE_FILTERING_OPTIONS.customIgnoreFiles,
     };
   }
 }
@@ -348,6 +357,7 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
 
     // Only validate path if one is provided
     if (params.path) {
+      params.path = unescapePath(params.path.trim());
       try {
         resolveAndValidatePath(this.config, params.path, {
           allowExternalPaths: true,

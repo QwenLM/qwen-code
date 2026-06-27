@@ -654,6 +654,64 @@ describe('HookRegistry', () => {
 
       expect(registry.getAllHooks()).toHaveLength(2);
     });
+
+    it('should distinguish unnamed prompt hooks with same prefix but different content', async () => {
+      // Two prompt hooks without name that share the same first 30 chars
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Prompt,
+                prompt:
+                  'This is a very long prompt that exceeds thirty characters and has ending A',
+              },
+              {
+                type: HookType.Prompt,
+                prompt:
+                  'This is a very long prompt that exceeds thirty characters and has ending B',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      // Both hooks should be registered (not treated as duplicates)
+      const hooks = registry.getAllHooks();
+      expect(hooks).toHaveLength(2);
+      expect(hooks[0].config.type).toBe(HookType.Prompt);
+      expect(hooks[1].config.type).toBe(HookType.Prompt);
+    });
+
+    it('should skip truly duplicate unnamed prompt hooks with identical prompt', async () => {
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Prompt,
+                prompt: 'This is a test prompt',
+              },
+              {
+                type: HookType.Prompt,
+                prompt: 'This is a test prompt',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      // Only one hook should be registered (true duplicate)
+      expect(registry.getAllHooks()).toHaveLength(1);
+    });
   });
 
   describe('extension hooks', () => {
@@ -813,6 +871,117 @@ describe('HookRegistry', () => {
       expect((hooks[0].config as { source?: unknown }).source).toBe(
         HooksConfigSource.User,
       );
+    });
+  });
+
+  describe('addAgentHooks — per-agent frontmatter ephemeral entries', () => {
+    it('appends entries tagged with agentScope and returns an unregister callback', async () => {
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      expect(registry.getAllHooks()).toHaveLength(0);
+
+      const unregister = registry.addAgentHooks(
+        {
+          [HookEventName.PreToolUse]: [
+            {
+              matcher: 'Bash',
+              hooks: [
+                {
+                  type: HookType.Command,
+                  command: 'echo per-agent',
+                  name: 'agent-hook',
+                },
+              ],
+            },
+          ],
+        },
+        'agent:test:abc',
+      );
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect(after[0].source).toBe(HooksConfigSource.Session);
+      expect(after[0].agentScope).toBe('agent:test:abc');
+
+      unregister();
+      expect(registry.getAllHooks()).toHaveLength(0);
+    });
+
+    it('coexists with session/user hooks of the same identity', async () => {
+      const userHooks: Parameters<HookRegistry['addAgentHooks']>[0] = {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              { type: HookType.Command, command: 'echo same', name: 'shared' },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      expect(registry.getAllHooks()).toHaveLength(1);
+
+      // Same identity, different source path (Session + agentScope) — must
+      // NOT be deduped against the user-source entry.
+      registry.addAgentHooks(userHooks, 'agent:test:def');
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(2);
+      // Assert the scope tag itself participates in the dedup key, not just
+      // the count. A regression that drops `agentScope` from the dedup
+      // check would still produce 2 entries by ordering luck — this
+      // assertion catches that.
+      expect(
+        after.some(
+          (e) =>
+            e.source === HooksConfigSource.User && e.agentScope === undefined,
+        ),
+      ).toBe(true);
+      expect(
+        after.some(
+          (e) =>
+            e.source === HooksConfigSource.Session &&
+            e.agentScope === 'agent:test:def',
+        ),
+      ).toBe(true);
+    });
+
+    it('two concurrent agents each keep their own copy of an identical hook', async () => {
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      const sameHooks: Parameters<HookRegistry['addAgentHooks']>[0] = {
+        [HookEventName.PostToolUse]: [
+          {
+            hooks: [
+              { type: HookType.Command, command: 'echo done', name: 'h' },
+            ],
+          },
+        ],
+      };
+
+      const u1 = registry.addAgentHooks(sameHooks, 'agent:a:1');
+      const u2 = registry.addAgentHooks(sameHooks, 'agent:b:2');
+
+      expect(registry.getAllHooks()).toHaveLength(2);
+      u1();
+      const remaining = registry.getAllHooks();
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].agentScope).toBe('agent:b:2');
+      u2();
+      expect(registry.getAllHooks()).toHaveLength(0);
+    });
+
+    it('silently keeps entries when the hooks payload is empty', async () => {
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      const unregister = registry.addAgentHooks({}, 'agent:empty:0');
+      expect(registry.getAllHooks()).toHaveLength(0);
+      // No-op unregister should not throw
+      unregister();
+      expect(registry.getAllHooks()).toHaveLength(0);
     });
   });
 

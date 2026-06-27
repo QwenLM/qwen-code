@@ -15,6 +15,7 @@ import {
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Storage } from '../config/storage.js';
+import { getTraceContext } from '../telemetry/trace-context.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -31,6 +32,10 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+vi.mock('../telemetry/trace-context.js', () => ({
+  getTraceContext: vi.fn().mockReturnValue(null),
+}));
+
 describe('debugLogger', () => {
   const mockSession: DebugLogSession = {
     getSessionId: () => 'test-session-123',
@@ -46,6 +51,7 @@ describe('debugLogger', () => {
     vi.setSystemTime(new Date('2026-01-24T10:30:00.000Z'));
     resetDebugLoggingState();
     setDebugLogSession(mockSession);
+    vi.mocked(getTraceContext).mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -63,7 +69,6 @@ describe('debugLogger', () => {
     it('returns no-op logger when session is unset', () => {
       setDebugLogSession(null);
       const logger = createDebugLogger();
-      // Should not throw
       logger.debug('test');
       logger.info('test');
       logger.warn('test');
@@ -71,7 +76,7 @@ describe('debugLogger', () => {
       expect(fs.appendFile).not.toHaveBeenCalled();
     });
 
-    it('writes debug log with correct format', async () => {
+    it('writes debug log without trace context when telemetry context is unset', async () => {
       const logger = createDebugLogger();
       logger.debug('Hello world');
 
@@ -115,6 +120,77 @@ describe('debugLogger', () => {
       expect(calls[1]?.[1]).toContain('[INFO]');
       expect(calls[2]?.[1]).toContain('[WARN]');
       expect(calls[3]?.[1]).toContain('[ERROR]');
+    });
+
+    it('uses trace context when getTraceContext returns a context', async () => {
+      vi.mocked(getTraceContext).mockReturnValue({
+        traceId: 'realtraceidddddddddddddddddddddd',
+        spanId: 'realspanid111111',
+        traceFlags: 1,
+      });
+
+      const logger = createDebugLogger();
+      logger.debug('with real span');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining(
+          '[trace_id=realtraceidddddddddddddddddddddd span_id=realspanid111111]',
+        ),
+        'utf8',
+      );
+    });
+
+    it('omits trace context when getTraceContext returns null', async () => {
+      vi.mocked(getTraceContext).mockReturnValue(null);
+
+      const logger = createDebugLogger();
+      logger.debug('no trace context');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.not.stringContaining('trace_id='),
+        'utf8',
+      );
+    });
+
+    it('does not synthesize span ids when telemetry context is unset', async () => {
+      const logger = createDebugLogger();
+      logger.debug('first line');
+      logger.debug('second line');
+
+      await vi.runAllTimersAsync();
+
+      const calls = vi.mocked(fs.appendFile).mock.calls;
+      expect(calls).toHaveLength(2);
+
+      expect(calls[0]?.[1]).not.toContain('span_id=');
+      expect(calls[1]?.[1]).not.toContain('span_id=');
+    });
+
+    it('uses the session root span context for fallback trace context', async () => {
+      vi.mocked(getTraceContext).mockReturnValue({
+        traceId: 'cccccccccccccccccccccccccccccccc',
+        spanId: 'dddddddddddddddd',
+        traceFlags: 1,
+      });
+
+      const logger = createDebugLogger();
+      logger.debug('session root fallback');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining(
+          '[trace_id=cccccccccccccccccccccccccccccccc span_id=dddddddddddddddd]',
+        ),
+        'utf8',
+      );
     });
 
     it('creates a new debug directory after the runtime base dir changes', async () => {
@@ -214,12 +290,10 @@ describe('debugLogger', () => {
 
       expect(isDebugLoggingDegraded()).toBe(true);
 
-      // Reset mock to succeed
       vi.mocked(fs.appendFile).mockResolvedValue(undefined);
       logger.debug('second write succeeds');
       await vi.runAllTimersAsync();
 
-      // Should still be degraded
       expect(isDebugLoggingDegraded()).toBe(true);
     });
   });

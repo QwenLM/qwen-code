@@ -30,6 +30,7 @@ import {
   EVENT_CHAT_COMPRESSION,
   EVENT_CONTENT_RETRY,
   EVENT_CONTENT_RETRY_FAILURE,
+  EVENT_API_RETRY,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
   EVENT_EXTENSION_INSTALL,
@@ -47,6 +48,8 @@ import {
   EVENT_ARENA_SESSION_ENDED,
   EVENT_PROMPT_SUGGESTION,
   EVENT_SPECULATION,
+  EVENT_WORKFLOW_KEYWORD,
+  EVENT_WORKFLOW_RUN,
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
@@ -57,6 +60,7 @@ import {
   recordChatCompressionMetrics,
   recordContentRetry,
   recordContentRetryFailure,
+  recordApiRetry,
   recordFileOperationMetric,
   recordInvalidChunk,
   recordModelSlashCommand,
@@ -93,6 +97,7 @@ import type {
   ChatCompressionEvent,
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ApiRetryEvent,
   RipgrepFallbackEvent,
   ToolOutputTruncatedEvent,
   ExtensionDisableEvent,
@@ -112,6 +117,8 @@ import type {
   ArenaSessionEndedEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
+  WorkflowKeywordEvent,
+  WorkflowRunEvent,
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
@@ -119,6 +126,7 @@ import type {
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
+import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -223,7 +231,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     'event.name': EVENT_TOOL_CALL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
@@ -393,7 +401,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
@@ -436,7 +444,7 @@ export function logApiCancel(config: Config, event: ApiCancelEvent): void {
     'event.name': EVENT_API_CANCEL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   QwenLogger.getInstance(config)?.logApiCancelEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -462,8 +470,11 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
+    if (config.getUsageStatisticsEnabled()) {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+    }
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
@@ -508,10 +519,6 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
   recordTokenUsageMetrics(config, event.thoughts_token_count, {
     model: event.model,
     type: 'thought',
-  });
-  recordTokenUsageMetrics(config, event.tool_token_count, {
-    model: event.model,
-    type: 'tool',
   });
 }
 
@@ -760,6 +767,38 @@ export function logContentRetryFailure(
   recordContentRetryFailure(config);
 }
 
+/**
+ * Phase 4b — Emits an HTTP-status retry event fired from `retryWithBackoff`
+ * at an LLM call site (via the `onRetry` callback opt-in). Distinct from
+ * `logContentRetry`, which is fired by `geminiChat`'s content-recovery loop.
+ *
+ * Three-sink fan-out, matching the `logContentRetry` shape exactly:
+ *   1. QwenLogger RUM ingestion (Aliyun internal stats)
+ *   2. OTel log signal via `logger.emit()` — picked up by LogToSpanProcessor
+ *      and bridged to a span sibling under the caller's active span (typically
+ *      interaction or tool, NOT the failed LLM span — that span has already
+ *      ended by the time onRetry fires).
+ *   3. `recordApiRetry` Counter increment for per-model retry-rate dashboards.
+ */
+export function logApiRetry(config: Config, event: ApiRetryEvent): void {
+  QwenLogger.getInstance(config)?.logApiRetryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_API_RETRY,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `API retry attempt ${event.attempt_number} for ${event.model} (status ${event.status_code ?? 'unknown'}).`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordApiRetry(config, { model: event.model });
+}
+
 export function logSubagentExecution(
   config: Config,
   event: SubagentExecutionEvent,
@@ -960,6 +999,7 @@ export function logAuth(config: Config, event: AuthEvent): void {
 }
 
 export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
+  QwenLogger.getInstance(config)?.logSkillLaunchEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -977,6 +1017,17 @@ export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
   logger.emit(logRecord);
 }
 
+export function recordSkillInvocation(
+  config: Config,
+  event: { skillName: string; success: boolean },
+): void {
+  uiTelemetryService.recordSkillInvocation(
+    event.skillName,
+    event.success,
+    config.getSessionId(),
+  );
+}
+
 export function logUserFeedback(
   config: Config,
   event: UserFeedbackEvent,
@@ -986,7 +1037,7 @@ export function logUserFeedback(
     'event.name': EVENT_USER_FEEDBACK,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   QwenLogger.getInstance(config)?.logUserFeedbackEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -1108,6 +1159,9 @@ export function logPromptSuggestion(
   if (event.accept_method) {
     attributes['accept_method'] = event.accept_method;
   }
+  if (event.accept_source) {
+    attributes['accept_source'] = event.accept_source;
+  }
   if (event.time_to_accept_ms !== undefined) {
     attributes['time_to_accept_ms'] = event.time_to_accept_ms;
   }
@@ -1163,6 +1217,39 @@ export function logSpeculation(config: Config, event: SpeculationEvent): void {
     attributes,
   };
   logger.emit(logRecord);
+}
+
+// ─── Workflow Log Functions (#4721) ──────────────────────────────────────────
+
+export function logWorkflowKeyword(
+  config: Config,
+  event: WorkflowKeywordEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_KEYWORD,
+    'event.timestamp': event['event.timestamp'],
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({ body: 'Workflow keyword trigger fired.', attributes });
+}
+
+export function logWorkflowRun(config: Config, event: WorkflowRunEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_RUN,
+    'event.timestamp': event['event.timestamp'],
+    status: event.status,
+    agents_dispatched: event.agents_dispatched,
+    agents_completed: event.agents_completed,
+    phase_count: event.phase_count,
+    tokens_spent: event.tokens_spent,
+    duration_ms: event.duration_ms,
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({ body: `Workflow run ${event.status}.`, attributes });
 }
 
 // ─── Auto-Memory Log Functions ───────────────────────────────────────────────

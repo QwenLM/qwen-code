@@ -5,10 +5,7 @@
  */
 
 import * as vscode from 'vscode';
-import type {
-  File,
-  IdeContext,
-} from '@qwen-code/qwen-code-core/src/ide/types.js';
+import type { File, IdeContext } from '@qwen-code/qwen-code-core';
 import {
   isFileUri,
   isNotebookFileUri,

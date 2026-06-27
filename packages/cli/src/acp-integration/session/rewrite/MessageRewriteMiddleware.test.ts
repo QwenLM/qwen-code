@@ -202,5 +202,149 @@ describe('MessageRewriteMiddleware', () => {
       expect(meta['rewritten']).toBe(true);
       expect(meta['turnIndex']).toBe(1);
     });
+
+    it('preserves background discrete metadata on rewritten messages', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware('message');
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'background response' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'monitor-1',
+            status: 'completed',
+            kind: 'monitor',
+            toolUseId: 'tool-1',
+          },
+          customTraceId: 'trace-1',
+        },
+      } as unknown as SessionUpdate);
+
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      const rewriteCall = mockSendUpdate.mock.calls.find(
+        (call: unknown[]) =>
+          (
+            (call[0] as Record<string, unknown>)['_meta'] as
+              | Record<string, unknown>
+              | undefined
+          )?.['rewritten'] === true,
+      );
+      expect(rewriteCall).toBeDefined();
+      expect((rewriteCall![0] as Record<string, unknown>)['_meta']).toEqual({
+        source: 'background_notification_response',
+        qwenDiscreteMessage: true,
+        backgroundTask: {
+          taskId: 'monitor-1',
+          status: 'completed',
+          kind: 'monitor',
+          toolUseId: 'tool-1',
+        },
+        customTraceId: 'trace-1',
+        rewritten: true,
+        turnIndex: 1,
+      });
+    });
+  });
+
+  describe('timeoutMs config', () => {
+    it('should use configured timeoutMs for the rewrite abort signal', async () => {
+      vi.useFakeTimers();
+      try {
+        const capturedSignals: AbortSignal[] = [];
+        const { LlmRewriter } = await import('./LlmRewriter.js');
+        (
+          LlmRewriter as unknown as {
+            mockImplementation: (fn: unknown) => void;
+          }
+        ).mockImplementation(() => ({
+          rewrite: vi.fn((_content: unknown, signal: AbortSignal) => {
+            capturedSignals.push(signal);
+            return new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () =>
+                reject(new Error('aborted')),
+              );
+            });
+          }),
+        }));
+
+        const mockSendUpdate = vi.fn().mockResolvedValue(undefined);
+        const middleware = new MessageRewriteMiddleware(
+          {} as Config,
+          {
+            enabled: true,
+            target: 'all',
+            prompt: 'test prompt',
+            timeoutMs: 5_000,
+          },
+          mockSendUpdate,
+        );
+
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'content' },
+        } as unknown as SessionUpdate);
+        await middleware.flushTurn();
+
+        expect(capturedSignals).toHaveLength(1);
+        expect(capturedSignals[0].aborted).toBe(false);
+
+        // Advance past the configured 5s timeout
+        await vi.advanceTimersByTimeAsync(5_100);
+        expect(capturedSignals[0].aborted).toBe(true);
+
+        await middleware.waitForPendingRewrites();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should default to 30s when timeoutMs is not provided', async () => {
+      vi.useFakeTimers();
+      try {
+        const capturedSignals: AbortSignal[] = [];
+        const { LlmRewriter } = await import('./LlmRewriter.js');
+        (
+          LlmRewriter as unknown as {
+            mockImplementation: (fn: unknown) => void;
+          }
+        ).mockImplementation(() => ({
+          rewrite: vi.fn((_content: unknown, signal: AbortSignal) => {
+            capturedSignals.push(signal);
+            return new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () =>
+                reject(new Error('aborted')),
+              );
+            });
+          }),
+        }));
+
+        const mockSendUpdate = vi.fn().mockResolvedValue(undefined);
+        const middleware = new MessageRewriteMiddleware(
+          {} as Config,
+          { enabled: true, target: 'all', prompt: 'test prompt' },
+          mockSendUpdate,
+        );
+
+        await middleware.interceptUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'content' },
+        } as unknown as SessionUpdate);
+        await middleware.flushTurn();
+
+        expect(capturedSignals).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(29_000);
+        expect(capturedSignals[0].aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(capturedSignals[0].aborted).toBe(true);
+
+        await middleware.waitForPendingRewrites();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

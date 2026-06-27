@@ -13,7 +13,12 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { MessageRewriteMiddleware } from './rewrite/index.js';
 
-export type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
+export type ApprovalModeValue =
+  | 'plan'
+  | 'default'
+  | 'auto-edit'
+  | 'auto'
+  | 'yolo';
 
 /**
  * Interface for sending session updates to the ACP client.
@@ -21,6 +26,24 @@ export type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
  */
 export interface SessionUpdateSender {
   sendUpdate(update: SessionUpdate): Promise<void>;
+}
+
+/**
+ * Running cumulative usage for the conversation, mutated in place as usage
+ * metadata is emitted (MessageEmitter) and snapshotted onto each plan/todo
+ * update (PlanEmitter). The web-shell diffs consecutive snapshots to show a
+ * finished task's token/time spend.
+ *
+ * `apiTimeMs` only advances on the live path: history replay re-emits usage
+ * metadata without per-turn durations, so on `/resume` it stays 0 — the
+ * intended "API time is live-only" behaviour. Tokens accumulate on both paths
+ * because replayed usage metadata carries the counts.
+ */
+export interface CumulativeUsage {
+  promptTokens: number;
+  cachedTokens: number;
+  candidateTokens: number;
+  apiTimeMs: number;
 }
 
 /**
@@ -33,6 +56,13 @@ export interface SessionContext extends SessionUpdateSender {
   /** Optional message rewrite middleware for ACP message transformation.
    *  Installed after history replay to avoid rewriting historical messages. */
   messageRewriter?: MessageRewriteMiddleware;
+  /**
+   * Running cumulative usage, when the context wants per-todo resource detail.
+   * Mutated by MessageEmitter as usage is emitted and read by PlanEmitter to
+   * stamp plan updates. Optional so contexts that don't need it (export, etc.)
+   * can omit it.
+   */
+  readonly cumulativeUsage?: CumulativeUsage;
 }
 
 /**

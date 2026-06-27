@@ -30,13 +30,14 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 
 ## Hook Types
 
-Qwen Code supports three hook executor types:
+Qwen Code supports four hook executor types:
 
 | Type       | Description                                                                                    |
 | :--------- | :--------------------------------------------------------------------------------------------- |
 | `command`  | Execute a shell command. Receives JSON via `stdin`, returns results via `stdout`.              |
 | `http`     | Send JSON as a `POST` request body to a specified URL. Returns results via HTTP response body. |
 | `function` | Directly call a registered JavaScript function (session-level hooks only).                     |
+| `prompt`   | Use an LLM to evaluate hook input and return a decision.                                       |
 
 ### Command Hooks
 
@@ -134,6 +135,102 @@ Function hooks directly call registered JavaScript/TypeScript functions. They ar
 
 **Note**: For most use cases, use **command hooks** or **HTTP hooks** instead, which can be configured in settings files.
 
+### Prompt Hooks
+
+Prompt hooks use an LLM to evaluate hook input and return a decision. This is useful for making intelligent decisions based on context, such as determining whether to allow or block an operation.
+
+**How it works:**
+
+1. The hook input JSON is injected into your prompt using the `$ARGUMENTS` placeholder
+2. The prompt is sent to an LLM (default: your current model)
+3. The LLM returns a JSON response with the decision
+4. Qwen Code processes the decision and continues or blocks execution accordingly
+
+**Configuration:**
+
+| Field           | Type       | Required | Description                                         |
+| :-------------- | :--------- | :------- | :-------------------------------------------------- |
+| `type`          | `"prompt"` | Yes      | Hook type                                           |
+| `prompt`        | `string`   | Yes      | Prompt sent to LLM. Use `$ARGUMENTS` for hook input |
+| `model`         | `string`   | No       | Model to use (defaults to your current model)       |
+| `timeout`       | `number`   | No       | Timeout in seconds, default 30                      |
+| `name`          | `string`   | No       | Hook name (for logging)                             |
+| `description`   | `string`   | No       | Hook description                                    |
+| `statusMessage` | `string`   | No       | Status message displayed during execution           |
+
+**Response Format:**
+
+The LLM must return JSON with the following structure:
+
+```json
+{
+  "ok": true,
+  "reason": "Explanation of the decision",
+  "additionalContext": "Optional context to inject into the conversation"
+}
+```
+
+| Field               | Description                                                                |
+| :------------------ | :------------------------------------------------------------------------- |
+| `ok`                | `true` to allow/continue, `false` to block/stop                            |
+| `reason`            | Required when `ok` is `false`. Shown to the model to explain the block     |
+| `additionalContext` | Optional. Additional context to inject into the conversation when allowing |
+
+**Supported Events:**
+
+Prompt hooks can be used with most hook events, including:
+
+- `PreToolUse` - Evaluate whether to allow a tool call
+- `PostToolUse` - Evaluate tool results and potentially inject context
+- `Stop` - Determine whether to continue or stop
+- `SubagentStop` - Evaluate subagent results
+- `UserPromptSubmit` - Evaluate or enrich user prompts
+
+**Example: Stop Hook**
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "You are evaluating whether Qwen Code should stop working. Context: $ARGUMENTS\n\nAnalyze the conversation and determine if:\n1. All user-requested tasks are complete\n2. Any errors need to be addressed\n3. Follow-up work is needed\n\nRespond with JSON: {\"ok\": true} to allow stopping, or {\"ok\": false, \"reason\": \"your explanation\"} to continue working.",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+When `ok` is `false`, Qwen Code will continue working and use the `reason` as context for the next response.
+
+**Example: PreToolUse Hook**
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Evaluate this tool call for security concerns. Tool input: $ARGUMENTS\n\nCheck for:\n- Dangerous commands (rm -rf, curl | sh, etc.)\n- Unauthorized access attempts\n- Data exfiltration patterns\n\nRespond with {\"ok\": true} if safe, or {\"ok\": false, \"reason\": \"concern\"} if blocked.",
+            "model": "sonnet",
+            "timeout": 30,
+            "name": "security-evaluator"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## Hook Events
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
@@ -152,6 +249,8 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                |
 | `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`) |
 | `PermissionRequest`  | When permission dialog is shown           | Tool name                                                 |
+| `TodoCreated`        | When a new todo item is created           | None (always fires)                                       |
+| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                       |
 
 ### Matcher Patterns
 
@@ -165,6 +264,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Session Events      | `SessionEnd`                                                           | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.     |
 | Notification Events | `Notification`                                                         | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success` |
 | Compact Events      | `PreCompact`                                                           | ✅ Exact match  | Trigger: `manual`, `auto`                                |
+| Todo Events         | `TodoCreated`, `TodoCompleted`                                         | ❌ No           | N/A                                                      |
 | Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                      |
 | Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                      |
 
@@ -284,7 +384,8 @@ Hook output supports three categories of fields:
   "permission_mode": "default | plan | auto_edit | yolo",
   "tool_name": "name of the tool being executed",
   "tool_input": "object containing the tool's input parameters",
-  "tool_use_id": "unique identifier for this tool use instance"
+  "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
 }
 ```
 
@@ -322,7 +423,8 @@ Hook output supports three categories of fields:
   "tool_name": "name of the tool that was executed",
   "tool_input": "object containing the tool's input parameters",
   "tool_response": "object containing the tool's response",
-  "tool_use_id": "unique identifier for this tool use instance"
+  "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
 }
 ```
 
@@ -353,7 +455,8 @@ Hook output supports three categories of fields:
 ```json
 {
   "permission_mode": "default | plan | auto_edit | yolo",
-  "tool_use_id": "unique identifier for the tool use",
+  "tool_use_id": "unique identifier for the tool use (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)",
   "tool_name": "name of the tool that failed",
   "tool_input": "object containing the tool's input parameters",
   "error": "error message describing the failure",
@@ -753,6 +856,204 @@ Hook output supports three categories of fields:
   }
 }
 ```
+
+#### TodoCreated
+
+**Purpose**: Executed when a new todo item is created via the `todo_write` tool. Allows validation, logging, or blocking of todo creation.
+
+Todo hooks run in two phases:
+
+- `validation`: runs before persistence. Use this phase for validation only; returning `block` or `deny` prevents the write.
+- `postWrite`: runs after persistence. Use this phase for side effects such as logging or syncing; `block` or `deny` is ignored in this phase.
+
+**Event-specific fields**:
+
+```json
+{
+  "todo_id": "unique identifier for the todo item",
+  "todo_content": "content/description of the todo item",
+  "todo_status": "pending | in_progress | completed",
+  "all_todos": "array of all todo items in the current list",
+  "phase": "validation | postWrite"
+}
+```
+
+**Output Options**:
+
+- `decision`: "allow", "block", or "deny"
+- `reason`: human-readable explanation for the decision (required when blocking)
+
+**Blocking Behavior**:
+
+During the `validation` phase, when `decision` is `block` or `deny` (exit code 2), todo creation is prevented. The todo list remains unchanged, and the reason is provided as feedback to the model.
+
+During the `postWrite` phase, the todo has already been persisted. Hooks may still return output, but `block` / `deny` does not undo the write and should not be used for validation.
+
+**Example Output (Allow)**:
+
+```json
+{
+  "decision": "allow",
+  "reason": "Todo content validated successfully"
+}
+```
+
+**Example Output (Block)**:
+
+```json
+{
+  "decision": "block",
+  "reason": "Todo content too short. Minimum 5 characters required."
+}
+```
+
+**Example Hook Script**:
+
+```bash
+#!/bin/bash
+# ~/.qwen/hooks/todo-validator.sh
+# Validates todo content before creation
+
+INPUT=$(cat)
+CONTENT=$(echo "$INPUT" | jq -r '.todo_content')
+
+# Check minimum length
+if [ ${#CONTENT} -lt 5 ]; then
+  echo '{"decision": "block", "reason": "Todo content must be at least 5 characters"}'
+  exit 2
+fi
+
+# Block test-related todos
+if [[ "$CONTENT" =~ "test" ]]; then
+  echo '{"decision": "block", "reason": "Test todos are not allowed in production"}'
+  exit 2
+fi
+
+echo '{"decision": "allow"}'
+exit 0
+```
+
+**Example Configuration**:
+
+```json
+{
+  "hooks": {
+    "TodoCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.qwen/hooks/todo-validator.sh",
+            "name": "todo-validator",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### TodoCompleted
+
+**Purpose**: Executed when a todo item is marked as completed. Allows validation, logging, or blocking of todo completion.
+
+Todo hooks run in two phases:
+
+- `validation`: runs before persistence. Use this phase for validation only; returning `block` or `deny` prevents the write.
+- `postWrite`: runs after persistence. Use this phase for side effects such as logging or syncing; `block` or `deny` is ignored in this phase.
+
+**Event-specific fields**:
+
+```json
+{
+  "todo_id": "unique identifier for the todo item",
+  "todo_content": "content/description of the todo item",
+  "previous_status": "pending | in_progress (status before completion)",
+  "all_todos": "array of all todo items in the current list",
+  "phase": "validation | postWrite"
+}
+```
+
+**Output Options**:
+
+- `decision`: "allow", "block", or "deny"
+- `reason`: human-readable explanation for the decision (required when blocking)
+
+**Blocking Behavior**:
+
+During the `validation` phase, when `decision` is `block` or `deny` (exit code 2), todo completion is prevented. The todo item remains in its previous status, and the reason is provided as feedback to the model.
+
+During the `postWrite` phase, the todo has already been persisted. Hooks may still return output, but `block` / `deny` does not undo the write and should not be used for validation.
+
+**Example Output (Allow)**:
+
+```json
+{
+  "decision": "allow",
+  "reason": "Todo completion approved"
+}
+```
+
+**Example Output (Block)**:
+
+```json
+{
+  "decision": "block",
+  "reason": "Cannot complete this todo until dependent tasks are finished."
+}
+```
+
+**Example Hook Script**:
+
+```bash
+#!/bin/bash
+# ~/.qwen/hooks/todo-completion-validator.sh
+# Validates todo completion conditions
+
+INPUT=$(cat)
+TODO_ID=$(echo "$INPUT" | jq -r '.todo_id')
+ALL_TODOS=$(echo "$INPUT" | jq -r '.all_todos')
+
+# Check if there are incomplete dependent todos (example logic)
+INCOMPLETE_COUNT=$(echo "$ALL_TODOS" | jq '[.[] | select(.status != "completed")] | length')
+
+if [ "$INCOMPLETE_COUNT" -gt 5 ]; then
+  echo '{"decision": "block", "reason": "Too many incomplete todos. Complete other tasks first."}'
+  exit 2
+fi
+
+echo '{"decision": "allow"}'
+exit 0
+```
+
+**Example Configuration**:
+
+```json
+{
+  "hooks": {
+    "TodoCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.qwen/hooks/todo-completion-validator.sh",
+            "name": "completion-validator",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Use Cases**:
+
+- **Logging**: Track todo creation and completion for audit or analytics
+- **Validation**: Enforce content quality standards (minimum length, required keywords)
+- **Workflow Control**: Block completion until prerequisites are met
+- **Integration**: Sync todos with external task management systems (Jira, Trello, etc.)
 
 ## Hook Configuration
 

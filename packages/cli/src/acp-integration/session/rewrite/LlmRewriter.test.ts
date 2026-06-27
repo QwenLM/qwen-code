@@ -8,7 +8,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { TurnContent, MessageRewriteConfig } from './types.js';
 
-// Mock core to avoid Vite https resolution issue
+// Track runSideQuery calls so each test can assert on the options the
+// LlmRewriter passed (model, contents, etc.).
+const mockGenerateContent = vi.fn();
+
+// Mock core to avoid Vite https resolution issue. runSideQuery is stubbed
+// to forward the caller's options into mockGenerateContent so existing
+// assertions on call args still apply.
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({
     info: vi.fn(),
@@ -16,27 +22,27 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     debug: vi.fn(),
     error: vi.fn(),
   }),
+  runSideQuery: vi.fn(async (_config: unknown, options: unknown) => {
+    const result = await mockGenerateContent(options);
+    if (!result || typeof result !== 'object')
+      return { text: '', usage: undefined };
+    const r = result as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const text = (r.candidates?.[0]?.content?.parts ?? [])
+      .map((p) => p.text ?? '')
+      .join('')
+      .trim();
+    return { text, usage: undefined };
+  }),
 }));
-
-// Track generateContent calls
-const mockGenerateContent = vi.fn().mockResolvedValue({
-  candidates: [
-    {
-      content: {
-        parts: [{ text: 'rewritten output' }],
-      },
-    },
-  ],
-});
 
 const { LlmRewriter } = await import('./LlmRewriter.js');
 
 function makeConfig(): Config {
   return {
-    getContentGenerator: () => ({
-      generateContent: mockGenerateContent,
-    }),
     getModel: () => 'test-model',
+    getGeminiClient: () => ({}),
   } as unknown as Config;
 }
 

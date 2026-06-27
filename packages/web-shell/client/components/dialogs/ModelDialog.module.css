@@ -1,0 +1,108 @@
+.layout {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  font-size: 12px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.row:hover,
+.selected {
+  background: var(--secondary);
+}
+
+.selected .label {
+  color: var(--agent-blue-500);
+}
+
+.divider {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 6px 8px 0;
+  background: var(--border);
+}
+
+.number {
+  min-width: 28px;
+  color: var(--muted-foreground);
+  text-align: right;
+}
+
+.provider {
+  flex: 0 0 auto;
+  color: var(--agent-blue-500);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.detailRow {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 6px;
+}
+
+.detailLabel {
+  min-width: 12ch;
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+
+.detailValue {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  padding: 14px 0;
+  color: var(--muted-foreground);
+}

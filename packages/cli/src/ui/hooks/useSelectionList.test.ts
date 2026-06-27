@@ -47,7 +47,11 @@ describe('useSelectionList', () => {
     mockOnHighlight.mockClear();
   });
 
-  const pressKey = (name: string, sequence: string = name) => {
+  const pressKey = (
+    name: string,
+    sequence: string = name,
+    overrides: Partial<Key> = {},
+  ) => {
     act(() => {
       if (activeKeypressHandler) {
         const key: Key = {
@@ -57,6 +61,7 @@ describe('useSelectionList', () => {
           meta: false,
           shift: false,
           paste: false,
+          ...overrides,
         };
         activeKeypressHandler(key);
       } else {
@@ -176,6 +181,19 @@ describe('useSelectionList', () => {
       pressKey('k');
       expect(result.current.activeIndex).toBe(2);
       pressKey('up');
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('should move with Ctrl+P and Ctrl+N readline aliases', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({ items, onSelect: mockOnSelect }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+
+      pressKey('n', '\u000E', { ctrl: true });
+      expect(result.current.activeIndex).toBe(2);
+
+      pressKey('p', '\u0010', { ctrl: true });
       expect(result.current.activeIndex).toBe(0);
     });
 
@@ -1007,6 +1025,63 @@ describe('useSelectionList', () => {
         vi.advanceTimersByTime(1000);
       });
       expect(mockOnSelect).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('disableVimNav', () => {
+    it('bare j does NOT dispatch MOVE_DOWN when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('j');
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('bare k does NOT dispatch MOVE_UP when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          initialIndex: 2,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(2);
+      pressKey('k');
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('Ctrl+N still dispatches MOVE_DOWN when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('n', 'n', { ctrl: true });
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('arrow keys still work when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('down');
+      expect(result.current.activeIndex).toBe(2);
+      pressKey('up');
+      expect(result.current.activeIndex).toBe(0);
     });
   });
 });

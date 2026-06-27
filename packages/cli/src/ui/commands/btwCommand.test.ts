@@ -33,10 +33,24 @@ const mockGetCacheSafeParams = vi.hoisted(() =>
     version: 1,
   }),
 );
+const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
+  vi.fn().mockReturnValue({
+    generationConfig: {},
+    history: [],
+    model: 'test-model',
+    version: 0,
+  }),
+);
+const mockBuildBtwPrompt = vi.hoisted(() =>
+  vi.fn().mockImplementation((q: string) => `<system-reminder>...\n${q}`),
+);
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  BTW_MAX_INPUT_LENGTH: 4096,
   runForkedAgent: mockRunForkedAgent,
   getCacheSafeParams: mockGetCacheSafeParams,
+  buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
+  buildBtwPrompt: mockBuildBtwPrompt,
 }));
 
 describe('btwCommand', () => {
@@ -52,6 +66,12 @@ describe('btwCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: [],
+      model: 'test-model',
+      version: 1,
+    });
     mockContext = createMockCommandContext({
       services: {
         config: createConfig(),
@@ -82,6 +102,16 @@ describe('btwCommand', () => {
       type: 'message',
       messageType: 'error',
       content: 'Please provide a question. Usage: /btw <your question>',
+    });
+  });
+
+  it('should return error when question exceeds BTW_MAX_INPUT_LENGTH', async () => {
+    const result = await btwCommand.action!(mockContext, 'x'.repeat(4097));
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('too long'),
     });
   });
 
@@ -155,6 +185,50 @@ describe('btwCommand', () => {
           userMessage: expect.stringContaining('my question'),
         }),
       );
+    });
+
+    it('should error when buildBtwCacheSafeParams returns null (no cross-session fallback)', async () => {
+      mockBuildBtwCacheSafeParams.mockReturnValue(null);
+
+      await btwCommand.action!(mockContext, 'how ?');
+      await flushPromises();
+
+      expect(mockBuildBtwCacheSafeParams).toHaveBeenCalled();
+      expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
+      expect(mockRunForkedAgent).not.toHaveBeenCalled();
+      // Interactive mode: error is pushed via addItem
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('No conversation context'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should use buildBtwCacheSafeParams only (no getCacheSafeParams fallback)', async () => {
+      mockBuildBtwCacheSafeParams.mockReturnValue({
+        generationConfig: { systemInstruction: 'live' },
+        history: [{ role: 'user', parts: [{ text: 'live msg' }] }],
+        model: 'live-model',
+        version: 0,
+      });
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
+      });
+
+      await btwCommand.action!(mockContext, 'how ?');
+      await flushPromises();
+
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cacheSafeParams: expect.objectContaining({
+            model: 'live-model',
+          }),
+        }),
+      );
+      expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
     });
 
     it('should add error item on failure and clear btwItem', async () => {
@@ -328,108 +402,99 @@ describe('btwCommand', () => {
     });
   });
 
-  describe('non-interactive mode', () => {
-    let nonInteractiveContext: CommandContext;
-
-    beforeEach(() => {
-      nonInteractiveContext = createMockCommandContext({
-        executionMode: 'non_interactive',
-        services: {
-          config: createConfig(),
-        },
-      });
-    });
-
-    it('should return info message on success', async () => {
+  describe('acp mode', () => {
+    it('should return message result with answer on success', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        text: 'the answer',
-        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
+        text: 'The answer is 42.',
+        usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 3 },
       });
 
-      const result = await btwCommand.action!(
-        nonInteractiveContext,
-        'my question',
-      );
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: { config: createConfig() },
+      });
+
+      const result = await btwCommand.action!(acpContext, 'question');
 
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: 'btw> my question\nthe answer',
+        content: 'The answer is 42.',
       });
+      expect(acpContext.ui.setBtwItem).not.toHaveBeenCalled();
     });
 
     it('should return error message on failure', async () => {
-      mockRunForkedAgent.mockRejectedValue(new Error('network error'));
+      mockRunForkedAgent.mockRejectedValue(new Error('Model error'));
 
-      const result = await btwCommand.action!(
-        nonInteractiveContext,
-        'my question',
-      );
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: { config: createConfig() },
+      });
+
+      const result = await btwCommand.action!(acpContext, 'question');
 
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to answer btw question: network error',
-      });
-    });
-  });
-
-  describe('acp mode', () => {
-    let acpContext: CommandContext;
-
-    beforeEach(() => {
-      acpContext = createMockCommandContext({
-        executionMode: 'acp',
-        services: {
-          config: createConfig(),
-        },
+        content: 'Failed to answer btw question: Model error',
       });
     });
 
-    it('should return stream_messages generator on success', async () => {
+    it('should return fallback text when result.text is null', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        text: 'streamed answer',
-        usage: { inputTokens: 5, outputTokens: 3, cacheHitTokens: 0 },
+        text: null,
+        usage: { inputTokens: 5, outputTokens: 0, cacheHitTokens: 0 },
       });
 
-      const result = (await btwCommand.action!(acpContext, 'my question')) as {
-        type: string;
-        messages: AsyncGenerator;
-      };
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: { config: createConfig() },
+      });
 
-      expect(result.type).toBe('stream_messages');
+      const result = await btwCommand.action!(acpContext, 'question');
 
-      const messages = [];
-      for await (const msg of result.messages) {
-        messages.push(msg);
-      }
-
-      expect(messages).toEqual([
-        { messageType: 'info', content: 'Thinking...' },
-        { messageType: 'info', content: 'btw> my question\nstreamed answer' },
-      ]);
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'No response received.',
+      });
     });
 
-    it('should yield error message on failure', async () => {
-      mockRunForkedAgent.mockRejectedValue(new Error('api failure'));
+    it('should return error when no cache params available', async () => {
+      mockBuildBtwCacheSafeParams.mockReturnValue(null);
 
-      const result = (await btwCommand.action!(acpContext, 'my question')) as {
-        type: string;
-        messages: AsyncGenerator;
-      };
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: { config: createConfig() },
+      });
 
-      const messages = [];
-      for await (const msg of result.messages) {
-        messages.push(msg);
-      }
+      const result = await btwCommand.action!(acpContext, 'question');
 
-      expect(messages).toEqual([
-        { messageType: 'info', content: 'Thinking...' },
-        {
-          messageType: 'error',
-          content: 'Failed to answer btw question: api failure',
-        },
-      ]);
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Failed to answer btw question: No conversation context available for /btw',
+      });
+    });
+
+    it('should not use fire-and-forget pattern', async () => {
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
+      });
+
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: { config: createConfig() },
+      });
+
+      const result = await btwCommand.action!(acpContext, 'question');
+
+      expect(result).toBeDefined();
+      expect(acpContext.ui.cancelBtw).not.toHaveBeenCalled();
+      expect(acpContext.ui.setBtwItem).not.toHaveBeenCalled();
     });
   });
 });

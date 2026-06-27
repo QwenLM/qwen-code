@@ -48,6 +48,7 @@ export class MessageRouter {
       conversationStore,
       currentConversationId,
       sendToWebView,
+      (id) => this.setCurrentConversationId(id),
     );
 
     this.fileHandler = new FileMessageHandler(
@@ -165,11 +166,22 @@ export class MessageRouter {
   }
 
   /**
-   * Set login handler
+   * Set auth interactive handler — interactive auth flow.
+   * Also registers the handler on the session handler so
+   * "Configure" prompts in session flows trigger the interactive flow.
    */
-  setLoginHandler(handler: () => Promise<void>): void {
-    this.authHandler.setLoginHandler(handler);
-    this.sessionHandler?.setLoginHandler?.(handler);
+  setAuthInteractiveHandler(
+    handler: (
+      config: import('@qwen-code/qwen-code-core').ProviderConfig,
+      inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
+    ) => Promise<void>,
+  ): void {
+    this.authHandler.setAuthInteractiveHandler(handler);
+    // SessionMessageHandler's authHandler is a simple () => Promise<void>.
+    // Wrap so "Configure" prompts trigger the full interactive auth QuickPick.
+    this.sessionHandler?.setAuthHandler?.(() =>
+      this.authHandler.handle({ type: 'auth' }),
+    );
   }
 
   /**

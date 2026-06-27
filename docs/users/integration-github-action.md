@@ -96,7 +96,7 @@ This workflow acts as a central dispatcher for Qwen Code CLI, routing requests t
 
 ### Issue Triage
 
-This action can be used to triage GitHub Issues automatically or on a schedule. For a detailed guide on how to set up the issue triage system, go to the [GitHub Issue Triage workflow documentation](./examples/workflows/issue-triage).
+This action can be used to triage GitHub Issues automatically or on a schedule. For a working issue triage setup, see the [automated issue triage workflow](https://github.com/QwenLM/qwen-code/blob/main/.github/workflows/qwen-automated-issue-triage.yml).
 
 ### Pull Request Review
 
@@ -208,7 +208,7 @@ The Qwen Code CLI can be extended with additional functionality through extensio
 These extensions are installed from source from their GitHub repositories.
 
 For detailed instructions on how to set up and configure extensions, go to the
-[Extensions documentation](../developers/extensions/extension).
+[Extensions documentation](./extension/introduction.md).
 
 ## Best Practices
 

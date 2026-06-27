@@ -9,7 +9,8 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useCommandCompletion } from './useCommandCompletion.js';
-import type { CommandContext } from '../commands/types.js';
+import type { CommandContext, SlashCommand } from '../commands/types.js';
+import { CommandKind } from '../commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useTextBuffer } from '../components/shared/text-buffer.js';
 import { useEffect } from 'react';
@@ -209,6 +210,50 @@ describe('useCommandCompletion', () => {
             expect.objectContaining({
               enabled: true,
               pattern: 'src/a\\ file.txt',
+            }),
+          );
+        });
+      });
+
+      it('should not trigger AT completion when @ is not preceded by whitespace', async () => {
+        const text = 'cici@192.168.0.160';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
+      it('should not trigger AT completion for email-like patterns', async () => {
+        const text = 'user@example.com';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
             }),
           );
         });
@@ -551,6 +596,41 @@ describe('useCommandCompletion', () => {
       expect(result.current.textBuffer.text).toBe('@src/file1.txt ');
     });
 
+    it('should not append trailing space for directory completions', async () => {
+      setupMocks({
+        atSuggestions: [
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
+        ],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('@src/com');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('@src/components/');
+    });
+
     it('should complete a file path when cursor is not at the end of the line', async () => {
       const text = '@src/fi is a good file';
       const cursorOffset = 7; // after "i"
@@ -583,6 +663,204 @@ describe('useCommandCompletion', () => {
       expect(result.current.textBuffer.text).toBe(
         '@src/file1.txt is a good file',
       );
+    });
+
+    it('should preserve existing space after directory completions at mid-line cursor', async () => {
+      const text = '@src/com is a dir';
+      const cursorOffset = 8; // after "m"
+
+      setupMocks({
+        atSuggestions: [
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
+        ],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest(text, cursorOffset);
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('@src/components/ is a dir');
+    });
+  });
+
+  describe('argument hint ghost text', () => {
+    it('shows argumentHint as inline ghost text for a complete slash command', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'fix-issue',
+          description: 'Fix GitHub issue',
+          argumentHint: '[issue-number]',
+          kind: CommandKind.FILE,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('/fix-issue');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      expect(result.current.midInputGhostText).toEqual({
+        text: '[issue-number]',
+        insertPosition: '/fix-issue'.length,
+        showCursorBeforeText: true,
+      });
+    });
+
+    it('shows mid-input ghost text for model-invocable commands', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'review',
+          description: 'Review changed code',
+          kind: CommandKind.SKILL,
+          modelInvocable: true,
+        },
+        {
+          name: 'rewind',
+          description: 'Rewind conversation',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /rev');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      expect(result.current.midInputGhostText).toEqual({
+        text: 'iew',
+        insertPosition: 'please /rev'.length,
+        acceptText: 'iew',
+        showCursorBeforeText: false,
+      });
+    });
+
+    it('shows argumentHint for a complete mid-input model-invocable command', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'review',
+          description: 'Review changed code',
+          kind: CommandKind.SKILL,
+          modelInvocable: true,
+          argumentHint: '[pr-number]',
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /review');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      expect(result.current.midInputGhostText).toEqual({
+        text: '[pr-number]',
+        insertPosition: 'please /review'.length,
+        acceptText: undefined,
+        showCursorBeforeText: true,
+      });
+    });
+
+    it('does not show argumentHint after arguments have started', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'fix-issue',
+          description: 'Fix GitHub issue',
+          argumentHint: '[issue-number]',
+          kind: CommandKind.FILE,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('/fix-issue 123');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      expect(result.current.midInputGhostText).toBeNull();
+    });
+
+    it('returns null midInputGhostText when only non-modelInvocable commands match', () => {
+      const slashCommands: SlashCommand[] = [
+        {
+          name: 'clear',
+          description: 'Clear conversation',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        },
+        {
+          name: 'compress',
+          description: 'Compress context',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        },
+      ];
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /cl');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          slashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return completion;
+      });
+
+      // '/cl' matches 'clear' but it is not modelInvocable, so no ghost text
+      expect(result.current.midInputGhostText).toBeNull();
     });
   });
 });

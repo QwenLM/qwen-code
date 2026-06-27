@@ -59,6 +59,13 @@ export interface FollowupControllerOptions {
   onOutcome?: (params: {
     outcome: 'accepted' | 'ignored';
     accept_method?: 'tab' | 'enter' | 'right';
+    /**
+     * Whether the accepted text came from the live controller suggestion or
+     * from `fallbackText` (no live suggestion — e.g. type-then-delete or
+     * within the show delay). Lets analytics distinguish the two, since a
+     * fallback accept reports `time_ms: 0` (it was never shown via the timer).
+     */
+    accept_source?: 'live' | 'fallback';
     time_ms: number;
     suggestion_length: number;
   }) => void;
@@ -71,10 +78,17 @@ export interface FollowupControllerOptions {
 export interface FollowupControllerActions {
   /** Set suggestion text (with delayed show). Null clears immediately. */
   setSuggestion: (text: string | null) => void;
-  /** Accept the current suggestion and invoke onAccept callback */
+  /**
+   * Accept the current suggestion and invoke onAccept callback.
+   *
+   * When the controller has no live suggestion (e.g. still within the show
+   * delay, or dismissed after type-then-delete while the placeholder text is
+   * still available), pass `fallbackText` so the accept — including telemetry —
+   * is logged instead of silently bypassing this path.
+   */
   accept: (
     method?: 'tab' | 'enter' | 'right',
-    options?: { skipOnAccept?: boolean },
+    options?: { skipOnAccept?: boolean; fallbackText?: string },
   ) => void;
   /** Dismiss/clear suggestion */
   dismiss: () => void;
@@ -140,7 +154,7 @@ export function createFollowupController(
 
   const accept = (
     method?: 'tab' | 'enter' | 'right',
-    options?: { skipOnAccept?: boolean },
+    options?: { skipOnAccept?: boolean; fallbackText?: string },
   ): void => {
     if (accepting) {
       return;
@@ -153,7 +167,10 @@ export function createFollowupController(
 
     accepting = true;
 
-    const text = currentState.suggestion;
+    const accept_source: 'live' | 'fallback' = currentState.suggestion
+      ? 'live'
+      : 'fallback';
+    const text = currentState.suggestion ?? options?.fallbackText ?? null;
     const { shownAt } = currentState;
     if (!text) {
       accepting = false;
@@ -164,6 +181,7 @@ export function createFollowupController(
       onOutcome?.({
         outcome: 'accepted',
         accept_method: method,
+        accept_source,
         time_ms: shownAt > 0 ? Date.now() - shownAt : 0,
         suggestion_length: text.length,
       });

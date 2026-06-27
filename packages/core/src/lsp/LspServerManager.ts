@@ -213,14 +213,16 @@ export class LspServerManager {
       return;
     }
 
-    // Request user confirmation
-    const consent = await this.requestUserConsent(
+    // Check workspace trust before starting the server
+    const trusted = await this.checkWorkspaceTrust(
       name,
       handle.config,
       workspaceTrusted,
     );
-    if (!consent) {
-      debugLogger.info(`User declined to start LSP server ${name}`);
+    if (!trusted) {
+      debugLogger.info(
+        `Workspace trust check failed, not starting LSP server ${name}`,
+      );
       handle.status = 'FAILED';
       return;
     }
@@ -263,6 +265,7 @@ export class LspServerManager {
       const connection = await this.createLspConnection(handle.config);
       handle.connection = connection.connection;
       handle.process = connection.process;
+      handle.processDiagnostics = connection.processDiagnostics;
 
       // Initialize LSP server
       await this.initializeLspServer(connection, handle.config);
@@ -273,6 +276,12 @@ export class LspServerManager {
     } catch (error) {
       handle.status = 'FAILED';
       handle.error = error as Error;
+      if (handle.processDiagnostics) {
+        debugLogger.error(
+          `LSP server ${name} process diagnostics:`,
+          handle.processDiagnostics,
+        );
+      }
       debugLogger.error(`LSP server ${name} failed to start:`, error);
     }
   }
@@ -297,6 +306,7 @@ export class LspServerManager {
     }
     handle.connection = undefined;
     handle.process = undefined;
+    handle.processDiagnostics = undefined;
     handle.status = 'NOT_STARTED';
     handle.warmedUp = false;
     handle.restartAttempts = 0;
@@ -366,6 +376,7 @@ export class LspServerManager {
     }
     handle.connection = undefined;
     handle.process = undefined;
+    handle.processDiagnostics = undefined;
     handle.status = 'NOT_STARTED';
     handle.error = undefined;
     handle.warmedUp = false;
@@ -440,6 +451,7 @@ export class LspServerManager {
       return {
         connection: lspConnection.connection,
         process: lspConnection.process as ChildProcess,
+        processDiagnostics: lspConnection.processDiagnostics,
         shutdown: async () => {
           await lspConnection.connection.shutdown();
         },
@@ -623,7 +635,14 @@ export class LspServerManager {
   }
 
   /**
-   * Check path safety
+   * Check path safety.
+   *
+   * Allows:
+   * - Bare command names (resolved via PATH, e.g. "clangd")
+   * - Absolute paths (explicit user intent, e.g. "/usr/bin/clangd")
+   *
+   * Blocks:
+   * - Relative paths that escape the workspace (e.g. "../../bin/evil")
    */
   private isPathSafe(
     command: string,
@@ -636,12 +655,18 @@ export class LspServerManager {
       return true;
     }
 
-    // For explicit paths (absolute or relative), verify they're within workspace
+    // Allow absolute paths — the user explicitly specified a full path to
+    // the server binary (e.g. /usr/bin/clangd, /opt/tools/jdtls/bin/jdtls).
+    // Trust checks (workspace trust + user consent) already gate server startup.
+    if (path.isAbsolute(command)) {
+      return true;
+    }
+
+    // For relative paths, verify they resolve within the workspace to prevent
+    // path traversal attacks (e.g. "../../malicious-binary").
     const resolvedWorkspacePath = path.resolve(workspacePath);
     const basePath = cwd ? path.resolve(cwd) : resolvedWorkspacePath;
-    const resolvedPath = path.isAbsolute(command)
-      ? path.resolve(command)
-      : path.resolve(basePath, command);
+    const resolvedPath = path.resolve(basePath, command);
 
     return (
       resolvedPath.startsWith(resolvedWorkspacePath + path.sep) ||
@@ -650,9 +675,13 @@ export class LspServerManager {
   }
 
   /**
-   * 请求用户确认启动 LSP 服务器
+   * Check whether the workspace trust level allows starting an LSP server.
+   *
+   * Auto-allows in trusted workspaces. In untrusted workspaces, blocks
+   * servers that require trust (`trustRequired` or global
+   * `requireTrustedWorkspace`), and cautiously allows the rest.
    */
-  private async requestUserConsent(
+  private async checkWorkspaceTrust(
     serverName: string,
     serverConfig: LspServerConfig,
     workspaceTrusted: boolean,

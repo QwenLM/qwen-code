@@ -7,7 +7,7 @@
 import { convert } from 'html-to-text';
 import type { Config } from '../config/config.js';
 import { fetchWithTimeout, isPrivateIp } from '../utils/fetch.js';
-import { getResponseText } from '../utils/partUtils.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   ToolCallConfirmationDetails,
@@ -18,7 +18,6 @@ import type {
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
 
@@ -37,6 +36,15 @@ export interface WebFetchToolParams {
    * The prompt to run on the fetched content
    */
   prompt: string;
+  /**
+   * Preferred content format (controls only the Accept header)
+   * All content is normalized to plain text for LLM processing
+   * - auto: Prefers markdown via content negotiation (default)
+   * - markdown: Prefer markdown format
+   * - html: Prefer HTML format (still converted to text)
+   * - text: Prefer plain text format
+   */
+  format?: 'auto' | 'markdown' | 'html' | 'text';
 }
 
 /**
@@ -56,6 +64,21 @@ class WebFetchToolInvocation extends BaseToolInvocation<
     this.debugLogger = createDebugLogger('WEB_FETCH');
   }
 
+  private getAcceptHeader(): string {
+    const format = this.params.format ?? 'auto';
+    switch (format) {
+      case 'markdown':
+        return 'text/markdown, */*;q=0.1';
+      case 'html':
+        return 'text/html, */*;q=0.1';
+      case 'text':
+        return 'text/plain, */*;q=0.1';
+      case 'auto':
+      default:
+        return 'text/markdown, text/html;q=0.9, text/plain;q=0.8, */*;q=0.1';
+    }
+  }
+
   private async executeDirectFetch(signal: AbortSignal): Promise<ToolResult> {
     let url = this.params.url;
 
@@ -69,9 +92,16 @@ class WebFetchToolInvocation extends BaseToolInvocation<
       );
     }
 
+    const acceptHeader = this.getAcceptHeader();
+    this.debugLogger.debug(
+      `[WebFetchTool] Using Accept header: ${acceptHeader}`,
+    );
+
     try {
       this.debugLogger.debug(`[WebFetchTool] Fetching content from: ${url}`);
-      const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS);
+      const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS, {
+        Accept: acceptHeader,
+      });
 
       if (!response.ok) {
         const errorMessage = `Request failed with status code ${response.status} ${response.statusText}`;
@@ -82,20 +112,38 @@ class WebFetchToolInvocation extends BaseToolInvocation<
       this.debugLogger.debug(
         `[WebFetchTool] Successfully fetched content from ${url}`,
       );
-      const html = await response.text();
-      const textContent = convert(html, {
-        wordwrap: false,
-        selectors: [
-          { selector: 'a', options: { ignoreHref: true } },
-          { selector: 'img', format: 'skip' },
-        ],
-      }).substring(0, MAX_CONTENT_LENGTH);
+
+      const contentType = response.headers.get('content-type') || '';
+      const responseText = await response.text();
+
+      let textContent: string;
+
+      if (contentType.includes('text/markdown')) {
+        this.debugLogger.debug('[WebFetchTool] Received markdown content');
+        textContent = responseText.substring(0, MAX_CONTENT_LENGTH);
+      } else if (contentType.includes('text/plain')) {
+        this.debugLogger.debug('[WebFetchTool] Received plain text content');
+        textContent = responseText.substring(0, MAX_CONTENT_LENGTH);
+      } else if (contentType.includes('text/html')) {
+        this.debugLogger.debug('[WebFetchTool] Converting HTML to text');
+        textContent = convert(responseText.substring(0, MAX_CONTENT_LENGTH), {
+          wordwrap: false,
+          selectors: [
+            { selector: 'a', options: { ignoreHref: true } },
+            { selector: 'img', format: 'skip' },
+          ],
+        });
+      } else {
+        this.debugLogger.debug(
+          `[WebFetchTool] Passing through ${contentType || 'unknown'} content as text`,
+        );
+        textContent = responseText.substring(0, MAX_CONTENT_LENGTH);
+      }
 
       this.debugLogger.debug(
-        `[WebFetchTool] Converted HTML to text (${textContent.length} characters)`,
+        `[WebFetchTool] Content length: ${textContent.length} characters`,
       );
 
-      const geminiClient = this.config.getGeminiClient();
       const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
 
 I have fetched the content from ${this.params.url}. Please use the following content to answer the user's request.
@@ -108,17 +156,21 @@ ${textContent}
         `[WebFetchTool] Processing content with prompt: "${this.params.prompt}"`,
       );
 
-      const result = await geminiClient.generateContent(
-        [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
-        {
-          systemInstruction:
-            'Extract and summarize the requested information from the provided web content. ' +
-            'Be concise and accurate. Respond only with the requested information.',
-        },
-        signal,
-        this.config.getModel() || DEFAULT_QWEN_MODEL,
-      );
-      const resultText = getResponseText(result) || '';
+      const result = await runSideQuery(this.config, {
+        purpose: 'web-fetch',
+        // Pin to the main model — fast model loses too much fidelity on
+        // long, rich source material.
+        model: this.config.getModel(),
+        // Best-effort: the outer catch already converts processing failures
+        // into a tool error; retrying 7× just delays that fallback.
+        maxAttempts: 1,
+        contents: [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
+        systemInstruction:
+          'Extract and summarize the requested information from the provided web content. ' +
+          'Be concise and accurate. Respond only with the requested information.',
+        abortSignal: signal,
+      });
+      const resultText = result.text || '';
 
       this.debugLogger.debug(
         `[WebFetchTool] Successfully processed content from ${this.params.url}`,
@@ -148,7 +200,8 @@ ${textContent}
       this.params.prompt.length > 100
         ? this.params.prompt.substring(0, 97) + '...'
         : this.params.prompt;
-    return `Fetching content from ${this.params.url} and processing with prompt: "${displayPrompt}"`;
+    const format = this.params.format ?? 'auto';
+    return `Fetching content from ${this.params.url} (format: ${format}) and processing with prompt: "${displayPrompt}"`;
   }
 
   /**
@@ -221,7 +274,7 @@ export class WebFetchTool extends BaseDeclarativeTool<
     super(
       WebFetchTool.Name,
       ToolDisplayNames.WEB_FETCH,
-      'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Fetches the URL content, converts HTML to markdown\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Supports both public and private/localhost URLs using direct fetch',
+      'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Supports content negotiation for markdown (reduces tokens by ~80%)\n- Fetches the URL content, converts HTML to text if needed\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - format parameter (optional): controls only the Accept header sent to the server. All content is normalized to plain text for LLM processing, regardless of format.\n  - "auto" (default): Prefers markdown via content negotiation, accepts HTML, text, or other content as fallback. Use when user does NOT specify a format.\n  - "markdown": Prefers text/markdown. Use when user explicitly asks for markdown content.\n  - "html": Prefers text/html. Content is still converted to plain text for LLM processing.\n  - "text": Prefers text/plain. Use when user explicitly asks for plain text.\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Supports both public and private/localhost URLs using direct fetch',
       Kind.Fetch,
       {
         properties: {
@@ -233,10 +286,21 @@ export class WebFetchTool extends BaseDeclarativeTool<
             description: 'The prompt to run on the fetched content',
             type: 'string',
           },
+          format: {
+            description:
+              'Preferred content format (Accept header only): auto (default, prefers markdown), markdown, html, or text. All content is normalized to plain text.',
+            type: 'string',
+            enum: ['auto', 'markdown', 'html', 'text'],
+          },
         },
         required: ['url', 'prompt'],
         type: 'object',
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — web fetching is infrequent
+      false, // alwaysLoad
+      'web fetch url http download content',
     );
   }
 
@@ -246,11 +310,17 @@ export class WebFetchTool extends BaseDeclarativeTool<
     if (!params.url || params.url.trim() === '') {
       return "The 'url' parameter cannot be empty.";
     }
-    if (
-      !params.url.startsWith('http://') &&
-      !params.url.startsWith('https://')
-    ) {
+    // Regex rejects non-http(s) schemes and malformed authority that new URL() normalizes away.
+    if (!/^https?:\/\//i.test(params.url)) {
       return "The 'url' must be a valid URL starting with http:// or https://.";
+    }
+    try {
+      const parsedUrl = new URL(params.url);
+      if (parsedUrl.username || parsedUrl.password) {
+        return "The 'url' must not include credentials.";
+      }
+    } catch {
+      return "The 'url' is malformed and could not be parsed.";
     }
     if (!params.prompt || params.prompt.trim() === '') {
       return "The 'prompt' parameter cannot be empty.";
@@ -262,5 +332,12 @@ export class WebFetchTool extends BaseDeclarativeTool<
     params: WebFetchToolParams,
   ): ToolInvocation<WebFetchToolParams, ToolResult> {
     return new WebFetchToolInvocation(this.config, params);
+  }
+
+  override toAutoClassifierInput(
+    params: WebFetchToolParams,
+  ): Record<string, unknown> {
+    // Do not forward the prompt — it may contain sensitive context.
+    return { url: params.url };
   }
 }

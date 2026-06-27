@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FC } from 'react';
+import { type FC, memo } from 'react';
 import { CollapsibleFileContent } from './CollapsibleFileContent.js';
+import { EditPencilIcon } from '../icons/EditIcons.js';
+import { MessageMeta } from './MessageMeta.js';
 
 export interface FileContext {
   fileName: string;
@@ -19,20 +21,23 @@ export interface UserMessageProps {
   timestamp: number;
   onFileClick?: (path: string) => void;
   fileContext?: FileContext;
+  onEdit?: () => void;
+  editDisabled?: boolean;
 }
 
-export const UserMessage: FC<UserMessageProps> = ({
+const UserMessageBase: FC<UserMessageProps> = ({
   content,
-  timestamp: _timestamp,
+  timestamp,
   onFileClick,
   fileContext,
+  onEdit,
+  editDisabled = false,
 }) => {
   const getFileContextDisplay = () => {
     if (!fileContext) {
       return null;
     }
     const { fileName, startLine, endLine } = fileContext;
-    // Use != null to handle line number 0 and support start-only line
     if (startLine != null) {
       if (endLine != null && endLine !== startLine) {
         return `${fileName}#${startLine}-${endLine}`;
@@ -46,7 +51,7 @@ export const UserMessage: FC<UserMessageProps> = ({
 
   return (
     <div
-      className="qwen-message user-message-container flex gap-0 my-1 items-start text-left flex-col relative"
+      className="qwen-message user-message-container group flex gap-0 my-1 items-start text-left flex-col relative"
       style={{ position: 'relative' }}
     >
       <div
@@ -65,6 +70,14 @@ export const UserMessage: FC<UserMessageProps> = ({
           enableFileLinks={false}
         />
       </div>
+
+      <MessageMeta
+        timestamp={timestamp}
+        copyText={content}
+        onEdit={onEdit}
+        editDisabled={editDisabled}
+        editIcon={<EditPencilIcon size={14} />}
+      />
 
       {fileContextDisplay && (
         <div className="mt-1">
@@ -89,3 +102,7 @@ export const UserMessage: FC<UserMessageProps> = ({
     </div>
   );
 };
+
+UserMessageBase.displayName = 'UserMessage';
+
+export const UserMessage = memo(UserMessageBase);

@@ -1,0 +1,163 @@
+/* Animated TaskItem styling surface (single tuning point) */
+.tiptap-editor {
+  --task-checkbox-hit-size: 0.9rem;
+  --task-checkbox-size-x: 0.825rem;
+  --task-checkbox-size-y: 0.825rem;
+  --task-checkbox-radius: 4px;
+  --task-checkbox-border-width: 1.5px;
+  --task-checkbox-active-scale: 0.95;
+  --task-checkbox-ring-size: 3px;
+  --task-checkbox-first-line-offset: 0.28em;
+
+  --task-check-svg-scale: 105%;
+  --task-check-svg-offset-x: -0.025rem;
+  --task-check-svg-offset-y: -0.005rem;
+  --task-check-stroke-width: 2;
+
+  --task-check-draw-duration: 360ms;
+  --task-check-draw-ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --task-text-fade-duration: 200ms;
+  --task-strike-duration: 400ms;
+  --task-strike-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] {
+  list-style: none;
+  /* Align task text column with regular list text (compensate checkbox + gap). */
+  padding-inline-start: max(0px, calc(var(--tiptap-list-indent, 1.5rem) - var(--task-checkbox-hit-size) - 0.5rem));
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label {
+  position: relative;
+  margin-top: var(--task-checkbox-first-line-offset);
+  inline-size: var(--task-checkbox-hit-size);
+  block-size: var(--task-checkbox-hit-size);
+  aspect-ratio: 1 / 1;
+  line-height: 0;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label > span {
+  position: relative;
+  display: inline-block;
+  box-sizing: border-box;
+  inline-size: var(--task-checkbox-size-x);
+  block-size: var(--task-checkbox-size-y);
+  aspect-ratio: 1 / 1;
+  border-radius: var(--task-checkbox-radius);
+  border: var(--task-checkbox-border-width) solid color-mix(in oklch, var(--foreground) 40%, transparent);
+  background-color: transparent;
+  box-shadow: 0 0 0 0 color-mix(in oklch, var(--accent) 0%, transparent);
+  transform: scale(1);
+  transition:
+    border-color 200ms ease,
+    background-color 200ms ease,
+    box-shadow 180ms ease,
+    transform 120ms ease;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label > span.tiptap-task-checkbox-visual {
+  display: inline-grid;
+  place-items: center;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label > span .tiptap-task-checkbox-svg {
+  display: block;
+  inline-size: var(--task-check-svg-scale);
+  block-size: var(--task-check-svg-scale);
+  color: var(--background);
+  transform: translate(var(--task-check-svg-offset-x), var(--task-check-svg-offset-y));
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label > span .tiptap-task-checkbox-path {
+  stroke-width: var(--task-check-stroke-width);
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  opacity: 1;
+  transition: stroke-dashoffset var(--task-check-draw-duration) var(--task-check-draw-ease);
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label:hover > span {
+  border-color: color-mix(in oklch, var(--foreground) 60%, transparent);
+  background: color-mix(in oklch, var(--foreground) 3%, transparent);
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label:active > span {
+  transform: scale(var(--task-checkbox-active-scale));
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label input[type='checkbox']:focus-visible + span {
+  box-shadow: 0 0 0 var(--task-checkbox-ring-size) color-mix(in oklch, var(--foreground) 18%, transparent);
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li[data-checked='true'] > label > span {
+  background-color: var(--foreground);
+  border-color: transparent;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li[data-checked='false'] > label > span .tiptap-task-checkbox-path {
+  stroke-dashoffset: 1;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li[data-checked='true'] > label > span .tiptap-task-checkbox-path {
+  stroke-dashoffset: 0;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li > div > p {
+  display: inline;
+  margin: 0;
+  color: inherit;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  background-image: linear-gradient(
+    color-mix(in oklch, var(--foreground) 45%, transparent),
+    color-mix(in oklch, var(--foreground) 45%, transparent)
+  );
+  background-repeat: no-repeat;
+  background-position: 0 56%;
+  background-size: 0% 1.5px;
+  transition:
+    color var(--task-text-fade-duration) ease,
+    background-size var(--task-strike-duration) var(--task-strike-ease);
+}
+
+.tiptap-editor .tiptap-prose ul[data-type="taskList"] li[data-checked='true'] > div > p {
+  color: color-mix(in oklch, var(--foreground) 50%, transparent);
+  background-size: 100% 1.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label > span,
+  .tiptap-editor .tiptap-prose ul[data-type="taskList"] li > label > span .tiptap-task-checkbox-path,
+  .tiptap-editor .tiptap-prose ul[data-type="taskList"] li > div > p {
+    transition-duration: 1ms !important;
+    animation: none !important;
+  }
+}

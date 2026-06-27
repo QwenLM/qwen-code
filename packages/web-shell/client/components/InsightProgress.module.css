@@ -1,0 +1,59 @@
+.progress {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 0px;
+  font-size: 13px;
+  color: var(--muted-foreground);
+  margin-top: -20px;
+}
+
+.spinner {
+  color: var(--agent-blue-500);
+  display: inline-block;
+  width: 1ch;
+  text-align: center;
+}
+
+.bar {
+  color: var(--muted-foreground);
+  letter-spacing: 0;
+  font-size: 11px;
+}
+
+.stage {
+  color: var(--agent-blue-500);
+}
+
+.icon {
+  font-weight: 700;
+  width: 14px;
+  text-align: center;
+}
+
+.done .icon {
+  color: var(--success-color);
+}
+
+.done .stage {
+  color: var(--success-color);
+}
+
+.error .icon {
+  color: var(--error-color);
+}
+
+.error .stage {
+  color: var(--error-color);
+}
+
+.detail {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.path {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}

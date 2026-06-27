@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { isSubpath } from './paths.js';
 import { marked, type Token } from 'marked';
 import { createDebugLogger } from './debugLogger.js';
+import { findProjectRoot } from './projectRoot.js';
 
 const logger = createDebugLogger('IMPORT_PROCESSOR');
 
@@ -38,29 +39,37 @@ export interface ProcessImportsResult {
   importTree: MemoryFile;
 }
 
-// Helper to find the project root (looks for .git directory)
-async function findProjectRoot(startDir: string): Promise<string> {
-  let currentDir = path.resolve(startDir);
-  while (true) {
-    const gitPath = path.join(currentDir, '.git');
-    try {
-      const stats = await fs.lstat(gitPath);
-      if (stats.isDirectory()) {
-        return currentDir;
-      }
-    } catch {
-      // .git not found, continue to parent
-    }
-    const parentDir = path.dirname(currentDir);
-    if (parentDir === currentDir) {
-      // Reached filesystem root
-      break;
-    }
-    currentDir = parentDir;
-  }
-  // Fallback to startDir if .git not found
-  return path.resolve(startDir);
+export interface ImportedFileNotification {
+  filePath: string;
+  parentFilePath: string;
 }
+
+export interface ProcessImportsOptions {
+  onFileImported?: (
+    notification: ImportedFileNotification,
+  ) => void | Promise<void>;
+}
+
+async function notifyFileImported(
+  options: ProcessImportsOptions | undefined,
+  notification: ImportedFileNotification,
+): Promise<void> {
+  try {
+    await options?.onFileImported?.(notification);
+  } catch (error) {
+    logger.warn(
+      `onFileImported callback failed for ${notification.filePath}: ${
+        hasMessage(error) ? error.message : 'Unknown error'
+      }`,
+    );
+  }
+}
+
+// `findProjectRoot` now lives in `./projectRoot.ts` and is shared with
+// memoryDiscovery. It returns `string | null`; `processImports` below
+// preserves the previous "fall back to startDir" contract at the call
+// site, so behavior for code paths that don't care about the difference
+// (a non-git scratch dir for example) is unchanged.
 
 // Add a type guard for error objects
 function hasMessage(err: unknown): err is { message: string } {
@@ -207,9 +216,13 @@ export async function processImports(
   },
   projectRoot?: string,
   importFormat: 'flat' | 'tree' = 'tree',
+  options: ProcessImportsOptions = {},
 ): Promise<ProcessImportsResult> {
   if (!projectRoot) {
-    projectRoot = await findProjectRoot(basePath);
+    // Preserve the previous local helper's contract: if no `.git`
+    // ancestor exists, fall back to the absolute basePath so
+    // `@`-imports can still resolve relatively.
+    projectRoot = (await findProjectRoot(basePath)) ?? path.resolve(basePath);
   }
 
   if (importState.currentDepth >= importState.maxDepth) {
@@ -290,6 +303,10 @@ export async function processImports(
             normalizedFullPath,
             depth + 1,
           );
+          await notifyFileImported(options, {
+            filePath: normalizedFullPath,
+            parentFilePath: normalizedPath,
+          });
         } catch (error) {
           // If file doesn't exist, silently skip this import (it's not a real import)
           // Only log warnings for other types of errors
@@ -367,9 +384,14 @@ export async function processImports(
         newImportState,
         projectRoot,
         importFormat,
+        options,
       );
       result += `<!-- Imported from: ${importPath} -->\n${imported.content}\n<!-- End of import from: ${importPath} -->`;
       imports.push(imported.importTree);
+      await notifyFileImported(options, {
+        filePath: fullPath,
+        parentFilePath: importState.currentFile ?? path.resolve(basePath),
+      });
     } catch (err: unknown) {
       // If file doesn't exist, preserve the original @path text (it's not a real import)
       if (isFileNotFoundError(err)) {

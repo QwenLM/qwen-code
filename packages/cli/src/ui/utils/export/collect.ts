@@ -171,6 +171,7 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
         originalContent?: string | null;
         newContent?: string;
         diffStat?: { model_added_lines?: number; model_removed_lines?: number };
+        truncatedForSession?: boolean;
       };
 
       // Determine operation type based on content fields
@@ -197,7 +198,7 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
           // Use diffStat if available for accurate counts
           stats.linesAdded += display.diffStat.model_added_lines ?? 0;
           stats.linesRemoved += display.diffStat.model_removed_lines ?? 0;
-        } else {
+        } else if (!display.truncatedForSession) {
           // Fallback: count lines in content
           const oldText = String(display.originalContent ?? '');
           const newText = String(display.newContent ?? '');
@@ -610,7 +611,7 @@ class ExportSessionContext implements SessionContext {
       toolCall: {
         toolCallId: uuid, // Use the same uuid as toolCallId for plan updates
         kind: 'todowrite',
-        title: 'TodoWrite',
+        title: 'TodoList',
         status: 'completed',
         content: todoContent,
         timestamp: Date.parse(timestamp),
