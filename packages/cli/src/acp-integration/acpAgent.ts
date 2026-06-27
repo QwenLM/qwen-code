@@ -7725,7 +7725,19 @@ export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
     return undefined;
   }
   const port = Number(process.env['QWEN_SERVE_CDP_TUNNEL_PORT']);
-  if (!Number.isInteger(port) || port <= 0) return undefined;
+  if (!Number.isInteger(port) || port <= 0) {
+    // Don't disable the browser tools silently — the most common cause is an
+    // ephemeral `--port 0` daemon, whose real port is bound too late to thread
+    // into this child's (frozen) env. Tell the operator how to enable them.
+    process.stderr.write(
+      'qwen serve: browser tools (chrome-devtools-mcp) disabled — no valid ' +
+        `/cdp tunnel port (QWEN_SERVE_CDP_TUNNEL_PORT=${
+          process.env['QWEN_SERVE_CDP_TUNNEL_PORT'] ?? '<unset>'
+        }). Start the daemon with a fixed --port (ephemeral --port 0 is not ` +
+        'supported for the CDP tunnel).\n',
+    );
+    return undefined;
+  }
   try {
     const requireFromHere = createRequire(import.meta.url);
     const pkgJsonPath = requireFromHere.resolve(

@@ -78,6 +78,14 @@ let activeSend: CdpSend | null = null;
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 /** True while a `handleAttach` is mid-flight (guards against overlapping attaches). */
 let attaching = false;
+/**
+ * Set when a `cdp_release` (or socket close) arrives while `handleAttach` is
+ * mid-flight. A teardown that fires before the attach lands can't detach a tab
+ * the debugger isn't on yet, so it records the request here; `handleAttach`
+ * honors it the moment it finishes wiring up. Without this, the late attach
+ * would leave a debugger attachment with no live `/cdp` client behind it.
+ */
+let releaseRequestedDuringAttach = false;
 
 /**
  * Keep the MV3 worker alive while the debugger is attached: it idles out after
@@ -266,6 +274,19 @@ async function handleAttach(
       /* metadata is optional */
     }
 
+    // A cdp_release (or socket close) that arrived while we were awaiting above
+    // couldn't tear down an attachment that hadn't landed yet. Now that it has,
+    // honor that release immediately so we never leak a debugger attachment with
+    // no live `/cdp` client. Clear `attaching` first so shutdownCdpBridge runs a
+    // real teardown instead of re-arming the flag we're acting on.
+    if (releaseRequestedDuringAttach) {
+      attaching = false;
+      releaseRequestedDuringAttach = false;
+      console.log(LOG_PREFIX, 'release arrived during attach; tearing down');
+      shutdownCdpBridge();
+      return;
+    }
+
     console.log(LOG_PREFIX, 'attached tab', tabId);
     send({ type: 'cdp_attached', id: frame.id, url, title });
   } catch (e) {
@@ -274,6 +295,7 @@ async function handleAttach(
     send({ type: 'cdp_attached', id: frame.id, error: { message } });
   } finally {
     attaching = false;
+    releaseRequestedDuringAttach = false;
   }
 }
 
@@ -347,6 +369,13 @@ export function handleCdpFrame(frame: { type?: unknown }, send: CdpSend): void {
  * the daemon socket closes so a stale attachment doesn't linger. Idempotent.
  */
 export function shutdownCdpBridge(): void {
+  // A release that races an in-flight handleAttach can't detach a tab the
+  // debugger hasn't attached to yet (attachedTabId is still null, listeners
+  // aren't registered). Record it so handleAttach tears down the moment it
+  // finishes wiring up, instead of leaving a debugger attachment behind.
+  if (attaching) {
+    releaseRequestedDuringAttach = true;
+  }
   const tabId = attachedTabId;
   teardownAttachment();
   activeSend = null;

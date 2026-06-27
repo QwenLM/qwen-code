@@ -1426,11 +1426,12 @@ export async function runQwenServe(
     // CDP tunnel (Plan C, #5626): forward the flag + bound port so the spawned
     // ACP child can auto-register chrome-devtools-mcp against this `/cdp`
     // endpoint. Only meaningful with a fixed `--port`: the override map is frozen
-    // at bridge construction, so an ephemeral `--port 0` can't be threaded here.
+    // at bridge construction, so an ephemeral `--port 0` (resolved only after
+    // `listen`) can't be threaded here. Leave the port unset in that case so the
+    // child surfaces a clear diagnostic instead of a bogus port "0".
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
-    QWEN_SERVE_CDP_TUNNEL_PORT: opts.cdpTunnelOverWs
-      ? String(opts.port)
-      : undefined,
+    QWEN_SERVE_CDP_TUNNEL_PORT:
+      opts.cdpTunnelOverWs && opts.port > 0 ? String(opts.port) : undefined,
     // Tell the child whether `/cdp` requires bearer auth. The ACP child can't
     // inherit QWEN_SERVER_TOKEN (the spawn path scrubs it) and chrome-devtools-
     // mcp is launched with `--wsEndpoint` only, so it can't authenticate against

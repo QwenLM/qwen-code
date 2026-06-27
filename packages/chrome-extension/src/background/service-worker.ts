@@ -80,7 +80,16 @@ function onWsMessage(data: unknown): void {
   // bound this connection as the CDP bridge.
   if (msg['id'] === ACP_INIT_ID && ('result' in msg || 'error' in msg)) {
     if (msg['error']) {
-      console.warn(LOG_PREFIX, 'ACP initialize failed:', msg['error']);
+      // The daemon may have already registered this connection as the CDP
+      // bridge (by clientInfo.name), so a failed init leaves it holding a bridge
+      // the extension considers dead. Close the socket; onclose tears the bridge
+      // down and reconnects rather than stranding it open.
+      console.warn(
+        LOG_PREFIX,
+        'ACP initialize failed; closing socket:',
+        msg['error'],
+      );
+      socket?.close();
     } else {
       console.log(LOG_PREFIX, 'ACP initialized; CDP tunnel ready');
     }

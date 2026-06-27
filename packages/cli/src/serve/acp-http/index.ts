@@ -941,6 +941,9 @@ export function mountAcpHttp(
               // register/unregister frames would otherwise spawn unbounded
               // concurrent provider round-trips. Reject once at the cap.
               if (clientMcpInflightDispatch >= MAX_INFLIGHT_MCP_DISPATCH) {
+                writeStderrLine(
+                  `qwen serve: /acp client-MCP inflight cap hit (${MAX_INFLIGHT_MCP_DISPATCH}); rejecting ${String(frameType)} frame`,
+                );
                 safeWsSend(
                   ws,
                   JSON.stringify({
@@ -952,14 +955,33 @@ export function mountAcpHttp(
                 );
                 return;
               }
+
               clientMcpInflightDispatch++;
             }
             const handleP = clientMcp
               .handleFrame(parsed as Record<string, unknown>)
               .then(sendClientMcpAck, (err: unknown) => {
+                const message =
+                  err instanceof Error ? err.message : String(err);
                 writeStderrLine(
-                  `qwen serve: /acp client-mcp frame error: ${err instanceof Error ? err.message : String(err)}`,
+                  `qwen serve: /acp client-mcp frame error: ${message}`,
                 );
+                // handleFrame normally returns a structured {kind:'error'};
+                // this branch is an UNEXPECTED rejection. mcp_register /
+                // mcp_unregister callers block on a response frame, so without
+                // an mcp_error here they hang. mcp_message is a reply (not a
+                // request), so it needs no ack.
+                if (isFireAndForget) {
+                  safeWsSend(
+                    ws,
+                    JSON.stringify({
+                      type: 'mcp_error',
+                      code: 'internal_error',
+                      message,
+                    }),
+                    'client-MCP',
+                  );
+                }
               })
               .finally(() => {
                 if (isFireAndForget) clientMcpInflightDispatch--;

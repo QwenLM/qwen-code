@@ -125,6 +125,9 @@ export function attachCdpClient(
     if (notifyExtension && registry.getActive() === bridge) {
       try {
         bridge.send({ type: CDP_FRAME_TYPES.release });
+        log(
+          `qwen serve: /cdp sent release to extension (puppeteer disconnected: ${reason})`,
+        );
       } catch (err) {
         log(
           `qwen serve: /cdp release send failed: ${
