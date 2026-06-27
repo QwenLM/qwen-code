@@ -1728,6 +1728,26 @@ const SETTINGS_SCHEMA = {
           'Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.',
         showInDialog: false,
       },
+      enableTeamMemory: {
+        type: 'boolean',
+        label: 'Enable Team Memory',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.',
+        showInDialog: false,
+      },
+      enableTeamMemorySync: {
+        type: 'boolean',
+        label: 'Enable Team Memory Git Sync',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.',
+        showInDialog: false,
+      },
     },
   },
 
