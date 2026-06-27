@@ -11,6 +11,7 @@ describe('source slug validation in config validators', () => {
     const result = validateSource(workspaceRoot, '../sessions');
 
     expect(result.valid).toBe(false);
+    expect(result.errors[0]?.file).toBe('sources/<invalid>/config.json');
     expect(result.errors[0]?.message).toBe('Invalid source slug: "../sessions"');
   });
 
@@ -70,7 +71,7 @@ describe('source slug validation in config validators', () => {
     const result = validateSourcePermissions(workspaceRoot, 'legacy-source-');
 
     expect(result.valid).toBe(false);
-    expect(result.errors[0]?.file).toBe('sources/legacy-source-/permissions.json');
+    expect(result.errors[0]?.file).toBe('sources/<invalid>/permissions.json');
     expect(result.errors[0]?.message).toBe('Invalid source slug: "legacy-source-"');
   });
 });

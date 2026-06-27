@@ -6,6 +6,10 @@ import { getCredentialManager } from '@craft-agent/shared/credentials'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 
+function isInvalidSourceSlugError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('Invalid source slug:')
+}
+
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.sources.GET,
   RPC_CHANNELS.sources.CREATE,
@@ -112,7 +116,11 @@ export function registerSourcesHandlers(server: RpcServer, deps: HandlerDeps): v
       const content = readFileSync(path, 'utf-8')
       return safeJsonParse(content)
     } catch (error) {
-      log.error('Error reading permissions config:', error)
+      if (isInvalidSourceSlugError(error)) {
+        log.warn('Invalid source slug for permissions:', error instanceof Error ? error.message : error)
+      } else {
+        log.error('Error reading permissions config:', error)
+      }
       return null
     }
   })

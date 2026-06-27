@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test'
-import { mkdtempSync, rmSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import type {
   HandlerFn,
@@ -10,19 +10,25 @@ import type {
 } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 
+let workspaceRoot = ''
+
 const mockGetWorkspaceByNameOrId = mock((workspaceId: string) => ({
   id: workspaceId,
-  rootPath: mkdtempSync(join(tmpdir(), 'source-rpc-delete-')),
+  name: 'Workspace',
+  rootPath: workspaceRoot,
 }))
 
 mock.module('@craft-agent/shared/config', () => ({
   getWorkspaceByNameOrId: mockGetWorkspaceByNameOrId,
 }))
 
-import { registerSourcesHandlers } from './sources'
+await import('@craft-agent/shared/agent')
+const { registerSourcesHandlers } = await import('./sources')
 
-function createDeleteSourceHandler() {
+function createHandlers() {
   const handlers = new Map<string, HandlerFn>()
+  const warnings: unknown[][] = []
+  const errors: unknown[][] = []
   const server: RpcServer = {
     handle(channel, handler) {
       handlers.set(channel, handler)
@@ -44,33 +50,34 @@ function createDeleteSourceHandler() {
       isDebugMode: true,
       logger: {
         info: () => {},
-        warn: () => {},
-        error: () => {},
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: (...args: unknown[]) => errors.push(args),
         debug: () => {},
       },
       imageProcessor: {
         getMetadata: async () => null,
-        process: async () => Buffer.from(''),
+        process: async (buffer: Buffer) => buffer,
       },
     },
   }
 
   registerSourcesHandlers(server, deps)
 
-  const handler = handlers.get(RPC_CHANNELS.sources.DELETE)
-  if (!handler) {
-    throw new Error('DELETE source handler not registered')
-  }
-  return handler
+  return { handlers, warnings, errors }
 }
 
 describe('registerSourcesHandlers DELETE', () => {
   beforeEach(() => {
     mockGetWorkspaceByNameOrId.mockClear()
+    workspaceRoot = mkdtempSync(join(tmpdir(), 'source-rpc-delete-'))
   })
 
   it('marks invalid source slugs as invalid arguments', async () => {
-    const deleteSource = createDeleteSourceHandler()
+    const { handlers } = createHandlers()
+    const deleteSource = handlers.get(RPC_CHANNELS.sources.DELETE)
+    if (!deleteSource) {
+      throw new Error('DELETE source handler not registered')
+    }
     const ctx: RequestContext = {
       clientId: 'client-1',
       workspaceId: null,
@@ -85,12 +92,34 @@ describe('registerSourcesHandlers DELETE', () => {
       expect((error as Error).message).toBe('Invalid source slug: "../sessions"')
       expect((error as Error & { code?: string }).code).toBe('INVALID_ARGUMENT')
     }
+  })
+})
 
-    const workspace = mockGetWorkspaceByNameOrId.mock.results[0]?.value as
-      | { rootPath?: string }
-      | undefined
-    if (workspace?.rootPath) {
-      rmSync(workspace.rootPath, { recursive: true, force: true })
+describe('source permissions RPC diagnostics', () => {
+  it('logs invalid source slugs separately from permissions file read errors', async () => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), 'source-rpc-permissions-'))
+    try {
+      const { handlers, warnings, errors } = createHandlers()
+
+      const getPermissions = handlers.get(RPC_CHANNELS.sources.GET_PERMISSIONS)
+      if (!getPermissions) {
+        throw new Error('GET_PERMISSIONS handler not registered')
+      }
+
+      const result = await getPermissions(
+        { clientId: 'c1', workspaceId: null, webContentsId: null },
+        'workspace-1',
+        '../sessions',
+      )
+
+      expect(result).toBeNull()
+      expect(errors).toHaveLength(0)
+      expect(warnings).toHaveLength(1)
+      expect(String(warnings[0]?.[0])).toBe('Invalid source slug for permissions:')
+      expect(String(warnings[0]?.[1])).toBe('Invalid source slug: "../sessions"')
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true })
+      workspaceRoot = ''
     }
   })
 })

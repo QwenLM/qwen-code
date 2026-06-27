@@ -52,7 +52,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             <Markdown
               content={content}
               source="assistant"
-              deferMermaid={isStreaming}
+              isStreaming={isStreaming}
               enhanceTables={!isStreaming}
             />
           </div>
@@ -257,7 +257,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                   <Markdown
                     content={content}
                     source="thinking"
-                    deferMermaid={isStreaming}
+                    isStreaming={isStreaming}
                   />
                 </div>
               </div>
