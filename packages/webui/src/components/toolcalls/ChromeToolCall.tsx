@@ -24,7 +24,7 @@ export const ChromeToolCall: FC<BaseToolCallProps> = ({
   // Extract tool name from rawInput or kind
   const getToolName = (): string => {
     if (rawInput && typeof rawInput === 'object') {
-      const toolName = (rawInput as Record<string, unknown>).name;
+      const toolName = (rawInput as Record<string, unknown>)['name'];
       if (typeof toolName === 'string') {
         return toolName;
       }

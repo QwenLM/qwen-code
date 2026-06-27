@@ -30,8 +30,13 @@ export function safeWsSend(
     return;
   }
   if (isServeDebugMode()) {
-    writeStderrLine(
-      `qwen serve: dropped ${context} frame on non-OPEN /acp socket (readyState=${ws.readyState})`,
-    );
+    try {
+      writeStderrLine(
+        `qwen serve: dropped ${context} frame on non-OPEN /acp socket (readyState=${ws.readyState})`,
+      );
+    } catch {
+      // stderr gone (e.g. EPIPE on a piped/closed log) — preserve the no-throw
+      // contract; a dropped debug line must never take the daemon down.
+    }
   }
 }
