@@ -92,6 +92,36 @@ export function createDaemonWorkspaceActions({
       }
     },
 
+    async loadMcpResources(serverName) {
+      const client = requireClient(getClient, 'Load MCP resources failed');
+      try {
+        return await withActionTimeout(
+          client.workspaceMcpResources(serverName),
+          'Load MCP resources timed out',
+        );
+      } catch {
+        // Older daemons lack the resources route. Degrade gracefully so a
+        // mixed-version client still renders the rest of the /mcp dialog —
+        // mirrors the loadMcpTools fallback.
+        return {
+          v: 1 as const,
+          workspaceCwd: '',
+          serverName,
+          initialized: false,
+          acpChannelLive: false,
+          resources: [],
+          errors: [
+            {
+              kind: 'mcp_resources' as const,
+              status: 'error' as const,
+              error:
+                'The connected daemon does not expose MCP resource details.',
+            },
+          ],
+        };
+      }
+    },
+
     async restartMcpServer(serverName) {
       const client = requireClient(getClient, 'Restart MCP server failed');
       return withActionTimeout(

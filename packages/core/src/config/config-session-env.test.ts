@@ -103,6 +103,13 @@ const baseParams: ConfigParameters = {
   overrideExtensions: [],
 };
 
+// Each test re-imports config.js's full transitive module graph cold
+// (afterEach calls vi.resetModules() so the module-level sessionEnvClaimed
+// flag resets). That cold transform+evaluate runs several seconds and, under
+// a contended CI runner, crosses the 5s default — a flaky timeout, not a hang.
+// The reset is load-bearing for what these tests check, so give them headroom.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 describe('Config sessionEnvClaimed guard', () => {
   let originalEnv: string | undefined;
 

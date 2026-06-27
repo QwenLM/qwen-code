@@ -7,7 +7,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
-import { isSafeHref, isSafeImageSrc, Markdown } from './Markdown';
+import {
+  MAX_HIGHLIGHT_LINE_CHARS,
+  __resetForTesting,
+  getCodeHighlighter,
+} from './codeHighlighter';
+import {
+  isSafeHref,
+  isSafeImageSrc,
+  Markdown,
+  resolveFenceLanguage,
+} from './Markdown';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -245,8 +255,60 @@ describe('Markdown enhanced tables', () => {
   });
 });
 
+describe('resolveFenceLanguage', () => {
+  it('resolves common aliases to Shiki language ids', () => {
+    expect(resolveFenceLanguage('ts').resolvedLang).toBe('typescript');
+    expect(resolveFenceLanguage('js').resolvedLang).toBe('javascript');
+    expect(resolveFenceLanguage('py').resolvedLang).toBe('python');
+    expect(resolveFenceLanguage('sh').resolvedLang).toBe('bash');
+    expect(resolveFenceLanguage('yml').resolvedLang).toBe('yaml');
+    expect(resolveFenceLanguage('golang').resolvedLang).toBe('go');
+  });
+
+  it('passes through already-canonical languages', () => {
+    expect(resolveFenceLanguage('typescript').resolvedLang).toBe('typescript');
+    expect(resolveFenceLanguage('sql').resolvedLang).toBe('sql');
+  });
+
+  it('is case-insensitive', () => {
+    expect(resolveFenceLanguage('SQL').resolvedLang).toBe('sql');
+    expect(resolveFenceLanguage('TS').resolvedLang).toBe('typescript');
+  });
+
+  it('falls back to "text" for unknown languages', () => {
+    expect(resolveFenceLanguage('made-up').resolvedLang).toBe('text');
+    expect(resolveFenceLanguage('').resolvedLang).toBe('text');
+    expect(resolveFenceLanguage(undefined).resolvedLang).toBe('text');
+  });
+
+  it('keeps the user-typed label (original case) for the header', () => {
+    expect(resolveFenceLanguage('ts').label).toBe('ts');
+    // Original case is preserved for display even though resolution lowercases.
+    expect(resolveFenceLanguage('TypeScript').label).toBe('TypeScript');
+    expect(resolveFenceLanguage('TypeScript').resolvedLang).toBe('typescript');
+    expect(resolveFenceLanguage(undefined).label).toBe('text');
+  });
+
+  it('detects mermaid as its own language', () => {
+    expect(resolveFenceLanguage('mermaid').lang).toBe('mermaid');
+  });
+
+  it('does not leak inherited Object.prototype keys as a non-string lang', () => {
+    for (const evil of [
+      '__proto__',
+      'constructor',
+      'toString',
+      'hasOwnProperty',
+    ]) {
+      const { lang, resolvedLang } = resolveFenceLanguage(evil);
+      expect(typeof lang).toBe('string');
+      expect(resolvedLang).toBe('text');
+    }
+  });
+});
+
 describe('Markdown mermaid rendering', () => {
-  it('keeps mermaid code blocks unrendered while deferred', async () => {
+  it('keeps mermaid code blocks unrendered while streaming', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -255,7 +317,7 @@ describe('Markdown mermaid rendering', () => {
       root.render(
         createElement(Markdown, {
           content: '```mermaid\ngraph TD\nA --> B\n```',
-          deferMermaid: true,
+          isStreaming: true,
         }),
       );
     });
@@ -263,6 +325,208 @@ describe('Markdown mermaid rendering', () => {
     expect(container.textContent).toContain('mermaid');
     expect(container.textContent).toContain('graph TD');
     expect(container.textContent).not.toContain('mermaid.rendering');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+});
+
+describe('Markdown code highlighting while streaming', () => {
+  it('keeps streamed code content visible while streaming', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst x: number = 1;\n```',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    // The streamed code stays visible inside the rendered code element — not
+    // merely somewhere in the DOM (the lang label / copy button). Anchoring to
+    // `pre code` guards the "no streamed text is ever hidden" invariant: if the
+    // highlight HTML were set but empty, this element would be missing/blank
+    // even though container.textContent still matched the header.
+    const codeEl = container.querySelector('pre code');
+    expect(codeEl).not.toBeNull();
+    expect(codeEl?.textContent).toContain('const x: number = 1;');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('highlights the block as it streams, and the appended chunk too', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    // First streamed chunk: gets highlighted (async grammar load, then the
+    // synchronous re-highlight).
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst a = 1;\n```',
+          isStreaming: true,
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(container.querySelector('.shiki')).not.toBeNull();
+    expect(container.textContent).toContain('const a = 1;');
+
+    // Appended chunk (still streaming): the new line is re-highlighted
+    // synchronously — content never lags out of the DOM.
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst a = 1;\nconst b = 2;\n```',
+          isStreaming: true,
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(container.querySelector('.shiki')).not.toBeNull();
+    expect(container.textContent).toContain('const b = 2;');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('applies Shiki highlighting once a code block has settled', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst x: number = 1;\n```',
+          isStreaming: false,
+        }),
+      );
+    });
+    // Wait for the async highlight (language load + tokenization) to resolve.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+
+    expect(container.querySelector('.shiki')).not.toBeNull();
+    expect(container.textContent).toContain('const x');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('drops stale highlighted HTML when the code is replaced (regeneration)', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    // Settle an initial highlighted block.
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst aaa = 1;\n```',
+          isStreaming: false,
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(container.textContent).toContain('const aaa');
+
+    // Replace the content while streaming. `ts` is already warm, so the
+    // synchronous re-highlight produces the new block's HTML immediately; the
+    // stale highlight (of `const aaa`) must NOT be shown — `const zzz` is.
+    // (The cold-language variant of this — where the new grammar is still
+    // loading — is covered deterministically in Markdown.coldHighlight.test.tsx.)
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst zzz = 2;\n```',
+          isStreaming: true,
+        }),
+      );
+    });
+    expect(container.textContent).toContain('const zzz');
+    expect(container.textContent).not.toContain('const aaa');
+
+    // Positive case: once the regenerated content settles, it is actually
+    // highlighted (re-highlighted synchronously — not stuck on plain text).
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst zzz = 2;\n```',
+          isStreaming: false,
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(container.querySelector('.shiki')).not.toBeNull();
+    expect(container.textContent).toContain('const zzz');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('renders an oversized single-line fence as plain text even when the grammar is warm', async () => {
+    // Warm `json` up front so this test exercises the SIZE guard, not the cold
+    // path: if isTooLargeToHighlight were removed from CodeBlock, the warm
+    // synchronous highlight would run and produce `.shiki` — so the test would
+    // fail, which is what we want. (With an unwarmed language it would pass
+    // vacuously, because the cold path renders plain regardless of size.)
+    __resetForTesting();
+    await getCodeHighlighter('json');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const longLine = 'a'.repeat(MAX_HIGHLIGHT_LINE_CHARS + 1);
+
+    // Sanity: a normal json block DOES highlight, proving the grammar is warm.
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```json\n{ "a": 1 }\n```',
+          isStreaming: false,
+        }),
+      );
+    });
+    expect(container.querySelector('.shiki')).not.toBeNull();
+
+    // The oversized single line is rendered plain despite the warm grammar — the
+    // size guard, not language coldness, is what suppresses highlighting.
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```json\n' + longLine + '\n```',
+          isStreaming: false,
+        }),
+      );
+    });
+    expect(container.textContent).toContain(longLine);
+    expect(container.querySelector('.shiki')).toBeNull();
 
     await act(async () => {
       root.unmount();

@@ -469,6 +469,18 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ serverName: 'fs' });
   });
 
+  it('GET /workspace/mcp/:server/resources maps to _qwen/workspace/mcp/resources', () => {
+    const result = matchRoute('/workspace/mcp/fs/resources', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/resources');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ serverName: 'fs' });
+  });
+
   it('POST /workspace/mcp/servers maps to _qwen/workspace/mcp/servers/add', () => {
     const result = matchRoute('/workspace/mcp/servers', 'POST');
     expect(result).not.toBeNull();

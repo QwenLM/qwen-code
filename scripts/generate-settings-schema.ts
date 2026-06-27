@@ -38,6 +38,7 @@ interface JsonSchemaProperty {
   items?: JsonSchemaProperty;
   enum?: (string | number)[];
   default?: unknown;
+  minimum?: number;
   additionalProperties?: boolean | JsonSchemaProperty;
   required?: string[];
   oneOf?: JsonSchemaProperty[];
@@ -182,6 +183,10 @@ function convertSettingToJsonSchema(
       // default value (e.g. `{commit: true, pr: true}` for gitCoAuthor).
       schema.default = defaultVal;
     }
+  }
+
+  if (setting.type === 'number' && setting.minimum !== undefined) {
+    schema.minimum = setting.minimum;
   }
 
   // If the field accepts a legacy primitive shape (e.g. a boolean that was

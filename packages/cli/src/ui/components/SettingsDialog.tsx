@@ -26,6 +26,7 @@ import {
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
+  validateSettingValue,
 } from '../../utils/settingsUtils.js';
 import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
 import {
@@ -322,6 +323,16 @@ export function SettingsDialog({
         parsed = trimmed === '' ? 'auto' : trimmed;
       } else {
         parsed = editBuffer;
+      }
+    }
+
+    if (definition) {
+      const validationError = validateSettingValue(definition, parsed);
+      if (validationError) {
+        setEditingKey(null);
+        setEditBuffer('');
+        setEditCursorPos(0);
+        return;
       }
     }
 

@@ -179,6 +179,18 @@ export interface WebShellFooterRenderInfo {
 
 export type FooterRenderer = ComponentType<WebShellFooterRenderInfo>;
 
+// ---- Loading phrases ----
+
+/**
+ * Resolves the witty phrases cycled while a prompt is streaming. Receives the
+ * resolved UI language. Return phrases to override the built-in defaults, an
+ * empty array to hide the phrase entirely, or `undefined`/`null` to fall back
+ * to the built-in defaults for that language.
+ */
+export type LoadingPhrasesResolver = (
+  language: string,
+) => readonly string[] | undefined | null;
+
 export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
@@ -195,6 +207,7 @@ export interface WebShellCustomization {
    */
   collapseCompletedTurns?: boolean;
   markdown?: WebShellMarkdownCustomization;
+  loadingPhrases?: LoadingPhrasesResolver;
 }
 
 const WebShellCustomizationContext = createContext<WebShellCustomization>({});
