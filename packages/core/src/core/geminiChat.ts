@@ -1423,6 +1423,17 @@ export class GeminiChat {
     | null = null;
 
   /**
+   * Monotonically counts user-content pushes that survived into history.
+   * Incremented when `sendMessageStream` pushes the user content and decremented
+   * only if that same push is rolled back on a setup-time failure. Auto-
+   * compression mutates history length but never touches this counter, so a
+   * caller (the Retry strip/restore in client.ts) can snapshot it and tell
+   * whether the re-submitted content actually landed — a history-length delta
+   * can't, since compression shrinks history independently of the push.
+   */
+  private userContentPushCount = 0;
+
+  /**
    * Reset both partial-push markers in lockstep. Every history-mutation
    * site uses this — single-field resets are a bug because the fields
    * are always paired by lifecycle.
@@ -1902,6 +1913,9 @@ export class GeminiChat {
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       userContentAdded = true;
+      // Record that the user content landed (see `userContentPushCount`). The
+      // setup-error path below decrements this if it rolls the push back.
+      this.userContentPushCount++;
       // Per-send orphan repair (belt-and-suspenders alongside the
       // startChat load-time pass). Runs AFTER user content lands so a
       // user-supplied tool_result closes the pair before we synthesize
@@ -1933,6 +1947,8 @@ export class GeminiChat {
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
+        // The push above was rolled back, so undo its count too.
+        this.userContentPushCount--;
       }
       streamDoneResolver!();
       throw error;
@@ -2773,6 +2789,16 @@ export class GeminiChat {
    */
   getHistoryLength(): number {
     return this.history.length;
+  }
+
+  /**
+   * Monotonic count of user-content pushes that survived into history (see the
+   * field doc). Snapshot it before a send and compare after to tell whether the
+   * send actually pushed the user content — robust to auto-compression, which
+   * changes history length without touching this counter.
+   */
+  getUserContentPushCount(): number {
+    return this.userContentPushCount;
   }
 
   /**

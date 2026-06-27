@@ -371,6 +371,35 @@ describe('GeminiChat', async () => {
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
     });
 
+    it('increments the user-content push counter once per surviving send', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'done' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const before = chat.getUserContentPushCount();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-id-push-count',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      // The user content landed exactly once, so the counter advanced by one —
+      // this is the signal the Retry strip/restore in client.ts gates on.
+      expect(chat.getUserContentPushCount()).toBe(before + 1);
+    });
+
     it('releases the sleep inhibitor when the stream errors', async () => {
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         (async function* () {
