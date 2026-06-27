@@ -3094,7 +3094,7 @@ export class Config {
   async relocateWorkingDirectory(
     newDir: string,
     expectedCanonicalDir?: string,
-    opts?: { skipProcessChdir?: boolean },
+    opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
   ): Promise<{ memoryRefreshError?: unknown }> {
     const oldDir = opts?.skipProcessChdir
       ? this.cwd
@@ -3118,21 +3118,33 @@ export class Config {
           `Changed directory to ${actualCwd}, expected ${expected}.`,
         );
       }
+    } else {
+      // ACP path: validate realpath matches expected without calling
+      // process.chdir — guards against TOCTOU swaps between the trust
+      // check and the config state update.
+      const actualCanonical = fs.realpathSync(targetPath);
+      if (actualCanonical !== expected) {
+        throw new Error(
+          `Realpath mismatch: resolved ${actualCanonical}, expected ${expected}.`,
+        );
+      }
     }
 
     const oldStorage = this.storage;
-    const newStorage = new Storage(expected);
-    await this.prepareSessionArtifactMigration(
-      oldStorage,
-      newStorage,
-      oldDir,
-      opts,
-    );
+    if (!opts?.skipArtifactMigration) {
+      const newStorage = new Storage(expected);
+      await this.prepareSessionArtifactMigration(
+        oldStorage,
+        newStorage,
+        oldDir,
+        opts,
+      );
+      this.storage = newStorage;
+      this.chatRecordingService?.resetStoragePaths();
+    }
 
     this.targetDir = expected;
     this.cwd = expected;
-    this.storage = newStorage;
-    this.chatRecordingService?.resetStoragePaths();
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;

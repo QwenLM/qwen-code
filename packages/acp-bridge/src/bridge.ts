@@ -3495,43 +3495,73 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Chain onto promptQueue and update tail — ensures:
       // 1. cd waits for any in-flight prompt to complete
       // 2. Subsequent prompts wait for cd to complete (prevents stale config.cwd)
-      const cdResult = entry.promptQueue.then(async () => {
+      const cdPromise = entry.promptQueue.then(async () => {
         if (entry.promptActive) {
           throw new CdWhilePromptActiveError(sessionId);
         }
 
         const ci = await ensureChannel();
-        return (await withTimeout(
-          ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+        const raw = await ci.connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionCd,
+          {
             sessionId,
             path: req.path,
-          }),
-          Math.max(initTimeoutMs, 30_000),
-          'changeSessionCwd',
-        )) as { previousCwd: string; newCwd: string; warnings: string[] };
+          },
+        );
+        const extResult = raw as {
+          previousCwd: string;
+          newCwd: string;
+          warnings: string[];
+        };
+        if (
+          typeof extResult?.previousCwd !== 'string' ||
+          typeof extResult?.newCwd !== 'string' ||
+          !Array.isArray(extResult?.warnings)
+        ) {
+          throw new Error(
+            `changeSessionCwd: unexpected response shape from agent: ${JSON.stringify(raw)}`,
+          );
+        }
+
+        // State update inside the queue lambda — always executes when
+        // the extMethod settles, regardless of caller timeout.
+        if (extResult.previousCwd !== extResult.newCwd) {
+          entry.events.publish({
+            type: 'session_cwd_changed',
+            data: {
+              sessionId,
+              previousCwd: extResult.previousCwd,
+              newCwd: extResult.newCwd,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+
+        return extResult;
       });
 
-      // Update queue tail (same pattern as sendPrompt L3090)
-      entry.promptQueue = cdResult.then(
+      // Queue tail tied to the raw extMethod settlement — subsequent
+      // operations wait for the actual cd to finish, not the timeout.
+      entry.promptQueue = cdPromise.then(
         () => undefined,
         () => undefined,
       );
 
-      const result = await cdResult;
+      // Timeout is caller-facing only: surfaces a deadline exceeded error
+      // to the HTTP client without advancing the queue prematurely.
+      const result = await withTimeout(
+        cdPromise,
+        Math.max(initTimeoutMs, 30_000),
+        'changeSessionCwd',
+      );
 
-      // Only update state and broadcast if directory actually changed
-      if (result.previousCwd !== result.newCwd) {
-        entry.workspaceCwd = result.newCwd;
-        entry.events.publish({
-          type: 'session_cwd_changed',
-          data: {
-            sessionId,
-            previousCwd: result.previousCwd,
-            newCwd: result.newCwd,
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      }
+      writeStderrLine(
+        `qwen serve: session ${sessionId} cwd changed: ` +
+          `${result.previousCwd} -> ${result.newCwd}` +
+          (result.warnings.length > 0
+            ? ` (warnings: ${result.warnings.join('; ')})`
+            : ''),
+      );
 
       return { sessionId, ...result };
     },

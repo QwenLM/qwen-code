@@ -5527,7 +5527,8 @@ class QwenAgent implements Agent {
         if (
           typeof targetPath !== 'string' ||
           targetPath.length === 0 ||
-          !path.isAbsolute(targetPath)
+          !path.isAbsolute(targetPath) ||
+          targetPath.includes('\0')
         ) {
           throw RequestError.invalidParams(
             undefined,
@@ -5583,12 +5584,14 @@ class QwenAgent implements Agent {
           }
         }
 
-        // Relocate working directory (skip process.chdir for ACP)
+        // Relocate working directory (skip process.chdir and artifact
+        // migration for ACP — storage stays at the bound workspace so
+        // branch/load/lifecycle paths remain consistent).
         const warnings: string[] = [];
         const relocation = await config.relocateWorkingDirectory(
           canonicalPath,
           canonicalPath,
-          { skipProcessChdir: true },
+          { skipProcessChdir: true, skipArtifactMigration: true },
         );
         if (relocation.memoryRefreshError) {
           warnings.push(

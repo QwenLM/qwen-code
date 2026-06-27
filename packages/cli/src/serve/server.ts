@@ -5803,7 +5803,7 @@ function sendBridgeErrorImpl(
   if (err instanceof CdWhilePromptActiveError) {
     res.status(409).json({
       error: err.message,
-      code: 'session_busy',
+      code: 'cd_while_prompt_active',
       sessionId: err.sessionId,
     });
     return;
