@@ -96,12 +96,12 @@ export function registerSourcesHandlers(server: RpcServer, deps: HandlerDeps): v
     if (!workspace) return null
 
     const { existsSync, readFileSync } = await import('fs')
-    const { getSourcePermissionsPath } = await import('@craft-agent/shared/agent')
-    const path = getSourcePermissionsPath(workspace.rootPath, sourceSlug)
-
-    if (!existsSync(path)) return null
-
     try {
+      const { getSourcePermissionsPath } = await import('@craft-agent/shared/agent')
+      const path = getSourcePermissionsPath(workspace.rootPath, sourceSlug)
+
+      if (!existsSync(path)) return null
+
       const content = readFileSync(path, 'utf-8')
       return safeJsonParse(content)
     } catch (error) {

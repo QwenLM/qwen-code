@@ -368,6 +368,14 @@ import { getWorkspaceSourcesPath } from '../workspaces/storage.ts';
 // --- sources/{slug}/config.json ---
 
 const SourceTypeSchema = z.enum(['mcp', 'api', 'local']);
+// Keep in sync with session-tools-core/src/source-helpers.ts - shared cannot depend on that package.
+export const SOURCE_SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function assertValidSourceSlug(sourceSlug: string): void {
+  if (!SOURCE_SLUG_REGEX.test(sourceSlug)) {
+    throw new Error(`Invalid source slug: ${JSON.stringify(sourceSlug)}`);
+  }
+}
 
 // MCP source supports two transport types:
 // - HTTP/SSE: requires url and authType
@@ -451,7 +459,10 @@ const SourceBrandSchema = z.object({
 export const FolderSourceConfigSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
-  slug: z.string().regex(/^[a-z0-9-]+$/, 'Slug must be lowercase alphanumeric with hyphens'),
+  slug: z.string().regex(
+    SOURCE_SLUG_REGEX,
+    'Slug must be lowercase alphanumeric segments separated by single hyphens'
+  ),
   enabled: z.boolean(),
   provider: z.string().min(1),
   type: SourceTypeSchema,
@@ -524,6 +535,22 @@ export function validateSourceConfigContent(jsonString: string): ValidationResul
 export function validateSource(workspaceId: string, slug: string): ValidationResult {
   const sourcesDir = getWorkspaceSourcesPath(workspaceId);
   const file = `sources/${slug}/config.json`;
+
+  try {
+    assertValidSourceSlug(slug);
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [{
+        file,
+        path: '',
+        message: error instanceof Error ? error.message : 'Invalid source slug',
+        severity: 'error',
+      }],
+      warnings: [],
+    };
+  }
+
   const configPath = join(sourcesDir, slug, 'config.json');
 
   if (!existsSync(join(sourcesDir, slug))) {
@@ -1455,7 +1482,22 @@ export function validateWorkspacePermissions(workspaceRoot: string): ValidationR
  * @param sourceSlug - Source slug
  */
 export function validateSourcePermissions(workspaceRoot: string, sourceSlug: string): ValidationResult {
-  const permissionsPath = getSourcePermissionsPath(workspaceRoot, sourceSlug);
+  let permissionsPath: string;
+  try {
+    permissionsPath = getSourcePermissionsPath(workspaceRoot, sourceSlug);
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [{
+        file: `sources/${sourceSlug}/permissions.json`,
+        path: '',
+        message: error instanceof Error ? error.message : 'Invalid source slug',
+        severity: 'error',
+      }],
+      warnings: [],
+    };
+  }
+
   return validatePermissionsFile(permissionsPath, `sources/${sourceSlug}/permissions.json`);
 }
 
@@ -1492,6 +1534,18 @@ export function validateAllPermissions(workspaceRoot: string): ValidationResult 
     for (const entry of entries) {
       const entryPath = join(sourcesDir, entry);
       if (statSync(entryPath).isDirectory()) {
+        try {
+          assertValidSourceSlug(entry);
+        } catch {
+          warnings.push({
+            file: `sources/${entry}/permissions.json`,
+            path: '',
+            message: `Source '${entry}' has invalid slug format, skipping permissions validation`,
+            severity: 'warning',
+          });
+          continue;
+        }
+
         const srcResult = validateSourcePermissions(workspaceRoot, entry);
         errors.push(...srcResult.errors);
         warnings.push(...srcResult.warnings);
