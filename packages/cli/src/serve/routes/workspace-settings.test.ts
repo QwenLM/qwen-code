@@ -80,4 +80,58 @@ describe('POST /workspace/settings', () => {
       undefined,
     );
   });
+
+  it('rejects non-positive general.sessionRecapAwayThresholdMinutes values', async () => {
+    const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+
+    for (const value of [0, -1]) {
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.sessionRecapAwayThresholdMinutes',
+        value,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_value',
+        error: 'Value must be >= 1',
+      });
+    }
+
+    expect(persistSetting).not.toHaveBeenCalled();
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
+
+  it.each([1, 5])(
+    'accepts general.sessionRecapAwayThresholdMinutes=%s',
+    async (value) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.sessionRecapAwayThresholdMinutes',
+        value,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        key: 'general.sessionRecapAwayThresholdMinutes',
+        scope: 'workspace',
+        value,
+        requiresRestart: false,
+      });
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        expect.any(String),
+        'general.sessionRecapAwayThresholdMinutes',
+        value,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'general.sessionRecapAwayThresholdMinutes',
+        value,
+        'workspace',
+        undefined,
+      );
+    },
+  );
 });
