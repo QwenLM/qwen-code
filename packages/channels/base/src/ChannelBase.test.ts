@@ -552,10 +552,9 @@ describe('ChannelBase', () => {
 
     it('does not prefix a forwarded slash command even before availableCommands loads', async () => {
       const ch = createChannel({ groupPolicy: 'open' });
-      // availableCommands is populated asynchronously by an ACP notification and
-      // is still empty on a fresh session. A [sender] prefix would stop the
-      // command from parsing, so any slash-shaped message is passed through
-      // verbatim regardless of registration/load state — no race.
+      // A real command shape is recognized lexically, so it is passed through
+      // verbatim without consulting availableCommands (empty on a fresh session)
+      // — no race. A [sender] prefix would otherwise stop it from parsing.
       expect(bridge.availableCommands).toHaveLength(0);
       await ch.handleInbound(
         groupEnv({ senderName: 'Alice', text: '/compress now' }),
@@ -579,15 +578,67 @@ describe('ChannelBase', () => {
 
     it('does not prefix an unrecognized slash command either', async () => {
       const ch = createChannel({ groupPolicy: 'open' });
-      // Tradeoff: we can't distinguish a real command from an unknown one without
-      // racing the async command list, so /deploy is also forwarded un-prefixed.
-      // Not-breaking-real-commands wins over attributing an unknown command.
+      // Detection is by shape, not registration: /deploy looks like a command,
+      // so it is forwarded un-prefixed even though no handler exists. The CLI
+      // decides whether it resolves; breaking a real command is the worse risk.
       await ch.handleInbound(
         groupEnv({ senderName: 'Alice', text: '/deploy prod' }),
       );
       const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
       expect(promptText).toBe('/deploy prod');
+    });
+
+    it('prefixes a slash-prefixed path (not a command shape)', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      // /tmp/foo has a path separator in its first token, so the CLI treats it as
+      // prose — it must keep the speaker tag, unlike a real command.
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/tmp/foo bar' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] /tmp/foo bar');
+    });
+
+    it('prefixes a // line comment (not a command shape)', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '// a comment' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] // a comment');
+    });
+
+    it('prefixes a /* block comment (not a command shape)', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/* note */' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] /* note */');
+    });
+
+    it('prefixes a bare slash (no command token)', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(groupEnv({ senderName: 'Alice', text: '/' }));
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] /');
+    });
+
+    it('does not prefix a namespaced slash command', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      // /git:commit is a single command token (the `:` namespace separator is not
+      // a path separator), so it parses as a command and is forwarded verbatim.
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/git:commit' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('/git:commit');
     });
 
     it('still prefixes a normal (non-slash) group message', async () => {

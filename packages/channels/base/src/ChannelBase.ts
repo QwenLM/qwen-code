@@ -333,6 +333,29 @@ export abstract class ChannelBase {
     return { command: match[1].toLowerCase(), args: match[2].trim() };
   }
 
+  /**
+   * Whether `text` is a real slash command rather than prose that merely starts
+   * with `/`. Mirrors the CLI's classifier (cli `ui/utils/commandUtils.ts`
+   * `isSlashCommand`): a command is `/<name>[ args]` whose first whitespace-
+   * delimited token is non-empty and free of path separators, and is not a `//`
+   * line comment or `/*` block comment. The CLI sends slash-prefixed paths
+   * (`/tmp/foo`), comments and a bare `/` to the model as prose, so a group must
+   * still attribute them. Purely lexical — never consults the async command
+   * list, so it can't race a fresh session.
+   */
+  private isSlashCommand(text: string): boolean {
+    const trimmed = text.trim();
+    if (
+      !trimmed.startsWith('/') ||
+      trimmed.startsWith('//') ||
+      trimmed.startsWith('/*')
+    ) {
+      return false;
+    }
+    const firstToken = trimmed.slice(1).trimStart().split(/\s+/u)[0] ?? '';
+    return firstToken.length > 0 && !/[/\\]/.test(firstToken);
+  }
+
   async handleInbound(envelope: Envelope): Promise<void> {
     // 1. Group gate: policy + allowlist + mention gating
     const groupResult = this.groupGate.check(envelope);
@@ -416,13 +439,17 @@ export abstract class ChannelBase {
     // Multiplayer attribution: in a group, tag each turn with the speaker so a
     // shared session can tell members apart. Sanitize the name so a crafted nick
     // can't break out of the [..] tag or inject newlines. Skipped for 1:1 chats
-    // and for already-prefixed re-entries (collect-mode coalescing). Any
-    // slash-shaped message is also passed through verbatim: a [sender] prefix
-    // would stop a real command from parsing, and we can't reliably tell a real
-    // command from an unknown one here — the agent's command list loads async,
-    // so a registration check would race and corrupt the first command of a
-    // fresh session.
-    if (envelope.isGroup && !envelope.alreadyPrefixed && parsed === null) {
+    // and for already-prefixed re-entries (collect-mode coalescing). Real slash
+    // commands are also passed through verbatim — a [sender] prefix would stop
+    // them from parsing — but only genuine command shapes (isSlashCommand, which
+    // mirrors the CLI's classifier). Slash-prefixed paths (/tmp/foo) and comments
+    // (//…, /*…*/) are prose to the CLI, so they still get attributed. The check
+    // is purely lexical, so it never races the async command list.
+    if (
+      envelope.isGroup &&
+      !envelope.alreadyPrefixed &&
+      !this.isSlashCommand(envelope.text)
+    ) {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
       );
