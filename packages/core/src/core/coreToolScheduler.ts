@@ -795,6 +795,12 @@ const RETRY_LOOP_STOP_DIRECTIVE =
   'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
   'instead of retrying.';
 
+/** Directive injected when a truncated file-modifying call repeats. */
+const TRUNCATION_RETRY_LOOP_DIRECTIVE =
+  '\n\n⚠️ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
+  'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
+  'or explain to the user that the content is too large to write safely in one call.';
+
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
@@ -1907,7 +1913,7 @@ export class CoreToolScheduler {
           );
           const truncationError = new Error(
             count >= VALIDATION_RETRY_LOOP_THRESHOLD
-              ? `${TRUNCATION_EDIT_REJECTION}${RETRY_LOOP_STOP_DIRECTIVE}`
+              ? `${TRUNCATION_EDIT_REJECTION}${TRUNCATION_RETRY_LOOP_DIRECTIVE}`
               : TRUNCATION_EDIT_REJECTION,
           );
           newToolCalls.push({
