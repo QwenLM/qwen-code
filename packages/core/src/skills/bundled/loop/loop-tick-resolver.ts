@@ -141,6 +141,12 @@ export class LoopTickResolver {
   // is aborted between resolve() and delivery can't poison the cache into
   // sending a dangling short reminder next time.
   #pendingContent: string | null = null;
+  // Instance-scoped fs.realpath cache for the confinement boundaries, handed to
+  // readLoopTaskFile. Tying it to the resolver (a fresh Map per /cd rebuild,
+  // cleared by resetCache) keeps the per-tick perf win while staying
+  // invalidatable — a module-global cache would pin a stale boundary in a
+  // long-lived process after a /cd or symlink re-point.
+  readonly #realDirCache = new Map<string, Promise<string>>();
 
   constructor(private readonly deps: LoopTickResolverDeps) {}
 
@@ -149,6 +155,9 @@ export class LoopTickResolver {
   resetCache(): void {
     this.#lastContent = null;
     this.#pendingContent = null;
+    // A reset may follow a /cd or symlink change, so drop the cached boundary
+    // realpaths too and re-resolve them on the next tick.
+    this.#realDirCache.clear();
   }
 
   /** Commit the last resolve()'s content once it has reached the model. */
@@ -163,6 +172,7 @@ export class LoopTickResolver {
       projectRoot: this.deps.projectRoot,
       homeDir: this.deps.homeDir,
       allowProjectFile: this.deps.allowProjectFile,
+      realDirCache: this.#realDirCache,
     });
 
     if (result.status === 'missing') {

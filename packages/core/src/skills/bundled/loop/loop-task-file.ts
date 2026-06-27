@@ -44,25 +44,39 @@ export interface ReadLoopTaskFileOptions {
    * trust-derived value explicitly.
    */
   allowProjectFile?: boolean;
+  /**
+   * Per-resolver cache for the boundary `fs.realpath()` results. LoopTickResolver
+   * passes its own instance-scoped Map so the cache lifetime is tied to the
+   * resolver (rebuilt on `/cd`, cleared by `resetCache()`) instead of living
+   * forever at module scope. Omitted by direct barrel callers, who fall back to a
+   * process-lifetime cache. Eviction-on-failure is preserved either way.
+   */
+  realDirCache?: Map<string, Promise<string>>;
 }
 
 /**
- * `fs.realpath(dir)` cache for the two confinement boundaries — the workspace
- * root and the home dir. Each is stable for the process, so resolve it once per
- * dir instead of every tick. Keyed by the TRUSTED dir the caller passes (never a
- * path derived from file contents), so an external caller of this re-exported
- * function can't widen a boundary with a stale/broader path.
+ * Process-lifetime fallback `fs.realpath(dir)` cache for the two confinement
+ * boundaries — the workspace root and the home dir. Used only by direct callers
+ * of this re-exported function that don't supply their own cache; resolver-driven
+ * ticks pass an instance-scoped cache (see `ReadLoopTaskFileOptions.realDirCache`)
+ * so the boundary realpath stays invalidatable and a long-lived process can't pin
+ * a stale boundary after a `/cd` or symlink re-point. Keyed by the TRUSTED dir the
+ * caller passes (never a path derived from file contents), so a caller can't widen
+ * a boundary with a stale/broader path.
  */
-const realDirCache = new Map<string, Promise<string>>();
+const moduleRealDirCache = new Map<string, Promise<string>>();
 
-function resolveRealDir(dir: string): Promise<string> {
-  let real = realDirCache.get(dir);
+function resolveRealDir(
+  dir: string,
+  cache: Map<string, Promise<string>>,
+): Promise<string> {
+  let real = cache.get(dir);
   if (real === undefined) {
     real = fs.realpath(dir);
     // Don't pin a rejection: a transient failure (EACCES, ENOENT) must be
     // retried next tick rather than cached, preserving per-tick error semantics.
-    real.catch(() => realDirCache.delete(dir));
-    realDirCache.set(dir, real);
+    real.catch(() => cache.delete(dir));
+    cache.set(dir, real);
   }
   return real;
 }
@@ -144,6 +158,7 @@ export async function readLoopTaskFile({
   projectRoot,
   homeDir,
   allowProjectFile = false,
+  realDirCache = moduleRealDirCache,
 }: ReadLoopTaskFileOptions): Promise<LoopTaskFileResult> {
   if (!allowProjectFile) {
     // Repo-controlled file in an untrusted folder — never read it (the
@@ -187,7 +202,7 @@ export async function readLoopTaskFile({
         // A final-component lstat can't see an ANCESTOR symlink (e.g. a
         // checked-in `.qwen -> /outside`); realpath resolves it, so confine the
         // canonical path to the workspace root before reading.
-        const realRoot = await resolveRealDir(projectRoot);
+        const realRoot = await resolveRealDir(projectRoot, realDirCache);
         const real = await fs.realpath(filePath);
         if (!isWithin(realRoot, real)) {
           debugLogger.debug(
@@ -214,7 +229,7 @@ export async function readLoopTaskFile({
         // otherwise `~/.qwen/loop.md -> /etc/passwd` (or `-> /dev/...`) would be
         // read and fed to the model every tick. In-home dotfile symlinks (e.g.
         // `-> ~/dotfiles/loop.md`) still resolve inside $HOME and are allowed.
-        const realHome = await resolveRealDir(homeDir);
+        const realHome = await resolveRealDir(homeDir, realDirCache);
         const real = await fs.realpath(filePath);
         if (!isWithin(realHome, real)) {
           debugLogger.debug(
@@ -258,13 +273,37 @@ export async function readLoopTaskFile({
     const truncated = buffer.byteLength > LOOP_TASK_FILE_MAX_BYTES;
     let content: string;
     if (truncated) {
-      // Cap by bytes on a UTF-8 boundary: back off any trailing continuation
-      // bytes from a mid-character cut, then re-clamp the decoded string so
-      // malformed input (an orphan lead byte decoding to U+FFFD) still can't
-      // exceed the cap.
+      // Cap by bytes on a UTF-8 char boundary. First back off any trailing
+      // continuation bytes (10xxxxxx) left by a mid-character cut at the cap...
       let end = LOOP_TASK_FILE_MAX_BYTES;
       while (end > 0 && (buffer[end] & 0xc0) === 0x80) {
         end--;
+      }
+      // ...then drop a still-INCOMPLETE trailing char: walk to the last lead byte
+      // and, if its declared width runs past `end` (a 4-byte `f0` with too few
+      // continuations, from a mid-sequence cut or malformed input), cut before it.
+      // The continuation walk alone leaves such an orphan lead, which decodes to a
+      // trailing U+FFFD the byte-length re-clamp below can keep — so this boundary
+      // fix is load-bearing and the re-clamp is a pure safety net.
+      let lead = end - 1;
+      while (lead >= 0 && (buffer[lead] & 0xc0) === 0x80) {
+        lead--;
+      }
+      if (lead >= 0) {
+        const b = buffer[lead];
+        const width =
+          (b & 0x80) === 0x00
+            ? 1
+            : (b & 0xe0) === 0xc0
+              ? 2
+              : (b & 0xf0) === 0xe0
+                ? 3
+                : (b & 0xf8) === 0xf0
+                  ? 4
+                  : 1; // invalid lead (0xC0/0xC1/0xF8–0xFF): treat as a 1-byte unit
+        if (lead + width > end) {
+          end = lead;
+        }
       }
       content = buffer.subarray(0, end).toString('utf8');
       while (Buffer.byteLength(content, 'utf8') > LOOP_TASK_FILE_MAX_BYTES) {

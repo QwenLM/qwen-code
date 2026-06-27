@@ -679,4 +679,68 @@ describe('readLoopTaskFile', () => {
       expect(result.content).not.toContain('�');
     }
   });
+
+  it('drops an INCOMPLETE trailing multi-byte sequence at the cap (no orphan lead / U+FFFD)', async () => {
+    // A buffer cut mid-4-byte-sequence whose final byte is NOT a continuation
+    // (the sequence is incomplete) defeats the continuation-only back-off: it
+    // would keep `f0 9f a6` and decode a trailing U+FFFD. Sized so the orphan
+    // lands exactly on the cap, so the byte-length re-clamp can't mask it — only
+    // dropping the whole incomplete lead keeps the tail clean.
+    const head = Buffer.alloc(LOOP_TASK_FILE_MAX_BYTES - 3, 0x61); // 'a' * (cap-3)
+    const partial = Buffer.from([0xf0, 0x9f, 0xa6]); // 3 of a 4-byte char...
+    const tail = Buffer.from([0x62]); // ...then 'b' (non-continuation) → incomplete
+    const raw = Buffer.concat([head, partial, tail]); // cap + 1 bytes → truncated
+    await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
+    await fs.writeFile(path.join(projectRoot, '.qwen', 'loop.md'), raw);
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result.status).toBe('found');
+    if (result.status === 'found') {
+      expect(result.truncated).toBe(true);
+      expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThanOrEqual(
+        LOOP_TASK_FILE_MAX_BYTES,
+      );
+      // The incomplete sequence is gone entirely — no replacement char, and the
+      // body ends on the last complete ('a') char.
+      expect(result.content).not.toContain('�');
+      expect(result.content.endsWith('a')).toBe(true);
+    }
+  });
+
+  it('skips a candidate that raises ENAMETOOLONG and falls through instead of throwing', async () => {
+    // The over-long-path code is in the skip whitelist but otherwise untested; a
+    // typo'd entry would start throwing on a real ENAMETOOLONG instead of falling
+    // through. Drive it via a mocked lstat on the project path; home still reads.
+    await writeHome('user tasks');
+    const projectLoop = path.join(projectRoot, '.qwen', 'loop.md');
+    const actual =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    const enametoolong = Object.assign(new Error('ENAMETOOLONG'), {
+      code: 'ENAMETOOLONG',
+    });
+    vi.spyOn(fs, 'lstat').mockImplementation(async (p) =>
+      String(p) === projectLoop
+        ? Promise.reject(enametoolong)
+        : actual.lstat(p as string),
+    );
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result).toMatchObject({
+      status: 'found',
+      source: 'home',
+      content: 'user tasks',
+    });
+  });
 });

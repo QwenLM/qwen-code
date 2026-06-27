@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   LOOP_SENTINEL_CRON,
   LOOP_SENTINEL_DYNAMIC,
@@ -15,6 +15,14 @@ import {
   detectLoopSentinel,
 } from './loop-tick-resolver.js';
 import { LOOP_TASK_FILE_MAX_BYTES } from './loop-task-file.js';
+
+// Make only realpath observable; every other fs call stays real so the temp-dir
+// fixtures keep working. The default impl calls through, so behavior is unchanged
+// — the spy just lets a test count how often a boundary is re-resolved.
+vi.mock('node:fs/promises', async (importActual) => {
+  const actual = await importActual<typeof import('node:fs/promises')>();
+  return { ...actual, realpath: vi.fn(actual.realpath) };
+});
 
 describe('detectLoopSentinel', () => {
   it('recognizes the cron and dynamic sentinels exactly (after trim)', () => {
@@ -61,6 +69,8 @@ describe('LoopTickResolver', () => {
   });
 
   afterEach(async () => {
+    // Reset realpath call history (keep the call-through impl) between tests.
+    vi.mocked(fs.realpath).mockClear();
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -199,6 +209,27 @@ describe('LoopTickResolver', () => {
 
     expect(tick.full).toBe(true);
     expect(tick.modelText).toContain('- stable');
+  });
+
+  it('clears the boundary realpath cache on resetCache so it is re-resolved', async () => {
+    // The fs.realpath of the confinement boundary (projectRoot) is cached per
+    // resolver for the per-tick perf win. resetCache must invalidate it too —
+    // otherwise a long-lived process keeps a stale boundary after a /cd or symlink
+    // re-point. Prove projectRoot is re-resolved only after a reset.
+    await writeProject('- tasks');
+    const rootResolves = () =>
+      vi
+        .mocked(fs.realpath)
+        .mock.calls.filter((c) => String(c[0]) === projectRoot).length;
+
+    await resolver.resolve('cron');
+    expect(rootResolves()).toBe(1);
+    await resolver.resolve('cron');
+    expect(rootResolves()).toBe(1); // served from the instance cache, not re-resolved
+
+    resolver.resetCache();
+    await resolver.resolve('cron');
+    expect(rootResolves()).toBe(2); // cache cleared → boundary re-resolved
   });
 
   it('emits the absent reminder without poisoning the cache, then re-expands on recreate', async () => {

@@ -161,10 +161,21 @@ export function skipHeadlessLoopSentinel(
     return false;
   }
   if (job.recurring && !job.durable) {
+    // A user created this recurring loop.md cron via /loop in interactive mode;
+    // deleting it here is otherwise silent, so leave a trace of why it vanished
+    // from `cron list` when the same workspace is later run headless.
+    debugLogger.debug(
+      'skipHeadlessLoopSentinel: cleaning up recurring session loop.md cron in headless mode',
+      { jobId: job.id },
+    );
     // delete() removes the in-memory job synchronously before any await, so the
-    // sessionSize check that follows this call sees it gone; the returned
-    // promise has no on-disk work for a session job. Fire-and-forget.
-    void scheduler.delete(job.id);
+    // sessionSize check that follows this call sees it gone; the returned promise
+    // has no on-disk work for a session job. Fire-and-forget, but swallow a
+    // rejection so a future async delete() can't surface as an unhandled
+    // rejection (fatal under Node's --unhandled-rejections=throw).
+    void scheduler.delete(job.id).catch(() => {
+      /* session job: nothing to clean up on a delete failure */
+    });
   }
   return true;
 }
