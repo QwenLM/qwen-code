@@ -405,11 +405,24 @@ export class AcpConnection {
    * (`replay_complete` / `state_resync_required`) has passed, so those replies
    * are delivered AFTER the content chunks they followed in the original stream.
    * No-op if the session has no live stream (the frames stay buffered for the
-   * next attach).
+   * next attach), or if the stream is already closed (the frames stay buffered
+   * for the next reconnect rather than being dropped onto a dead socket).
+   *
+   * The frames are enqueued onto the stream synchronously, in buffer order:
+   * `SseStream` serializes every `send` through one `writeChain`, so the wire
+   * order is fixed by call order here. We deliberately do NOT `await` each
+   * `send` between `shift`s — doing so would open a window where a live event
+   * arriving mid-drain enqueues BETWEEN two deferred frames, reordering the
+   * very replies this deferral exists to keep in order (§1.8 W1).
    */
   flushBufferedSessionFrames(sessionId: string): void {
     const binding = this.sessions.get(sessionId);
-    if (!binding?.stream || binding.buffer.length === 0) return;
+    if (
+      !binding?.stream ||
+      binding.stream.isClosed ||
+      binding.buffer.length === 0
+    )
+      return;
     for (const { frame, id } of binding.buffer.splice(0)) {
       void binding.stream.send(frame, id);
     }
@@ -432,6 +445,13 @@ export class AcpConnection {
   ): void {
     const binding = this.sessions.get(sessionId);
     if (!binding || binding.stream !== stream) return;
+    // Breadcrumb at the moment of detach so an operator can measure the actual
+    // disconnect→reconnect gap against the grace window (the reclaim/expiry
+    // logs alone can't tell "reclaimed with 0.5s to spare" from "9.5s").
+    writeStderrLine(
+      `qwen serve: /acp session stream detached (${logSafe(sessionId)}), ` +
+        `grace=${graceMs}ms`,
+    );
     // Stop the closing stream's event pump; the prompt + ownership live on.
     binding.abort.abort();
     // Drop the stream ref so frames produced during the gap buffer until the

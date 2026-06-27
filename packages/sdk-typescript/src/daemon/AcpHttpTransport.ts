@@ -344,17 +344,20 @@ export class AcpHttpTransport implements DaemonTransport {
     const signal = opts.signal;
     // `reader.read()` doesn't observe `signal` on its own — race it against an
     // abort rejection so dispose()/caller-abort can unblock a hanging read.
+    // Keep the listener in a named ref and remove it in the `finally`: a
+    // long-lived signal reused across reconnects (the scenario this resumable
+    // transport enables) would otherwise accumulate one listener per call.
+    let onAbort: (() => void) | undefined;
     const abortPromise = new Promise<never>((_, reject) => {
       if (signal?.aborted) {
         reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
         return;
       }
-      signal?.addEventListener(
-        'abort',
-        () =>
-          reject(signal.reason ?? new DOMException('Aborted', 'AbortError')),
-        { once: true },
-      );
+      if (signal) {
+        onAbort = () =>
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
     });
 
     try {
@@ -385,8 +388,16 @@ export class AcpHttpTransport implements DaemonTransport {
               ? rawLine.slice(0, -1)
               : rawLine;
             if (line.startsWith('id:')) {
-              const n = Number(line.slice(3).trim());
-              if (Number.isInteger(n)) busId = n;
+              // Match the server's `parseLastEventId` strictness (pure decimal,
+              // within MAX_SAFE_INTEGER) so a proxy-mangled `id:` can't seed a
+              // cursor the daemon would later reject — `Number()` would wave
+              // through hex / `1e5` / `''`→0.
+              const raw = line.slice(3).trim();
+              if (/^\d+$/.test(raw)) {
+                const n = Number.parseInt(raw, 10);
+                if (Number.isFinite(n) && n <= Number.MAX_SAFE_INTEGER)
+                  busId = n;
+              }
             } else if (line.startsWith('data:')) {
               // Per the SSE spec, multiple `data:` lines in one event join with
               // a newline.
@@ -400,7 +411,14 @@ export class AcpHttpTransport implements DaemonTransport {
           try {
             msg = JSON.parse(dataLine);
           } catch {
-            continue; // heartbeat / non-JSON
+            // Non-empty payload that failed to parse ⇒ a corrupt data frame
+            // (genuine heartbeats/comments carry no `data:` and were filtered
+            // by the `dataParts.length === 0` guard above). We drop it and move
+            // on: the SDK has no logger and the package's lint config forbids
+            // `console`, so there's no in-convention channel to trace it here.
+            // Surfacing dropped frames is left to a follow-up once the SDK
+            // grows a logging facility.
+            continue;
           }
           if (!isRecord(msg)) continue;
 
@@ -446,6 +464,7 @@ export class AcpHttpTransport implements DaemonTransport {
         }
       }
     } finally {
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
       try {
         reader.cancel().catch(() => {});
       } catch {

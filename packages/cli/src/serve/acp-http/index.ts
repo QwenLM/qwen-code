@@ -22,7 +22,13 @@ import {
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
-import { RPC, error as rpcError, isRequest, parseInbound } from './json-rpc.js';
+import {
+  RPC,
+  error as rpcError,
+  isRequest,
+  logSafe,
+  parseInbound,
+} from './json-rpc.js';
 import { parseLastEventId } from '../sse-last-event-id.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
@@ -471,7 +477,7 @@ export function mountAcpHttp(
       .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
       .then(onPumpSettled, (err: unknown) => {
         writeStderrLine(
-          `qwen serve: /acp event pump error (${sessionId}, lastEventId=${
+          `qwen serve: /acp event pump error (${logSafe(sessionId)}, lastEventId=${
             lastEventId ?? 'none'
           }): ${err instanceof Error ? err.message : String(err)}`,
         );

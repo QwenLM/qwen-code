@@ -172,6 +172,35 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('flushBufferedSessionFrames leaves frames buffered when the stream is already closed (no drop onto a dead socket)', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+      conn.sendSession('sess-1', { reply: true }); // id-less reply
+
+      const s1 = new FakeStream('sse');
+      // Resume attach defers the id-less reply into the buffer (s1 stays empty).
+      conn.attachSessionStream('sess-1', s1, new AbortController(), 3);
+      expect(s1.sent).toEqual([]);
+
+      // Socket dies before the pump reaches the replay boundary.
+      s1.close();
+      conn.flushBufferedSessionFrames('sess-1');
+      expect(s1.sent).toEqual([]); // nothing dropped onto the dead stream
+
+      // The reply is still buffered: a fresh reconnect (non-resume) delivers it.
+      conn.detachSessionStream('sess-1', s1, 10_000);
+      const s2 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s2, new AbortController());
+      expect(s2.sent).toEqual([{ message: { reply: true }, id: undefined }]);
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('detachSessionStream is a no-op for a stale stream after reclaim (identity guard)', () => {
     // The CONTRACT at the attach site marks this guard load-bearing: once a
     // reclaim installs s2, the OLD stream s1 closing must NOT tear down or
