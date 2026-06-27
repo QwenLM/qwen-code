@@ -1008,6 +1008,13 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
+   * Explicit vision model for the vision bridge. When a text-only primary model
+   * receives an image, the bridge transcribes it through this model instead of
+   * auto-picking a same-provider one. Corresponds to the `visionModel` setting
+   * (configurable via `/model --vision`).
+   */
+  visionModel?: string;
+  /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
@@ -1468,6 +1475,7 @@ export class Config {
   private readonly enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
+  private visionModel?: string;
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
@@ -1751,6 +1759,7 @@ export class Config {
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
+    this.visionModel = params.visionModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
@@ -2899,15 +2908,105 @@ export class Config {
   }
 
   /**
-   * Pick an image-capable model from the registered models to use as the
-   * vision bridge model. This lets the bridge work out-of-the-box when the user
-   * already has a vision model on the SAME provider as their text-only primary
-   * (see {@link selectVisionBridgeModel} — it never reaches across providers).
-   * `runSideQuery` resolves the chosen model's credentials by id.
+   * Update the vision bridge model at runtime (e.g. `/model --vision <model>`).
+   * Pass undefined or an empty string to clear the override and fall back to
+   * same-provider auto-select.
+   */
+  setVisionModel(model: string | undefined): void {
+    this.visionModel = model || undefined;
+  }
+
+  /**
+   * Whether `model` is the same entry as the current primary model — matched on
+   * the provider identity (auth type, and baseUrl when both carry one), not just
+   * the bare id. The vision bridge must never route at the primary (it's the
+   * text-only model the bridge works around), but a cross-provider namesake —
+   * the same bare id on another provider/endpoint, e.g. `anthropic:shared-model`
+   * vs an `openai` `shared-model` primary — is a different model and stays
+   * eligible. When the primary's auth type is unknown we can't disambiguate, so
+   * fall back to a conservative bare-id match (never risk hitting the primary).
+   */
+  isCurrentPrimaryModel(model: AvailableModel): boolean {
+    if (model.id !== this.getModel()) return false;
+    const cfg = this.getContentGeneratorConfig();
+    const primaryAuthType = cfg?.authType;
+    if (primaryAuthType === undefined) return true;
+    if (model.authType !== primaryAuthType) return false;
+    const primaryBaseUrl = cfg?.baseUrl;
+    if (primaryBaseUrl !== undefined && model.baseUrl !== undefined) {
+      return model.baseUrl === primaryBaseUrl;
+    }
+    return true;
+  }
+
+  /**
+   * Resolve the user's explicit `visionModel` (set via `/model --vision`) into a
+   * bridge selection. The id is passed through verbatim so `runSideQuery` can
+   * resolve an `authType:modelId` selector; the endpoint is looked up for the
+   * egress notice. Returns `undefined` (so the caller falls back to
+   * same-provider auto-select) when no explicit model is set, the selector can't
+   * be parsed, the pinned model isn't actually configured, or it points at the
+   * text-only primary itself — those guards keep a stale/typo'd pin from firing
+   * the bridge at an unreachable, or non-image-capable, model.
+   */
+  private resolveVisionModelSelection():
+    | VisionBridgeModelSelection
+    | undefined {
+    if (!this.visionModel) return undefined;
+    let selector;
+    try {
+      selector = resolveModelId(this.visionModel);
+    } catch {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' could not be parsed; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    if (!selector) {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' resolved to no selector; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    // Each guard below silently drops the pin (the hardest failure mode to
+    // debug, hence the warn): skip fast/voice-only models (a `settings.json`
+    // pin can bypass the slash command's filter), and never route the bridge at
+    // the primary entry itself (the text-only model the bridge works around) —
+    // via the provider-aware identity check so a cross-provider namesake stays
+    // eligible.
+    const match = this.getAllConfiguredModels().find(
+      (m) =>
+        m.id === selector.modelId &&
+        (!selector.authType || m.authType === selector.authType) &&
+        !m.fastOnly &&
+        !m.voiceOnly &&
+        !this.isCurrentPrimaryModel(m),
+    );
+    if (!match) {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' did not match a usable configured model ` +
+          `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
+      );
+      return undefined;
+    }
+    return {
+      id: this.visionModel,
+      ...(match.baseUrl && { baseUrl: match.baseUrl }),
+    };
+  }
+
+  /**
+   * The vision bridge model: the explicit `visionModel` (`/model --vision`) when
+   * set, otherwise an auto-picked image-capable model on the SAME provider as
+   * the text-only primary (see {@link selectVisionBridgeModel} — auto-select
+   * never reaches across providers; an explicit override may). `runSideQuery`
+   * resolves the chosen model's credentials by id.
    *
-   * @returns A same-provider image-capable model, or `undefined`.
+   * @returns The bridge model selection, or `undefined`.
    */
   getDefaultVisionBridgeModel(): VisionBridgeModelSelection | undefined {
+    const explicit = this.resolveVisionModelSelection();
+    if (explicit) return explicit;
     const contentGeneratorConfig = this.getContentGeneratorConfig();
     return selectVisionBridgeModel(
       this.getModel(),
@@ -2979,9 +3078,17 @@ export class Config {
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
+      // Modalities are model-derived: a hot switch between oauth models with
+      // different image support must update them, or the vision-bridge gate and
+      // image-stripping read the previous model's modalities.
+      this.contentGeneratorConfig.modalities = config.modalities;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
+      }
+      if ('modalities' in sources) {
+        this.contentGeneratorConfigSources['modalities'] =
+          sources['modalities'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =
