@@ -879,6 +879,7 @@ export interface ConfigParameters {
   skipWorkflowUsageWarning?: boolean;
   computerUseEnabled?: boolean;
   computerUseMaxImageDimension?: number;
+  computerUseIdleTimeoutMs?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -1386,6 +1387,7 @@ export class Config {
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly computerUseMaxImageDimension?: number;
+  private readonly computerUseIdleTimeoutMs?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1604,6 +1606,7 @@ export class Config {
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
+    this.computerUseIdleTimeoutMs = params.computerUseIdleTimeoutMs;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -4447,6 +4450,10 @@ export class Config {
    */
   getComputerUseMaxImageDimension(): number | undefined {
     return this.computerUseMaxImageDimension;
+  }
+
+  getComputerUseIdleTimeoutMs(): number | undefined {
+    return this.computerUseIdleTimeoutMs;
   }
 
   /**

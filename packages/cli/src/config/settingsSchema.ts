@@ -88,6 +88,8 @@ export interface SettingDefinition {
   items?: SettingItemDefinition;
   /** Minimum value for number-type settings. */
   minimum?: number;
+  /** Maximum value for number-type settings. */
+  maximum?: number;
   /**
    * Primitive shapes a field accepted before it was expanded to its current
    * type. The exported JSON Schema wraps the field in `anyOf` so values from
@@ -2235,8 +2237,20 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              'When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.',
+              'When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.',
             showInDialog: true,
+          },
+          idleTimeoutMs: {
+            type: 'number',
+            label: 'Idle Timeout',
+            category: 'Tools',
+            requiresRestart: true,
+            default: 300000,
+            minimum: 0,
+            maximum: 2147483647,
+            description:
+              'Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.',
+            showInDialog: false,
           },
           maxImageDimension: {
             type: 'number',
