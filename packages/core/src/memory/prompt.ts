@@ -10,6 +10,9 @@ const MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES = 25_000;
 const DIR_EXISTS_GUIDANCE =
   'This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence).';
 
+// Spell out the tier count so a future 4th tier never silently reads "two".
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four'] as const;
+
 export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```markdown',
   '---',
@@ -179,6 +182,40 @@ export interface UserAutoMemorySection {
   indexContent?: string | null;
 }
 
+/**
+ * Optional team-level (in-repo, git-tracked) memory dir + index. When provided
+ * to {@link buildManagedAutoMemoryPrompt}, the prompt adds a third shared tier
+ * and teaches the assistant when to route saves there instead of the private
+ * dirs. Enabled via the `memory.enableTeamMemory` setting (see
+ * `Config.getTeamMemoryEnabled`).
+ */
+export interface TeamAutoMemorySection {
+  memoryDir: string;
+  indexContent?: string | null;
+}
+
+/**
+ * Guidance appended when a shared team directory is available. It refines the
+ * per-type `<scope>` routing (which only knows user vs project) so the model
+ * knows when a memory belongs in the shared tier — and never to put secrets
+ * there.
+ */
+function buildTeamScopeSection(): string[] {
+  return [
+    '## Saving to team memory',
+    '',
+    'TEAM memory is shared with every collaborator through the repository, so it refines the `<scope>` guidance above:',
+    '',
+    '- A `feedback` memory that is a project-wide convention every contributor must follow (a testing policy, a build invariant) → save to TEAM instead of the project directory.',
+    '- A `reference` pointer the whole team relies on (issue tracker, dashboard, channel) → save to TEAM instead of the project directory.',
+    '- `user` memories are always private — never save them to TEAM.',
+    '- `project` memories stay private to you by default. Save to TEAM only for durable shared facts every contributor needs — not time-bound state like freezes or in-flight task status, which stays private and decays.',
+    '- You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials. It is visible to everyone who can read the repository, and such writes are rejected automatically.',
+    '- For TEAM memory you only write the memory file (Step 1). Its `MEMORY.md` index is generated automatically from the saved files — do NOT hand-edit the team index (that two-step rule applies only to the private directories).',
+    '',
+  ];
+}
+
 function renderIndexBlock(
   memoryDir: string,
   indexContent: string | null | undefined,
@@ -197,66 +234,86 @@ export function buildManagedAutoMemoryPrompt(
   memoryDir: string,
   indexContent?: string | null,
   userSection?: UserAutoMemorySection,
+  teamSection?: TeamAutoMemorySection,
 ): string {
-  const intro =
-    userSection !== undefined
-      ? [
-          `You have two persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
-          '',
-          `- USER memory (cross-project, durable knowledge about who the user is): \`${userSection.memoryDir}\``,
-          `- PROJECT memory (this project only, may be shared with teammates): \`${memoryDir}\``,
-          '',
-          'For every memory you save, decide which directory it belongs in using the per-type `<scope>` guidance below.',
-        ]
-      : [
-          `You have a persistent, file-based memory system at \`${memoryDir}\`. ${DIR_EXISTS_GUIDANCE}`,
-        ];
+  const tierLines: string[] = [];
+  if (userSection !== undefined) {
+    tierLines.push(
+      `- USER memory (cross-project, durable knowledge about who the user is): \`${userSection.memoryDir}\``,
+    );
+  }
+  tierLines.push(
+    `- PROJECT memory (this project only, private to you): \`${memoryDir}\``,
+  );
+  if (teamSection !== undefined) {
+    tierLines.push(
+      `- TEAM memory (this project, shared with every collaborator through the repository — just save the file; the repo's normal git workflow carries it to teammates, so don't run git yourself): \`${teamSection.memoryDir}\``,
+    );
+  }
+  const multiTier = tierLines.length > 1;
 
-  const howToSave =
-    userSection !== undefined
-      ? [
-          '## How to save memories',
-          '',
-          'Saving a memory is a two-step process:',
-          '',
-          '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`, organising it under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
-          '',
-          ...MEMORY_FRONTMATTER_EXAMPLE,
-          '',
-          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. Never write memory content directly into `MEMORY.md`.',
-          '',
-          `- Both \`MEMORY.md\` files are always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
-          '- Keep the name, description, and type fields in memory files up-to-date with the content',
-          '- Organize memory semantically by topic, not chronologically.',
-          '- Update or remove memories that turn out to be wrong or outdated.',
-          '- Do not write duplicate memories. First check if there is an existing memory in EITHER directory you can update before writing a new one.',
-        ]
-      : [
-          '## How to save memories',
-          '',
-          'Saving a memory is a two-step process:',
-          '',
-          '**Step 1** — write the memory to its own file under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
-          '',
-          ...MEMORY_FRONTMATTER_EXAMPLE,
-          '',
-          `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
-          '',
-          `- \`${memoryDir}/MEMORY.md\` is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
-          '- Keep the name, description, and type fields in memory files up-to-date with the content',
-          '- Organize memory semantically by topic, not chronologically.',
-          '- Update or remove memories that turn out to be wrong or outdated.',
-          '- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.',
-        ];
+  const intro = multiTier
+    ? [
+        `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
+        '',
+        ...tierLines,
+        '',
+        'For every memory you save, decide which directory it belongs in using the per-type `<scope>` guidance below.',
+      ]
+    : [
+        `You have a persistent, file-based memory system at \`${memoryDir}\`. ${DIR_EXISTS_GUIDANCE}`,
+      ];
 
-  const indexSections =
-    userSection !== undefined
-      ? [
-          ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
-          '',
-          ...renderIndexBlock(memoryDir, indexContent),
-        ]
-      : renderIndexBlock(memoryDir, indexContent);
+  const howToSave = multiTier
+    ? [
+        '## How to save memories',
+        '',
+        'Saving a memory is a two-step process:',
+        '',
+        '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`, organising it under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
+        '',
+        ...MEMORY_FRONTMATTER_EXAMPLE,
+        '',
+        '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. Never write memory content directly into `MEMORY.md`.',
+        '',
+        `- Every \`MEMORY.md\` index is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
+        '- Keep the name, description, and type fields in memory files up-to-date with the content',
+        '- Organize memory semantically by topic, not chronologically.',
+        '- Update or remove memories that turn out to be wrong or outdated.',
+        '- Do not write duplicate memories. First check if there is an existing memory in any of your memory directories you can update before writing a new one.',
+      ]
+    : [
+        '## How to save memories',
+        '',
+        'Saving a memory is a two-step process:',
+        '',
+        '**Step 1** — write the memory to its own file under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
+        '',
+        ...MEMORY_FRONTMATTER_EXAMPLE,
+        '',
+        `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
+        '',
+        `- \`${memoryDir}/MEMORY.md\` is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
+        '- Keep the name, description, and type fields in memory files up-to-date with the content',
+        '- Organize memory semantically by topic, not chronologically.',
+        '- Update or remove memories that turn out to be wrong or outdated.',
+        '- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.',
+      ];
+
+  const indexSections: string[] = [];
+  if (userSection !== undefined) {
+    indexSections.push(
+      ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
+      '',
+    );
+  }
+  indexSections.push(...renderIndexBlock(memoryDir, indexContent));
+  if (teamSection !== undefined) {
+    indexSections.push(
+      '',
+      ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
+    );
+  }
 
   const lines = [
     '# auto memory',
@@ -268,6 +325,7 @@ export function buildManagedAutoMemoryPrompt(
     'If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.',
     '',
     ...TYPES_SECTION_INDIVIDUAL,
+    ...(teamSection !== undefined ? buildTeamScopeSection() : []),
     ...WHAT_NOT_TO_SAVE_SECTION,
     '',
     ...howToSave,
@@ -292,11 +350,13 @@ export function appendManagedAutoMemoryToUserMemory(
   memoryDir: string,
   indexContent?: string | null,
   userSection?: UserAutoMemorySection,
+  teamSection?: TeamAutoMemorySection,
 ): string {
   const managedPrompt = buildManagedAutoMemoryPrompt(
     memoryDir,
     indexContent,
     userSection,
+    teamSection,
   );
   const trimmedUserMemory = userMemory.trim();
 

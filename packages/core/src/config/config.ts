@@ -180,11 +180,21 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
-import { getAutoMemoryRoot, getUserAutoMemoryRoot } from '../memory/paths.js';
+import {
+  getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from '../memory/paths.js';
 import {
   readAutoMemoryIndex,
   readUserAutoMemoryIndex,
 } from '../memory/store.js';
+import {
+  rebuildTeamAutoMemoryIndex,
+  TeamMemoryRootSecurityError,
+} from '../memory/indexer.js';
+import { syncTeamMemory } from '../memory/team-memory-sync.js';
+import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -879,6 +889,7 @@ export interface ConfigParameters {
   skipWorkflowUsageWarning?: boolean;
   computerUseEnabled?: boolean;
   computerUseMaxImageDimension?: number;
+  computerUseIdleTimeoutMs?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -978,6 +989,13 @@ export interface ConfigParameters {
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
   enableManagedAutoDream?: boolean;
+  /**
+   * Enable the git-shared team memory tier. Defaults to false (opt-in).
+   * Overridable at runtime by `QWEN_CODE_MEMORY_TEAM` ('0'/'1') via
+   * {@link Config.getTeamMemoryEnabled}.
+   */
+  enableTeamMemory?: boolean;
+  enableTeamMemorySync?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
@@ -1386,6 +1404,7 @@ export class Config {
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly computerUseMaxImageDimension?: number;
+  private readonly computerUseIdleTimeoutMs?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1439,6 +1458,13 @@ export class Config {
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
+  private readonly enableTeamMemory: boolean;
+  private readonly enableTeamMemorySync: boolean;
+  // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
+  // warning is emitted at most once per repo, even though refreshHierarchicalMemory
+  // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
+  // re-checks shareability instead of reusing the first repo's result.
+  private readonly teamMemoryShareabilityChecked = new Set<string>();
   private readonly enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
@@ -1604,6 +1630,7 @@ export class Config {
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
+    this.computerUseIdleTimeoutMs = params.computerUseIdleTimeoutMs;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -1719,6 +1746,8 @@ export class Config {
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
+    this.enableTeamMemory = params.enableTeamMemory ?? false;
+    this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
@@ -2285,6 +2314,88 @@ export class Config {
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
       // section out of the system prompt. Project-level read still bubbles
       // (its failure is a real config-load problem).
+      const teamMemoryEnabled =
+        this.getTeamMemoryEnabled() && this.isTrustedFolder();
+      if (this.getTeamMemoryEnabled() && !this.isTrustedFolder()) {
+        // Surface why team memory is silently absent from the prompt.
+        this.debugLogger.debug(
+          'Team memory enabled but inactive: workspace is not trusted.',
+        );
+      }
+      const teamProjectRoot = this.getProjectRoot();
+      // When the tier is active, warn (once per repo) if its directory is not
+      // actually git-shareable — no git root, or a directory-form .gitignore
+      // swallowing it — so the tier never silently shares nothing.
+      if (
+        teamMemoryEnabled &&
+        !this.teamMemoryShareabilityChecked.has(teamProjectRoot)
+      ) {
+        this.teamMemoryShareabilityChecked.add(teamProjectRoot);
+        const shareabilityWarning =
+          getTeamMemoryShareabilityWarning(teamProjectRoot);
+        if (shareabilityWarning) {
+          this.warnings.push(shareabilityWarning);
+          this.debugLogger.warn(shareabilityWarning);
+        }
+      }
+      // Rebuild the team index BEFORE syncing so the freshly generated MEMORY.md
+      // is what gets committed and pushed, not a stale one. Then, when opted in,
+      // best-effort git sync (never throws — a failure must not break session
+      // start): pull collaborators' updates and push local ones. If the sync
+      // PULLED new files, rebuild once more so the in-prompt index reflects them.
+      let teamAutoMemoryIndex: string | null = null;
+      if (teamMemoryEnabled) {
+        // rebuildTeamAutoMemoryIndex throws for two distinct classes, and only
+        // ONE may block sync:
+        //   • SECURITY — a symlink/escape rejection (TeamMemoryRootSecurityError)
+        //     means the team root could redirect the committed index OUTSIDE the
+        //     repo. Sync MUST be blocked: otherwise syncTeamMemory would git
+        //     add/commit/push that out-of-repo dir, defeating the indexer's
+        //     refusal. This invariant is non-negotiable.
+        //   • OPERATIONAL — EACCES/ENOSPC/EPERM on lstat/readdir/write. Not a
+        //     security problem, so it must NOT permanently gate legitimate sync;
+        //     it self-corrects on the next successful rebuild. Log and sync on.
+        let teamRootSecurityBlocked = false;
+        try {
+          teamAutoMemoryIndex =
+            await rebuildTeamAutoMemoryIndex(teamProjectRoot);
+        } catch (err) {
+          if (err instanceof TeamMemoryRootSecurityError) {
+            teamRootSecurityBlocked = true;
+            this.debugLogger.warn(
+              'team memory root failed the symlink/escape safety check; skipping sync',
+              err,
+            );
+          } else {
+            this.debugLogger.warn(
+              'team memory index rebuild failed (operational); not security-gating sync',
+              err,
+            );
+          }
+        }
+        if (!teamRootSecurityBlocked && this.getTeamMemorySyncEnabled()) {
+          const syncResult = await syncTeamMemory(teamProjectRoot, {
+            message: 'chore(memory): sync team memory',
+          }).catch((err) => {
+            this.debugLogger.warn('team memory sync failed', err);
+            return undefined;
+          });
+          // Surface the silent no-op: the user opted into sync but, e.g., the
+          // repo has no upstream, so nothing is shared. Debug-level — not every
+          // session should warn loudly, but an operator can see why sync did
+          // nothing.
+          if (syncResult?.skippedReason) {
+            this.debugLogger.warn(
+              `team memory sync skipped: ${syncResult.skippedReason}`,
+            );
+          }
+          if (syncResult?.pulled) {
+            teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
+              teamProjectRoot,
+            ).catch(() => teamAutoMemoryIndex);
+          }
+        }
+      }
       const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
         readAutoMemoryIndex(this.getProjectRoot()),
         readUserAutoMemoryIndex().catch(() => null),
@@ -2303,6 +2414,12 @@ export class Config {
             memoryDir: getUserAutoMemoryRoot(),
             indexContent: userAutoMemoryIndex,
           },
+          teamMemoryEnabled
+            ? {
+                memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+                indexContent: teamAutoMemoryIndex,
+              }
+            : undefined,
         ),
       );
     } else {
@@ -4466,6 +4583,10 @@ export class Config {
     return this.computerUseMaxImageDimension;
   }
 
+  getComputerUseIdleTimeoutMs(): number | undefined {
+    return this.computerUseIdleTimeoutMs;
+  }
+
   /**
    * Whether the turn loop should fire a fast-model call after each tool batch
    * to emit a `tool_use_summary` message. Mirrors Claude Code's
@@ -4637,6 +4758,45 @@ export class Config {
 
   getManagedAutoMemoryEnabled(): boolean {
     return this.enableManagedAutoMemory && !this.getBareMode();
+  }
+
+  /**
+   * Whether the git-shared team memory tier is active. Opt-in: off unless the
+   * `memory.enableTeamMemory` setting is on. `QWEN_CODE_MEMORY_TEAM` overrides
+   * for tests / power users ('0' forces off, '1' forces on).
+   */
+  getTeamMemoryEnabled(): boolean {
+    if (this.getBareMode()) {
+      return false;
+    }
+    const override = process.env['QWEN_CODE_MEMORY_TEAM'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableTeamMemory;
+  }
+
+  /**
+   * Whether the daemon/session should auto-sync team memory with the git
+   * remote (pull + commit + push). Resolves the `memory.enableTeamMemorySync`
+   * setting, with env `QWEN_CODE_MEMORY_TEAM_SYNC` ('0'/'1') as an override.
+   * Off by default since it mutates the repo and pushes. Inert in bare mode.
+   */
+  getTeamMemorySyncEnabled(): boolean {
+    if (this.getBareMode()) {
+      return false;
+    }
+    const override = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableTeamMemorySync;
   }
 
   isManagedMemoryAvailable(): boolean {

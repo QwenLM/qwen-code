@@ -2972,6 +2972,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         enableManagedAutoDream: true,
         enableAutoSkill: true,
         autoSkillConfirm: true,
+        enableTeamMemory: false,
+        enableTeamMemorySync: false,
       },
     });
     await expect(
@@ -2999,6 +3001,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         enableManagedAutoDream: true,
         enableAutoSkill: true,
         autoSkillConfirm: true,
+        enableTeamMemory: false,
+        enableTeamMemorySync: false,
       },
     });
 
@@ -6264,9 +6268,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   let lastSessionMock:
     | {
         getId: ReturnType<typeof vi.fn>;
+        getConfig: ReturnType<typeof vi.fn>;
         sendAvailableCommandsUpdate: ReturnType<typeof vi.fn>;
         replayHistory: ReturnType<typeof vi.fn>;
         installRewriter: ReturnType<typeof vi.fn>;
+        startCronScheduler: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
       }
     | undefined;
@@ -6328,6 +6334,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       resumedConversation?: { messages: unknown[] };
     } = {},
   ) {
+    const recording = {
+      rebuildTurnBoundaries: vi.fn(),
+    };
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -6353,6 +6362,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getChatRecordingService: vi.fn().mockReturnValue(recording),
       // load path reads back the persisted conversation here and feeds
       // it to `session.replayHistory`. resume path doesn't read this.
       getResumedSessionData: vi
@@ -6441,10 +6451,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   });
 
   it('loadSession returns LoadSessionResponse and replays history on the session', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
     bindRestoreMocks({
       sessionExists: true,
       resumedConversation: {
-        messages: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        messages,
       },
     });
     const { agent, agentPromise } = await spawnAgent();
@@ -6462,9 +6473,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
     // load semantic: history MUST be replayed so SSE subscribers see
     // the persisted turns.
-    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith([
-      { role: 'user', parts: [{ text: 'hi' }] },
-    ]);
+    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(messages);
+
+    const recording = lastSessionMock?.getConfig().getChatRecordingService();
+    expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -6547,10 +6559,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   });
 
   it('unstable_resumeSession returns the response without replaying history', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
     bindRestoreMocks({
       sessionExists: true,
       resumedConversation: {
-        messages: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        messages,
       },
     });
     const { agent, agentPromise } = await spawnAgent();
@@ -6570,6 +6583,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     // the SSE stream stays clean for clients that already have the
     // history rendered.
     expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
+    const recording = lastSessionMock?.getConfig().getChatRecordingService();
+    expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);
 
     mockConnectionState.resolve();
     await agentPromise;

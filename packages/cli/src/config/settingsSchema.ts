@@ -86,6 +86,10 @@ export interface SettingDefinition {
   options?: readonly SettingEnumOption[];
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
+  /** Minimum value for number-type settings. */
+  minimum?: number;
+  /** Maximum value for number-type settings. */
+  maximum?: number;
   /**
    * Primitive shapes a field accepted before it was expanded to its current
    * type. The exported JSON Schema wraps the field in `anyOf` so values from
@@ -493,6 +497,7 @@ const SETTINGS_SCHEMA = {
         // surprised when a mid-session edit doesn't take effect immediately.
         requiresRestart: true,
         default: 30,
+        minimum: 0,
         description:
           'Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.',
         showInDialog: true,
@@ -1723,6 +1728,26 @@ const SETTINGS_SCHEMA = {
           'Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.',
         showInDialog: false,
       },
+      enableTeamMemory: {
+        type: 'boolean',
+        label: 'Enable Team Memory',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.',
+        showInDialog: false,
+      },
+      enableTeamMemorySync: {
+        type: 'boolean',
+        label: 'Enable Team Memory Git Sync',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.',
+        showInDialog: false,
+      },
     },
   },
 
@@ -2232,8 +2257,20 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              'When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.',
+              'When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.',
             showInDialog: true,
+          },
+          idleTimeoutMs: {
+            type: 'number',
+            label: 'Idle Timeout',
+            category: 'Tools',
+            requiresRestart: true,
+            default: 300000,
+            minimum: 0,
+            maximum: 2147483647,
+            description:
+              'Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.',
+            showInDialog: false,
           },
           maxImageDimension: {
             type: 'number',

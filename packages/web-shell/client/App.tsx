@@ -73,6 +73,7 @@ import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
+import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
@@ -244,6 +245,7 @@ function isGoalClearCommand(text: string): boolean {
 
 interface QueuedPrompt {
   id: number;
+  sessionId?: string;
   text: string;
   images?: PromptImage[];
   onComplete?: () => void;
@@ -313,6 +315,11 @@ export interface BugReportInfo {
   systemInfo: Record<string, string>;
 }
 
+export interface WebShellSidebarOptions {
+  enabled?: boolean;
+  defaultCollapsed?: boolean;
+}
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string) => void;
@@ -330,6 +337,8 @@ export interface WebShellProps {
   style?: React.CSSProperties;
   /** Maximum chat content width in regular mode. Defaults to 1000px. */
   chatMaxWidth?: number;
+  /** Optional workspace sidebar. Disabled by default. */
+  sidebar?: boolean | WebShellSidebarOptions;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
@@ -406,6 +415,45 @@ type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
+
+function resolveSidebarOptions(
+  sidebar: WebShellProps['sidebar'],
+): Required<WebShellSidebarOptions> {
+  if (sidebar === true) {
+    return { enabled: true, defaultCollapsed: false };
+  }
+  if (!sidebar) {
+    return { enabled: false, defaultCollapsed: false };
+  }
+  return {
+    enabled: sidebar.enabled ?? true,
+    defaultCollapsed: sidebar.defaultCollapsed ?? false,
+  };
+}
+
+function readSidebarCollapsed(defaultCollapsed: boolean): boolean {
+  if (typeof window === 'undefined') return defaultCollapsed;
+  try {
+    const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+    if (stored === 'true') return true;
+    if (stored === 'false') return false;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return defaultCollapsed;
+}
+
+function writeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(
+      SIDEBAR_COLLAPSED_STORAGE_KEY,
+      String(collapsed),
+    );
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+}
 
 function getDefaultChatWidthMode(): ChatWidthMode {
   return `${DEFAULT_CHAT_MAX_WIDTH}`;
@@ -826,6 +874,7 @@ export function App({
   renderComposerToolbarEnd,
   renderFooter,
   chatMaxWidth,
+  sidebar,
   composerToolbarActions,
   compactThinking = false,
   collapseCompletedTurns = true,
@@ -848,6 +897,20 @@ export function App({
         : normalizeLanguage(providedLanguage),
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const sidebarOptions = useMemo(
+    () => resolveSidebarOptions(sidebar),
+    [sidebar],
+  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    readSidebarCollapsed(sidebarOptions.defaultCollapsed),
+  );
+  const [sidebarSwitchingSessionId, setSidebarSwitchingSessionId] = useState<
+    string | null
+  >(null);
+  const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
+    setSidebarCollapsed(collapsed);
+    writeSidebarCollapsed(collapsed);
+  }, []);
   const customization = useMemo(
     () => ({
       renderToolHeaderExtra,
@@ -952,13 +1015,22 @@ export function App({
     [messageBlocks],
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
+  const canActOnPendingApproval = !(
+    connection.catchingUp && sidebarSwitchingSessionId !== null
+  );
   const pendingAskUserApproval = isAskUserPermission(pendingApproval)
-    ? pendingApproval
+    ? canActOnPendingApproval
+      ? pendingApproval
+      : null
     : null;
   const pendingToolApproval =
-    pendingApproval && !pendingAskUserApproval ? pendingApproval : null;
+    pendingApproval && !isAskUserPermission(pendingApproval)
+      ? canActOnPendingApproval
+        ? pendingApproval
+        : null
+      : null;
   const pendingApprovalRef = useRef(pendingApproval);
-  pendingApprovalRef.current = pendingApproval;
+  pendingApprovalRef.current = canActOnPendingApproval ? pendingApproval : null;
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -1328,6 +1400,11 @@ export function App({
 
   useEffect(() => {
     activeSessionIdRef.current = connection.sessionId;
+    queuedPromptsRef.current = [];
+    setQueuedPrompts([]);
+    drainingQueueRef.current = false;
+    midTurnEnqueueAbortRef.current?.abort();
+    midTurnEnqueueAbortRef.current = null;
     btwAbortControllerRef.current?.abort();
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
@@ -1488,6 +1565,7 @@ export function App({
       if (!trimmed) return true;
       const nextPrompt: QueuedPrompt = {
         id: nextQueuedPromptIdRef.current++,
+        sessionId: activeSessionIdRef.current,
         text: trimmed,
         images: images ? [...images] : undefined,
         onComplete,
@@ -1540,6 +1618,11 @@ export function App({
     setQueuedPrompts(rest);
     return nextPrompt;
   }, []);
+
+  const peekNextQueuedPrompt = useCallback(
+    (): QueuedPrompt | null => queuedPromptsRef.current[0] ?? null,
+    [],
+  );
 
   const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
     const current = queuedPromptsRef.current;
@@ -2067,20 +2150,53 @@ export function App({
     branchCurrentSession();
   }, [branchCurrentSession]);
 
-  const createNewSession = useCallback(() => {
-    (sessionActions as typeof sessionActions & SessionActionsWithCreate)
-      .createSession()
-      .then((session) => {
-        if (onSessionIdChange) {
-          onSessionIdChange(session.sessionId);
-          return;
-        }
-        return sessionActions.loadSession(session.sessionId);
-      })
-      .catch((error: unknown) => {
-        reportError(error, 'Failed to create a new session');
-      });
+  const createNewSession = useCallback(async () => {
+    try {
+      const session = await (
+        sessionActions as typeof sessionActions & SessionActionsWithCreate
+      ).createSession();
+      if (onSessionIdChange) {
+        onSessionIdChange(session.sessionId);
+        return true;
+      }
+      void sessionActions
+        .loadSession(session.sessionId)
+        .catch((error: unknown) =>
+          reportError(error, 'Failed to switch session'),
+        );
+      return true;
+    } catch (error) {
+      reportError(error, 'Failed to create a new session');
+      return false;
+    }
   }, [onSessionIdChange, reportError, sessionActions]);
+
+  const loadSidebarSession = useCallback(
+    async (sessionId: string) => {
+      setSidebarSwitchingSessionId(sessionId);
+      try {
+        await sessionActions.loadSession(sessionId, {
+          deferTranscriptReset: true,
+        });
+      } catch (error) {
+        setSidebarSwitchingSessionId((current) =>
+          current === sessionId ? null : current,
+        );
+        throw error;
+      }
+    },
+    [sessionActions],
+  );
+
+  useEffect(() => {
+    if (
+      sidebarSwitchingSessionId !== null &&
+      connection.sessionId === sidebarSwitchingSessionId &&
+      !connection.catchingUp
+    ) {
+      setSidebarSwitchingSessionId(null);
+    }
+  }, [connection.catchingUp, connection.sessionId, sidebarSwitchingSessionId]);
 
   const openTasksPanel = useCallback(() => {
     sessionActions
@@ -3021,8 +3137,15 @@ export function App({
     if (pendingApproval) return;
     if (queuedPrompts.length === 0) return;
 
-    const nextPrompt = popNextQueuedPrompt();
+    const nextPrompt = peekNextQueuedPrompt();
     if (!nextPrompt) return;
+    if (
+      nextPrompt.sessionId !== undefined &&
+      nextPrompt.sessionId !== connection.sessionId
+    ) {
+      return;
+    }
+    popNextQueuedPrompt();
 
     drainingQueueRef.current = true;
     let sent = false;
@@ -3049,9 +3172,11 @@ export function App({
     };
   }, [
     connected,
+    connection.sessionId,
     interactionBlocked,
     handleSubmit,
     pendingApproval,
+    peekNextQueuedPrompt,
     popNextQueuedPrompt,
     queuedPrompts,
     streamingState,
@@ -3336,6 +3461,7 @@ export function App({
     styles.app,
     styles.appChat,
     isChatEmptyState ? styles.appChatEmpty : undefined,
+    sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
       : styles.themeDark,
@@ -3665,210 +3791,228 @@ export function App({
             </DialogShell>
           )}
 
-          <WebShellCustomizationProvider value={customization}>
-            <CompactModeContext.Provider value={compactMode}>
-              <TodoContextsProvider
-                timeline={todoTimeline}
-                details={todoDetails}
-              >
-                <div
-                  className={[
-                    styles.content,
-                    showFloatingTodos ||
-                    displayMessages.length > 0 ||
-                    pendingApproval
-                      ? styles.contentHasMessages
-                      : undefined,
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
-                >
-                  <MessageList
-                    ref={messageListRef}
-                    messages={displayMessages}
-                    pendingApproval={pendingToolApproval}
-                    onShowContextDetail={handleShowContextDetail}
-                    catchingUp={connection.catchingUp}
-                    isResponding={streamingState !== 'idle'}
-                    activeTurnStartedAt={activeTurnStartedAt}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    shellOutputMaxLines={shellOutputMaxLines}
-                    showRetryHint={showRetryHint}
-                    onRetryClick={handleRetry}
-                    onBranchSession={handleBranchCurrentSession}
-                    welcomeHeader={isChatEmptyState ? welcomeHeader : undefined}
-                    tailContent={undefined}
-                    tailKey={undefined}
-                    onFollowStateChange={handleFollowStateChange}
-                    virtualScrollThreshold={virtualScrollThreshold}
-                  />
-                  {btwMessage?.role === 'btw' && (
-                    <div className={styles.btwPanel}>
-                      <BtwMessage
-                        question={btwMessage.question}
-                        answer={btwMessage.answer}
-                        isPending={btwMessage.isPending}
+          <div className={styles.appShell}>
+            {sidebarOptions.enabled && (
+              <WebShellSidebar
+                collapsed={sidebarCollapsed}
+                onCollapsedChange={handleSidebarCollapsedChange}
+                onOpenSettings={() => setShowSettingsDialog(true)}
+                onNewSession={createNewSession}
+                onLoadSession={loadSidebarSession}
+                onError={reportError}
+              />
+            )}
+            <div className={styles.chatPane}>
+              <WebShellCustomizationProvider value={customization}>
+                <CompactModeContext.Provider value={compactMode}>
+                  <TodoContextsProvider
+                    timeline={todoTimeline}
+                    details={todoDetails}
+                  >
+                    <div
+                      className={[
+                        styles.content,
+                        showFloatingTodos ||
+                        displayMessages.length > 0 ||
+                        pendingApproval
+                          ? styles.contentHasMessages
+                          : undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
+                      <MessageList
+                        ref={messageListRef}
+                        messages={displayMessages}
+                        pendingApproval={pendingToolApproval}
+                        onShowContextDetail={handleShowContextDetail}
+                        catchingUp={connection.catchingUp}
+                        isResponding={streamingState !== 'idle'}
+                        activeTurnStartedAt={activeTurnStartedAt}
+                        workspaceCwd={connection.workspaceCwd || ''}
+                        shellOutputMaxLines={shellOutputMaxLines}
+                        showRetryHint={showRetryHint}
+                        onRetryClick={handleRetry}
+                        onBranchSession={handleBranchCurrentSession}
+                        welcomeHeader={
+                          isChatEmptyState ? welcomeHeader : undefined
+                        }
+                        tailContent={undefined}
+                        tailKey={undefined}
+                        onFollowStateChange={handleFollowStateChange}
+                        virtualScrollThreshold={virtualScrollThreshold}
+                      />
+                      {btwMessage?.role === 'btw' && (
+                        <div className={styles.btwPanel}>
+                          <BtwMessage
+                            question={btwMessage.question}
+                            answer={btwMessage.answer}
+                            isPending={btwMessage.isPending}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </TodoContextsProvider>
+                </CompactModeContext.Provider>
+
+                <div ref={footerRef} className={styles.footer}>
+                  {showScrollToBottom && (
+                    <div
+                      className={
+                        showFloatingTodos
+                          ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
+                          : styles.scrollToBottomLayer
+                      }
+                    >
+                      <button
+                        type="button"
+                        className={styles.scrollToBottomButton}
+                        aria-label={t('chat.scrollToBottom')}
+                        onClick={() => resumeChatBottomFollow('smooth')}
+                      >
+                        <svg
+                          className={styles.scrollToBottomIcon}
+                          viewBox="0 0 24 24"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+                  {showFloatingTodos && (
+                    <div className={styles.bottomPanels}>
+                      <TodoPanel todos={floatingTodos} />
+                    </div>
+                  )}
+                  {pendingToolApproval && (
+                    <div className={styles.approvalOverlay}>
+                      <ToolApproval
+                        request={pendingToolApproval}
+                        onConfirm={handleConfirm}
+                        variant="floating"
                       />
                     </div>
                   )}
-                </div>
-              </TodoContextsProvider>
-            </CompactModeContext.Provider>
-
-            <div ref={footerRef} className={styles.footer}>
-              {showScrollToBottom && (
-                <div
-                  className={
-                    showFloatingTodos
-                      ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
-                      : styles.scrollToBottomLayer
-                  }
-                >
-                  <button
-                    type="button"
-                    className={styles.scrollToBottomButton}
-                    aria-label={t('chat.scrollToBottom')}
-                    onClick={() => resumeChatBottomFollow('smooth')}
-                  >
-                    <svg
-                      className={styles.scrollToBottomIcon}
-                      viewBox="0 0 24 24"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
+                  {pendingAskUserApproval && (
+                    <div className={styles.approvalOverlay}>
+                      <AskUserQuestion
+                        request={pendingAskUserApproval}
+                        onConfirm={handleConfirm}
+                        variant="floating"
                       />
-                    </svg>
-                  </button>
+                    </div>
+                  )}
+                  <div className={styles.composer}>
+                    <StreamingStatus startedAt={activeTurnStartedAt} />
+                    <QueuedPromptDisplay
+                      prompts={queuedPrompts}
+                      t={t}
+                      onDelete={removeQueuedPrompt}
+                      onInsert={insertQueuedPrompt}
+                      onEdit={editQueuedPrompt}
+                    />
+                    <ChatEditor
+                      ref={setEditorHandle}
+                      onSubmit={handleEditorSubmit}
+                      onCycleMode={handleCycleMode}
+                      onToggleShortcuts={handleToggleShortcuts}
+                      onCancel={handleCancel}
+                      isRunning={streamingState !== 'idle'}
+                      disabled={isDisabled || pendingApproval !== null}
+                      commands={commands}
+                      skills={loadedSkills}
+                      slashCommandCategoryOrder={slashCommandCategoryOrder}
+                      queuedMessages={queuedTexts}
+                      onFocusFooter={handleFocusTaskPill}
+                      onPopQueuedMessages={popLastQueuedPromptText}
+                      onClearQueuedMessages={clearQueuedPrompts}
+                      currentMode={currentMode}
+                      currentModel={currentModel}
+                      chatWidthMode={chatWidthMode}
+                      showChatWidthToggle={!isChatEmptyState}
+                      chatWidthToggleMin={chatWidthToggleMin}
+                      visibleToolbarActions={composerToolbarActions}
+                      availableModels={availableModels}
+                      onSelectMode={handleSetMode}
+                      onSelectModel={handleModelSelect}
+                      onChatWidthModeChange={handleChatWidthModeChange}
+                      sessionName={sessionDisplayName}
+                      dialogOpen={interactionBlocked}
+                      followupState={followupState}
+                      onAcceptFollowup={onAcceptFollowup}
+                      onDismissFollowup={onDismissFollowup}
+                      composerInput={composerInput}
+                      composerInputVersion={composerInputVersion}
+                      placeholderText={
+                        !connected || connection.catchingUp
+                          ? t('common.loading')
+                          : streamingState !== 'idle'
+                            ? t('editor.processing')
+                            : t('editor.placeholder')
+                      }
+                    />
+                  </div>
+                  {CustomFooter ? (
+                    <CustomFooter
+                      connected={connected}
+                      mode={currentMode}
+                      model={currentModel}
+                      streamingState={streamingState}
+                      contextUsageRatio={
+                        (connection.contextWindow ?? 0) > 0
+                          ? (connection.tokenCount ?? 0) /
+                            (connection.contextWindow ?? 0)
+                          : 0
+                      }
+                      activeGoal={activeGoal}
+                      tasks={footerTasks}
+                      availableModes={MODES_CYCLE}
+                      availableModels={(connection.models ?? [])
+                        .filter(isVisibleComposerModel)
+                        .map((m) => ({
+                          id: m.id,
+                          label: getModelDisplayName(m.label || m.id),
+                          contextWindow: m.contextWindow,
+                        }))}
+                      skills={loadedSkills}
+                      onSelectMode={handleSetMode}
+                      onSelectModel={handleModelSelect}
+                    />
+                  ) : (
+                    <StatusBar
+                      escapeHint={escapeHintVisible}
+                      onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
+                      onSelectModel={() =>
+                        setModelDialogMode((v) => (v ? null : 'main'))
+                      }
+                      onShowContext={() => showContextUsage('/context', false)}
+                      onOpenSettings={() => setShowSettingsDialog(true)}
+                      ref={statusBarRef}
+                      onOpenTasks={() => openTasksPanel()}
+                      onReturnToInput={handleReturnToEditor}
+                      tasks={backgroundTasks}
+                      activeGoal={activeGoal}
+                      hideSettings={hideSettings}
+                      onToggleShortcuts={handleToggleShortcuts}
+                      compact={true}
+                    />
+                  )}
+                  {isChatEmptyState && welcomeFooter && (
+                    <div className={styles.emptyWelcomeFooter}>
+                      {welcomeFooter}
+                    </div>
+                  )}
                 </div>
-              )}
-              {showFloatingTodos && (
-                <div className={styles.bottomPanels}>
-                  <TodoPanel todos={floatingTodos} />
-                </div>
-              )}
-              {pendingToolApproval && (
-                <div className={styles.approvalOverlay}>
-                  <ToolApproval
-                    request={pendingToolApproval}
-                    onConfirm={handleConfirm}
-                    variant="floating"
-                  />
-                </div>
-              )}
-              {pendingAskUserApproval && (
-                <div className={styles.approvalOverlay}>
-                  <AskUserQuestion
-                    request={pendingAskUserApproval}
-                    onConfirm={handleConfirm}
-                    variant="floating"
-                  />
-                </div>
-              )}
-              <div className={styles.composer}>
-                <StreamingStatus startedAt={activeTurnStartedAt} />
-                <QueuedPromptDisplay
-                  prompts={queuedPrompts}
-                  t={t}
-                  onDelete={removeQueuedPrompt}
-                  onInsert={insertQueuedPrompt}
-                  onEdit={editQueuedPrompt}
-                />
-                <ChatEditor
-                  ref={setEditorHandle}
-                  onSubmit={handleEditorSubmit}
-                  onCycleMode={handleCycleMode}
-                  onToggleShortcuts={handleToggleShortcuts}
-                  onCancel={handleCancel}
-                  isRunning={streamingState !== 'idle'}
-                  disabled={isDisabled || pendingApproval !== null}
-                  commands={commands}
-                  skills={loadedSkills}
-                  slashCommandCategoryOrder={slashCommandCategoryOrder}
-                  queuedMessages={queuedTexts}
-                  onFocusFooter={handleFocusTaskPill}
-                  onPopQueuedMessages={popLastQueuedPromptText}
-                  onClearQueuedMessages={clearQueuedPrompts}
-                  currentMode={currentMode}
-                  currentModel={currentModel}
-                  chatWidthMode={chatWidthMode}
-                  showChatWidthToggle={!isChatEmptyState}
-                  chatWidthToggleMin={chatWidthToggleMin}
-                  visibleToolbarActions={composerToolbarActions}
-                  availableModels={availableModels}
-                  onSelectMode={handleSetMode}
-                  onSelectModel={handleModelSelect}
-                  onChatWidthModeChange={handleChatWidthModeChange}
-                  sessionName={sessionDisplayName}
-                  dialogOpen={interactionBlocked}
-                  followupState={followupState}
-                  onAcceptFollowup={onAcceptFollowup}
-                  onDismissFollowup={onDismissFollowup}
-                  composerInput={composerInput}
-                  composerInputVersion={composerInputVersion}
-                  placeholderText={
-                    !connected || connection.catchingUp
-                      ? t('common.loading')
-                      : streamingState !== 'idle'
-                        ? t('editor.processing')
-                        : t('editor.placeholder')
-                  }
-                />
-              </div>
-              {CustomFooter ? (
-                <CustomFooter
-                  connected={connected}
-                  mode={currentMode}
-                  model={currentModel}
-                  streamingState={streamingState}
-                  contextUsageRatio={
-                    (connection.contextWindow ?? 0) > 0
-                      ? (connection.tokenCount ?? 0) /
-                        (connection.contextWindow ?? 0)
-                      : 0
-                  }
-                  activeGoal={activeGoal}
-                  tasks={footerTasks}
-                  availableModes={MODES_CYCLE}
-                  availableModels={(connection.models ?? [])
-                    .filter(isVisibleComposerModel)
-                    .map((m) => ({
-                      id: m.id,
-                      label: getModelDisplayName(m.label || m.id),
-                      contextWindow: m.contextWindow,
-                    }))}
-                  skills={loadedSkills}
-                  onSelectMode={handleSetMode}
-                  onSelectModel={handleModelSelect}
-                />
-              ) : (
-                <StatusBar
-                  escapeHint={escapeHintVisible}
-                  onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
-                  onSelectModel={() =>
-                    setModelDialogMode((v) => (v ? null : 'main'))
-                  }
-                  onShowContext={() => showContextUsage('/context', false)}
-                  onOpenSettings={() => setShowSettingsDialog(true)}
-                  ref={statusBarRef}
-                  onOpenTasks={() => openTasksPanel()}
-                  onReturnToInput={handleReturnToEditor}
-                  tasks={backgroundTasks}
-                  activeGoal={activeGoal}
-                  hideSettings={hideSettings}
-                  onToggleShortcuts={handleToggleShortcuts}
-                  compact={true}
-                />
-              )}
-              {isChatEmptyState && welcomeFooter && (
-                <div className={styles.emptyWelcomeFooter}>{welcomeFooter}</div>
-              )}
+              </WebShellCustomizationProvider>
             </div>
-          </WebShellCustomizationProvider>
+          </div>
         </div>
       </I18nProvider>
     </ThemeProvider>

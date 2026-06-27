@@ -1597,7 +1597,7 @@ describe('AnthropicContentGenerator', () => {
         );
       });
 
-      it('uses conservative default when max_tokens is not explicitly configured', async () => {
+      it('uses model default when max_tokens is not explicitly configured', async () => {
         const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue({
           id: 'anthropic-1',
@@ -1625,7 +1625,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 8000 }),
+          expect.objectContaining({ max_tokens: 65536 }),
         );
       });
 
@@ -1660,7 +1660,7 @@ describe('AnthropicContentGenerator', () => {
           const [anthropicRequest] =
             anthropicState.lastCreateArgs as AnthropicCreateArgs;
           expect(anthropicRequest).toEqual(
-            expect.objectContaining({ max_tokens: 8000 }),
+            expect.objectContaining({ max_tokens: 65536 }),
           );
         }
       });
@@ -1759,7 +1759,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 8000 }),
+          expect.objectContaining({ max_tokens: 65536 }),
         );
       });
     });

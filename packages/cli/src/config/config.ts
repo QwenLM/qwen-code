@@ -1959,6 +1959,7 @@ export async function loadCliConfig(
         : (settings.tools?.computerUse?.enabled ?? true),
     computerUseMaxImageDimension:
       settings.tools?.computerUse?.maxImageDimension,
+    computerUseIdleTimeoutMs: settings.tools?.computerUse?.idleTimeoutMs,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
@@ -2005,6 +2006,12 @@ export async function loadCliConfig(
     enableManagedAutoDream: bareMode
       ? false
       : (settings.memory?.enableManagedAutoDream ?? true),
+    enableTeamMemory: bareMode
+      ? false
+      : (settings.memory?.enableTeamMemory ?? false),
+    enableTeamMemorySync: bareMode
+      ? false
+      : (settings.memory?.enableTeamMemorySync ?? false),
     enableAutoSkill: bareMode
       ? false
       : (settings.memory?.enableAutoSkill ?? true),
