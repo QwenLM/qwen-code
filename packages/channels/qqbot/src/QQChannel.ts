@@ -972,8 +972,12 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText}\n`,
       );
     }
-    // Don't prefix slash commands, keep [senderName] for normal messages
-    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
+    // We self-prefix and set alreadyPrefixed below, which skips ChannelBase's
+    // [..]/newline/length sanitization — so neutralize the nick here too, or a
+    // crafted QQ nickname could inject brackets/newlines into the prompt.
+    const safeName = senderName.replace(/[[\]\r\n]/g, ' ').slice(0, 64);
+    // Don't prefix slash commands, keep [safeName] for normal messages
+    const text = isSlash ? cleanText : `[${safeName}]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId: event.author.user_openid || event.author.id,

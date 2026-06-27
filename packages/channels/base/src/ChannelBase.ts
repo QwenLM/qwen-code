@@ -1,3 +1,4 @@
+import { basename } from 'node:path';
 import type { ChannelConfig, DispatchMode, Envelope } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
@@ -153,7 +154,12 @@ export abstract class ChannelBase {
       );
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          // Purge every per-session map (all keyed by sessionId) so a
+          // long-running gateway doesn't leak dead entries after /clear.
           this.instructedSessions.delete(id);
+          this.sessionQueues.delete(id);
+          this.activePrompts.delete(id);
+          this.collectBuffers.delete(id);
         }
         await this.sendMessage(
           envelope.chatId,
@@ -214,7 +220,8 @@ export abstract class ChannelBase {
         envelope.chatId,
         [
           `Channel: ${this.name}`,
-          `Workspace: ${this.config.cwd}`,
+          // Only the basename — don't leak the absolute cwd to group members.
+          `Workspace: ${basename(this.config.cwd)}`,
           `Session: ${active ? 'active' : 'none'}${scopeNote}`,
         ].join('\n'),
       );
@@ -379,11 +386,22 @@ export abstract class ChannelBase {
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
 
+    // A slash is only a real command if we recognize it — a local handler or a
+    // forwarded agent command. Recognized commands must stay verbatim (a prefix
+    // would corrupt them); an unrecognized slash (e.g. /deploy) is just text and
+    // must keep its [sender] tag so a shared group can attribute it.
+    const isKnownCommand =
+      parsed !== null &&
+      (this.commands.has(parsed.command) ||
+        this.bridge.availableCommands.some(
+          (c) => c.name.toLowerCase() === parsed.command,
+        ));
+
     // Multiplayer attribution: in a group, tag each turn with the speaker so a
     // shared session can tell members apart. Sanitize the name so a crafted nick
     // can't break out of the [..] tag or inject newlines. Skipped for 1:1 chats
     // and for already-prefixed re-entries (collect-mode coalescing).
-    if (envelope.isGroup && !envelope.alreadyPrefixed && !parsed) {
+    if (envelope.isGroup && !envelope.alreadyPrefixed && !isKnownCommand) {
       const who = (envelope.senderName || envelope.senderId || 'unknown')
         .replace(/[[\]\r\n]/g, ' ')
         .slice(0, 64);
@@ -391,7 +409,13 @@ export abstract class ChannelBase {
     }
 
     if (envelope.referencedText) {
-      promptText = `[Replying to: "${envelope.referencedText}"]\n\n${promptText}`;
+      // Quoted text is attacker-controlled: strip control chars and cap length so
+      // it can't inject newlines/instructions or balloon the prompt.
+      const quoted = envelope.referencedText
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+        .slice(0, 500);
+      promptText = `[Replying to: "${quoted}"]\n\n${promptText}`;
     }
 
     // Resolve attachments: extract image for bridge, append file paths to text
