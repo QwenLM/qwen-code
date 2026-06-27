@@ -602,6 +602,8 @@ describe('<ModelDialog />', () => {
           authType: AuthType.USE_ANTHROPIC,
           model: 'claude-opus-4-7',
         })),
+        isCurrentPrimaryModel: (m: { id: string; authType?: string }) =>
+          m.id === 'claude-opus-4-7' && m.authType === AuthType.USE_ANTHROPIC,
         setVisionModel,
       } as unknown as Partial<Config>,
     );
@@ -626,12 +628,13 @@ describe('<ModelDialog />', () => {
 
   it('warns in the history when a pinned vision model is not image-capable', async () => {
     // qwen-plus is text-only by name default, so the pin is honored but flagged.
+    // The primary is a different model so the pin isn't rejected as the primary.
     const setVisionModel = vi.fn();
     const { mockHistoryManager } = renderComponent(
       { isVisionModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getModel: vi.fn(() => 'qwen-plus'),
+        getModel: vi.fn(() => 'qwen3.7-max'),
         getAllConfiguredModels: vi.fn(() => [
           {
             id: 'qwen-plus',
@@ -641,8 +644,9 @@ describe('<ModelDialog />', () => {
         ]),
         getContentGeneratorConfig: vi.fn(() => ({
           authType: AuthType.USE_OPENAI,
-          model: 'qwen-plus',
+          model: 'qwen3.7-max',
         })),
+        isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen3.7-max',
         setVisionModel,
       } as unknown as Partial<Config>,
     );

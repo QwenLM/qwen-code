@@ -582,6 +582,20 @@ export function ModelDialog({
       // duplicate ids across providers stay unambiguous; baseUrl discarded).
       if (isVisionModelMode) {
         const visionModel = encodeAuxModelSelector(selected);
+        // Pinning the primary itself is ignored by the bridge at runtime, so
+        // reject it here instead of persisting a dead pin and reporting success.
+        if (
+          selectedEntry &&
+          config?.isCurrentPrimaryModel(selectedEntry.model)
+        ) {
+          setErrorMessage(
+            t(
+              "'{{model}}' is the current primary model and cannot be used as the vision bridge.",
+              { model: visionModel },
+            ),
+          );
+          return;
+        }
         const scope = getPersistScopeForModelSelection(settings);
         settings.setValue(scope, 'visionModel', visionModel);
         // Sync runtime Config so the vision bridge picks it up without a restart.

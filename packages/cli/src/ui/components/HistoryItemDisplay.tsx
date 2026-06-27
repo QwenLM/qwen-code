@@ -175,6 +175,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
     case 'goal_status':
+    case 'vision_notice':
       return 0;
     default:
       return 1;

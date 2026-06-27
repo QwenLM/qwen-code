@@ -2800,6 +2800,29 @@ export class Config {
   }
 
   /**
+   * Whether `model` is the same entry as the current primary model — matched on
+   * the provider identity (auth type, and baseUrl when both carry one), not just
+   * the bare id. The vision bridge must never route at the primary (it's the
+   * text-only model the bridge works around), but a cross-provider namesake —
+   * the same bare id on another provider/endpoint, e.g. `anthropic:shared-model`
+   * vs an `openai` `shared-model` primary — is a different model and stays
+   * eligible. When the primary's auth type is unknown we can't disambiguate, so
+   * fall back to a conservative bare-id match (never risk hitting the primary).
+   */
+  isCurrentPrimaryModel(model: AvailableModel): boolean {
+    if (model.id !== this.getModel()) return false;
+    const cfg = this.getContentGeneratorConfig();
+    const primaryAuthType = cfg?.authType;
+    if (primaryAuthType === undefined) return true;
+    if (model.authType !== primaryAuthType) return false;
+    const primaryBaseUrl = cfg?.baseUrl;
+    if (primaryBaseUrl !== undefined && model.baseUrl !== undefined) {
+      return model.baseUrl === primaryBaseUrl;
+    }
+    return true;
+  }
+
+  /**
    * Resolve the user's explicit `visionModel` (set via `/model --vision`) into a
    * bridge selection. The id is passed through verbatim so `runSideQuery` can
    * resolve an `authType:modelId` selector; the endpoint is looked up for the
@@ -2817,20 +2840,38 @@ export class Config {
     try {
       selector = resolveModelId(this.visionModel);
     } catch {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' could not be parsed; falling back to auto-select`,
+      );
       return undefined;
     }
-    if (!selector) return undefined;
-    // Mirror selectVisionBridgeModel's guard: never route the bridge at the
-    // primary model itself, even when explicitly pinned — the primary is the
-    // text-only model the bridge exists to work around.
-    const primaryModelId = this.getModel();
+    if (!selector) {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' resolved to no selector; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    // Each guard below silently drops the pin (the hardest failure mode to
+    // debug, hence the warn): skip fast/voice-only models (a `settings.json`
+    // pin can bypass the slash command's filter), and never route the bridge at
+    // the primary entry itself (the text-only model the bridge works around) —
+    // via the provider-aware identity check so a cross-provider namesake stays
+    // eligible.
     const match = this.getAllConfiguredModels().find(
       (m) =>
-        m.id !== primaryModelId &&
         m.id === selector.modelId &&
-        (!selector.authType || m.authType === selector.authType),
+        (!selector.authType || m.authType === selector.authType) &&
+        !m.fastOnly &&
+        !m.voiceOnly &&
+        !this.isCurrentPrimaryModel(m),
     );
-    if (!match) return undefined;
+    if (!match) {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' did not match a usable configured model ` +
+          `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
+      );
+      return undefined;
+    }
     return {
       id: this.visionModel,
       ...(match.baseUrl && { baseUrl: match.baseUrl }),

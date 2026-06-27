@@ -614,6 +614,7 @@ describe('modelCommand', () => {
               authType: AuthType.USE_OPENAI,
             },
           ]),
+          isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen-plus',
           setVisionModel,
         },
         settings: createMockSettings(setValue),
@@ -649,8 +650,9 @@ describe('modelCommand', () => {
       },
       services: {
         config: {
+          // Primary differs from the pinned model so the guard doesn't fire.
           getContentGeneratorConfig: vi.fn().mockReturnValue({
-            model: 'qwen3.7-max',
+            model: 'qwen-plus',
             authType: AuthType.USE_OPENAI,
           }),
           // qwen3.7-max is text-only (no modalities / isVision) → bridge can't use it.
@@ -661,6 +663,7 @@ describe('modelCommand', () => {
               authType: AuthType.USE_OPENAI,
             },
           ]),
+          isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen-plus',
           setVisionModel,
         },
         settings: createMockSettings(setValue),
@@ -684,6 +687,49 @@ describe('modelCommand', () => {
     expect(msg.messageType).toBe('info');
     expect(msg.content).toContain('Vision Model: qwen3.7-max');
     expect(msg.content).toMatch(/not a known image-capable model/i);
+  });
+
+  it('rejects pinning the current primary model as the vision bridge', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision qwen-plus',
+        name: 'model',
+        args: '--vision qwen-plus',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-plus',
+              label: 'qwen-plus',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          // qwen-plus IS the current primary, so it can't double as the vision
+          // bridge — the runtime guard would silently ignore the pin.
+          isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen-plus',
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision qwen-plus',
+    );
+
+    const msg = result as { messageType: string; content: string };
+    expect(msg.messageType).toBe('error');
+    expect(msg.content).toMatch(/current primary model/i);
+    expect(setVisionModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
   });
 
   it('should reject unavailable vision models across all auth types', async () => {

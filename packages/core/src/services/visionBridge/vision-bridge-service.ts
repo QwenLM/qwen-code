@@ -350,11 +350,12 @@ export async function runVisionBridge(params: {
       );
     }
 
-    // The transcription is no longer surfaced to the user or carried on the
-    // result; log it so a wrong primary-model answer can be traced to either a
-    // misread image or a downstream hallucination.
+    // The transcription often carries sensitive screen contents (tokens, PII,
+    // private code), and debug logs can end up in shared support bundles — so
+    // log only metadata (model + length), never the raw text. Trace a wrong
+    // primary-model answer via the length/model here, not the content.
     debugLogger.debug(
-      `vision bridge transcription via ${model}: ${description.slice(0, 500)}`,
+      `vision bridge transcription via ${model} (${description.length} chars)`,
     );
 
     return {

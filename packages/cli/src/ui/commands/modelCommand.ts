@@ -504,6 +504,20 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      // Pinning the primary itself is a no-op at runtime (the bridge guard skips
+      // it and falls back to auto-select), so reject it at set time instead of
+      // persisting a dead pin and reporting success.
+      if (config.isCurrentPrimaryModel(matched)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            "'{{model}}' is the current primary model and cannot be used as the vision bridge. Choose a different image-capable model.",
+            { model: modelName },
+          ),
+        };
+      }
+
       persistSetting(settings, 'visionModel', modelName);
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(modelName);

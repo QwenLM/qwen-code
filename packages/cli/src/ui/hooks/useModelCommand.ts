@@ -39,7 +39,9 @@ export const useModelCommand = (): UseModelCommandReturn => {
           ? false
           : (options?.fastModelMode ?? false),
       );
-      setIsVoiceModelMode(voiceModelMode);
+      // Vision wins over voice when both are passed, so the dialog can't end up
+      // in two specialized modes at once (mismatched title vs. highlighted row).
+      setIsVoiceModelMode(visionModelMode ? false : voiceModelMode);
       setIsVisionModelMode(visionModelMode);
       setIsModelDialogOpen(true);
     },
