@@ -189,17 +189,13 @@ Settings are organized into categories. Most settings should be placed within th
 }
 ```
 
-**max_tokens (adaptive output tokens):**
+**max_tokens (output token limit):**
 
-When `samplingParams.max_tokens` is not set, Qwen Code uses an adaptive output token strategy to optimize GPU resource usage:
+When neither `samplingParams.max_tokens` nor `QWEN_CODE_MAX_OUTPUT_TOKENS` is set, Qwen Code generally uses the selected model's declared output limit as the request's default output limit. If the response still hits that limit, Qwen Code may retry with an escalated limit (using a 64K floor) and then recover across continuation turns.
 
-1. Requests start with a default limit of **8K** output tokens
-2. If the response is truncated (the model hits the limit), Qwen Code automatically retries with **64K** tokens
-3. The partial output is discarded and replaced with the full response from the retry
+For OpenAI-compatible providers, `samplingParams` is also a wire-shape escape hatch: when it is set, its keys are passed through verbatim and Qwen Code does not synthesize a `max_tokens` default. Use this for provider-specific parameters such as `max_completion_tokens`.
 
-This is transparent to users — you may briefly see a retry indicator if escalation occurs. Since 99% of responses are under 5K tokens, the retry happens rarely (<1% of requests).
-
-To override this behavior, either set `samplingParams.max_tokens` in your settings or use the `QWEN_CODE_MAX_OUTPUT_TOKENS` environment variable.
+To force a fixed output limit, set `samplingParams.max_tokens` in your settings or use the `QWEN_CODE_MAX_OUTPUT_TOKENS` environment variable. Explicit limits disable automatic output-token escalation.
 
 **toolResultContentFormat:**
 
