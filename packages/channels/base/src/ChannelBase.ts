@@ -199,11 +199,34 @@ export abstract class ChannelBase {
           }
           // Purge every per-session map (all keyed by sessionId) so a
           // long-running gateway doesn't leak dead entries after /clear.
-          // sessionGenerations is intentionally kept: a still-queued turn needs
-          // to read the bumped value to detect that it's stale.
           this.instructedSessions.delete(id);
+          // The queue's tail resolves only after every turn queued before this
+          // /clear has dequeued and bailed on the bumped generation. Capture it
+          // before deletion so we can reclaim sessionGenerations[id] once it
+          // drains — otherwise the bumped entry leaks for the gateway's lifetime.
+          const drained = this.sessionQueues.get(id);
+          const bumpedGeneration = this.sessionGenerations.get(id);
           this.sessionQueues.delete(id);
           this.activePrompts.delete(id);
+          if (drained) {
+            // Deferred, never awaited: a wedged turn that never drains must not
+            // block /clear (the entry just lingers, as before). The guards skip
+            // reclamation if a newer turn re-queued onto this id or another
+            // /clear re-bumped it, so an entry a queued turn still needs is never
+            // deleted out from under it.
+            void drained.then(() => {
+              if (
+                !this.sessionQueues.has(id) &&
+                this.sessionGenerations.get(id) === bumpedGeneration
+              ) {
+                this.sessionGenerations.delete(id);
+              }
+            });
+          } else {
+            // Nothing was ever queued for this session, so no turn can read the
+            // bumped value — reclaim it immediately.
+            this.sessionGenerations.delete(id);
+          }
         }
         await this.sendMessage(
           envelope.chatId,
@@ -572,6 +595,11 @@ export abstract class ChannelBase {
       // A /clear (or reset/new) while we were queued bumps the generation; the
       // captured session is cleared, so don't run the prompt against it.
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
+        // Surface the drop — otherwise an unanswered queued message vanishes
+        // silently, making "my message was never answered" undiagnosable.
+        process.stderr.write(
+          `[${this.name}] dropped queued turn for session ${sessionId}: session was cleared before it ran\n`,
+        );
         return;
       }
       // Register this prompt as active

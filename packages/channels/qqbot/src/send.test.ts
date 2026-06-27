@@ -365,6 +365,37 @@ describe('group sender-name sanitization', () => {
     expect(env.alreadyPrefixed).toBe(true);
     expect(env.text).toContain('hello world');
   });
+
+  it('passes a group slash command through verbatim without the [sender] tag or alreadyPrefixed', () => {
+    // Fake timers so isDuplicate's eviction interval / saveQQState debounce don't
+    // leak past the test.
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-slash',
+      group_openid: 'grp-1',
+      content: '/clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    expect(inbound).toHaveBeenCalledTimes(1);
+    const env = inbound.mock.calls[0][0] as {
+      text: string;
+      alreadyPrefixed?: boolean;
+    };
+    // The slash command is forwarded raw — no [Alice] prefix would let it parse
+    // as a command, so the cleanText must arrive untouched.
+    expect(env.text).toBe('/clear');
+    // And alreadyPrefixed must NOT be set: setting it would route the command
+    // through ChannelBase as already-attributed text. A regression that always
+    // sets alreadyPrefixed is caught here.
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
 });
 
 describe('sendMessage', () => {

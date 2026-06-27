@@ -1189,6 +1189,106 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session: none');
     });
 
+    it('logs a dropped queued turn and reclaims the bumped generation once it drains', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve(`response-${callCount}`);
+      });
+      (bridge as unknown as Record<string, unknown>).cancelSession = vi
+        .fn()
+        .mockImplementation(() => {
+          resolveFirst('cancelled');
+          return Promise.resolve();
+        });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        const ch = createChannel({
+          sessionScope: 'thread',
+          groupPolicy: 'open',
+          groups: { '*': { dispatchMode: 'followup' } },
+        });
+        const g = envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          threadId: 't1',
+        });
+
+        // Alice's turn starts and hangs in flight.
+        const pA = ch.handleInbound({
+          ...g,
+          senderId: 'alice',
+          text: 'task one',
+        });
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0][0] as string;
+        const maps = ch as unknown as {
+          sessionQueues: Map<string, unknown>;
+          sessionGenerations: Map<string, number>;
+        };
+        const aliceQueue = maps.sessionQueues.get(sid);
+
+        // Bob's turn queues onto the chain before /clear, capturing the soon-to-
+        // be-bumped generation.
+        const pB = ch.handleInbound({
+          ...g,
+          senderId: 'bob',
+          text: 'task two',
+        });
+        await vi.waitFor(() =>
+          expect(maps.sessionQueues.get(sid)).not.toBe(aliceQueue),
+        );
+
+        await ch.handleInbound({
+          ...g,
+          senderId: 'alice',
+          text: '/clear confirm',
+        });
+        await pA;
+        await pB;
+
+        // Bob bailed (no second prompt) and the drop was surfaced with the sid.
+        expect(callCount).toBe(1);
+        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('dropped queued turn');
+        expect(logged).toContain(`session ${sid}`);
+
+        // Once Bob's bail drains the queue, nothing reads the bumped generation,
+        // so the entry must be reclaimed rather than leaked for the gateway's life.
+        await vi.waitFor(() =>
+          expect(maps.sessionGenerations.has(sid)).toBe(false),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('reclaims the bumped generation entry when /clear runs with no queued turn', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope({ text: 'hi' }));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+      const gens = (
+        ch as unknown as { sessionGenerations: Map<string, number> }
+      ).sessionGenerations;
+
+      await ch.handleInbound(envelope({ text: '/clear' }));
+
+      // /clear bumps the generation defensively; with no turn ever queued for the
+      // cleared session, that bump must not outlive it.
+      await vi.waitFor(() => expect(gens.has(sid)).toBe(false));
+    });
+
     it('logs a drain failure with lost count, session, and sender when collect re-entry rejects', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
