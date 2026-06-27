@@ -142,7 +142,9 @@ export interface DaemonGlobResult {
 
 export interface DaemonWorkspaceActions {
   // Sessions
-  listSessions(): Promise<DaemonSessionSummary[]>;
+  listSessions(options?: {
+    pageSize?: number;
+  }): Promise<DaemonSessionSummary[]>;
   deleteSession(sessionId: string): Promise<boolean>;
   deleteSessions(sessionIds: string[]): Promise<{
     removed: string[];
