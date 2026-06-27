@@ -2311,6 +2311,22 @@ export default {
   'Update failed: {{error}}': '更新失败：{{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     '自动更新失败：{{error}}。请重新运行安装程序以手动更新。',
+  'Running from a local git clone. Please update with "git pull".':
+    '正在从本地 Git 克隆运行。请使用 "git pull" 更新。',
+  'Running via npx, update not applicable.': '正在通过 npx 运行，更新不适用。',
+  'Running via pnpx, update not applicable.':
+    '正在通过 pnpx 运行，更新不适用。',
+  'Running via bunx, update not applicable.':
+    '正在通过 bunx 运行，更新不适用。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    '通过 Homebrew 安装。请使用 "brew upgrade" 更新。',
+  "Locally installed. Please update via your project's package.json.":
+    '本地安装。请通过项目的 package.json 更新。',
+  'Update requires sudo. Please run:': '更新需要 sudo。请运行：',
+  'Standalone install detected. Attempting to automatically update now...':
+    '检测到独立安装。正在尝试自动更新...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    '检测到独立安装。请重新运行独立安装程序以更新：',
   'Run the following to update:': '运行以下命令进行更新：',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     '无法自动更新此独立安装。请从以下地址重新安装：',

@@ -2078,6 +2078,24 @@ export default {
   'Update failed: {{error}}': 'Actualització fallida: {{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     'Ha fallat l’actualització automàtica: {{error}}. Torneu a executar l’instal·lador per actualitzar manualment.',
+  'Running from a local git clone. Please update with "git pull".':
+    'S’està executant des d’un clon Git local. Actualitzeu amb "git pull".',
+  'Running via npx, update not applicable.':
+    'S’està executant via npx, l’actualització no és aplicable.',
+  'Running via pnpx, update not applicable.':
+    'S’està executant via pnpx, l’actualització no és aplicable.',
+  'Running via bunx, update not applicable.':
+    'S’està executant via bunx, l’actualització no és aplicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Instal·lat via Homebrew. Actualitzeu amb "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Instal·lat localment. Actualitzeu mitjançant el package.json del vostre projecte.',
+  'Update requires sudo. Please run:':
+    'L’actualització requereix sudo. Executeu:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'S’ha detectat una instal·lació independent. S’intenta actualitzar automàticament...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'S’ha detectat una instal·lació independent. Torneu a executar l’instal·lador independent per actualitzar:',
   'Run the following to update:': 'Executeu el següent per actualitzar:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'No es pot actualitzar automàticament aquesta instal·lació autònoma. Reinstal·leu des de:',

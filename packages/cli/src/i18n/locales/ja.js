@@ -1881,6 +1881,24 @@ export default {
   'Update failed: {{error}}': 'アップデート失敗：{{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     '自動更新に失敗しました: {{error}}。手動で更新するにはインストーラーを再実行してください。',
+  'Running from a local git clone. Please update with "git pull".':
+    'ローカル Git クローンから実行中です。"git pull" で更新してください。',
+  'Running via npx, update not applicable.':
+    'npx 経由で実行中のため、更新は適用されません。',
+  'Running via pnpx, update not applicable.':
+    'pnpx 経由で実行中のため、更新は適用されません。',
+  'Running via bunx, update not applicable.':
+    'bunx 経由で実行中のため、更新は適用されません。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Homebrew 経由でインストールされています。"brew upgrade" で更新してください。',
+  "Locally installed. Please update via your project's package.json.":
+    'ローカルにインストールされています。プロジェクトの package.json 経由で更新してください。',
+  'Update requires sudo. Please run:':
+    '更新には sudo が必要です。次を実行してください:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'スタンドアロンインストールを検出しました。自動更新を試行しています...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'スタンドアロンインストールを検出しました。更新するにはスタンドアロンインストーラーを再実行してください:',
   'Run the following to update:':
     '以下のコマンドを実行してアップデートしてください：',
   'Unable to auto-update this standalone installation. Please reinstall from:':

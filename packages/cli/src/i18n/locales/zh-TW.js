@@ -2109,6 +2109,22 @@ export default {
   'Update failed: {{error}}': '更新失敗：{{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     '自動更新失敗：{{error}}。請重新執行安裝程式以手動更新。',
+  'Running from a local git clone. Please update with "git pull".':
+    '正在從本機 Git 複製執行。請使用 "git pull" 更新。',
+  'Running via npx, update not applicable.': '正在透過 npx 執行，更新不適用。',
+  'Running via pnpx, update not applicable.':
+    '正在透過 pnpx 執行，更新不適用。',
+  'Running via bunx, update not applicable.':
+    '正在透過 bunx 執行，更新不適用。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    '透過 Homebrew 安裝。請使用 "brew upgrade" 更新。',
+  "Locally installed. Please update via your project's package.json.":
+    '本機安裝。請透過專案的 package.json 更新。',
+  'Update requires sudo. Please run:': '更新需要 sudo。請執行：',
+  'Standalone install detected. Attempting to automatically update now...':
+    '偵測到獨立安裝。正在嘗試自動更新...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    '偵測到獨立安裝。請重新執行獨立安裝程式以更新：',
   'Run the following to update:': '執行以下命令進行更新：',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     '無法自動更新此獨立安裝。請從以下位址重新安裝：',

@@ -732,10 +732,32 @@ describe('formatUpdateInstructions', () => {
         {
           packageManager: PackageManager.NPM,
           isGlobal: true,
-          updateMessage: 'Please run sudo npm i -g @qwen-code/qwen-code@latest',
+          updateMessage:
+            'Update requires sudo. Please run: sudo npm i -g @qwen-code/qwen-code@latest',
         },
         '1.2.3-nightly.20250101',
       ),
-    ).toEqual(['Please run sudo npm i -g @qwen-code/qwen-code@nightly']);
+    ).toEqual([
+      'Update requires sudo. Please run:',
+      '  sudo npm i -g @qwen-code/qwen-code@nightly',
+    ]);
+  });
+
+  it('formats standalone updateMessage-only guidance as a localized prompt plus command', () => {
+    expect(
+      formatUpdateInstructions(
+        {
+          packageManager: PackageManager.STANDALONE,
+          isGlobal: true,
+          isStandalone: true,
+          updateMessage:
+            'Standalone install detected. Please rerun the standalone installer to update: curl -fsSL https://example.test/install.sh | bash',
+        },
+        '1.2.3',
+      ),
+    ).toEqual([
+      'Standalone install detected. Please rerun the standalone installer to update:',
+      '  curl -fsSL https://example.test/install.sh | bash',
+    ]);
   });
 });

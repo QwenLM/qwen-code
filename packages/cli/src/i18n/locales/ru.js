@@ -2096,6 +2096,24 @@ export default {
   'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     'Автоматическое обновление не удалось: {{error}}. Повторно запустите установщик, чтобы обновить вручную.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Запущено из локального клона Git. Обновите с помощью "git pull".',
+  'Running via npx, update not applicable.':
+    'Запущено через npx, обновление неприменимо.',
+  'Running via pnpx, update not applicable.':
+    'Запущено через pnpx, обновление неприменимо.',
+  'Running via bunx, update not applicable.':
+    'Запущено через bunx, обновление неприменимо.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Установлено через Homebrew. Обновите с помощью "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Установлено локально. Обновите через package.json вашего проекта.',
+  'Update requires sudo. Please run:':
+    'Для обновления требуется sudo. Выполните:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Обнаружена автономная установка. Выполняется попытка автоматического обновления...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Обнаружена автономная установка. Повторно запустите автономный установщик для обновления:',
   'Run the following to update:': 'Выполните следующую команду для обновления:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'Невозможно автоматически обновить эту автономную установку. Переустановите с:',

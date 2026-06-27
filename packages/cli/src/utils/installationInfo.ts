@@ -53,7 +53,7 @@ export function formatUpdateInstructions(
 
   if (installationInfo.updateMessage && !installationInfo.updateCommand) {
     lines.push(
-      resolveUpdateCommand(installationInfo.updateMessage, latestVersion),
+      ...formatUpdateMessage(installationInfo.updateMessage, latestVersion),
     );
   }
 
@@ -75,6 +75,44 @@ export function formatUpdateInstructions(
   }
 
   return lines;
+}
+
+function formatUpdateMessage(
+  updateMessage: string,
+  latestVersion: string,
+): string[] {
+  const message = resolveUpdateCommand(updateMessage, latestVersion);
+
+  const sudoPrefix = 'Update requires sudo. Please run: ';
+  if (message.startsWith(sudoPrefix)) {
+    return [
+      'Update requires sudo. Please run:',
+      `  ${message.slice(sudoPrefix.length)}`,
+    ];
+  }
+
+  const standalonePrefix =
+    'Standalone install detected. Please rerun the standalone installer to update: ';
+  if (message.startsWith(standalonePrefix)) {
+    return [
+      'Standalone install detected. Please rerun the standalone installer to update:',
+      `  ${message.slice(standalonePrefix.length)}`,
+    ];
+  }
+
+  const pleaseRunPrefix = 'Please run ';
+  const pleaseRunSuffix = ' to update';
+  if (
+    message.startsWith(pleaseRunPrefix) &&
+    message.endsWith(pleaseRunSuffix)
+  ) {
+    return [
+      'Run the following to update:',
+      `  ${message.slice(pleaseRunPrefix.length, -pleaseRunSuffix.length)}`,
+    ];
+  }
+
+  return [message];
 }
 
 export interface InstallationInfo {

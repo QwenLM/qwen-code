@@ -2109,6 +2109,23 @@ export default {
   'Update failed: {{error}}': 'Falha na atualização: {{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
     'Falha na atualização automática: {{error}}. Execute novamente o instalador para atualizar manualmente.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Executando a partir de um clone Git local. Atualize com "git pull".',
+  'Running via npx, update not applicable.':
+    'Executando via npx, atualização não aplicável.',
+  'Running via pnpx, update not applicable.':
+    'Executando via pnpx, atualização não aplicável.',
+  'Running via bunx, update not applicable.':
+    'Executando via bunx, atualização não aplicável.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Instalado via Homebrew. Atualize com "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Instalado localmente. Atualize via package.json do seu projeto.',
+  'Update requires sudo. Please run:': 'A atualização requer sudo. Execute:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Instalação standalone detectada. Tentando atualizar automaticamente agora...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Instalação standalone detectada. Execute novamente o instalador standalone para atualizar:',
   'Run the following to update:': 'Execute o seguinte para atualizar:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'Não foi possível atualizar automaticamente esta instalação independente. Reinstale de:',
