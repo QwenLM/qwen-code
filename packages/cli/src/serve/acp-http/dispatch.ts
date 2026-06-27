@@ -3093,7 +3093,10 @@ export class AcpDispatcher {
     // violating the JSON-RPC one-response-per-request contract. Fall back to
     // the connection-scoped stream so an id'd request always gets its reply.
     if (conn.sessions.has(sessionId)) {
-      conn.sendSession(sessionId, frame);
+      // Out-of-band reply: `sendSessionReply` defers it behind an in-flight ring
+      // replay (`replayPending`) so a prompt finishing mid-replay can't overtake
+      // not-yet-sent replay frames (§1.8 W1).
+      conn.sendSessionReply(sessionId, frame);
     } else {
       // Fallback fired — log it so an operator can correlate "reply arrived on
       // the connection stream, not the session stream" with a mid-flight

@@ -97,6 +97,17 @@ export interface SessionBinding {
    * reconnect and on teardown.
    */
   graceTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Set on a resumptive attach (`attachSessionStream` with a `Last-Event-ID`)
+   * and cleared when the ring replay boundary passes (`replay_complete` →
+   * `flushBufferedSessionFrames`). While set, OUT-OF-BAND session JSON-RPC
+   * replies (`replySession` — e.g. a `session/prompt` result that finishes
+   * mid-replay) are deferred into `buffer` instead of written live, so they
+   * can't overtake replay frames that haven't been sent yet. In-band pump
+   * frames (`translateEvent`, including the `replay_complete` frame itself)
+   * are unaffected — they're already produced in replay order.
+   */
+  replayPending?: boolean;
 }
 
 /** An agent→client request awaiting the client's JSON-RPC response. */
@@ -286,6 +297,23 @@ export class AcpConnection {
     return false;
   }
 
+  /**
+   * True if any session is mid-reconnect: its transport stream detached but
+   * its `SESSION_GRACE_MS` reclaim window is still armed (`graceTimer` set),
+   * so the binding — ownership + in-flight prompt — is being held open for an
+   * imminent resume. The connection reaper must count these as activity:
+   * otherwise, when the connection-scoped stream closes first and a session
+   * stream detaches just after, the connection grace timer could delete the
+   * whole connection (and `destroy()` abort the prompt) while the session is
+   * still inside its OWN grace window — the reconnect would then 404.
+   */
+  hasRecoverableSession(): boolean {
+    for (const b of this.sessions.values()) {
+      if (b.graceTimer) return true;
+    }
+    return false;
+  }
+
   /** Cancel a pending grace-period reap (e.g. on conn-stream reconnect). */
   clearGraceTimer(): void {
     if (this.connGraceTimer) {
@@ -320,6 +348,41 @@ export class AcpConnection {
       void binding.stream.send(frame, id);
     } else {
       pushCapped(binding.buffer, { frame, id }, `session ${sessionId}`);
+    }
+  }
+
+  /**
+   * Send an OUT-OF-BAND session JSON-RPC reply (a `session/prompt` result and
+   * friends from `replySession`) — id-less on the wire (no ring cursor).
+   *
+   * Identical to `sendSession` EXCEPT it honors `binding.replayPending`: if a
+   * resumptive ring replay is mid-flight, the reply is deferred into `buffer`
+   * (released after `replay_complete`) so a prompt that finishes DURING the
+   * replay window can't land ahead of replay frames that haven't been sent yet
+   * — the same original-order guarantee the detach-gap deferral gives, but for
+   * the post-attach window. Pump-generated frames keep using `sendSession`
+   * (they're already in replay order, and deferring the `replay_complete` frame
+   * itself would deadlock the release).
+   */
+  sendSessionReply(sessionId: string, frame: unknown): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding) return;
+    if (binding.replayPending) {
+      pushCapped(
+        binding.buffer,
+        { frame, id: undefined },
+        `session ${sessionId}`,
+      );
+      return;
+    }
+    if (binding.stream && !binding.stream.isClosed) {
+      void binding.stream.send(frame);
+    } else {
+      pushCapped(
+        binding.buffer,
+        { frame, id: undefined },
+        `session ${sessionId}`,
+      );
     }
   }
 
@@ -385,6 +448,12 @@ export class AcpConnection {
     // resume we DEFER id-less frames: leave them in the buffer for the pump to
     // flush after `replay_complete` (`flushBufferedSessionFrames`), preserving
     // original stream order.
+    if (resumeFromEventId !== undefined) {
+      // Resume: keep deferring out-of-band replies (`sendSessionReply`) until
+      // the replay boundary passes — not just the ones already buffered from
+      // the detach gap, but any prompt that finishes DURING the replay window.
+      binding.replayPending = true;
+    }
     for (const entry of binding.buffer.splice(0)) {
       if (resumeFromEventId === undefined) {
         void stream.send(entry.frame, entry.id); // fresh connect: flush all now
@@ -401,12 +470,17 @@ export class AcpConnection {
    * Flush any frames still buffered for a session to its live stream, in order.
    * On resume, `attachSessionStream` defers id-less JSON-RPC replies (e.g. a
    * `session/prompt` result that landed during the detach gap) into the buffer;
-   * the event pump calls this once the ring replay boundary
-   * (`replay_complete` / `state_resync_required`) has passed, so those replies
-   * are delivered AFTER the content chunks they followed in the original stream.
-   * No-op if the session has no live stream (the frames stay buffered for the
-   * next attach), or if the stream is already closed (the frames stay buffered
-   * for the next reconnect rather than being dropped onto a dead socket).
+   * the event pump calls this once the ring replay boundary (`replay_complete`)
+   * has passed, so those replies are delivered AFTER the content chunks they
+   * followed in the original stream. Clearing `replayPending` here also closes
+   * the post-attach window: out-of-band replies (`sendSessionReply`) resume
+   * live delivery now that replay has drained.
+   *
+   * No-op for the actual frame flush if the session has no live stream (the
+   * frames stay buffered for the next attach), or if the stream is already
+   * closed (the frames stay buffered for the next reconnect rather than being
+   * dropped onto a dead socket) — but `replayPending` is cleared regardless,
+   * since the boundary has passed.
    *
    * The frames are enqueued onto the stream synchronously, in buffer order:
    * `SseStream` serializes every `send` through one `writeChain`, so the wire
@@ -417,8 +491,11 @@ export class AcpConnection {
    */
   flushBufferedSessionFrames(sessionId: string): void {
     const binding = this.sessions.get(sessionId);
+    if (!binding) return;
+    // Replay boundary passed → stop deferring out-of-band replies.
+    binding.replayPending = false;
     if (
-      !binding?.stream ||
+      !binding.stream ||
       binding.stream.isClosed ||
       binding.buffer.length === 0
     )

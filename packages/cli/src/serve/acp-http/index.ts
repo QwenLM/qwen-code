@@ -393,13 +393,17 @@ export function mountAcpHttp(
           // idle TTL. After the grace window, reap UNLESS a reconnect
           // re-attached the conn stream (clears the timer) OR a session
           // stream is still live (client is active — only the conn stream
-          // blipped, don't kill its sessions/prompts).
+          // blipped, don't kill its sessions/prompts) OR a session is itself
+          // mid-reconnect within its OWN grace window (`hasRecoverableSession`)
+          // — reaping then would 404 the imminent session resume and abort the
+          // in-flight prompt before SESSION_GRACE_MS promised.
           conn.clearGraceTimer();
           conn.connGraceTimer = setTimeout(() => {
             if (
               registry.get(connId) === conn &&
               conn.connStream === stream &&
-              !conn.hasLiveSessionStream()
+              !conn.hasLiveSessionStream() &&
+              !conn.hasRecoverableSession()
             ) {
               writeStderrLine(
                 `qwen serve: /acp reaping connection ${connId.slice(0, 8)} (conn stream gone, no live session stream)`,

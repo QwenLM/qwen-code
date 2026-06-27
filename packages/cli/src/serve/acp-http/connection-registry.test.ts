@@ -355,6 +355,86 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('defers an out-of-band reply that finishes DURING the replay window until replay_complete (sendSessionReply + replayPending)', () => {
+    // wenshao MsOpj: the gap-buffer deferral alone isn't enough — a prompt that
+    // finishes AFTER the resumptive attach but BEFORE replay drains would, via
+    // the plain live-send path, overtake replay frames not yet sent. The
+    // `replayPending` flag keeps `sendSessionReply` deferring through that
+    // window too.
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      // Resumptive attach (cursor present) → replayPending armed.
+      const s = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s, new AbortController(), 5);
+
+      // A prompt finishes mid-replay → out-of-band reply. Must NOT be sent yet.
+      conn.sendSessionReply('sess-1', { promptResult: true });
+      expect(s.sent).toEqual([]);
+
+      // The pump replays content (bus events) live, in order.
+      conn.sendSession('sess-1', { chunk: 'a' }, 6);
+      conn.sendSession('sess-1', { chunk: 'b' }, 7);
+      expect(s.sent).toEqual([
+        { message: { chunk: 'a' }, id: 6 },
+        { message: { chunk: 'b' }, id: 7 },
+      ]);
+
+      // replay_complete → flush deferred reply AFTER the replayed content, and
+      // clear replayPending.
+      conn.flushBufferedSessionFrames('sess-1');
+      expect(s.sent).toEqual([
+        { message: { chunk: 'a' }, id: 6 },
+        { message: { chunk: 'b' }, id: 7 },
+        { message: { promptResult: true }, id: undefined },
+      ]);
+
+      // Past the boundary, a later reply is delivered live (no longer deferred).
+      conn.sendSessionReply('sess-1', { later: true });
+      expect(s.sent.at(-1)).toEqual({
+        message: { later: true },
+        id: undefined,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('hasRecoverableSession() is true while a session grace timer is armed, so the connection reaper treats it as active', () => {
+    // wenshao MsOpl: a detached-but-recoverable session (graceTimer armed,
+    // stream undefined) must count as connection activity, else the conn reaper
+    // can delete the whole connection mid SESSION_GRACE_MS and 404 the resume.
+    vi.useFakeTimers();
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const s1 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s1, new AbortController());
+      expect(conn.hasLiveSessionStream()).toBe(true);
+      expect(conn.hasRecoverableSession()).toBe(false);
+
+      // Transport close → detach with grace: no live stream, but recoverable.
+      conn.detachSessionStream('sess-1', s1, 10_000);
+      expect(conn.hasLiveSessionStream()).toBe(false);
+      expect(conn.hasRecoverableSession()).toBe(true);
+
+      // Reclaim within grace → no longer in a grace window.
+      const s2 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s2, new AbortController());
+      expect(conn.hasRecoverableSession()).toBe(false);
+      expect(conn.hasLiveSessionStream()).toBe(true);
+    } finally {
+      registry.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('aborts the connection signal when the connection is deleted', () => {
     const registry = new ConnectionRegistry();
     try {
