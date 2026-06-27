@@ -4620,6 +4620,104 @@ describe('Session', () => {
         }
       });
 
+      it('rebuilds the loop.md resolver when the working dir changes between ticks', async () => {
+        // /cd mid-session: the resolver is cached per project root, so a working-
+        // dir change must rebuild it for the NEW root. Two ticks of the same
+        // sentinel — the first resolves the OLD root's loop.md; getWorkingDir then
+        // flips and the second must resolve the NEW root's loop.md (a fresh
+        // resolver → full delivery), never re-serving the OLD root's content.
+        // Mutation check: drop the `loopTickResolverRoot !== root` rebuild guard
+        // and tick2 reuses the OLD resolver — the NEW content never reaches the
+        // model (the unchanged OLD content is re-served as a short reminder).
+        const oldDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-md-old-'));
+        const newDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-md-new-'));
+        await fs.mkdir(path.join(oldDir, '.qwen'), { recursive: true });
+        await fs.mkdir(path.join(newDir, '.qwen'), { recursive: true });
+        await fs.writeFile(
+          path.join(oldDir, '.qwen', 'loop.md'),
+          '- task from OLD root',
+        );
+        await fs.writeFile(
+          path.join(newDir, '.qwen', 'loop.md'),
+          '- task from NEW root',
+        );
+
+        let currentRoot = oldDir;
+        mockConfig.getWorkingDir = vi.fn(() => currentRoot);
+
+        let fire:
+          | ((job: { prompt: string; cronExpr?: string }) => void)
+          | undefined;
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          // Capture the fire callback so the test can drive ticks one at a time,
+          // flipping the working dir in between.
+          start: vi.fn(
+            (cb: (job: { prompt: string; cronExpr?: string }) => void) => {
+              fire = cb;
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          // Bootstraps the scheduler and captures `fire`; no tick fires yet.
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+          await vi.waitFor(() => expect(fire).toBeDefined());
+
+          const cronModelTexts = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .filter((c) => Array.isArray(c[1]?.message))
+              .map((c) =>
+                (c[1].message as Array<{ text?: string }>)
+                  .map((p) => p.text ?? '')
+                  .join(''),
+              );
+
+          // Tick 1 resolves against the OLD root. Waiting for its content in the
+          // model proves the resolve consumed oldDir before we flip (race-free:
+          // the model send is downstream of the resolve).
+          fire!({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+          await vi.waitFor(() => {
+            expect(
+              cronModelTexts().some((t) => t.includes('task from OLD root')),
+            ).toBe(true);
+          });
+
+          // /cd: the resolver must rebuild for the new root on the next tick.
+          currentRoot = newDir;
+
+          // Tick 2 must resolve the NEW root's loop.md (fresh resolver → full).
+          fire!({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+          await vi.waitFor(() => {
+            expect(
+              cronModelTexts().some((t) => t.includes('task from NEW root')),
+            ).toBe(true);
+          });
+
+          // The NEW-root tick carries ONLY the new root's tasks — the old root's
+          // content is not re-resolved after the dir change.
+          const newMsg = cronModelTexts().find((t) =>
+            t.includes('task from NEW root'),
+          )!;
+          expect(newMsg).not.toContain('task from OLD root');
+        } finally {
+          await fs.rm(oldDir, { recursive: true, force: true });
+          await fs.rm(newDir, { recursive: true, force: true });
+        }
+      });
+
       it('does not expand the project loop.md sentinel in an untrusted folder', async () => {
         // An untrusted folder's repo-controlled .qwen/loop.md must not be read
         // and fed to the model. With no user-owned ~/.qwen/loop.md, the tick is

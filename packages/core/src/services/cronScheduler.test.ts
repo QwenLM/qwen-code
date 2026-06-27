@@ -1011,6 +1011,50 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('deliverPending missed branch: an ALL-sentinel batch fires nothing and leaves every task on disk', async () => {
+      // All-filtered companion to the mixed-batch lock above. When a headless
+      // load misses ONLY <<loop.md>> sentinels it can't run, the
+      // runnable.length > 0 guard must fire NOTHING (no empty carrier notice)
+      // AND never call removeMissedFromDisk, so every sentinel is preserved for
+      // its owning interactive session. Mutation check: drop the guard and the
+      // empty batch fires a bogus missed notification (durableTaskToJob over an
+      // undefined runnable[0]).
+      const past = Date.now() - 10 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'loopmd-a',
+          cron: '* * * * *',
+          prompt: '<<loop.md>>',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+        {
+          id: 'loopmd-b',
+          cron: '* * * * *',
+          prompt: '<<loop.md>>',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+      await scheduler.enableDurable('session-1');
+
+      // Nothing in the batch is runnable → no fire at all (delivery is
+      // synchronous within enableDurable, so this is race-free).
+      expect(fired).toEqual([]);
+
+      // Both sentinels survive — removeMissedFromDisk was never reached.
+      expect((await readCronTasks(tmpDir)).map((t) => t.id).sort()).toEqual([
+        'loopmd-a',
+        'loopmd-b',
+      ]);
+    });
+
     it('deliverPending catch-up branch: skips a sentinel overdue-recurring (stamp left on disk), fires a sibling', async () => {
       // 3h overdue, past any jitter window. The sentinel must not be fired and
       // must keep its on-disk lastFiredAt (left out of persistCatchUpStamps) so
