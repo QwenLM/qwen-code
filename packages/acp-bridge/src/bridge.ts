@@ -653,6 +653,12 @@ const PERSIST_TIMEOUT_MS = 5_000;
 const MCP_RESTART_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
+// Trusted continuation marker. Only `Session.continueLastTurn()` sets this
+// internally; an external `POST /session/:id/prompt` caller must never be able
+// to smuggle it in to trigger a continuation that bypasses the
+// `continueLastTurn()` admission guards. `sendPrompt` strips it for that reason
+// (see the `_meta` sanitisation below), mirroring `DAEMON_RETRY_META_KEY`.
+const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -2903,6 +2909,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       ? { ...copy._meta }
                       : {};
                   delete meta[DAEMON_RETRY_META_KEY];
+                  // External prompt callers cannot self-trigger a continuation:
+                  // only the agent's internal `continueLastTurn()` path is
+                  // allowed to set this, and it does not go through `sendPrompt`.
+                  delete meta[DAEMON_CONTINUE_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
