@@ -2540,15 +2540,23 @@ export class Session implements SessionContext {
                   // resolve() reads .qwen/loop.md (project or home/global); an
                   // EACCES/EIO here is a sentinel-RESOLUTION failure, not a
                   // model-call failure — tag it so the two are distinguishable
-                  // in logs (the shared catch below still surfaces it). Log the
-                  // sentinel mode + error code only, never an absolute path (the
-                  // error message may embed one; the relative file is .qwen/loop.md).
+                  // in logs (the shared catch below still surfaces it).
+                  const code =
+                    (resolveErr as NodeJS.ErrnoException).code ?? 'unknown';
+                  // Full detail — including the raw fs error's ABSOLUTE loop.md
+                  // path (OS username + dir layout) — stays in this LOCAL debug
+                  // log only; debug logs are never sent to the ACP client.
                   debugLogger.warn(
-                    `loop.md sentinel resolution failed (mode=${loopMode}, code=${
-                      (resolveErr as NodeJS.ErrnoException).code ?? 'unknown'
-                    }) — check .qwen/loop.md permissions/IO`,
+                    `loop.md sentinel resolution failed (mode=${loopMode}, code=${code}) — check .qwen/loop.md permissions/IO`,
+                    resolveErr,
                   );
-                  throw resolveErr;
+                  // Re-throw a SANITIZED error: the outer cron catch forwards
+                  // error.message verbatim to the client via emitAgentMessage, so
+                  // re-throwing the raw fs error would leak that absolute path.
+                  // Surface only the relative candidate labels + errno code.
+                  throw new Error(
+                    `loop.md resolution failed (${code}) for .qwen/loop.md (project) or ~/.qwen/loop.md (home)`,
+                  );
                 }
               }
               const modelText = loopTick ? loopTick.modelText : prompt;

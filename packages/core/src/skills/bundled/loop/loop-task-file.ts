@@ -148,7 +148,14 @@ async function readBoundedTaskFile(filePath: string): Promise<Buffer | null> {
     }
     return buffer.subarray(0, total);
   } finally {
-    await handle.close();
+    // Guard the close so a close failure (e.g. EBADF) can't replace an in-flight
+    // read/stat error (e.g. EIO) — JS would otherwise surface the close error and
+    // mask the original. Swallow it (debug-log only) and let the original throw.
+    try {
+      await handle.close();
+    } catch (closeErr) {
+      debugLogger.debug('failed to close loop.md handle', { closeErr });
+    }
   }
 }
 

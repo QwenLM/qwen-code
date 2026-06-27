@@ -885,4 +885,34 @@ describe('readLoopTaskFile', () => {
       content: 'user tasks',
     });
   });
+
+  it('lets the original read error propagate when handle.close() also throws', async () => {
+    // readBoundedTaskFile closes the handle in a `finally`. If read() throws
+    // (e.g. EIO) AND close() also throws (e.g. EBADF), an unguarded `finally`
+    // would replace the original I/O error with the close error, masking the
+    // real cause. The close is guarded, so the ORIGINAL read error must survive.
+    await writeProject('project tasks'); // real file so lstat/realpath/confine pass
+    const eio = Object.assign(new Error('EIO: i/o error, read'), {
+      code: 'EIO',
+    });
+    const ebadf = Object.assign(
+      new Error('EBADF: bad file descriptor, close'),
+      { code: 'EBADF' },
+    );
+    const close = vi.fn().mockRejectedValue(ebadf);
+    const fakeHandle = {
+      stat: async () => ({ isFile: () => true, size: 100 }),
+      read: vi.fn().mockRejectedValue(eio),
+      close,
+    } as unknown as Awaited<ReturnType<typeof fs.open>>;
+    // The first fs.open is the project candidate (read first); hand it the
+    // fake handle. lstat/realpath above this still run against the real file.
+    vi.mocked(fs.open).mockImplementationOnce(async () => fakeHandle);
+
+    await expect(
+      readLoopTaskFile({ projectRoot, homeDir, allowProjectFile: true }),
+    ).rejects.toBe(eio);
+    // The close was still attempted (we swallow its failure, not skip it).
+    expect(close).toHaveBeenCalled();
+  });
 });

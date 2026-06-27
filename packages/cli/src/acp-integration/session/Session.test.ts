@@ -4887,16 +4887,23 @@ describe('Session', () => {
         }
       });
 
-      it('propagates a sentinel resolve() error (EACCES) instead of swallowing it into a normal tick', async () => {
+      it('propagates a sentinel resolve() error (EACCES) without leaking the absolute path to the client', async () => {
         // #executeCronPrompt: when resolve() throws (e.g. EACCES on
         // .qwen/loop.md) it logs a loop.md-specific warn and RE-THROWS into the
         // cron catch. Regression guard: the failure must PROPAGATE (surface as a
         // cron error, never degrade to a default/normal tick sent to the model)
         // and the loop.md-tagged warn must fire so a resolution failure stays
         // distinguishable from a model-call failure in logs.
+        //
+        // Security guard: the raw fs error message embeds the ABSOLUTE loop.md
+        // path (OS username + dir layout). The cron catch forwards error.message
+        // verbatim to the client via emitAgentMessage, so the re-thrown error's
+        // message must be SANITIZED — relative label + errno code only, never the
+        // absolute path. The full detail stays in the LOCAL debug warn.
         debugLoggerWarnSpy.mockClear();
+        const absoluteLoopMdPath = '/home/alice/project/.qwen/loop.md';
         const eacces = Object.assign(
-          new Error("EACCES: permission denied, open '.qwen/loop.md'"),
+          new Error(`EACCES: permission denied, open '${absoluteLoopMdPath}'`),
           { code: 'EACCES' },
         );
         const resolveSpy = vi
@@ -4930,35 +4937,50 @@ describe('Session', () => {
 
           // The loop.md-specific warn fired, tagged with the sentinel mode and
           // the EACCES code (proving the failure was logged as a resolution
-          // failure, not a generic model error).
+          // failure, not a generic model error). The raw error — whose message
+          // carries the absolute path — is passed as the second arg so the full
+          // detail is kept in this LOCAL log (debug logs are never sent to the
+          // client).
           await vi.waitFor(() => {
             expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
               'loop.md sentinel resolution failed (mode=cron, code=EACCES) — check .qwen/loop.md permissions/IO',
+              eacces,
             );
           });
 
-          // The error PROPAGATED to the cron catch and surfaced to the client.
+          // The error PROPAGATED to the cron catch and surfaced to the client,
+          // but SANITIZED: the emitted message names the relative candidate
+          // labels + errno code and NEVER the raw absolute loop.md path.
           const sessionUpdateMock = mockClient.sessionUpdate as ReturnType<
             typeof vi.fn
           >;
-          const cronErrorEmitted = () =>
-            sessionUpdateMock.mock.calls.some((call) => {
-              const update = (
-                call[0] as {
-                  update?: {
-                    sessionUpdate?: string;
-                    content?: { text?: string };
-                  };
-                }
-              ).update;
-              const text = update?.content?.text ?? '';
-              return (
-                update?.sessionUpdate === 'agent_message_chunk' &&
-                text.includes('[cron error]') &&
-                text.includes('EACCES')
-              );
-            });
-          await vi.waitFor(() => expect(cronErrorEmitted()).toBe(true));
+          const cronErrorTexts = () =>
+            sessionUpdateMock.mock.calls
+              .map(
+                (call) =>
+                  (
+                    call[0] as {
+                      update?: {
+                        sessionUpdate?: string;
+                        content?: { text?: string };
+                      };
+                    }
+                  ).update,
+              )
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of cronErrorTexts()) {
+            // Relative label + errno code present...
+            expect(text).toContain('EACCES');
+            expect(text).toContain('.qwen/loop.md (project)');
+            // ...and NO absolute path leaked to the client/API.
+            expect(text).not.toContain(absoluteLoopMdPath);
+            expect(text).not.toContain('/home/alice');
+          }
 
           // It was NOT swallowed into a normal tick: resolve() threw before any
           // model send, so neither an expanded `# /loop tick` block nor the raw
