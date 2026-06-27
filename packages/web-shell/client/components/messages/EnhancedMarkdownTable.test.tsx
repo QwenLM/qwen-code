@@ -18,6 +18,7 @@ afterEach(() => {
     container.remove();
   }
   vi.restoreAllMocks();
+  vi.useRealTimers();
   document.getSelection()?.removeAllRanges();
   if (originalElementFromPoint) {
     Object.defineProperty(document, 'elementFromPoint', {
@@ -622,6 +623,29 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(
       ['Score', '10', '2', '30'].join('\n'),
     );
+  });
+
+  it('shows checkmark feedback after quick copy', async () => {
+    vi.useFakeTimers();
+    mockClipboard();
+    const container = renderTable();
+
+    await act(async () => {
+      textButton(container, 'Quick copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('✓');
+    expect(container.textContent).toContain('Copied!');
+    expect(container.textContent).not.toContain('Quick copy');
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    expect(container.textContent).not.toContain('✓');
+    expect(container.textContent).toContain('Quick copy');
   });
 
   it('resets interactive state when table columns change', () => {

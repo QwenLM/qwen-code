@@ -1012,11 +1012,13 @@ function ColumnFilterMenu({
 interface EnhancedMarkdownTableProps {
   children?: ReactNode;
   fallback?: ReactNode;
+  toolbarExtra?: ReactNode;
 }
 
 export function EnhancedMarkdownTable({
   children,
   fallback,
+  toolbarExtra,
 }: EnhancedMarkdownTableProps) {
   const { t } = useI18n();
   const table = useMemo(
@@ -1036,10 +1038,16 @@ export function EnhancedMarkdownTable({
     return <>{fallback ?? <table>{children}</table>}</>;
   }
 
-  return <InteractiveMarkdownTable table={table} />;
+  return <InteractiveMarkdownTable table={table} toolbarExtra={toolbarExtra} />;
 }
 
-function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
+function InteractiveMarkdownTable({
+  table,
+  toolbarExtra,
+}: {
+  table: ParsedTable;
+  toolbarExtra?: ReactNode;
+}) {
   const { t } = useI18n();
   const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
@@ -1053,6 +1061,8 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   );
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [copiedVisible, setCopiedVisible] = useState(false);
+  const [copiedSelection, setCopiedSelection] = useState(false);
   const draggingRef = useRef(false);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1451,6 +1461,10 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     if (!text || !navigator.clipboard) return;
     void navigator.clipboard
       .writeText(text)
+      .then(() => {
+        setCopiedSelection(true);
+        setTimeout(() => setCopiedSelection(false), 2000);
+      })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
       );
@@ -1465,6 +1479,10 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     if (!text || !navigator.clipboard) return;
     void navigator.clipboard
       .writeText(text)
+      .then(() => {
+        setCopiedVisible(true);
+        setTimeout(() => setCopiedVisible(false), 2000);
+      })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
       );
@@ -1511,7 +1529,14 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           type="button"
           onClick={copyVisibleTable}
         >
-          {t('markdownTable.copyVisible')}
+          {copiedVisible ? (
+            <>
+              <span className={styles.copyCheck}>✓</span>
+              {t('code.copied')}
+            </>
+          ) : (
+            t('markdownTable.copyVisible')
+          )}
         </button>
         {hiddenColumns.size > 0 && (
           <button
@@ -1539,10 +1564,18 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
               type="button"
               onClick={copySelection}
             >
-              {t('markdownTable.copyTsv')}
+              {copiedSelection ? (
+                <>
+                  <span className={styles.copyCheck}>✓</span>
+                  {t('code.copied')}
+                </>
+              ) : (
+                t('markdownTable.copyTsv')
+              )}
             </button>
           </>
         )}
+        {toolbarExtra}
       </div>
       <div
         ref={containerRef}

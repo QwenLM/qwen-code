@@ -332,11 +332,107 @@ function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
 
-function PlainMarkdownTable({ children }: { children?: ReactNode }) {
+function PlainMarkdownTable({
+  children,
+  toggle,
+}: {
+  children?: ReactNode;
+  toggle?: ReactNode;
+}) {
   return (
     <div className={styles.tableWrapper}>
+      {toggle}
       <table className={styles.table}>{children}</table>
     </div>
+  );
+}
+
+function TableBasicIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="6" y="6" width="12" height="12" rx="1" />
+      <path d="M6 10h12" />
+      <path d="M6 14h12" />
+      <path d="M12 6v12" />
+    </svg>
+  );
+}
+
+const TableAdvancedIcon = TableBasicIcon;
+
+function ToggleableMarkdownTable({
+  children,
+  tableResetKey,
+}: {
+  children?: ReactNode;
+  tableResetKey: string;
+}) {
+  const [enhanced, setEnhanced] = useState(false);
+  const { t } = useI18n();
+
+  if (enhanced) {
+    const fallbackToggle = (
+      <button
+        className={`${styles.tableToggle} ${styles.tableToggleActive}`}
+        type="button"
+        onClick={() => setEnhanced(false)}
+        title={t('markdownTable.toggleBasic')}
+        aria-label={t('markdownTable.toggleBasic')}
+      >
+        <TableBasicIcon />
+      </button>
+    );
+    const fallback = (
+      <PlainMarkdownTable toggle={fallbackToggle}>
+        {children}
+      </PlainMarkdownTable>
+    );
+    const toolbarToggle = (
+      <button
+        className={`${styles.tableToggle} ${styles.tableToggleInline} ${styles.tableToggleActive}`}
+        type="button"
+        onClick={() => setEnhanced(false)}
+        title={t('markdownTable.toggleBasic')}
+        aria-label={t('markdownTable.toggleBasic')}
+      >
+        <TableBasicIcon />
+      </button>
+    );
+    return (
+      <EnhancedMarkdownTableBoundary
+        fallback={fallback}
+        resetKey={tableResetKey}
+      >
+        <EnhancedMarkdownTable fallback={fallback} toolbarExtra={toolbarToggle}>
+          {children}
+        </EnhancedMarkdownTable>
+      </EnhancedMarkdownTableBoundary>
+    );
+  }
+
+  const toggleButton = (
+    <button
+      className={styles.tableToggle}
+      type="button"
+      onClick={() => setEnhanced(true)}
+      title={t('markdownTable.toggleAdvanced')}
+      aria-label={t('markdownTable.toggleAdvanced')}
+    >
+      <TableAdvancedIcon />
+    </button>
+  );
+  return (
+    <PlainMarkdownTable toggle={toggleButton}>{children}</PlainMarkdownTable>
   );
 }
 
@@ -416,20 +512,14 @@ function createComponents(
       );
     },
     table({ children }: { children?: ReactNode }) {
-      const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
       if (enhanceTables) {
         return (
-          <EnhancedMarkdownTableBoundary
-            fallback={fallback}
-            resetKey={tableResetKey}
-          >
-            <EnhancedMarkdownTable fallback={fallback}>
-              {children}
-            </EnhancedMarkdownTable>
-          </EnhancedMarkdownTableBoundary>
+          <ToggleableMarkdownTable tableResetKey={tableResetKey}>
+            {children}
+          </ToggleableMarkdownTable>
         );
       }
-      return fallback;
+      return <PlainMarkdownTable>{children}</PlainMarkdownTable>;
     },
     img({ src, alt }: { src?: string; alt?: string }) {
       const safeSrc = isSafeImageSrc(src) ? src : undefined;

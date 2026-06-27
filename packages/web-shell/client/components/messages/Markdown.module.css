@@ -74,8 +74,55 @@
 }
 
 .tableWrapper {
+  position: relative;
   overflow-x: auto;
   margin: 6px 0;
+}
+
+.tableToggle {
+  position: absolute;
+  right: 8px;
+  top: 4px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle-bg);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tableToggle svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.tableToggle:not(.tableToggleActive):hover {
+  color: var(--foreground);
+  background: var(--subtle-bg-strong);
+}
+
+.tableToggleInline {
+  position: static;
+  margin-left: auto;
+}
+
+.tableToggleActive {
+  background: var(--agent-blue-500);
+  color: var(--card);
+  border-color: var(--agent-blue-500);
+}
+
+.tableToggleActive:hover {
+  filter: brightness(1.08);
 }
 
 .table {
@@ -89,6 +136,11 @@
   border: 1px solid var(--border);
   padding: 4px 8px;
   text-align: left;
+}
+
+.table th:last-child,
+.table td:last-child {
+  padding-right: 40px;
 }
 
 .table th {

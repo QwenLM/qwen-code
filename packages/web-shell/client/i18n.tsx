@@ -215,6 +215,8 @@ const EN: Messages = {
   'code.copy': 'Copy',
   'code.copied': 'Copied!',
   'markdownTable.blank': '(blank)',
+  'markdownTable.toggleAdvanced': 'Switch to advanced table',
+  'markdownTable.toggleBasic': 'Switch to basic table',
   'markdownTable.column': (v) => `Column ${v?.index ?? ''}`,
   'markdownTable.rows': (v) => {
     const count = Number(v?.count ?? 0);
@@ -1401,6 +1403,8 @@ const ZH: Messages = {
   'code.copy': '复制',
   'code.copied': '已复制！',
   'markdownTable.blank': '(空白)',
+  'markdownTable.toggleAdvanced': '切换到高级表格',
+  'markdownTable.toggleBasic': '切换到基础表格',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `${v?.count ?? 0} 行`,
   'markdownTable.rowsFiltered': (v) => `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
