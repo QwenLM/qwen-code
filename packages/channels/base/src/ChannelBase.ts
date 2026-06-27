@@ -29,6 +29,12 @@ export abstract class ChannelBase {
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
+  /**
+   * Per-session generation, bumped by /clear. A queued followup turn captures the
+   * generation when it enqueues and bails if /clear bumped it before the turn ran,
+   * so a cleared session can't be resurrected by an already-queued prompt.
+   */
+  private sessionGenerations: Map<string, number> = new Map();
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<
@@ -155,6 +161,13 @@ export abstract class ChannelBase {
       );
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          // Bump the generation up-front (before any await) so a followup turn
+          // already queued onto this session sees a stale generation and bails
+          // instead of running bridge.prompt() against the cleared session.
+          this.sessionGenerations.set(
+            id,
+            (this.sessionGenerations.get(id) ?? 0) + 1,
+          );
           // Cancel an in-flight turn (and drop its buffered follow-ups) before
           // purging, so a running prompt can't deliver a stale response into —
           // or resurrect via collect-drain — the just-cleared session.
@@ -167,6 +180,8 @@ export abstract class ChannelBase {
           }
           // Purge every per-session map (all keyed by sessionId) so a
           // long-running gateway doesn't leak dead entries after /clear.
+          // sessionGenerations is intentionally kept: a still-queued turn needs
+          // to read the bumped value to detect that it's stale.
           this.instructedSessions.delete(id);
           this.sessionQueues.delete(id);
           this.activePrompts.delete(id);
@@ -310,8 +325,10 @@ export abstract class ChannelBase {
    */
   private parseCommand(text: string): { command: string; args: string } | null {
     if (!text.startsWith('/')) return null;
-    // Handle /command@botname format (Telegram groups)
-    const match = text.match(/^\/([a-zA-Z0-9_]+)(?:@\S+)?\s*(.*)/s);
+    // Handle /command@botname format (Telegram groups). The token allows `-` and
+    // `:` so hyphenated and namespaced agent commands (e.g. /compress-fast,
+    // /git:commit) still parse as commands rather than being treated as text.
+    const match = text.match(/^\/([a-zA-Z0-9_:-]+)(?:@\S+)?\s*(.*)/s);
     if (!match) return null;
     return { command: match[1].toLowerCase(), args: match[2].trim() };
   }
@@ -396,22 +413,16 @@ export abstract class ChannelBase {
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
 
-    // A slash is only a real command if we recognize it — a local handler or a
-    // forwarded agent command. Recognized commands must stay verbatim (a prefix
-    // would corrupt them); an unrecognized slash (e.g. /deploy) is just text and
-    // must keep its [sender] tag so a shared group can attribute it.
-    const isKnownCommand =
-      parsed !== null &&
-      (this.commands.has(parsed.command) ||
-        this.bridge.availableCommands.some(
-          (c) => c.name.toLowerCase() === parsed.command,
-        ));
-
     // Multiplayer attribution: in a group, tag each turn with the speaker so a
     // shared session can tell members apart. Sanitize the name so a crafted nick
     // can't break out of the [..] tag or inject newlines. Skipped for 1:1 chats
-    // and for already-prefixed re-entries (collect-mode coalescing).
-    if (envelope.isGroup && !envelope.alreadyPrefixed && !isKnownCommand) {
+    // and for already-prefixed re-entries (collect-mode coalescing). Any
+    // slash-shaped message is also passed through verbatim: a [sender] prefix
+    // would stop a real command from parsing, and we can't reliably tell a real
+    // command from an unknown one here — the agent's command list loads async,
+    // so a registration check would race and corrupt the first command of a
+    // fresh session.
+    if (envelope.isGroup && !envelope.alreadyPrefixed && parsed === null) {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
       );
@@ -506,8 +517,17 @@ export abstract class ChannelBase {
 
     // Run the prompt (with followup-mode serialization for safety)
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    // Snapshot the session generation now (at enqueue time). If /clear bumps it
+    // before this turn dequeues, the session we captured is gone — bail rather
+    // than resurrect it.
+    const generation = this.sessionGenerations.get(sessionId) ?? 0;
     const useBlockStreaming = this.config.blockStreaming === 'on';
     const current = prev.then(async () => {
+      // A /clear (or reset/new) while we were queued bumps the generation; the
+      // captured session is cleared, so don't run the prompt against it.
+      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
+        return;
+      }
       // Register this prompt as active
       let doneResolve: () => void = () => {};
       const done = new Promise<void>((r) => {

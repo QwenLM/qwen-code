@@ -550,15 +550,13 @@ describe('ChannelBase', () => {
       expect(promptText).toBe('[Alice] ship it');
     });
 
-    it('does not prefix recognized (forwarded) slash commands', async () => {
+    it('does not prefix a forwarded slash command even before availableCommands loads', async () => {
       const ch = createChannel({ groupPolicy: 'open' });
-      // A real agent command must reach the agent verbatim — prefixing it would
-      // corrupt the command.
-      (
-        bridge as unknown as {
-          availableCommands: Array<{ name: string; description: string }>;
-        }
-      ).availableCommands = [{ name: 'compress', description: 'compress' }];
+      // availableCommands is populated asynchronously by an ACP notification and
+      // is still empty on a fresh session. A [sender] prefix would stop the
+      // command from parsing, so any slash-shaped message is passed through
+      // verbatim regardless of registration/load state — no race.
+      expect(bridge.availableCommands).toHaveLength(0);
       await ch.handleInbound(
         groupEnv({ senderName: 'Alice', text: '/compress now' }),
       );
@@ -567,16 +565,39 @@ describe('ChannelBase', () => {
       expect(promptText).toBe('/compress now');
     });
 
-    it('keeps the [sender] prefix for unrecognized slash commands', async () => {
+    it('does not prefix a hyphenated slash command (widened token pattern)', async () => {
       const ch = createChannel({ groupPolicy: 'open' });
-      // /deploy is neither a local nor an agent command, so it falls through to
-      // the agent as plain text and must keep its attribution.
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/compress-fast now' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      // The `-` is part of the command token, so it parses as a command and is
+      // forwarded verbatim rather than tagged as plain text.
+      expect(promptText).toBe('/compress-fast now');
+    });
+
+    it('does not prefix an unrecognized slash command either', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      // Tradeoff: we can't distinguish a real command from an unknown one without
+      // racing the async command list, so /deploy is also forwarded un-prefixed.
+      // Not-breaking-real-commands wins over attributing an unknown command.
       await ch.handleInbound(
         groupEnv({ senderName: 'Alice', text: '/deploy prod' }),
       );
       const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
-      expect(promptText).toBe('[Alice] /deploy prod');
+      expect(promptText).toBe('/deploy prod');
+    });
+
+    it('still prefixes a normal (non-slash) group message', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: 'just chatting' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] just chatting');
     });
 
     it('does not double-prefix already attributed group messages', async () => {
@@ -940,6 +961,154 @@ describe('ChannelBase', () => {
           }),
         ]),
       );
+    });
+
+    it('/clear waits for the in-flight turn to wind down before confirming', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        () => firstPrompt,
+      );
+      // cancelSession only *requests* cancellation; it does NOT resolve the turn,
+      // so doClear's `await active.done` genuinely blocks on the pending prompt.
+      (bridge as unknown as Record<string, unknown>).cancelSession = vi
+        .fn()
+        .mockResolvedValue(undefined);
+
+      const ch = createChannel();
+      const p1 = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+      // Fire /clear but don't await — it must hang on `await active.done`.
+      const pClear = ch.handleInbound(envelope({ text: '/clear' }));
+      await vi.waitFor(() =>
+        expect(
+          (bridge as unknown as Record<string, () => unknown>).cancelSession,
+        ).toHaveBeenCalledTimes(1),
+      );
+      // Cancel was requested, but the turn hasn't wound down, so /clear must not
+      // have confirmed yet — proving doClear awaits the in-flight prompt.
+      expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
+        false,
+      );
+
+      // Let the in-flight turn finish; its response is stale and suppressed.
+      resolveFirst('stale response');
+      await pClear;
+      await p1;
+      expect(ch.sent.some((m) => m.text === 'stale response')).toBe(false);
+      expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
+        true,
+      );
+    });
+
+    it('/clear confirm invalidates an already-queued followup turn (no resurrection)', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve(`response-${callCount}`);
+      });
+      (bridge as unknown as Record<string, unknown>).cancelSession = vi
+        .fn()
+        .mockImplementation(() => {
+          resolveFirst('cancelled');
+          return Promise.resolve();
+        });
+
+      const ch = createChannel({
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+        groups: { '*': { dispatchMode: 'followup' } },
+      });
+      const g = envelope({
+        isGroup: true,
+        isMentioned: true,
+        chatId: 'g1',
+        threadId: 't1',
+      });
+
+      // Alice's turn starts and hangs in flight.
+      const pA = ch.handleInbound({
+        ...g,
+        senderId: 'alice',
+        text: 'task one',
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+      const queues = (ch as unknown as { sessionQueues: Map<string, unknown> })
+        .sessionQueues;
+      const aliceQueue = queues.get(sid);
+
+      // Bob's turn enters handleInbound BEFORE /clear and queues onto the chain,
+      // capturing the session generation that /clear is about to bump. Wait until
+      // it is actually chained (its queue entry replaces Alice's) so the race the
+      // bug is about — queued-before-clear — is deterministically reproduced.
+      const pB = ch.handleInbound({ ...g, senderId: 'bob', text: 'task two' });
+      await vi.waitFor(() => expect(queues.get(sid)).not.toBe(aliceQueue));
+
+      // /clear confirm cancels Alice's turn and clears the shared session.
+      await ch.handleInbound({
+        ...g,
+        senderId: 'alice',
+        text: '/clear confirm',
+      });
+      await pA;
+      await pB;
+
+      // Bob's queued turn captured the stale generation, so it must bail instead
+      // of running bridge.prompt() against the cleared session.
+      expect(callCount).toBe(1);
+      ch.sent = [];
+      await ch.handleInbound({ ...g, senderId: 'alice', text: '/status' });
+      expect(ch.sent[0]!.text).toContain('Session: none');
+    });
+
+    it('logs a drain failure with lost count, session, and sender when collect re-entry rejects', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        // The coalesced re-entry's prompt rejects → the drain .catch must log.
+        return Promise.reject(new Error('boom'));
+      });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        const ch = createChannel({ dispatchMode: 'collect' });
+        const p1 = ch.handleInbound(
+          envelope({ senderId: 'u-77', text: 'first' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        // Buffer a second message while the first is in flight.
+        await ch.handleInbound(envelope({ senderId: 'u-77', text: 'second' }));
+
+        resolveFirst('first response');
+        await p1;
+        await vi.waitFor(() => expect(stderr).toHaveBeenCalled());
+
+        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0][0] as string;
+        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('dropped 1 buffered message(s)');
+        expect(logged).toContain(`session ${sid}`);
+        expect(logged).toContain('last sender u-77');
+      } finally {
+        stderr.mockRestore();
+      }
     });
 
     it('followup: queues messages sequentially', async () => {
