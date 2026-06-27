@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChannelConfig, Envelope } from './types.js';
 import type { AcpBridge } from './AcpBridge.js';
-import { ChannelBase } from './ChannelBase.js';
+import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 
 // Concrete test implementation
@@ -198,6 +198,51 @@ describe('ChannelBase', () => {
       expect(maps.collectBuffers.has(sid)).toBe(false);
     });
 
+    it('/clear completes (does not hang) when a wedged turn never resolves active.done', async () => {
+      const ch = createChannel({ instructions: 'Be brief.' });
+      await ch.handleInbound(envelope({ text: 'hi' }));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+
+      const maps = ch as unknown as {
+        sessionQueues: Map<string, unknown>;
+        activePrompts: Map<string, unknown>;
+        collectBuffers: Map<string, unknown>;
+        instructedSessions: Set<string>;
+      };
+      // Wedged in-flight turn: active.done NEVER resolves (ACP child stuck in a
+      // long tool call / crashed without closing). Without the bounded wait,
+      // /clear would await this forever and hang the whole channel.
+      maps.activePrompts.set(sid, {
+        cancelled: false,
+        done: new Promise<void>(() => {}),
+        resolve: () => {},
+      });
+      maps.collectBuffers.set(sid, []);
+      expect(maps.activePrompts.has(sid)).toBe(true);
+
+      ch.sent = [];
+      vi.useFakeTimers();
+      try {
+        const clearPromise = ch.handleInbound(envelope({ text: '/clear' }));
+        // Drive the bounded wait to its timeout with no real delay; clearPromise
+        // resolves ONLY because the wait is bounded.
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        await clearPromise;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+      // Maps fully purged on the timeout path — not left half-cleared.
+      expect(maps.activePrompts.has(sid)).toBe(false);
+      expect(maps.sessionQueues.has(sid)).toBe(false);
+      expect(maps.instructedSessions.has(sid)).toBe(false);
+      expect(maps.collectBuffers.has(sid)).toBe(false);
+      // Cancellation stayed best-effort (attempted before the bounded wait).
+      expect(bridge.cancelSession).toHaveBeenCalledWith(sid);
+    });
+
     it('/clear reports when no session exists', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ text: '/clear' }));
@@ -259,6 +304,28 @@ describe('ChannelBase', () => {
       ch.sent = [];
       await ch.handleInbound({ ...g, text: '/status' });
       expect(ch.sent[0]!.text).toContain('Session: none');
+    });
+
+    it('/clear accepts mixed-case "confirm" in a shared group', async () => {
+      // The handler lowercases args (args.toLowerCase() !== 'confirm'), so
+      // /clear Confirm and /clear CONFIRM must clear too. Guards a refactor that
+      // drops .toLowerCase().
+      for (const arg of ['Confirm', 'CONFIRM']) {
+        const ch = createChannel({
+          sessionScope: 'thread',
+          groupPolicy: 'open',
+        });
+        const g = envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          threadId: 't1',
+        });
+        await ch.handleInbound({ ...g, text: 'hello' });
+        ch.sent = [];
+        await ch.handleInbound({ ...g, text: `/clear ${arg}` });
+        expect(ch.sent[0]!.text).toContain('Session cleared');
+      }
     });
 
     it('/clear in a user-scoped group clears the sender session directly', async () => {

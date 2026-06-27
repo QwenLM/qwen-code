@@ -8,6 +8,16 @@ import { SessionRouter } from './SessionRouter.js';
 import { sanitizeSenderName } from './sanitize.js';
 import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
+/**
+ * Max time /clear waits for a cancelled in-flight turn to wind down before
+ * purging anyway. A wedged ACP child (stuck tool call, not reading stdin, or
+ * crashed without closing) can leave active.done unresolved forever; without
+ * this bound /clear — and the whole channel — would hang. Safe because the
+ * purge runs regardless and the generation is bumped, so a turn that settles
+ * later is already invalidated.
+ */
+export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
+
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
@@ -176,7 +186,16 @@ export abstract class ChannelBase {
           if (active) {
             active.cancelled = true;
             await this.bridge.cancelSession(id).catch(() => {});
-            await active.done;
+            // Bound the wait: a wedged child may never resolve active.done, so
+            // race it against a timeout and purge anyway when the timeout wins.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            await Promise.race([
+              active.done,
+              new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, CLEAR_CANCEL_TIMEOUT_MS);
+              }),
+            ]);
+            clearTimeout(timer);
           }
           // Purge every per-session map (all keyed by sessionId) so a
           // long-running gateway doesn't leak dead entries after /clear.
