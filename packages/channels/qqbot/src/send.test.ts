@@ -102,6 +102,9 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  // Mirror the real helper so the self-prefix sanitization is still exercised.
+  sanitizeSenderName: (name: string) =>
+    name.replace(/[[\]\r\n]/g, ' ').slice(0, 64),
 }));
 
 const { QQChannel } = await import('./QQChannel.js');

@@ -5,6 +5,7 @@ import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
+import { sanitizeSenderName } from './sanitize.js';
 import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
 export interface ChannelBaseOptions {
@@ -154,12 +155,21 @@ export abstract class ChannelBase {
       );
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          // Cancel an in-flight turn (and drop its buffered follow-ups) before
+          // purging, so a running prompt can't deliver a stale response into —
+          // or resurrect via collect-drain — the just-cleared session.
+          const active = this.activePrompts.get(id);
+          this.collectBuffers.delete(id);
+          if (active) {
+            active.cancelled = true;
+            await this.bridge.cancelSession(id).catch(() => {});
+            await active.done;
+          }
           // Purge every per-session map (all keyed by sessionId) so a
           // long-running gateway doesn't leak dead entries after /clear.
           this.instructedSessions.delete(id);
           this.sessionQueues.delete(id);
           this.activePrompts.delete(id);
-          this.collectBuffers.delete(id);
         }
         await this.sendMessage(
           envelope.chatId,
@@ -212,7 +222,7 @@ export abstract class ChannelBase {
         envelope.threadId,
       );
       const scopeNote = envelope.isGroup
-        ? this.config.sessionScope === 'thread'
+        ? isSharedGroupSession(envelope)
           ? ' (shared by this group)'
           : ' (private to you)'
         : '';
@@ -402,9 +412,9 @@ export abstract class ChannelBase {
     // can't break out of the [..] tag or inject newlines. Skipped for 1:1 chats
     // and for already-prefixed re-entries (collect-mode coalescing).
     if (envelope.isGroup && !envelope.alreadyPrefixed && !isKnownCommand) {
-      const who = (envelope.senderName || envelope.senderId || 'unknown')
-        .replace(/[[\]\r\n]/g, ' ')
-        .slice(0, 64);
+      const who = sanitizeSenderName(
+        envelope.senderName || envelope.senderId || 'unknown',
+      );
       promptText = `[${who}] ${promptText}`;
     }
 
@@ -414,6 +424,10 @@ export abstract class ChannelBase {
       const quoted = envelope.referencedText
         // eslint-disable-next-line no-control-regex
         .replace(/[\u0000-\u001f\u007f]/g, ' ')
+        // Also strip the wrapper's own delimiters so a crafted quote (e.g.
+        // `"] [SYSTEM] ...`) can't close [Replying to: "..."] and inject its
+        // own top-level instructions.
+        .replace(/["[\]]/g, ' ')
         .slice(0, 500);
       promptText = `[Replying to: "${quoted}"]\n\n${promptText}`;
     }
@@ -565,7 +579,7 @@ export abstract class ChannelBase {
           // Surface a drain failure instead of silently losing buffered turns.
           this.handleInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
-              `[${this.name}] dropped ${lost} buffered message(s) on collect re-entry: ${
+              `[${this.name}] dropped ${lost} buffered message(s) on collect re-entry for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
                 err instanceof Error ? err.message : String(err)
               }\n`,
             );

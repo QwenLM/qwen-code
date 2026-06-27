@@ -158,6 +158,13 @@ describe('SessionRouter', () => {
       expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
     });
 
+    it('single scope: any sender/chat sees the one shared session', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'single');
+      await router.resolve('ch', 'alice', 'chat1');
+      // Different sender and chat still resolve to the same single session.
+      expect(router.hasSession('ch', 'bob', 'other-chat')).toBe(true);
+    });
+
     it('prefix-scans when chatId omitted', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       await router.resolve('ch', 'alice', 'chat1');
@@ -196,6 +203,14 @@ describe('SessionRouter', () => {
     it('returns empty array when nothing to remove', () => {
       const router = new SessionRouter(bridge, '/tmp');
       expect(router.removeSession('ch', 'alice', 'chat1')).toEqual([]);
+    });
+
+    it('single scope: removeSession clears the shared session for everyone', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'single');
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+      // Any sender/chat removes the one shared session.
+      expect(router.removeSession('ch', 'bob', 'other-chat')).toEqual([sid]);
+      expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
     });
 
     it('removes all sender sessions when chatId omitted', async () => {

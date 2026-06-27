@@ -16,6 +16,7 @@ import {
   ChannelBase,
   SessionRouter,
   getGlobalQwenDir,
+  sanitizeSenderName,
 } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
@@ -973,9 +974,9 @@ export class QQChannel extends ChannelBase {
       );
     }
     // We self-prefix and set alreadyPrefixed below, which skips ChannelBase's
-    // [..]/newline/length sanitization — so neutralize the nick here too, or a
-    // crafted QQ nickname could inject brackets/newlines into the prompt.
-    const safeName = senderName.replace(/[[\]\r\n]/g, ' ').slice(0, 64);
+    // [..]/newline/length sanitization — so neutralize the nick here too (same
+    // shared helper), or a crafted QQ nickname could inject brackets/newlines.
+    const safeName = sanitizeSenderName(senderName);
     // Don't prefix slash commands, keep [safeName] for normal messages
     const text = isSlash ? cleanText : `[${safeName}]: ${cleanText}`;
     this.handleInbound({
