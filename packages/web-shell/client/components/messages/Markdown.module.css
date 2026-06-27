@@ -95,7 +95,10 @@
   background: var(--subtle-bg);
   color: var(--muted-foreground);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
 }
 
 .tableToggle svg {
@@ -138,8 +141,8 @@
   text-align: left;
 }
 
-.table th:last-child,
-.table td:last-child {
+.tableWrapper:has(.tableToggle) .table th:last-child,
+.tableWrapper:has(.tableToggle) .table td:last-child {
   padding-right: 40px;
 }
 

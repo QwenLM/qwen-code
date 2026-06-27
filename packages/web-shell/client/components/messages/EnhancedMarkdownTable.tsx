@@ -1064,6 +1064,12 @@ function InteractiveMarkdownTable({
   const [copiedVisible, setCopiedVisible] = useState(false);
   const [copiedSelection, setCopiedSelection] = useState(false);
   const draggingRef = useRef(false);
+  const copiedVisibleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const copiedSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1154,6 +1160,18 @@ function InteractiveMarkdownTable({
     draggingRef.current = false;
     setIsDragging(false);
   }, [tableStructureKey]);
+
+  useEffect(
+    () => () => {
+      if (copiedVisibleTimerRef.current) {
+        clearTimeout(copiedVisibleTimerRef.current);
+      }
+      if (copiedSelectionTimerRef.current) {
+        clearTimeout(copiedSelectionTimerRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!openFilterMenu) return;
@@ -1462,8 +1480,14 @@ function InteractiveMarkdownTable({
     void navigator.clipboard
       .writeText(text)
       .then(() => {
+        if (copiedSelectionTimerRef.current) {
+          clearTimeout(copiedSelectionTimerRef.current);
+        }
         setCopiedSelection(true);
-        setTimeout(() => setCopiedSelection(false), 2000);
+        copiedSelectionTimerRef.current = setTimeout(
+          () => setCopiedSelection(false),
+          2000,
+        );
       })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
@@ -1480,8 +1504,14 @@ function InteractiveMarkdownTable({
     void navigator.clipboard
       .writeText(text)
       .then(() => {
+        if (copiedVisibleTimerRef.current) {
+          clearTimeout(copiedVisibleTimerRef.current);
+        }
         setCopiedVisible(true);
-        setTimeout(() => setCopiedVisible(false), 2000);
+        copiedVisibleTimerRef.current = setTimeout(
+          () => setCopiedVisible(false),
+          2000,
+        );
       })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
