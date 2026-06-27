@@ -2118,6 +2118,8 @@ export default {
     'Mise à jour téléchargée. Elle sera appliquée après avoir quitté cette session.',
   'Update failed: {{error}}': 'Échec de la mise à jour : {{error}}',
   'Downloading update...': 'Téléchargement de la mise à jour...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Mise à jour réussie ! Redémarrez Qwen Code pour utiliser la nouvelle version. Changer de fournisseur de modèle avant le redémarrage peut ne pas fonctionner correctement.',
   'Automatic update failed. Please try updating manually.':
     'La mise à jour automatique a échoué. Essayez de mettre à jour manuellement.',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':

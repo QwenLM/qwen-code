@@ -2121,6 +2121,8 @@ export default {
     'Update heruntergeladen. Es wird nach dem Beenden dieser Sitzung angewendet.',
   'Update failed: {{error}}': 'Update fehlgeschlagen: {{error}}',
   'Downloading update...': 'Update wird heruntergeladen...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Update erfolgreich! Bitte starten Sie Qwen Code neu, um die neue Version zu verwenden. Das Wechseln von Modellanbietern vor dem Neustart funktioniert möglicherweise nicht korrekt.',
   'Automatic update failed. Please try updating manually.':
     'Automatisches Update fehlgeschlagen. Bitte versuchen Sie, manuell zu aktualisieren.',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':

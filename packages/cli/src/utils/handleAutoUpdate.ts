@@ -107,7 +107,7 @@ export function handleAutoUpdate(
   updateProcess.on('close', (code) => {
     if (code === 0) {
       updateEventEmitter.emit('update-success', {
-        message: UPDATE_SUCCESS_MESSAGE,
+        message: t(UPDATE_SUCCESS_MESSAGE),
       });
     } else {
       debugLogger.warn(
@@ -162,7 +162,7 @@ export function setUpdateHandler(
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.ERROR,
-      text: data?.message ?? UPDATE_FAILED_MESSAGE,
+      text: data?.message ?? t(UPDATE_FAILED_MESSAGE),
     });
   };
 
@@ -171,7 +171,7 @@ export function setUpdateHandler(
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.INFO,
-      text: data?.message ?? UPDATE_SUCCESS_MESSAGE,
+      text: data?.message ?? t(UPDATE_SUCCESS_MESSAGE),
     });
   };
 

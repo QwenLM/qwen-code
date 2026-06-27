@@ -367,6 +367,13 @@ describe('standalone-update', () => {
       );
     });
 
+    it('allows symlink targets in child directories starting with two dots', () => {
+      const dest = path.join(tempDir, 'extract');
+      expect(
+        isSafeTarLinkTarget('qwen-code/bin/qwen', '../..hidden/tool', dest),
+      ).toBe(true);
+    });
+
     it('rejects symlink targets outside the extraction directory', () => {
       const dest = path.join(tempDir, 'extract');
       expect(
@@ -625,7 +632,7 @@ describe('standalone-update', () => {
         ensurePathInShellRc(binDir);
         const content = fs.readFileSync(fishConfig, 'utf-8');
         expect(content).toContain("set -gx PATH '");
-        expect(content).toContain("o\\'brien");
+        expect(content).toContain("o'\\''brien");
       } finally {
         process.env['SHELL'] = origShell;
         process.env['HOME'] = origHome;

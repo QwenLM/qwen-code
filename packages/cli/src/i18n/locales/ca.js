@@ -2077,6 +2077,8 @@ export default {
     "Actualització descarregada. S'aplicarà després de sortir d'aquesta sessió.",
   'Update failed: {{error}}': 'Actualització fallida: {{error}}',
   'Downloading update...': "S'està baixant l'actualització...",
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Actualització correcta! Reinicieu Qwen Code per utilitzar la nova versió. Canviar de proveïdor de models abans de reiniciar pot no funcionar correctament.',
   'Automatic update failed. Please try updating manually.':
     "L'actualització automàtica ha fallat. Proveu d'actualitzar manualment.",
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':

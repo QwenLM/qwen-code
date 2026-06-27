@@ -2095,6 +2095,8 @@ export default {
     'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
   'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
   'Downloading update...': 'Загрузка обновления...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Обновление успешно! Перезапустите Qwen Code, чтобы использовать новую версию. Переключение поставщиков моделей до перезапуска может работать некорректно.',
   'Automatic update failed. Please try updating manually.':
     'Автоматическое обновление не удалось. Попробуйте обновить вручную.',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':

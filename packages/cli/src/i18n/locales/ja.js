@@ -1880,6 +1880,8 @@ export default {
     'アップデートをダウンロードしました。現在のセッション終了後に適用されます。',
   'Update failed: {{error}}': 'アップデート失敗：{{error}}',
   'Downloading update...': 'アップデートをダウンロードしています...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'アップデートに成功しました！新しいバージョンを使用するには Qwen Code を再起動してください。再起動前にモデルプロバイダーを切り替えると正しく動作しない場合があります。',
   'Automatic update failed. Please try updating manually.':
     '自動アップデートに失敗しました。手動で更新してください。',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':

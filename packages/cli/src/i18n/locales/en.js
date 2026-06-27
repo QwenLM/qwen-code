@@ -2517,6 +2517,8 @@ export default {
     'Update downloaded. It will be applied after you exit this session.',
   'Update failed: {{error}}': 'Update failed: {{error}}',
   'Downloading update...': 'Downloading update...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.',
   'Automatic update failed. Please try updating manually.':
     'Automatic update failed. Please try updating manually.',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':

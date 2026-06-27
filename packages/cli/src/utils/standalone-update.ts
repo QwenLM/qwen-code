@@ -201,7 +201,11 @@ async function downloadToFile(
 function isPathInside(base: string, candidate: string): boolean {
   const rel = path.relative(base, candidate);
   return (
-    rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel))
+    rel === '' ||
+    (!!rel &&
+      rel !== '..' &&
+      !rel.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(rel))
   );
 }
 
@@ -493,7 +497,7 @@ function shellQuoteForSh(p: string): string {
 }
 
 function shellQuoteForFish(p: string): string {
-  return `'${p.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  return shellQuoteForSh(p);
 }
 
 function isProcessAlive(pid: number): boolean {

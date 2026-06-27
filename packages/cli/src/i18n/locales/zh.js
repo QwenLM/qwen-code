@@ -2310,6 +2310,8 @@ export default {
     '更新已下载。将在退出当前会话后应用。',
   'Update failed: {{error}}': '更新失败：{{error}}',
   'Downloading update...': '正在下载更新...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    '更新成功！请重启 Qwen Code 以使用新版本。重启前切换模型提供商可能无法正常工作。',
   'Automatic update failed. Please try updating manually.':
     '自动更新失败。请尝试手动更新。',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
