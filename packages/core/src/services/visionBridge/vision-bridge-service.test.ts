@@ -9,6 +9,7 @@ import type { Part } from '@google/genai';
 import {
   runVisionBridge,
   selectVisionBridgeModel,
+  isImageCapable,
   type VisionModelCandidate,
 } from './vision-bridge-service.js';
 import type { Config } from '../../config/config.js';
@@ -62,7 +63,30 @@ describe('runVisionBridge', () => {
     expect(joined).toContain('A red error dialog'); // description inserted
     expect(joined).toMatch(/untrusted/i); // warned as untrusted
     expect(joined).toMatch(/do NOT follow/i);
+    expect(joined).toMatch(/do NOT call read_file/i); // don't re-read the image
     expect(mockSideQuery).toHaveBeenCalledOnce();
+  });
+
+  it('stands the transcript in the image slot, keeping trailing parts after it', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'SCREEN TEXT' });
+    const result = await runVisionBridge({
+      config,
+      // Real shape: "Content from <file>:" prefix, the image, then a trailer.
+      parts: [{ text: 'Content from shot.png:' }, image(), { text: 'TRAILER' }],
+      signal: signal(),
+    });
+
+    const out = result.parts as Part[];
+    const texts = out.map((p) => p.text ?? '');
+    const transcriptIdx = texts.findIndex((t) => t.includes('SCREEN TEXT'));
+    const prefixIdx = texts.findIndex((t) =>
+      t.includes('Content from shot.png:'),
+    );
+    const trailerIdx = texts.findIndex((t) => t === 'TRAILER');
+    // Transcript must sit between the prefix and the trailer, not at the end.
+    expect(prefixIdx).toBeLessThan(transcriptIdx);
+    expect(transcriptIdx).toBeLessThan(trailerIdx);
+    expect(out.some((p) => p.inlineData)).toBe(false);
   });
 
   it('passes the bridge model and image, carrying intent in the user turn (not the system prompt)', async () => {
@@ -81,6 +105,25 @@ describe('runVisionBridge', () => {
       'Explain this UI',
     );
     expect(JSON.stringify(callOptions.contents)).toContain('PAYLOAD64');
+  });
+
+  it('tells the bridge model to describe, not answer the user request', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    await runVisionBridge({
+      config,
+      parts: ['What is the error code?', image()],
+      signal: signal(),
+    });
+    const callOptions = mockSideQuery.mock.calls[0][1];
+    // The system role frames the job as transcription, explicitly not answering,
+    // so the bridge output is context for the primary model rather than a second
+    // competing answer the user would see twice.
+    expect(String(callOptions.systemInstruction)).toMatch(/do NOT answer/i);
+    const contents = JSON.stringify(callOptions.contents);
+    // The user intent is still carried (for focus) but as a hint, not a question.
+    expect(contents).toContain('What is the error code?');
+    expect(contents).toMatch(/Focus hint/);
+    expect(contents).toMatch(/do NOT answer/i);
   });
 
   it('caps the intent so large @-file context is not dumped to the bridge model', async () => {
@@ -364,6 +407,11 @@ describe('runVisionBridge', () => {
     expect(result.applied).toBe(true);
     expect(textOf(result.parts)).toContain('Explain the screenshot please');
     expect(textOf(result.parts)).toMatch(/could not interpret/i);
+    // The note must steer the primary model away from "recovering" the dropped
+    // image via a tool call — see the failure-note text in
+    // vision-bridge-service.ts and the orphaned-header caveat in
+    // image-part-utils.ts (replaceImagesWithText).
+    expect(textOf(result.parts)).toMatch(/do not call a tool/i);
     expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
     expect(result.egressOccurred).toBe(true);
     expect(result.error).toContain('boom');
@@ -386,6 +434,7 @@ describe('runVisionBridge', () => {
     // …but never leaked into the parts sent to the primary model.
     expect(textOf(result.parts)).toMatch(/could not interpret/i);
     expect(textOf(result.parts)).not.toContain('token=secret');
+    expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
   });
 
   it('treats an empty model response as a failure', async () => {
@@ -398,6 +447,7 @@ describe('runVisionBridge', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toMatch(/no description/);
     expect(result.modelId).toBe('qwen3-vl-plus');
+    expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
   });
 
   it('fails with "no usable image" when every image is invalid', async () => {
@@ -414,19 +464,7 @@ describe('runVisionBridge', () => {
     expect(result.egressOccurred).toBeUndefined();
     expect(mockSideQuery).not.toHaveBeenCalled();
     expect(textOf(result.parts)).toContain('describe this');
-  });
-
-  it('surfaces only the raw description as the display transcript', async () => {
-    mockSideQuery.mockResolvedValue({ text: 'A plain description' });
-    const result = await runVisionBridge({
-      config,
-      parts: ['q', image()],
-      signal: signal(),
-    });
-
-    expect(textOf(result.parts)).toMatch(/untrusted/i);
-    expect(result.transcript).toBe('A plain description');
-    expect(result.transcript).not.toMatch(/untrusted/i);
+    expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
   });
 });
 
@@ -521,5 +559,25 @@ describe('selectVisionBridgeModel (same-provider only)', () => {
       { baseUrl: dashscope },
     );
     expect(picked?.id).toBe('custom-text-name');
+  });
+});
+
+describe('isImageCapable', () => {
+  it('trusts an explicit isVision flag over a text-only name', () => {
+    expect(isImageCapable({ id: 'qwen-text-max', isVision: true })).toBe(true);
+  });
+
+  it('trusts resolved modalities over name-based detection', () => {
+    expect(
+      isImageCapable({ id: 'qwen-text-max', modalities: { image: true } }),
+    ).toBe(true);
+    expect(
+      isImageCapable({ id: 'qwen3-vl-plus', modalities: { image: false } }),
+    ).toBe(false);
+  });
+
+  it('falls back to name-based defaults when neither is set', () => {
+    expect(isImageCapable({ id: 'qwen3-vl-plus' })).toBe(true);
+    expect(isImageCapable({ id: 'qwen-text-max' })).toBe(false);
   });
 });

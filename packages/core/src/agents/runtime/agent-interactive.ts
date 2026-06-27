@@ -481,6 +481,11 @@ function terminateModeMessage(
       return { text: 'Agent stopped: time limit reached.', level: 'warning' };
     case AgentTerminateMode.ERROR:
       return { text: 'Agent stopped due to an error.', level: 'error' };
+    case AgentTerminateMode.LOOP_DETECTED:
+      return {
+        text: 'Agent stopped: duplicate tool-call loop detected.',
+        level: 'error',
+      };
     case AgentTerminateMode.CANCELLED:
     case AgentTerminateMode.SHUTDOWN:
       return null;

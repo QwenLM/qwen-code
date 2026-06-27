@@ -1404,7 +1404,8 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
   };
 
-  const cliVersion = await getCliVersion();
+  const cliVersionPromise = getCliVersion();
+  let cliVersion: string | undefined;
 
   const diagnosticSink = (line: string, level?: 'info' | 'warn' | 'error') =>
     daemonLog.raw(line, level);
@@ -1477,11 +1478,14 @@ export async function runQwenServe(
     app: Application;
     bridge: AcpSessionBridge;
   }> => {
-    const [runtime, core, settingsRuntime] = await Promise.all([
-      loadServeRuntimeModules(),
-      loadCoreRuntime(),
-      loadSettingsRuntimeModules(),
-    ]);
+    const [runtime, core, settingsRuntime, resolvedCliVersion] =
+      await Promise.all([
+        loadServeRuntimeModules(),
+        loadCoreRuntime(),
+        loadSettingsRuntimeModules(),
+        cliVersionPromise,
+      ]);
+    cliVersion = resolvedCliVersion;
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -1513,14 +1517,24 @@ export async function runQwenServe(
       );
     }
     const daemonWorkspaceHash = core.hashDaemonWorkspace(boundWorkspace);
-    const daemonTelemetrySettings = await core.resolveTelemetrySettings({
-      env: process.env,
-      settings: runtimeBootSettings?.merged.telemetry,
-    });
+    let daemonTelemetrySettings: TelemetrySettings;
+    try {
+      daemonTelemetrySettings = await core.resolveTelemetrySettings({
+        env: process.env,
+        settings: runtimeBootSettings?.merged.telemetry,
+      });
+    } catch (err) {
+      if (err instanceof core.FatalConfigError) {
+        throw new core.FatalConfigError(
+          `Invalid telemetry configuration: ${err.message}.`,
+        );
+      }
+      throw err;
+    }
     core.initializeTelemetry(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
-        cliVersion,
+        resolvedCliVersion,
         `daemon:${daemonWorkspaceHash}:${process.pid}`,
         {
           otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
@@ -1745,7 +1759,7 @@ export async function runQwenServe(
       bridge,
       webShellDir,
       boundWorkspace,
-      qwenCodeVersion: cliVersion,
+      qwenCodeVersion: resolvedCliVersion,
       startup,
       fsFactory,
       daemonLog,
@@ -1803,6 +1817,8 @@ export async function runQwenServe(
     runtimeStartupSettled = true;
     markRuntimeReady();
   }
+
+  cliVersion ??= await cliVersionPromise;
 
   const bootstrapApp = createBootstrapServeApp({
     opts,

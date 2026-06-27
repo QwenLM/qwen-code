@@ -149,6 +149,42 @@ export function createDuplicateProviderToolCallResponse(
   };
 }
 
+export function markDuplicateProviderToolCallResponseSent(
+  providerCallId: string,
+  duplicateProviderToolCallResponseIds: Set<string>,
+): void {
+  duplicateProviderToolCallResponseIds.add(providerCallId);
+}
+
+export function findRepeatedDuplicateProviderToolCall<T>(
+  items: readonly T[],
+  getProviderCallId: (item: T) => string | undefined,
+  handledProviderToolCallIds: ReadonlySet<string>,
+  duplicateProviderToolCallResponseIds: ReadonlySet<string>,
+): T | undefined {
+  const repeatedProviderIds = new Map<string, number>();
+  for (const item of items) {
+    const providerCallId = getProviderCallId(item);
+    if (!providerCallId || !handledProviderToolCallIds.has(providerCallId)) {
+      continue;
+    }
+    repeatedProviderIds.set(
+      providerCallId,
+      (repeatedProviderIds.get(providerCallId) ?? 0) + 1,
+    );
+  }
+
+  return items.find((item) => {
+    const providerCallId = getProviderCallId(item);
+    return (
+      providerCallId !== undefined &&
+      handledProviderToolCallIds.has(providerCallId) &&
+      (duplicateProviderToolCallResponseIds.has(providerCallId) ||
+        (repeatedProviderIds.get(providerCallId) ?? 0) > 1)
+    );
+  });
+}
+
 export interface ServerToolCallConfirmationDetails {
   request: ToolCallRequestInfo;
   details: ToolCallConfirmationDetails;

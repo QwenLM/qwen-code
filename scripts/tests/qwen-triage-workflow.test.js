@@ -54,6 +54,18 @@ describe('qwen-triage tmux workflow', () => {
     expect(runStep).toContain('"OPENAI_MODEL=$OPENAI_MODEL"');
   });
 
+  it('isolates agent state per run', () => {
+    const cleanStep = step('Clean stale agent state');
+    const runStep = step('Run Qwen Triage');
+
+    expect(cleanStep).toContain('QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"');
+    expect(cleanStep).toContain('rm -rf "$QWEN_HOME"');
+    expect(cleanStep).toContain('mkdir -p "$QWEN_HOME"');
+    expect(cleanStep).toContain('rm -f /tmp/stage-*.md');
+    expect(cleanStep).toContain('echo "stale agent state cleaned"');
+    expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
+  });
+
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
 

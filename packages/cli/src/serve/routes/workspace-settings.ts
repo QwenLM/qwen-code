@@ -7,7 +7,6 @@
 import type { Application, Request, Response } from 'express';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import type {
-  SettingDefinition,
   SettingEnumOption,
   SettingsType,
   SettingsValue,
@@ -16,6 +15,7 @@ import {
   getDialogSettingKeys,
   getNestedProperty,
   getSettingDefinition,
+  validateSettingValue,
 } from '../../utils/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -39,8 +39,6 @@ const TUI_ONLY_SETTINGS = new Set([
 const WEB_SHELL_SETTINGS = new Set(['ui.compactMode', 'voiceModel']);
 
 const VALID_WRITE_SCOPES = new Set(['workspace']);
-
-const MAX_STRING_VALUE_LENGTH = 1024;
 
 interface SettingDescriptor {
   key: string;
@@ -137,35 +135,6 @@ function buildSettingsResponse(
     ...(warnings.length ? { warnings } : {}),
     settings,
   };
-}
-
-function validateSettingValue(
-  def: SettingDefinition,
-  value: unknown,
-): string | undefined {
-  switch (def.type) {
-    case 'boolean':
-      if (typeof value !== 'boolean') return 'Value must be a boolean';
-      break;
-    case 'number':
-      if (typeof value !== 'number' || !Number.isFinite(value))
-        return 'Value must be a finite number';
-      break;
-    case 'string':
-      if (typeof value !== 'string') return 'Value must be a string';
-      if (value.length > MAX_STRING_VALUE_LENGTH)
-        return `Value exceeds ${MAX_STRING_VALUE_LENGTH}-character limit`;
-      break;
-    case 'enum':
-      if (!def.options?.some((opt) => opt.value === value)) {
-        const allowed = def.options?.map((o) => o.value).join(', ') ?? '';
-        return `Value must be one of: ${allowed}`;
-      }
-      break;
-    default:
-      return `Settings of type '${def.type}' cannot be modified via this API`;
-  }
-  return undefined;
 }
 
 const SCOPE_MAP: Record<string, SettingScope> = {

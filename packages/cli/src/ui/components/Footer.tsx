@@ -24,6 +24,7 @@ import { useVimModeState } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { GoalPill, useFooterGoalState } from './GoalPill.js';
+import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
 
 export const Footer: React.FC = () => {
@@ -141,6 +142,10 @@ export const Footer: React.FC = () => {
   if (goalActive) {
     rightItems.push({ key: 'goal', node: <GoalPill /> });
   }
+  const cronTaskCount = useFooterCronTaskCount();
+  if (cronTaskCount > 0) {
+    rightItems.push({ key: 'cron', node: <CronPill count={cronTaskCount} /> });
+  }
 
   // Layout matches upstream: left column has status line (top) + hints/mode
   // (bottom), right section has indicators. Status line and hints coexist.
@@ -216,6 +221,14 @@ export const Footer: React.FC = () => {
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {!uiState.isSkillReviewDialogOpen &&
+            (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
+              <Text color={theme.status.warning}>
+                {` ⚠ ${t('{{count}} skill(s) pending review', {
+                  count: String(uiState.skillReviewPending!.skills.length),
+                })}`}
+              </Text>
+            )}
         </Box>
       </Box>
 

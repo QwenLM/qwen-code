@@ -3,12 +3,12 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  border-bottom: 1px solid
-    color-mix(in srgb, var(--border-color) 58%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
   padding-bottom: 10px;
   margin-bottom: 5px;
   font-size: 12px;
   line-height: 1.2;
+  color: var(--muted-foreground);
 }
 
 .collapseRowClickable {
@@ -18,7 +18,7 @@
 
 .collapseRowClickable:hover .collapseLabel,
 .collapseRowClickable:focus-visible .collapseLabel {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .collapseRowClickable:focus-visible {
@@ -30,14 +30,18 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  color: var(--text-primary);
+  color: var(--muted-foreground);
 }
 
 .processedLabel {
   flex-shrink: 0;
   white-space: nowrap;
   font-size: 14px;
-  color: var(--processed-label-color);
+  color: var(--muted-foreground);
+}
+
+.processedMeta {
+  color: var(--muted-foreground);
 }
 
 .hiddenMetrics {
@@ -49,7 +53,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: color-mix(in srgb, var(--text-dimmed) 72%, transparent);
+  color: var(--muted-foreground);
 }
 
 .collapseIcon {
@@ -57,12 +61,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .collapseRowClickable:hover .collapseIcon,
 .collapseRowClickable:focus-visible .collapseIcon {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .chevronRight,
@@ -70,8 +74,8 @@
   display: block;
   width: 7px;
   height: 7px;
-  border-right: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
 }
 
 .chevronRight {

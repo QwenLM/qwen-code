@@ -84,6 +84,23 @@ export interface GenerateTextOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
+  /**
+   * Stream the response instead of awaiting the whole non-streaming body.
+   * Defaults to `false` (unchanged non-streaming behavior). Opt in to keep the
+   * HTTP connection alive against BFF gateways whose `proxy_read_timeout` would
+   * otherwise kill a slow inference before the first byte arrives. The streamed
+   * deltas are collected into the same `{ text, usage }` result.
+   */
+  stream?: boolean;
+  /**
+   * When true, throw instead of silently falling back to the main generator if
+   * a distinct generator for `model` can't be created (model not registered, or
+   * generator creation fails — e.g. a missing cross-provider credential). The
+   * vision bridge sets this so image payloads are never routed at the text-only
+   * primary while a notice names a different vision endpoint; it fails the
+   * conversion closed instead.
+   */
+  failClosed?: boolean;
 }
 
 /**
@@ -325,6 +342,7 @@ export class BaseLlmClient {
       systemInstruction,
       promptId,
       maxAttempts,
+      stream,
     } = options;
 
     const requestConfig: GenerateContentConfig = {
@@ -338,18 +356,49 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
-    } = await this.resolveForModel(model);
+    } = await this.resolveForModel(model, { failClosed: options.failClosed });
 
     try {
-      const apiCall = () =>
-        contentGenerator.generateContent(
-          {
-            model: requestModel,
-            config: requestConfig,
-            contents,
-          },
-          promptId ?? '',
-        );
+      const request = {
+        model: requestModel,
+        config: requestConfig,
+        contents,
+      };
+
+      // Both branches resolve to the same `{ text, usage }` shape so a single
+      // retryWithBackoff governs the whole request (a mid-stream failure retries
+      // the entire call — side queries are idempotent). Streaming keeps the HTTP
+      // connection alive so a slow inference can't be killed by a gateway's
+      // `proxy_read_timeout`; non-streaming is the unchanged default.
+      const apiCall: () => Promise<GenerateTextResult> = stream
+        ? async () => {
+            const responseStream = await contentGenerator.generateContentStream(
+              request,
+              promptId ?? '',
+            );
+            // Chunks are deltas, not cumulative snapshots, so concatenate.
+            // getResponseText already drops thought parts; usageMetadata rides
+            // the final chunk (last one wins), matching the non-streaming read.
+            let text = '';
+            let usage: GenerateContentResponseUsageMetadata | undefined;
+            for await (const chunk of responseStream) {
+              text += getResponseText(chunk) ?? '';
+              if (chunk.usageMetadata) {
+                usage = chunk.usageMetadata;
+              }
+            }
+            return { text, usage };
+          }
+        : async () => {
+            const result = await contentGenerator.generateContent(
+              request,
+              promptId ?? '',
+            );
+            return {
+              text: getResponseText(result) ?? '',
+              usage: result.usageMetadata,
+            };
+          };
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
@@ -379,8 +428,8 @@ export class BaseLlmClient {
       });
 
       return {
-        text: (getResponseText(result) ?? '').trim(),
-        usage: result.usageMetadata,
+        text: result.text.trim(),
+        usage: result.usage,
       };
     } catch (error) {
       if (abortSignal.aborted) {
@@ -389,7 +438,9 @@ export class BaseLlmClient {
 
       await reportError(
         error,
-        'Error generating text content via API.',
+        // Mark streaming failures so an oncall can tell a mid-stream error
+        // apart from the original non-streaming gateway timeout (#5861).
+        `Error generating text content via API${stream ? ' [streaming]' : ''}.`,
         contents,
         'generateText-api',
       );
@@ -449,7 +500,10 @@ export class BaseLlmClient {
    * Falls back to the main generator when the target model is not registered
    * or generator creation fails (e.g. tests without full auth setup).
    */
-  async resolveForModel(model: string): Promise<ResolvedGeneratorForModel> {
+  async resolveForModel(
+    model: string,
+    opts?: { failClosed?: boolean },
+  ): Promise<ResolvedGeneratorForModel> {
     const selector = this.resolveModelSelector(model);
     const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
     const mainModel = this.config.getModel() ?? model;
@@ -472,6 +526,7 @@ export class BaseLlmClient {
     const contentGenerator = await this.createContentGeneratorForModel(
       model,
       selector,
+      opts?.failClosed ?? false,
     );
     const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
     const retryAuthType =
@@ -539,6 +594,7 @@ export class BaseLlmClient {
   private async createContentGeneratorForModel(
     model: string,
     selector: ResolvedModelId | undefined,
+    failClosed = false,
   ): Promise<ContentGenerator> {
     const cacheKey = selector
       ? `${selector.authType ?? ''}:${selector.modelId}`
@@ -549,6 +605,14 @@ export class BaseLlmClient {
     const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
 
     if (!resolvedModel) {
+      // failClosed callers (vision bridge) must NOT silently run on the main
+      // generator — that would send image payloads to the text-only primary.
+      if (failClosed) {
+        throw new Error(
+          `Model "${model}" is not registered across any auth type; ` +
+            `refusing to fall back to the main generator.`,
+        );
+      }
       debugLogger.warn(
         `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
       );
@@ -576,11 +640,20 @@ export class BaseLlmClient {
 
         return await createContentGenerator(targetConfig, this.config);
       } catch (err: unknown) {
+        this.perModelGeneratorCache.delete(cacheKey);
+        if (failClosed) {
+          // Surface the creation failure rather than routing image payloads at
+          // the main (text-only) generator. The caller fails the conversion.
+          throw err instanceof Error
+            ? err
+            : new Error(
+                `Failed to create content generator for model "${model}": ${String(err)}`,
+              );
+        }
         debugLogger.warn(
           `Failed to create content generator for model "${model}", falling back to main generator.`,
           err instanceof Error ? err.message : String(err),
         );
-        this.perModelGeneratorCache.delete(cacheKey);
         return this.getCurrentContentGenerator();
       }
     })();

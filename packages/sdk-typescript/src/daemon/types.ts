@@ -143,6 +143,8 @@ export interface DaemonSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 /**
@@ -297,6 +299,21 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   description?: string;
   extensionName?: string;
   /**
+   * Count of MCP resources (`resources/list`) this server advertises.
+   * Rides the base status so a client can show "Resources: N" and gate a
+   * resource browser without a separate fetch. Absent on older daemons;
+   * present (including `0`) on newer daemons for non-disabled servers.
+   * The full list is fetched lazily via `workspaceMcpResources()`.
+   */
+  resourceCount?: number;
+  /**
+   * Count of MCP prompts (`prompts/list`) this server advertises.
+   * Inline-only — prompts have no drill-down endpoint (they surface as
+   * slash commands). Absent on older daemons; present (including `0`) on
+   * newer daemons for non-disabled servers.
+   */
+  promptCount?: number;
+  /**
    * Why this server is not live, when known.
    * `'config'`  -- operator-disabled via `disabledMcpServers`.
    * `'budget'`  -- refused by the workspace MCP client budget
@@ -377,6 +394,34 @@ export interface DaemonWorkspaceMcpToolsStatus {
   initialized: boolean;
   acpChannelLive: boolean;
   tools: DaemonWorkspaceMcpToolStatus[];
+  errors?: DaemonStatusCell[];
+}
+
+/**
+ * One resource advertised by an MCP server (`resources/list`). Metadata
+ * only — content is read on demand in-chat via the `@<serverName>:<uri>`
+ * reference reconstructed from the parent `serverName` + this `uri`.
+ */
+export interface DaemonWorkspaceMcpResourceStatus {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/**
+ * Drill-down payload returned by `workspaceMcpResources(serverName)`.
+ * Mirrors `DaemonWorkspaceMcpToolsStatus`.
+ */
+export interface DaemonWorkspaceMcpResourcesStatus {
+  v: 1;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  resources: DaemonWorkspaceMcpResourceStatus[];
   errors?: DaemonStatusCell[];
 }
 

@@ -97,6 +97,7 @@ export class MissingCliEntryError extends Error {
 export const SERVE_STATUS_EXT_METHODS = {
   workspaceMcp: 'qwen/status/workspace/mcp',
   workspaceMcpTools: 'qwen/status/workspace/mcp/tools',
+  workspaceMcpResources: 'qwen/status/workspace/mcp/resources',
   workspaceSkills: 'qwen/status/workspace/skills',
   workspaceTools: 'qwen/status/workspace/tools',
   workspaceProviders: 'qwen/status/workspace/providers',
@@ -196,6 +197,24 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   };
   description?: string;
   extensionName?: string;
+  /**
+   * Count of MCP resources (`resources/list`) this server advertises,
+   * from the workspace `ResourceRegistry`. Rides the existing status
+   * payload so dashboards can show a "Resources: N" line and gate a
+   * resource-browser affordance without a separate fetch. Absent on
+   * older daemons; present (including `0`) on newer daemons for
+   * non-disabled servers. The full list is fetched lazily via
+   * `qwen/status/workspace/mcp/resources`.
+   */
+  resourceCount?: number;
+  /**
+   * Count of MCP prompts (`prompts/list`) this server advertises, from
+   * the workspace `PromptRegistry`. Inline-only (there is no prompt
+   * drill-down endpoint — prompts surface as slash commands), so this
+   * count is the sole signal a dashboard has. Absent on older daemons;
+   * present (including `0`) on newer daemons for non-disabled servers.
+   */
+  promptCount?: number;
   /**
    * Why this server is not live, when known. Distinguishes
    * operator-disabled (`disabled: true` from `disabledMcpServers`
@@ -321,6 +340,38 @@ export interface ServeWorkspaceMcpToolsStatus {
   initialized: boolean;
   acpChannelLive: boolean;
   tools: ServeWorkspaceMcpToolStatus[];
+  errors?: ServeStatusCell[];
+}
+
+/**
+ * One resource advertised by an MCP server (`resources/list`). Mirrors
+ * the `MCPResourceDisplayInfo` the TUI `/mcp` dialog renders: metadata
+ * only (no content). The content is read on demand in-chat via the
+ * `@<serverName>:<uri>` reference, which the frontend reconstructs from
+ * `serverName` (the parent `ServeWorkspaceMcpResourcesStatus`) + `uri`.
+ */
+export interface ServeWorkspaceMcpResourceStatus {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/**
+ * Drill-down payload for `GET /workspace/mcp/:server/resources`. Mirrors
+ * `ServeWorkspaceMcpToolsStatus` — resources are a per-server drill-down
+ * exactly like tools, kept off the base `/workspace/mcp` status so that
+ * frequently-polled payload stays lean.
+ */
+export interface ServeWorkspaceMcpResourcesStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  resources: ServeWorkspaceMcpResourceStatus[];
   errors?: ServeStatusCell[];
 }
 
