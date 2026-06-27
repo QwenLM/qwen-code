@@ -179,6 +179,27 @@ function mockClipboardRejecting() {
   return writeText;
 }
 
+function mockClipboardDelayed() {
+  let resolveCopy: (() => void) | undefined;
+  const writeText = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        resolveCopy = resolve;
+      }),
+  );
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  return {
+    writeText,
+    resolveCopy: () => {
+      expect(resolveCopy).toBeDefined();
+      resolveCopy?.();
+    },
+  };
+}
+
 function button(container: HTMLElement, label: string): HTMLButtonElement {
   const el = container.querySelector<HTMLButtonElement>(
     `button[aria-label="${label}"]`,
@@ -751,6 +772,49 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).toContain('Copied!');
 
     click(button(container, 'Sort by Score'));
+
+    expect(container.textContent).not.toContain('Copied!');
+    expect(container.textContent).toContain('Quick copy');
+  });
+
+  it('ignores stale quick copy feedback after visible data changes', async () => {
+    const clipboard = mockClipboardDelayed();
+    const container = renderTable();
+
+    act(() => {
+      textButton(container, 'Quick copy').click();
+    });
+    click(button(container, 'Sort by Score'));
+
+    await act(async () => {
+      clipboard.resolveCopy();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain('Copied!');
+    expect(container.textContent).toContain('Quick copy');
+  });
+
+  it('resets quick copy feedback when filters change visible rows', async () => {
+    vi.useFakeTimers();
+    mockClipboard();
+    const container = renderTable();
+
+    await act(async () => {
+      textButton(container, 'Quick copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Copied!');
+
+    click(button(container, 'Filter Team'));
+    const beta = container.querySelector<HTMLInputElement>(
+      'input[name="markdown-table-filter-option-0-1"]',
+    );
+    expect(beta).not.toBeNull();
+    click(beta!);
+    click(textButton(container, 'Confirm'));
 
     expect(container.textContent).not.toContain('Copied!');
     expect(container.textContent).toContain('Quick copy');

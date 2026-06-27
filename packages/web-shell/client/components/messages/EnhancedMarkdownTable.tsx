@@ -1070,6 +1070,8 @@ function InteractiveMarkdownTable({
   const copiedSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const copiedVisibleGenRef = useRef(0);
+  const copiedSelectionGenRef = useRef(0);
   const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1105,6 +1107,7 @@ function InteractiveMarkdownTable({
   }, [focusFilterTrigger]);
 
   const resetCopiedVisible = useCallback(() => {
+    copiedVisibleGenRef.current += 1;
     if (copiedVisibleTimerRef.current) {
       clearTimeout(copiedVisibleTimerRef.current);
       copiedVisibleTimerRef.current = null;
@@ -1113,6 +1116,7 @@ function InteractiveMarkdownTable({
   }, []);
 
   const resetCopiedSelection = useCallback(() => {
+    copiedSelectionGenRef.current += 1;
     if (copiedSelectionTimerRef.current) {
       clearTimeout(copiedSelectionTimerRef.current);
       copiedSelectionTimerRef.current = null;
@@ -1507,10 +1511,12 @@ function InteractiveMarkdownTable({
   const copySelection = () => {
     const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
     if (!text || !navigator.clipboard) return;
+    const copyGeneration = copiedSelectionGenRef.current;
     void navigator.clipboard
       .writeText(text)
       .then(() => {
         if (!mountedRef.current) return;
+        if (copiedSelectionGenRef.current !== copyGeneration) return;
         if (copiedSelectionTimerRef.current) {
           clearTimeout(copiedSelectionTimerRef.current);
         }
@@ -1532,10 +1538,12 @@ function InteractiveMarkdownTable({
       visibleColumnIndexes,
     );
     if (!text || !navigator.clipboard) return;
+    const copyGeneration = copiedVisibleGenRef.current;
     void navigator.clipboard
       .writeText(text)
       .then(() => {
         if (!mountedRef.current) return;
+        if (copiedVisibleGenRef.current !== copyGeneration) return;
         if (copiedVisibleTimerRef.current) {
           clearTimeout(copiedVisibleTimerRef.current);
         }
