@@ -283,7 +283,8 @@ export function useCommandCompletion(
         if (
           start === end &&
           start > 1 &&
-          (buffer.lines[cursorRow] || '')[start - 1] !== ' '
+          (buffer.lines[cursorRow] || '')[start - 1] !== ' ' &&
+          (buffer.lines[cursorRow] || '')[start - 1] !== '/'
         ) {
           suggestionText = ' ' + suggestionText;
         }

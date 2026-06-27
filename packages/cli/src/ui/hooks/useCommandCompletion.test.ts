@@ -652,6 +652,43 @@ describe('useCommandCompletion', () => {
       );
     });
 
+    it('should complete a bare mid-input slash without inserting a space', async () => {
+      setupMocks({
+        slashSuggestions: [{ label: 'review', value: 'review' }],
+        slashCompletionRange: { completionStart: 1, completionEnd: 1 },
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [
+            {
+              name: 'review',
+              description: 'Review PR',
+              kind: CommandKind.BUILT_IN,
+              modelInvocable: true,
+            },
+          ],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('please /review ');
+    });
+
     it('should complete a file path', async () => {
       setupMocks({
         atSuggestions: [{ label: 'src/file1.txt', value: 'src/file1.txt' }],
