@@ -4872,7 +4872,10 @@ class QwenAgent implements Agent {
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
-        const adapter = createLoadedSettingsAdapter(this.settings, persistScope);
+        const adapter = createLoadedSettingsAdapter(
+          this.settings,
+          persistScope,
+        );
         await applyProviderInstallPlan(plan, {
           settings: adapter,
           reloadModelProviders: (modelProviders) =>
@@ -4886,7 +4889,7 @@ class QwenAgent implements Agent {
         const effectiveModelId =
           (adapter.getValue('model.name') as string | undefined) ??
           plan.modelSelection?.modelId;
-        const effectiveBaseUrl = 
+        const effectiveBaseUrl =
           (adapter.getValue('model.baseUrl') as string | undefined) ??
           plan.modelSelection?.baseUrl;
         return {

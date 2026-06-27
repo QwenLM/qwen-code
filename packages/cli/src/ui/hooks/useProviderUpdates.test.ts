@@ -20,7 +20,8 @@ import {
 import { useProviderUpdates } from './useProviderUpdates.js';
 
 vi.mock('../../utils/settingsUtils.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../utils/settingsUtils.js')>();
+  const actual =
+    await importOriginal<typeof import('../../utils/settingsUtils.js')>();
   return {
     ...actual,
     backupSettingsFile: vi.fn(),

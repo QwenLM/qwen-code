@@ -474,8 +474,9 @@ vi.mock('../config/settings.js', () => ({
 }));
 vi.mock('../config/loadedSettingsAdapter.js', () => ({
   createLoadedSettingsAdapter: vi.fn((settings: unknown) => {
-  (settings as Record<string, unknown>)['getValue'] = vi.fn();
-  return settings;}),
+    (settings as Record<string, unknown>)['getValue'] = vi.fn();
+    return settings;
+  }),
 }));
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
@@ -3997,19 +3998,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('qwen/providers/connect returns preserved model when adapter getValue returns a non-empty string', async () => {
-    vi.mocked(createLoadedSettingsAdapter).mockImplementationOnce((settings: unknown) => {
-      (settings as Record<string, unknown>)['getValue'] = vi.fn((key: string) =>
-        key === 'model.name' ? 'deepseek-flash' : undefined,
-      );
-      return settings as unknown as ReturnType<typeof createLoadedSettingsAdapter>;
-    });
+    vi.mocked(createLoadedSettingsAdapter).mockImplementationOnce(
+      (settings: unknown) => {
+        (settings as Record<string, unknown>)['getValue'] = vi.fn(
+          (key: string) =>
+            key === 'model.name' ? 'deepseek-flash' : undefined,
+        );
+        return settings as unknown as ReturnType<
+          typeof createLoadedSettingsAdapter
+        >;
+      },
+    );
 
     const settings = makeSessionSettings();
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
 
     const agent = capturedAgentFactory!({
-      get closed() { return mockConnectionState.promise; },
+      get closed() {
+        return mockConnectionState.promise;
+      },
     }) as AgentLike;
 
     await expect(
