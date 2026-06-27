@@ -32,6 +32,9 @@ import type {
   QQChannelConfig,
   QQMessageEvent,
   QQGroupMessageEvent,
+  GroupAddRobotEvent,
+  GroupDelRobotEvent,
+  GroupMsgToggleEvent,
 } from './types.js';
 import {
   getCredsFilePath,
@@ -116,6 +119,8 @@ export class QQChannel extends ChannelBase {
   private isReconnecting: boolean = false;
   /** Whether this process has never received READY (cold start vs RESUME fallback). */
   private coldStart: boolean = true;
+  /** Bot's own openid from READY event (d.user.id). Used for @mention detection. */
+  private botOpenId: string = '';
 
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
@@ -126,6 +131,8 @@ export class QQChannel extends ChannelBase {
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
+  /** Track per-group active message permission. */
+  private groupActiveMsgEnabled: Map<string, boolean> = new Map();
 
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
   private readonly qqStatePath: string;
@@ -208,6 +215,9 @@ export class QQChannel extends ChannelBase {
         '',
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
         '支持 Markdown 格式，回复自然流畅即可。',
+        '群聊中可以通过 <@OPENID> 格式 @ 指定成员，例如 <@D5B53C0123456789ABCDEF...>。',
+        '也可使用 QQ Markdown 富文本格式 @ 人: [@用户名](mqqapi://markdown/mention?at_type=1&at_tinyid=TINYID)',
+        '未 @ 你的消息以 [可选回复] 标记。不想回复时只输出 <noreply> 即可，系统不会发送。',
       ].join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -231,13 +241,14 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    if (text.trim() === '<noreply>') return;
     const route = await this.resolveRoute(chatId);
     if (!route) return;
 
     const entry = this.replyMsgId.get(chatId);
     const msgId =
       entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
-    const useMarkdown = hasMarkdownSyntax(text);
+    const useMarkdown = true;
 
     try {
       const body: Record<string, unknown> = useMarkdown
@@ -493,6 +504,9 @@ export class QQChannel extends ChannelBase {
             chatTypeMap: Array.from(this.chatTypeMap.entries()),
             replyMsgId: Array.from(this.replyMsgId.entries()),
             msgSeqMap: Array.from(this.msgSeqMap.entries()),
+            groupActiveMsgEnabled: Array.from(
+              this.groupActiveMsgEnabled.entries(),
+            ),
           }),
           { mode: 0o600 },
         );
@@ -516,6 +530,9 @@ export class QQChannel extends ChannelBase {
           chatTypeMap: Array.from(this.chatTypeMap.entries()),
           replyMsgId: Array.from(this.replyMsgId.entries()),
           msgSeqMap: Array.from(this.msgSeqMap.entries()),
+          groupActiveMsgEnabled: Array.from(
+            this.groupActiveMsgEnabled.entries(),
+          ),
         }),
         { mode: 0o600 },
       );
@@ -547,6 +564,9 @@ export class QQChannel extends ChannelBase {
         );
       }
       if (raw.msgSeqMap) this.msgSeqMap = new Map(raw.msgSeqMap);
+      if (raw.groupActiveMsgEnabled) {
+        this.groupActiveMsgEnabled = new Map(raw.groupActiveMsgEnabled);
+      }
       return true;
     } catch (e) {
       process.stderr.write(
@@ -858,6 +878,16 @@ export class QQChannel extends ChannelBase {
             ] as string) || '';
           this.tryResume = true;
           this.connectReject = null;
+          // Store bot's own openid for @mention detection in handleGroupAll
+          this.botOpenId =
+            ((
+              (msg['d'] as Record<string, unknown> | undefined)?.['user'] as
+                | Record<string, unknown>
+                | undefined
+            )?.['id'] as string) || '';
+          if (this.botOpenId) {
+            this.config.instructions += `\n\n你的 Bot OpenID: ${this.botOpenId}`;
+          }
           this.startHeartbeat();
           if (this.coldStart) {
             this.coldStart = false;
@@ -892,6 +922,18 @@ export class QQChannel extends ChannelBase {
           this.handleC2C(msg['d'] as unknown as QQMessageEvent);
         } else if (t === 'GROUP_AT_MESSAGE_CREATE') {
           this.handleGroup(msg['d'] as unknown as QQGroupMessageEvent);
+        } else if (t === 'GROUP_MESSAGE_CREATE') {
+          this.handleGroupAll(msg['d'] as unknown as QQGroupMessageEvent);
+        } else if (t === 'GROUP_ADD_ROBOT') {
+          this.handleGroupAddRobot(msg['d'] as unknown as GroupAddRobotEvent);
+        } else if (t === 'GROUP_DEL_ROBOT') {
+          this.handleGroupDelRobot(msg['d'] as unknown as GroupDelRobotEvent);
+        } else if (t === 'GROUP_MSG_REJECT') {
+          this.handleGroupMsgReject(msg['d'] as unknown as GroupMsgToggleEvent);
+        } else if (t === 'GROUP_MSG_RECEIVE') {
+          this.handleGroupMsgReceive(
+            msg['d'] as unknown as GroupMsgToggleEvent,
+          );
         } else if (t === 'RESUMED') {
           // RESUME success — the process did NOT restart, all in-memory
           // session state, QQ routing state, and global sessions.json are
@@ -1073,20 +1115,26 @@ export class QQChannel extends ChannelBase {
     if (this.isDuplicate(event.id)) return;
     // Ignore messages with no text content (images, stickers, etc.)
     if (!event.content?.trim()) return;
-    // user_openid and author.id are scoped differently — falling back to
-    // author.id may produce a different identity for the same user across
-    // C2C and group contexts, creating two separate sessions. QQ Bot does
-    // not expose a unified user identity, so this is unavoidable.
-    const chatId = event.author.user_openid || event.author.id;
+    // C2C messages carry user_openid per QQ Bot API docs.
+    // Falling back to author.id provides a safety net for edge cases
+    // but may produce a different identity for the same user across
+    // C2C and group contexts, creating two separate sessions.
+    const chatId = event.author.user_openid || event.author.id || 'unknown';
     this.chatTypeMap.set(chatId, 'c2c');
     this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
     this.saveQQState();
+    const senderName = event.author.username || event.author.id || 'QQ User';
+    const cleanText = event.content.trim();
+    const isSlash = cleanText.startsWith('/');
+    const text = isSlash
+      ? cleanText
+      : `[${senderName} (openid: ${event.author.user_openid || 'unknown'})]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
-      senderName: event.author.username || event.author.id || 'QQ User',
+      senderName,
       chatId,
-      text: event.content,
+      text,
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
@@ -1108,7 +1156,11 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.set(chatId, 'group');
     this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
     this.saveQQState();
-    const senderName = event.author.username || event.author.id || 'QQ User';
+    const senderName =
+      event.author.username ||
+      event.author.id ||
+      event.author.member_openid ||
+      'QQ User';
     // Strip @mention tags from message content. QQ Bot API docs state the API
     // cleans these, but the format varies across API versions:
     //   - Legacy: <@!12345> (numeric user ID with bang)
@@ -1129,10 +1181,16 @@ export class QQChannel extends ChannelBase {
       );
     }
     // Don't prefix slash commands, keep [senderName] for normal messages
-    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
+    const text = isSlash
+      ? cleanText
+      : `[${senderName} (openid: ${event.author.member_openid || event.author.user_openid || 'unknown'})]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
-      senderId: event.author.user_openid || event.author.id,
+      senderId:
+        event.author.member_openid ||
+        event.author.user_openid ||
+        event.author.id ||
+        'unknown',
       senderName,
       chatId,
       text,
@@ -1145,5 +1203,110 @@ export class QQChannel extends ChannelBase {
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
     );
+  }
+
+  private handleGroupAddRobot(event: GroupAddRobotEvent): void {
+    const groupId = event.group_openid;
+    if (!groupId) return;
+    this.chatTypeMap.set(groupId, 'group');
+    this.saveQQState();
+    process.stderr.write(
+      `[QQ:${this.name}] Added to group ${groupId} by ${event.op_member_openid}\n`,
+    );
+  }
+
+  private handleGroupDelRobot(event: GroupDelRobotEvent): void {
+    const groupId = event.group_openid;
+    if (!groupId) return;
+    this.chatTypeMap.delete(groupId);
+    this.groupActiveMsgEnabled.delete(groupId);
+    this.replyMsgId.delete(groupId);
+    this.msgSeqMap.delete(groupId);
+    for (const [sid, state] of this.streamState) {
+      if (state.chatId === groupId) this.streamState.delete(sid);
+    }
+    this.saveQQState();
+    process.stderr.write(
+      `[QQ:${this.name}] Removed from group ${groupId} by ${event.op_member_openid}\n`,
+    );
+  }
+
+  private handleGroupMsgReject(event: GroupMsgToggleEvent): void {
+    this.groupActiveMsgEnabled.set(event.group_openid, false);
+    this.saveQQState();
+    process.stderr.write(
+      `[QQ:${this.name}] Active msg disabled for group ${event.group_openid}\n`,
+    );
+  }
+
+  private handleGroupMsgReceive(event: GroupMsgToggleEvent): void {
+    this.groupActiveMsgEnabled.set(event.group_openid, true);
+    this.saveQQState();
+    process.stderr.write(
+      `[QQ:${this.name}] Active msg enabled for group ${event.group_openid}\n`,
+    );
+  }
+
+  private handleGroupAll(event: QQGroupMessageEvent): void {
+    if (!event.group_openid) {
+      return;
+    }
+    const chatId = event.group_openid;
+    // Group messages use member_openid; username/id are not present.
+    const senderName =
+      event.author.username ||
+      event.author.id ||
+      event.author.member_openid ||
+      'QQ User';
+
+    this.chatTypeMap.set(chatId, 'group');
+
+    const content = event.content?.trim() ?? '';
+
+    const policy = this.qqConfig.groupAllPolicy ?? 'log';
+
+    if (policy === 'log') return;
+
+    if (policy === 'keyword') {
+      const triggers = this.qqConfig.keywordTriggers ?? [];
+      if (triggers.length === 0) return;
+      const lower = content.toLowerCase();
+      const matched = triggers.some((kw) => lower.includes(kw.toLowerCase()));
+      if (!matched) return;
+    }
+
+    // policy === 'all' or keyword matched → forward to LLM
+
+    const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    if (!cleanText) return;
+
+    // 只有 @机器人本人 + 斜杠 才是 slash command
+    const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
+    const isSlash = isAtBot && cleanText.startsWith('/');
+
+    const text = isSlash
+      ? cleanText
+      : `${isAtBot ? '' : '[可选回复] '}[${senderName} (openid: ${event.author.member_openid || 'unknown'})]: ${content}`;
+
+    if (this.isDuplicate(event.id)) return;
+
+    this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
+    this.saveQQState();
+
+    this.handleInbound({
+      channelName: this.name,
+      chatId,
+      text,
+      senderId: event.author.member_openid || event.author.id || 'unknown',
+      senderName,
+      messageId: event.id,
+      isGroup: true,
+      isMentioned: isAtBot,
+      isReplyToBot: isAtBot,
+    }).catch((err: unknown) => {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupAll error: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    });
   }
 }

@@ -23,8 +23,17 @@ export const Intent = {
 export interface QQMessageEvent {
   id: string;
   author: {
-    id: string;
-    user_openid: string;
+    /** C2C: user_openid (present). Group: member_openid (present). */
+    user_openid?: string;
+    /** Group messages (both @ and all): the member's openid. */
+    member_openid?: string;
+    /** Group: member role. */
+    member_role?: string;
+    /** Group: whether the author is a bot. */
+    bot?: boolean;
+    /** Legacy field — may not be present in all event types. */
+    id?: string;
+    /** Legacy field — may not be present in all event types. */
     username?: string;
   };
   content: string;
@@ -33,10 +42,47 @@ export interface QQMessageEvent {
 /** Extended fields available on group message events. */
 export type QQGroupMessageEvent = QQMessageEvent & {
   group_openid: string;
+  mentions?: Array<{
+    member_openid?: string;
+    username?: string;
+    is_you?: boolean;
+    bot?: boolean;
+    scope?: 'all' | 'single';
+  }>;
 };
 
 export interface QQChannelConfig {
   appID?: string;
   appSecret?: string;
   sandbox?: boolean;
+  /**
+   * GROUP_MESSAGE_CREATE handling policy:
+   * - 'log' (default): log only, no LLM
+   * - 'keyword': trigger LLM when content includes any keywordTriggers entry
+   * - 'all': trigger LLM on every group message
+   */
+  groupAllPolicy?: 'log' | 'keyword' | 'all';
+  /** Case-insensitive keyword triggers. Only used when groupAllPolicy='keyword'. */
+  keywordTriggers?: string[];
+}
+
+/** Robot added to a group. */
+export interface GroupAddRobotEvent {
+  group_openid: string;
+  op_member_openid: string;
+  timestamp: number;
+}
+
+/** Robot removed from a group. */
+export interface GroupDelRobotEvent {
+  group_openid: string;
+  op_member_openid: string;
+  timestamp: number;
+}
+
+/** Active message permission toggle. */
+export interface GroupMsgToggleEvent {
+  group_openid: string;
+  op_member_openid: string;
+  timestamp: number;
 }

@@ -235,7 +235,7 @@ describe('sendMessage', () => {
     });
   });
 
-  it('sends plain text to C2C chat with msg_type=0', async () => {
+  it('sends plain text to C2C chat with msg_type=2', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     await ch.sendMessage('test-chat-id', 'hello');
 
@@ -244,7 +244,7 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: 'hello', msg_type: 0 },
+      { markdown: { content: 'hello' }, msg_type: 2 },
     );
   });
 
@@ -269,7 +269,7 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/groups/test-chat-id/messages',
       'test-token',
-      { content: 'hello', msg_type: 0 },
+      { markdown: { content: 'hello' }, msg_type: 2 },
     );
   });
 
@@ -306,8 +306,8 @@ describe('sendMessage', () => {
 
     await ch.sendMessage('test-chat-id', 'hello');
 
-    // Only one attempt — plain text doesn't retry, and we break on failure
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    // Two attempts — first markdown fails, then retried as plain text
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
   });
 
   it('returns early when disposed', async () => {
@@ -325,7 +325,7 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/unknown-chat/messages',
       'test-token',
-      { content: 'hello', msg_type: 0 },
+      { markdown: { content: 'hello' }, msg_type: 2 },
     );
   });
 
@@ -367,7 +367,12 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: 'hello', msg_type: 0, msg_id: 'msg-456', msg_seq: 1 },
+      {
+        markdown: { content: 'hello' },
+        msg_id: 'msg-456',
+        msg_seq: 1,
+        msg_type: 2,
+      },
     );
   });
 
@@ -381,7 +386,12 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: text, msg_type: 0, msg_id: 'msg-789', msg_seq: 1 },
+      {
+        markdown: { content: text },
+        msg_id: 'msg-789',
+        msg_seq: 1,
+        msg_type: 2,
+      },
     );
   });
 });
