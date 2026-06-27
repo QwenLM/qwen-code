@@ -1070,6 +1070,7 @@ function InteractiveMarkdownTable({
   const copiedSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1102,6 +1103,22 @@ function InteractiveMarkdownTable({
     setOpenFilterMenu(null);
     focusFilterTrigger();
   }, [focusFilterTrigger]);
+
+  const resetCopiedVisible = useCallback(() => {
+    if (copiedVisibleTimerRef.current) {
+      clearTimeout(copiedVisibleTimerRef.current);
+      copiedVisibleTimerRef.current = null;
+    }
+    setCopiedVisible(false);
+  }, []);
+
+  const resetCopiedSelection = useCallback(() => {
+    if (copiedSelectionTimerRef.current) {
+      clearTimeout(copiedSelectionTimerRef.current);
+      copiedSelectionTimerRef.current = null;
+    }
+    setCopiedSelection(false);
+  }, []);
 
   const flushPendingSelection = useCallback(() => {
     if (selectionFrameRef.current) {
@@ -1157,17 +1174,26 @@ function InteractiveMarkdownTable({
     setOpenFilterMenu(null);
     setHiddenColumns(new Set());
     setDetailRowKey(null);
+    resetCopiedVisible();
+    resetCopiedSelection();
     draggingRef.current = false;
     setIsDragging(false);
-  }, [tableStructureKey]);
+  }, [resetCopiedSelection, resetCopiedVisible, tableStructureKey]);
+
+  useEffect(() => {
+    resetCopiedSelection();
+  }, [resetCopiedSelection, selection]);
 
   useEffect(
     () => () => {
+      mountedRef.current = false;
       if (copiedVisibleTimerRef.current) {
         clearTimeout(copiedVisibleTimerRef.current);
+        copiedVisibleTimerRef.current = null;
       }
       if (copiedSelectionTimerRef.current) {
         clearTimeout(copiedSelectionTimerRef.current);
+        copiedSelectionTimerRef.current = null;
       }
     },
     [],
@@ -1266,6 +1292,10 @@ function InteractiveMarkdownTable({
         .filter((index) => !hiddenColumns.has(index)),
     [hiddenColumns, table.headers],
   );
+
+  useEffect(() => {
+    resetCopiedVisible();
+  }, [resetCopiedVisible, visibleColumnIndexes, visibleRows]);
 
   useEffect(() => {
     if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
@@ -1480,6 +1510,7 @@ function InteractiveMarkdownTable({
     void navigator.clipboard
       .writeText(text)
       .then(() => {
+        if (!mountedRef.current) return;
         if (copiedSelectionTimerRef.current) {
           clearTimeout(copiedSelectionTimerRef.current);
         }
@@ -1504,6 +1535,7 @@ function InteractiveMarkdownTable({
     void navigator.clipboard
       .writeText(text)
       .then(() => {
+        if (!mountedRef.current) return;
         if (copiedVisibleTimerRef.current) {
           clearTimeout(copiedVisibleTimerRef.current);
         }

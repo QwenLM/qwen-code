@@ -136,6 +136,20 @@ describe('Markdown enhanced tables', () => {
     expect(container.textContent).toContain('Quick copy');
     expect(container.textContent).toContain('Details');
 
+    const toggleOff = container.querySelector(
+      'button[aria-label="Switch to basic table"]',
+    );
+    expect(toggleOff).not.toBeNull();
+    act(() => {
+      toggleOff?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.querySelector('table')).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Switch to advanced table"]'),
+    ).not.toBeNull();
+
     act(() => root.unmount());
     container.remove();
   });

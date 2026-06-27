@@ -388,6 +388,7 @@ function ToggleableMarkdownTable({
         onClick={() => setEnhanced(false)}
         title={t('markdownTable.toggleBasic')}
         aria-label={t('markdownTable.toggleBasic')}
+        aria-pressed={true}
       >
         <TableBasicIcon />
       </button>
@@ -404,16 +405,21 @@ function ToggleableMarkdownTable({
         onClick={() => setEnhanced(false)}
         title={t('markdownTable.toggleBasic')}
         aria-label={t('markdownTable.toggleBasic')}
+        aria-pressed={true}
       >
         <TableBasicIcon />
       </button>
     );
+    const plainFallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
     return (
       <EnhancedMarkdownTableBoundary
         fallback={fallback}
         resetKey={tableResetKey}
       >
-        <EnhancedMarkdownTable fallback={fallback} toolbarExtra={toolbarToggle}>
+        <EnhancedMarkdownTable
+          fallback={plainFallback}
+          toolbarExtra={toolbarToggle}
+        >
           {children}
         </EnhancedMarkdownTable>
       </EnhancedMarkdownTableBoundary>
@@ -427,6 +433,7 @@ function ToggleableMarkdownTable({
       onClick={() => setEnhanced(true)}
       title={t('markdownTable.toggleAdvanced')}
       aria-label={t('markdownTable.toggleAdvanced')}
+      aria-pressed={false}
     >
       <TableAdvancedIcon />
     </button>

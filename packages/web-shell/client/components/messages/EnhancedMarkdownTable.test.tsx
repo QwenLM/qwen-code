@@ -150,8 +150,28 @@ function textButton(container: HTMLElement, text: string): HTMLButtonElement {
   return el!;
 }
 
+function textButtonContaining(
+  container: HTMLElement,
+  text: string,
+): HTMLButtonElement {
+  const el = [...container.querySelectorAll('button')].find((button) =>
+    button.textContent?.includes(text),
+  );
+  expect(el).not.toBeNull();
+  return el!;
+}
+
 function mockClipboard() {
   const writeText = vi.fn(() => Promise.resolve());
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  return writeText;
+}
+
+function mockClipboardRejecting() {
+  const writeText = vi.fn(() => Promise.reject(new Error('copy failed')));
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
     value: { writeText },
@@ -648,6 +668,74 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).toContain('Quick copy');
   });
 
+  it('keeps quick copy feedback visible for the latest click', async () => {
+    vi.useFakeTimers();
+    mockClipboard();
+    const container = renderTable();
+
+    await act(async () => {
+      textButton(container, 'Quick copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      textButtonContaining(container, 'Copied!').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(container.textContent).toContain('Copied!');
+    expect(container.textContent).not.toContain('Quick copy');
+
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(container.textContent).not.toContain('Copied!');
+    expect(container.textContent).toContain('Quick copy');
+  });
+
+  it('resets quick copy feedback when visible table data changes', async () => {
+    vi.useFakeTimers();
+    mockClipboard();
+    const container = renderTable();
+
+    await act(async () => {
+      textButton(container, 'Quick copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Copied!');
+
+    click(button(container, 'Sort by Score'));
+
+    expect(container.textContent).not.toContain('Copied!');
+    expect(container.textContent).toContain('Quick copy');
+  });
+
+  it('does not show copied feedback when clipboard write fails', async () => {
+    mockClipboardRejecting();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const container = renderTable();
+
+    await act(async () => {
+      textButton(container, 'Quick copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(warn).toHaveBeenCalled();
+    expect(container.textContent).not.toContain('Copied!');
+    expect(container.textContent).toContain('Quick copy');
+  });
+
   it('shows checkmark feedback after copying a selection', async () => {
     vi.useFakeTimers();
     mockClipboard();
@@ -670,6 +758,27 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(container.textContent).not.toContain('✓');
+    expect(container.textContent).toContain('Copy TSV');
+  });
+
+  it('resets selection copy feedback when the selection changes', async () => {
+    vi.useFakeTimers();
+    mockClipboard();
+    const container = renderTable();
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+
+    await act(async () => {
+      textButton(container, 'Copy TSV').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Copied!');
+
+    dragCells(dataCell(container, 1, 0), dataCell(container, 1, 0));
+
+    expect(container.textContent).not.toContain('Copied!');
     expect(container.textContent).toContain('Copy TSV');
   });
 
