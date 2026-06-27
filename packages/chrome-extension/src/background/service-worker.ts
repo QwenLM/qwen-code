@@ -22,9 +22,32 @@ import {
 import { getDaemonConfig } from '../daemon/config.js';
 import { checkDaemonHealth } from '../daemon/discovery.js';
 
-/* global WebSocket, console, setTimeout, chrome */
+/* global WebSocket, console, setTimeout, chrome, TextEncoder, btoa */
 
 const LOG_PREFIX = '[ServiceWorker]';
+
+// Bearer-over-WS subprotocol. A token-gated daemon reads the bearer from the
+// `Sec-WebSocket-Protocol` subprotocol (the WS handshake can't carry an
+// Authorization header). Kept in sync with WS_BEARER_SUBPROTOCOL_PREFIX in
+// `packages/cli/src/serve/acp-http/index.ts` and the web-shell encoder; the
+// daemon completes the handshake by selecting the non-secret `qwen-ws` marker
+// and never echoes the token.
+const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
+const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
+
+/** Encode a bearer token as a `qwen-bearer.<base64url(token)>` WS subprotocol. */
+function bearerSubprotocol(token: string): string {
+  const bytes = new TextEncoder().encode(token);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const b64 = btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return `${WS_BEARER_SUBPROTOCOL_PREFIX}${b64}`;
+}
 
 /** Correlation id for the ACP `initialize` sent right after the socket opens. */
 const ACP_INIT_ID = 'browser-tools-acp-init';
@@ -47,13 +70,10 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 
 /** Translate the daemon's HTTP base URL into the `/acp` WebSocket URL. */
-function toWebSocketUrl(baseUrl: string, token?: string): string {
+function toWebSocketUrl(baseUrl: string): string {
   const trimmed = baseUrl.replace(/\/+$/, '');
   const wsBase = trimmed.replace(/^http/i, 'ws');
-  const url = `${wsBase}/acp`;
-  // Loopback daemons are auth-free; for token-gated daemons pass it as a query
-  // param since the WebSocket handshake can't carry an Authorization header.
-  return token ? `${url}?token=${encodeURIComponent(token)}` : url;
+  return `${wsBase}/acp`;
 }
 
 /** Send any JSON message if the socket is open; swallow failures (close handles it). */
@@ -131,22 +151,27 @@ async function connect(): Promise<void> {
   }
 
   let url: string;
+  let token: string | undefined;
   try {
     const config = await getDaemonConfig();
-    url = toWebSocketUrl(config.baseUrl, config.token);
+    url = toWebSocketUrl(config.baseUrl);
+    token = config.token;
   } catch (error) {
     console.warn(LOG_PREFIX, 'Failed to read daemon config:', error);
     scheduleReconnect();
     return;
   }
 
-  // Redact the bearer token (carried as a `?token=` query param) so it never
-  // lands in the extension's DevTools console.
-  const safeUrl = url.replace(/([?&]token=)[^&]*/i, '$1<redacted>');
-  console.log(LOG_PREFIX, 'Connecting to', safeUrl);
+  // The token rides in the WS subprotocol, never the URL, so the URL is safe to
+  // log as-is.
+  console.log(LOG_PREFIX, 'Connecting to', url);
   let ws: WebSocket;
   try {
-    ws = new WebSocket(url);
+    // A token-gated daemon authenticates the handshake via the `qwen-bearer.*`
+    // subprotocol (loopback daemons are auth-free → no subprotocol).
+    ws = token
+      ? new WebSocket(url, [WS_AUTH_SUBPROTOCOL, bearerSubprotocol(token)])
+      : new WebSocket(url);
   } catch (error) {
     console.warn(LOG_PREFIX, 'WebSocket construction failed:', error);
     scheduleReconnect();

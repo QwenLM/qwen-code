@@ -103,6 +103,11 @@ export class ClientMcpSenderRegistry {
     }
   }
 
+  /** Whether `owner` currently owns the entry for `serverName`. */
+  owns(serverName: string, owner: string): boolean {
+    return this.senders.get(serverName)?.owner === owner;
+  }
+
   /** Currently-registered server names (tests / accounting). */
   serverNames(): string[] {
     return [...this.senders.keys()];
@@ -195,6 +200,11 @@ export function createClientMcpServerProvider(
       }
     },
     async unregisterClientMcpServer(serverName) {
+      // Only tear down if THIS connection still owns the route. A later
+      // connection may have re-registered the same name (last-writer-wins), and
+      // `Config.removeRuntimeMcpServer` is NOT owner-scoped — removing the
+      // child server by name alone would kill the newer owner's live tools.
+      if (!registry.owns(serverName, originatorClientId)) return;
       registry.delete(serverName, originatorClientId);
       // Best-effort: drop the child-side runtime server too. Idempotent on the
       // bridge (`not_present` skip).

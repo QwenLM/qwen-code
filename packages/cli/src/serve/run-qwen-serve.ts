@@ -642,6 +642,10 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
+    // Advertise the same WS feature flags as the runtime path (serve-features.ts)
+    // so the bootstrap `/capabilities` window doesn't briefly under-report them.
+    clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
+    cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
   });
 }
 
