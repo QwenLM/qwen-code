@@ -59,7 +59,7 @@ export function registerSourcesHandlers(server: RpcServer, deps: HandlerDeps): v
     try {
       deleteSource(workspace.rootPath, sourceSlug)
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith('Invalid source slug')) {
+      if (isInvalidSourceSlugError(error)) {
         ;(error as Error & { code?: string }).code = 'INVALID_ARGUMENT'
       }
       throw error

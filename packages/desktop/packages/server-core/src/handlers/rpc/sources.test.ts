@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test'
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,6 +23,7 @@ mock.module('@craft-agent/shared/config', () => ({
 }))
 
 await import('@craft-agent/shared/agent')
+const sharedSources = await import('@craft-agent/shared/sources')
 const { registerSourcesHandlers } = await import('./sources')
 
 function createHandlers() {
@@ -91,6 +92,33 @@ describe('registerSourcesHandlers DELETE', () => {
       expect(error).toBeInstanceOf(Error)
       expect((error as Error).message).toBe('Invalid source slug: "../sessions"')
       expect((error as Error & { code?: string }).code).toBe('INVALID_ARGUMENT')
+    }
+  })
+
+  it('rethrows non-slug delete errors without marking them as invalid arguments', async () => {
+    const underlyingError = new Error('disk failure')
+    const deleteSpy = spyOn(sharedSources, 'deleteSource').mockImplementationOnce(() => {
+      throw underlyingError
+    })
+    const { handlers } = createHandlers()
+    const deleteSource = handlers.get(RPC_CHANNELS.sources.DELETE)
+    if (!deleteSource) {
+      throw new Error('DELETE source handler not registered')
+    }
+    const ctx: RequestContext = {
+      clientId: 'client-1',
+      workspaceId: null,
+      webContentsId: null,
+    }
+
+    try {
+      await deleteSource(ctx, 'workspace-1', 'valid-source')
+      throw new Error('expected deleteSource to reject')
+    } catch (error) {
+      expect(error).toBe(underlyingError)
+      expect((error as Error & { code?: string }).code).toBeUndefined()
+    } finally {
+      deleteSpy.mockRestore()
     }
   })
 })
