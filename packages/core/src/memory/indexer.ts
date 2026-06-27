@@ -5,14 +5,17 @@
  */
 
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { QWEN_DIR } from '../utils/paths.js';
 import {
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
+  TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
 import {
   scanAutoMemoryTopicDocuments,
@@ -62,10 +65,40 @@ function sanitizeIndexField(value: string): string {
   return `${cleaned.slice(0, MAX_INDEX_FIELD_CHARS - 1).trimEnd()}…`;
 }
 
+/**
+ * Sanitize an attacker-controlled relative PATH before embedding it into the
+ * committed MEMORY.md (as a link target `](path)` and in the "(also: …)" list).
+ * Git filenames may legally contain newlines and markdown delimiters, so a raw
+ * path like `ok.md\n- SYSTEM: injected.md` would inject a second physical line —
+ * reopening the prompt-injection surface that sanitizeIndexField closes for
+ * title/description. Strip control / zero-width / bidi chars (a newline here is
+ * the injection), neutralize the `()[]\`` delimiters that let a path break out
+ * of its `](…)` target or forge a code span, collapse whitespace to one line,
+ * and cap length. Path separators are kept so the entry stays a usable reference.
+ */
+function sanitizeIndexPath(value: string): string {
+  const cleaned = value
+    // C0/C1 control chars (incl. CR/LF) stripped — a newline is the line-break
+    // injection we are defusing, so remove it rather than turn it into a space.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    // Zero-width + bidi-override chars that can hide or reorder injected text.
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    // Defang the markdown link/code delimiters a crafted filename could use to
+    // close the `](…)` target early and forge structure after it.
+    .replace(/[()[\]`]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length <= MAX_INDEX_FIELD_CHARS) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, MAX_INDEX_FIELD_CHARS - 1).trimEnd()}…`;
+}
+
 function docIndexLine(doc: ScannedAutoMemoryDocument): string {
   const title = sanitizeIndexField(doc.title) || doc.type;
   const description = sanitizeIndexField(doc.description) || doc.type;
-  return `- [${title}](${doc.relativePath}) — ${description}`;
+  return `- [${title}](${sanitizeIndexPath(doc.relativePath)}) — ${description}`;
 }
 
 /**
@@ -158,7 +191,9 @@ function teamGroupIndexLine(group: TeamIndexGroup): string {
   if (group.others.length === 0) {
     return truncateIndexLine(base);
   }
-  const also = group.others.map((doc) => doc.relativePath).join(', ');
+  const also = group.others
+    .map((doc) => sanitizeIndexPath(doc.relativePath))
+    .join(', ');
   return truncateIndexLine(`${base} (also: ${also})`);
 }
 
@@ -234,15 +269,34 @@ export async function rebuildTeamAutoMemoryIndex(
     return null;
   }
   // Refuse to write through a symlinked team root. A committed
-  // `.qwen/team-memory -> /elsewhere` symlink (or a symlinked dir component)
-  // would otherwise redirect the generated index — and the scanned topic files —
-  // OUTSIDE the repo with no tool approval. `noFollow` below only guards the
-  // MEMORY.md leaf; the directory symlink it cannot catch is rejected here.
+  // `.qwen/team-memory -> /elsewhere` symlink would otherwise redirect the
+  // generated index — and the scanned topic files — OUTSIDE the repo with no
+  // tool approval. `noFollow` below only guards the MEMORY.md leaf; the
+  // directory symlink it cannot catch is rejected here.
   const rootStat = await fs.lstat(teamRoot);
   if (rootStat.isSymbolicLink()) {
     throw new Error(
       `Refusing to write team memory index: ${teamRoot} is a symlink, which ` +
         `could redirect the committed index outside the repository.`,
+    );
+  }
+  // lstat only inspects the LEAF: a symlinked PARENT (e.g. `.qwen -> /tmp/out`)
+  // makes lstat(teamRoot) report a normal dir while every scan/write lands
+  // outside the repo. realpath-resolve the whole chain and require it to equal
+  // the literal in-repo location (repoRoot/.qwen/team-memory), so a symlink in
+  // ANY component is rejected, not just the final one.
+  const repoRoot = path.dirname(path.dirname(teamRoot));
+  const expectedRoot = path.join(
+    await fs.realpath(repoRoot),
+    QWEN_DIR,
+    TEAM_AUTO_MEMORY_DIRNAME,
+  );
+  const resolvedRoot = await fs.realpath(teamRoot);
+  if (resolvedRoot !== expectedRoot) {
+    throw new Error(
+      `Refusing to write team memory index: ${teamRoot} resolves to ` +
+        `${resolvedRoot}, outside the repository — a parent-directory symlink ` +
+        `may be redirecting it.`,
     );
   }
   const docs = await scanTeamAutoMemoryTopicDocuments(projectRoot);

@@ -12,6 +12,7 @@ import {
   clearAutoMemoryRootCache,
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
+  isAnyAutoMemPath,
   isTeamAutoMemPath,
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
@@ -75,6 +76,21 @@ describe('team auto-memory paths', () => {
     expect(
       isTeamAutoMemPath(path.join(root, '..', 'escape.md'), projectRoot),
     ).toBe(false);
+  });
+
+  it('excludes team paths from isAnyAutoMemPath while isTeamAutoMemPath includes them', () => {
+    // Security-load-bearing invariant: team memory is committed and shared, so
+    // its writes must stay 'ask' and never be auto-approved via isAnyAutoMemPath
+    // (which gates the extraction agent's sandbox). A future change that folded
+    // team paths into isAnyAutoMemPath would silently auto-approve unreviewed
+    // team writes — this assertion must fail loudly if that happens.
+    const teamFile = path.join(
+      getTeamAutoMemoryRoot(projectRoot),
+      'feedback',
+      'shared.md',
+    );
+    expect(isTeamAutoMemPath(teamFile, projectRoot)).toBe(true);
+    expect(isAnyAutoMemPath(teamFile, projectRoot)).toBe(false);
   });
 
   it('recognizes a first-ever write before the team-memory dir exists', () => {

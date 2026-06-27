@@ -13,6 +13,7 @@ import {
   clearAutoMemoryRootCache,
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
+  TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
 
 describe('rebuildTeamAutoMemoryIndex', () => {
@@ -126,6 +127,36 @@ describe('rebuildTeamAutoMemoryIndex', () => {
       );
       // Nothing was written into the symlink target.
       expect(fs.existsSync(path.join(outside, 'MEMORY.md'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a PARENT-component symlink that escapes the repo (no write outside)', async () => {
+    // `.qwen` itself is a symlink to an outside dir, with a real `team-memory`
+    // dir at the target. lstat(teamRoot) only inspects the LEAF (a real dir) and
+    // would pass — the realpath whole-path check must still reject the escape.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      fs.mkdirSync(path.join(outside, TEAM_AUTO_MEMORY_DIRNAME));
+      const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+      const qwenDir = path.dirname(teamRoot); // <repo>/.qwen
+      fs.symlinkSync(outside, qwenDir, 'dir');
+
+      // The leaf resolves to a real (non-symlink) directory outside the repo,
+      // so the existing leaf-only guard does NOT fire.
+      expect(fs.existsSync(teamRoot)).toBe(true);
+      expect(fs.lstatSync(teamRoot).isSymbolicLink()).toBe(false);
+
+      await expect(rebuildTeamAutoMemoryIndex(projectRoot)).rejects.toThrow(
+        /outside the repository/,
+      );
+      // Nothing was scanned or written into the escaped target.
+      expect(
+        fs.existsSync(
+          path.join(outside, TEAM_AUTO_MEMORY_DIRNAME, 'MEMORY.md'),
+        ),
+      ).toBe(false);
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }
