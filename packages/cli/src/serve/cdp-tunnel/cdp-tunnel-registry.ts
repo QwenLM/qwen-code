@@ -14,6 +14,7 @@
  * way through `server.ts`.
  */
 
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { CdpOutboundFrame } from './cdp-reverse-link.js';
 
 /** An active extension bridge: a sink for outbound `cdp_*` frames + its inbound router. */
@@ -62,6 +63,10 @@ export class CdpTunnelRegistry {
     // (its `dispose()` guards re-entry), and we skip a no-op re-register.
     const previous = this.active;
     if (previous && previous !== endpoint) {
+      writeStderrLine(
+        `qwen serve: /cdp tunnel — extension bridge '${endpoint.connectionId}' ` +
+          `superseded the stale '${previous.connectionId}'`,
+      );
       previous.onExtensionGone?.();
     }
     this.active = endpoint;

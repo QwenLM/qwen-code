@@ -200,8 +200,15 @@ async function connect(): Promise<void> {
     console.warn(LOG_PREFIX, 'WebSocket error', event);
   };
 
-  ws.onclose = () => {
-    console.log(LOG_PREFIX, 'Disconnected');
+  ws.onclose = (event: CloseEvent) => {
+    // Surface the daemon's close code/reason (e.g. 1011 "No browser extension
+    // connected to the CDP tunnel") so failure modes aren't indistinguishable.
+    console.log(
+      LOG_PREFIX,
+      `Disconnected (code=${event.code}${
+        event.reason ? `, reason="${event.reason}"` : ''
+      })`,
+    );
     // Only the *active* socket's close tears down the bridge. If the daemon
     // force-closed a stale socket after the extension already opened a new one,
     // that stale close must NOT detach the new connection's debugger — doing so

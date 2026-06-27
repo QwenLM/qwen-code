@@ -7749,7 +7749,14 @@ export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
     const binRel =
       typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin ?? {})[0];
     if (!binRel) return undefined;
-    const binPath = path.join(path.dirname(pkgJsonPath), binRel);
+    const pkgDir = path.dirname(pkgJsonPath);
+    const binPath = path.resolve(pkgDir, binRel);
+    // Containment: refuse to execute a bin path that escapes the package dir
+    // (a malformed/hostile `bin` field with `../` segments).
+    const binRelToPkg = path.relative(pkgDir, binPath);
+    if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
+      return undefined;
+    }
     return new MCPServerConfig(process.execPath, [
       binPath,
       '--wsEndpoint',
