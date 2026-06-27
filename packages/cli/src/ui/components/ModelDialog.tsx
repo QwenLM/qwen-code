@@ -596,6 +596,27 @@ export function ModelDialog({
           );
           return;
         }
+        // The persisted `authType:modelId` form can't distinguish two configured
+        // rows with the same id+authType but different baseUrls (e.g. two
+        // OpenAI-compatible endpoints), so the bridge could later egress images
+        // to the wrong endpoint. Reject the ambiguous pin (mirrors the voice-mode
+        // duplicate guard) instead of silently saving one of them.
+        const visionDupes = selectedEntry
+          ? availableModelEntries.filter(
+              ({ model }) =>
+                model.id === selectedEntry.model.id &&
+                model.authType === selectedEntry.model.authType,
+            )
+          : [];
+        if (visionDupes.length > 1) {
+          setErrorMessage(
+            t(
+              "Vision model '{{model}}' maps to multiple endpoints (same id and provider, different base URLs). Remove the duplicate or disambiguate before pinning it for the vision bridge.",
+              { model: visionModel },
+            ),
+          );
+          return;
+        }
         const scope = getPersistScopeForModelSelection(settings);
         settings.setValue(scope, 'visionModel', visionModel);
         // Sync runtime Config so the vision bridge picks it up without a restart.

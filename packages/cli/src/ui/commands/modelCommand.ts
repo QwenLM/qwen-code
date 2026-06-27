@@ -446,11 +446,15 @@ export const modelCommand: SlashCommand = {
         // current vision model (non-interactive).
         if (context.executionMode !== 'interactive') {
           const visionModel =
-            context.services.settings?.merged?.visionModel?.trim() || 'not set';
+            context.services.settings?.merged?.visionModel?.trim() ||
+            t('not set');
           return {
             type: 'message',
             messageType: 'info',
-            content: `Current vision model: ${visionModel}\nUse "/model --vision <model-id>" to set the vision bridge model.`,
+            content: t(
+              'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+              { visionModel },
+            ),
           };
         }
         return {

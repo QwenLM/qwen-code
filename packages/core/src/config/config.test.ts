@@ -521,6 +521,33 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('drops a pin that points at the current primary model and auto-selects a same-provider VL model instead', () => {
+      // Pinning the primary itself is a dead pin: the bridge exists to work
+      // around the text-only primary, so routing back at it would defeat the
+      // purpose. The provider-aware primary guard must drop the pin and hand off
+      // to same-provider auto-select rather than ever returning the primary.
+      const config = new Config({ ...baseParams, visionModel: 'text-primary' });
+      stubProvider(config, [
+        {
+          // Same id/provider/endpoint as the primary — without the guard the
+          // pin would resolve straight back to this row.
+          id: 'text-primary',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
     it('setVisionModel("") clears the pin and reverts to same-provider auto-select', () => {
       const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
       stubProvider(config, [

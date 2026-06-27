@@ -1694,6 +1694,8 @@ export default {
   'not set': 'not set',
   'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
+  'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
+    'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
   none: 'none',

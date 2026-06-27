@@ -337,6 +337,12 @@ export async function runVisionBridge(params: {
       maxAttempts: 2,
       skipOutputLanguagePreference: true,
       config: { maxOutputTokens: BRIDGE_MAX_OUTPUT_TOKENS },
+      // Fail closed: if the pinned/auto-selected vision model's generator can't
+      // be created (e.g. a missing cross-provider credential), throw here rather
+      // than letting BaseLlmClient fall back to the main generator — that would
+      // send image payloads to the text-only primary while the egress notice
+      // names a different endpoint. The catch below turns this into a failure.
+      failClosed: true,
     });
 
     const description = stripThinkTags(text ?? '');

@@ -808,6 +808,72 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(deepseekIndex);
   });
 
+  it('highlights the cross-auth row for a bare vision-model setting', () => {
+    // `/model --vision qwen-vl-max` validates across all providers and persists
+    // the bare model id. When the dialog re-opens in vision mode, the
+    // preferred-entry resolution must locate that row even though the setting
+    // carries no authType prefix — otherwise the highlight falls back to the
+    // current auth's first row and Enter would silently overwrite the setting.
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: { visionModel: 'qwen-vl-max' },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'claude-opus-4-7',
+        label: 'claude-opus-4-7',
+        description: '',
+        authType: AuthType.USE_ANTHROPIC,
+      },
+      {
+        id: 'qwen-vl-max',
+        label: 'qwen-vl-max',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'claude-opus-4-7'),
+              getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_ANTHROPIC,
+                model: 'claude-opus-4-7',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isVisionModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const visionIndex = items.findIndex((item) =>
+      String(item.value).includes('qwen-vl-max'),
+    );
+    expect(visionIndex).toBeGreaterThanOrEqual(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);
+  });
+
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {
     renderComponent();
 

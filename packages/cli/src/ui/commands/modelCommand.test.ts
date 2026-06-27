@@ -639,6 +639,93 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should set authType-qualified vision model selectors', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision openai:qwen-vl-max',
+        name: 'model',
+        args: '--vision openai:qwen-vl-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          }),
+          getAvailableModelsForAuthType: vi.fn((authType: AuthType) =>
+            authType === AuthType.USE_OPENAI
+              ? [
+                  {
+                    id: 'qwen-vl-max',
+                    label: 'qwen-vl-max',
+                    authType: AuthType.USE_OPENAI,
+                  },
+                ]
+              : [],
+          ),
+          // The pinned model lives on a different provider than the primary, so
+          // the set-time primary guard (config.isCurrentPrimaryModel) never fires.
+          isCurrentPrimaryModel: (m: { id: string }) =>
+            m.id === 'claude-opus-4-7',
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision openai:qwen-vl-max',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'visionModel',
+      'openai:qwen-vl-max',
+    );
+    expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-vl-max');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Vision Model: openai:qwen-vl-max',
+    });
+  });
+
+  it('rejects a malformed --vision selector with no model id', async () => {
+    // `openai:` is a known authType with no model id — resolveModelId throws.
+    // The --vision handler's try/catch must turn that into an error result
+    // instead of letting the exception escape or persisting a half-baked pin.
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision openai:',
+        name: 'model',
+        args: '--vision openai:',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--vision openai:');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setVisionModel).not.toHaveBeenCalled();
+    const msg = result as { messageType: string };
+    expect(msg.messageType).toBe('error');
+  });
+
   it('still sets a non-image-capable vision model but warns', async () => {
     const setValue = vi.fn();
     const setVisionModel = vi.fn();

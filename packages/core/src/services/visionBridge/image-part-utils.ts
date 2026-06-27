@@ -124,6 +124,16 @@ export function replaceImagesWithText(
         result.push({ text });
         replaced = true;
       }
+      // FRAGILE: only the FIRST image's slot receives the transcription; every
+      // later image part is dropped here. When the original turn carried more
+      // than one image, each was preceded by its own "Content from <file>:"
+      // header (added by `@` file resolution). The headers for the 2nd+ images
+      // stay in the part list with no image and no transcript following them —
+      // orphaned. Nothing structural stops the primary model from calling
+      // read_file to "recover" those files; the ONLY thing holding it back is
+      // the explicit "do not call a tool to read the image file" instruction
+      // baked into the interpretation/failure note text. Soften that wording
+      // and this silent drop turns into spurious tool calls — keep them in sync.
       continue; // drop additional images
     }
     result.push(part);

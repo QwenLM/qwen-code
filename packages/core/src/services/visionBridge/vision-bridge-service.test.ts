@@ -407,6 +407,11 @@ describe('runVisionBridge', () => {
     expect(result.applied).toBe(true);
     expect(textOf(result.parts)).toContain('Explain the screenshot please');
     expect(textOf(result.parts)).toMatch(/could not interpret/i);
+    // The note must steer the primary model away from "recovering" the dropped
+    // image via a tool call — see the failure-note text in
+    // vision-bridge-service.ts and the orphaned-header caveat in
+    // image-part-utils.ts (replaceImagesWithText).
+    expect(textOf(result.parts)).toMatch(/do not call a tool/i);
     expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
     expect(result.egressOccurred).toBe(true);
     expect(result.error).toContain('boom');
@@ -429,6 +434,7 @@ describe('runVisionBridge', () => {
     // …but never leaked into the parts sent to the primary model.
     expect(textOf(result.parts)).toMatch(/could not interpret/i);
     expect(textOf(result.parts)).not.toContain('token=secret');
+    expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
   });
 
   it('treats an empty model response as a failure', async () => {
@@ -441,6 +447,7 @@ describe('runVisionBridge', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toMatch(/no description/);
     expect(result.modelId).toBe('qwen3-vl-plus');
+    expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
   });
 
   it('fails with "no usable image" when every image is invalid', async () => {
@@ -457,6 +464,7 @@ describe('runVisionBridge', () => {
     expect(result.egressOccurred).toBeUndefined();
     expect(mockSideQuery).not.toHaveBeenCalled();
     expect(textOf(result.parts)).toContain('describe this');
+    expect((result.parts as Part[]).some((p) => p.inlineData)).toBe(false);
   });
 });
 
