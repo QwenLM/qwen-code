@@ -13,6 +13,7 @@ import {
   isSlashCommand,
   findMidInputSlashCommand,
   getBestSlashCommandMatch,
+  isMidInputCompletableCommand,
 } from '../utils/commandUtils.js';
 import { toCodePoints } from '../utils/textUtils.js';
 import { useAtCompletion } from './useAtCompletion.js';
@@ -35,14 +36,12 @@ function isExactMidInputModelInvocableCommand(
   slashCommands: readonly SlashCommand[],
 ): boolean {
   const query = partialCommand.toLowerCase();
+  // Match canonical names only. The ghost-text fallback (getBestSlashCommandMatch)
+  // matches names too, so an exact altName routes through the dropdown instead —
+  // fzf surfaces altNames there, avoiding a no-feedback dead zone.
   return slashCommands.some(
     (cmd) =>
-      cmd.modelInvocable === true &&
-      !cmd.hidden &&
-      (cmd.name.toLowerCase() === query ||
-        (cmd.altNames ?? []).some(
-          (altName) => altName.toLowerCase() === query,
-        )),
+      isMidInputCompletableCommand(cmd) && cmd.name.toLowerCase() === query,
   );
 }
 
@@ -178,7 +177,7 @@ export function useCommandCompletion(
   const slashCommandsForCompletion = useMemo(
     () =>
       isMidInputSlashCompletion
-        ? slashCommands.filter((cmd) => cmd.modelInvocable === true)
+        ? slashCommands.filter(isMidInputCompletableCommand)
         : slashCommands,
     [isMidInputSlashCompletion, slashCommands],
   );
