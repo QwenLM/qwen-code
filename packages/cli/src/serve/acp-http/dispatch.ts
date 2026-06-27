@@ -2752,9 +2752,16 @@ export class AcpDispatcher {
       // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
       // `session/prompt` result produced during the detach gap) so they land
       // AFTER the ring replays the content chunks that preceded them. Release
-      // them once the replay boundary passes — `replay_complete` (caught up) or
-      // `state_resync_required` (ring couldn't replay; client reloads, but the
-      // pending request still needs its reply). Once-guarded.
+      // them once replay actually drains — i.e. on `replay_complete` ONLY.
+      //
+      // NOT on `state_resync_required`: the EventBus emits that frame FIRST,
+      // BEFORE the replay frames, then still emits `replay_complete` at the end
+      // of replay (see eventBus.ts — both the `epoch_reset` and `ring_evicted`
+      // paths fall through to the replay loop + `replay_complete`). Flushing on
+      // the resync frame would put the deferred reply ahead of the replayed
+      // content — reintroducing the exact truncated-body reordering §1.8 fixes.
+      // The post-loop safety flush below covers the live-only case (no cursor ⇒
+      // no replay branch ⇒ no `replay_complete`). Once-guarded.
       let deferredFlushed = false;
       const flushDeferred = () => {
         if (deferredFlushed) return;
@@ -2767,10 +2774,7 @@ export class AcpDispatcher {
         // (no inbound HTTP) isn't reaped by the idle-TTL sweep.
         conn.touch();
         this.translateEvent(conn, sessionId, event);
-        if (
-          event.type === 'replay_complete' ||
-          event.type === 'state_resync_required'
-        ) {
+        if (event.type === 'replay_complete') {
           flushDeferred();
         }
       }

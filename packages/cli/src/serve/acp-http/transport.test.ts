@@ -1045,6 +1045,102 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await s2.body?.cancel().catch(() => {});
   });
 
+  it('on resume, a reply buffered during the gap is flushed on replay_complete — AFTER replayed content, NOT on the pre-replay state_resync_required frame', async () => {
+    // Guards the core §1.8 ordering invariant end-to-end through the pump:
+    // the EventBus emits `state_resync_required` BEFORE the replay frames (then
+    // `replay_complete` at the end). If the deferred id-less reply were flushed
+    // on the resync frame it would land ahead of the replayed content — the
+    // truncated-body failure this PR fixes. It must flush on `replay_complete`.
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    bridge.promptBehavior = async (_s, _q) => {
+      // Hold the prompt open across the disconnect; its result is produced
+      // only after the gate opens (i.e. during the detach gap) → buffered.
+      await gate;
+      return { stopReason: 'end_turn' };
+    };
+
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    expect(ack.status).toBe(202);
+
+    // Close s1 → detach-with-grace (old pump's signal aborts).
+    await s1.body?.cancel().catch(() => {});
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+
+    // Now release the prompt: its result is sent while detached → buffered as an
+    // id-less reply. Settle briefly so it lands in the buffer before reconnect
+    // (same in-process settle idiom the harness uses elsewhere).
+    openGate();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Reconnect carrying a cursor → the buffered id-less reply is DEFERRED.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '0',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+
+    // Drive the resume sequence the real EventBus would: resync FIRST, then the
+    // replayed content, then replay_complete.
+    const q2 = bridge.queues.get('sess-1')!;
+    q2.push({
+      type: 'state_resync_required',
+      data: { reason: 'ring_evicted' },
+    });
+    q2.push({
+      type: 'session_update',
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'REPLAYED' },
+      },
+    });
+    q2.push({ type: 'replay_complete', data: { replayedCount: 1 } });
+
+    const r2 = frameReader(s2);
+    const order: string[] = [];
+    try {
+      // Read until we've seen the deferred reply (or a safety cap).
+      for (let i = 0; i < 8 && !order.includes('reply'); i++) {
+        const f = (await r2.next()) as {
+          method?: string;
+          result?: unknown;
+          params?: { kind?: string; update?: { text?: string } };
+        };
+        if (f.method === undefined && 'result' in f) order.push('reply');
+        else if (f.params?.kind === 'state_resync_required')
+          order.push('resync');
+        else if (f.params?.update?.text === 'REPLAYED') order.push('content');
+        else if (f.params?.kind === 'replay_complete')
+          order.push('replay_complete');
+      }
+    } finally {
+      r2.close();
+    }
+
+    // The reply must arrive AFTER the replayed content (and thus after the
+    // pre-replay resync frame) — not flushed early on state_resync_required.
+    expect(order).toContain('reply');
+    expect(order).toContain('content');
+    expect(order.indexOf('content')).toBeLessThan(order.indexOf('reply'));
+    expect(order.indexOf('resync')).toBeLessThan(order.indexOf('content'));
+  });
+
   it('GET Last-Event-ID past MAX_SAFE_INTEGER → live-only (undefined)', async () => {
     const connId = await initialize();
     await newSession(connId);

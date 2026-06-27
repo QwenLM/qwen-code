@@ -162,10 +162,14 @@ reachable, so they ship together:
   arrive ahead of the content chunks that preceded it (client sees "done" before
   the body — the exact truncated-body failure §1.8 fixes). So on resume the
   id-less frames are **deferred**: left in the buffer, and the event pump releases
-  them (`flushBufferedSessionFrames`) once the replay boundary passes
-  (`replay_complete` / `state_resync_required`), preserving original stream order.
-  (A fresh connect with no `Last-Event-ID` has no ring anchor, so it flushes the
-  whole buffer immediately, in order, as before.)
+  them (`flushBufferedSessionFrames`) once replay drains — on `replay_complete`
+  **only**, preserving original stream order. Crucially NOT on
+  `state_resync_required`: the EventBus emits that frame _before_ the replay
+  frames (then still emits `replay_complete` at the end), so flushing on it would
+  put the reply ahead of the replayed content. The live-only case (no
+  `Last-Event-ID` ⇒ no replay ⇒ no `replay_complete`) is covered by the pump's
+  post-loop safety flush. (A fresh connect with no `Last-Event-ID` has no ring
+  anchor, so it flushes the whole buffer immediately, in order, as before.)
 - **Idempotent `permission_request` under replay.** A `permission_request` is
   an id-bearing ring event, so a reconnect whose cursor precedes a still-
   unanswered permission replays it. `translateEvent` now reuses the existing
