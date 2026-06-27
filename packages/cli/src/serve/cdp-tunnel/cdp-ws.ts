@@ -93,6 +93,7 @@ export function attachCdpClient(
       }
     },
     forwardToTab: link.forwardToTab,
+    log,
   });
   link.bindEmulator(emulator);
 

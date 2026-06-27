@@ -37,6 +37,8 @@ export interface CdpFrame {
 export interface CdpEmulatorCallbacks {
   /** Send a CDP reply or event back to the puppeteer client. */
   reply(frame: CdpFrame): void;
+  /** Optional diagnostic sink (e.g. unhandled browser-level CDP commands). */
+  log?(line: string): void;
   /**
    * Run a page-domain command on the real tab (reverse WS -> extension
    * `chrome.debugger.sendCommand`). Resolves with the CDP `result`, or rejects
@@ -161,6 +163,13 @@ export class CdpBrowserEmulator {
             result: { targetInfo: this.pageTargetInfo() },
           });
         default:
+          // TODO(#5626): return SERVER_ERROR once the emulator covers every
+          // browser-level command chrome-devtools-mcp sends. Until then the
+          // empty-result ack keeps puppeteer from hanging on optional commands;
+          // surface the unknown ones so the coverage gap stays visible.
+          this.cb.log?.(
+            `qwen serve: /cdp unsupported browser-level CDP method: ${method ?? '(none)'}`,
+          );
           return this.cb.reply({ id, result: {} });
       }
     }

@@ -119,7 +119,12 @@ async function tick() {
   const { baseUrl, token } = await readConfig();
   const state = await probeState(baseUrl, token);
   if (state === 'ready') {
-    showShell(baseUrl);
+    // Pass the bearer token through the Web Shell URL fragment — the iframe
+    // reads its token from the URL, so a token-gated daemon would otherwise
+    // 401 every embedded request after the probe passed.
+    showShell(
+      token ? `${baseUrl}#token=${encodeURIComponent(token)}` : baseUrl,
+    );
   } else {
     if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
       framedMisses += 1;

@@ -185,11 +185,30 @@ async function handleAttach(
 ): Promise<void> {
   try {
     const tabId = await getActiveTabId();
+
+    // Switching to a different tab: detach the previous one first so it doesn't
+    // keep Chrome's debugging banner + keepalive after we move on.
+    if (attachedTabId !== null && attachedTabId !== tabId) {
+      const prev = attachedTabId;
+      await new Promise<void>((resolve) => {
+        chrome.debugger.detach({ tabId: prev }, () => {
+          void chrome.runtime.lastError; // best-effort; tab may already be gone
+          resolve();
+        });
+      });
+      teardownAttachment();
+    }
+
     await new Promise<void>((resolve, reject) => {
       chrome.debugger.attach({ tabId }, CDP_PROTOCOL_VERSION, () => {
         const err = chrome.runtime.lastError;
-        // "Already attached" is benign — reuse the existing session.
-        if (err && !/already attached/i.test(err.message ?? '')) {
+        // "Already attached" is only benign when WE already own this exact tab.
+        // Chrome reports the same error when DevTools / another debugger owns
+        // it — acking success there would let us claim a tab we can't drive.
+        const ownAlreadyAttached =
+          /already attached/i.test(err?.message ?? '') &&
+          attachedTabId === tabId;
+        if (err && !ownAlreadyAttached) {
           reject(new Error(err.message ?? 'debugger attach failed'));
           return;
         }

@@ -384,6 +384,17 @@ export function createServeApp(
   // Standalone `createServeApp` (no injected bridge) builds its own and wires
   // it into the bridge it creates below. Inert until a WS client sends
   // `mcp_register` (gated by `clientMcpOverWs`).
+  // Guard the split-brain case: an injected `deps.bridge` was already wired to
+  // its own sender, so building a fresh registry here would leave the bridge
+  // and this registry pointing at different maps. A caller injecting the bridge
+  // must inject the matching registry too.
+  if (deps.bridge && !deps.clientMcpSenderRegistry) {
+    throw new Error(
+      'createServeApp: deps.bridge requires deps.clientMcpSenderRegistry ' +
+        '(the bridge is already wired to its own sender; a fresh registry ' +
+        'here would be an orphan).',
+    );
+  }
   const clientMcpSenderRegistry =
     deps.clientMcpSenderRegistry ?? new ClientMcpSenderRegistry();
   const statusProvider = deps.statusProvider ?? createDaemonStatusProvider();
