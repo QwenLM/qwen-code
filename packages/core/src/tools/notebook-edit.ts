@@ -817,6 +817,21 @@ export class NotebookEditTool
       return `File path '${params.notebook_path}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.notebook_path)} pattern(s).`;
     }
 
+    // Scan the cell source at validate time too — for parity with edit/write-file
+    // — so a team-memory write carrying a secret is rejected before scheduling.
+    // execute() still scans the full serialized notebook, which catches secrets
+    // split across cells that this single-cell check cannot.
+    if (typeof params.new_source === 'string') {
+      const teamMemoryError = checkTeamMemorySecrets(
+        params.notebook_path,
+        params.new_source,
+        this.config.getProjectRoot(),
+      );
+      if (teamMemoryError) {
+        return teamMemoryError;
+      }
+    }
+
     return null;
   }
 

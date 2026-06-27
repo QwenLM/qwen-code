@@ -166,17 +166,15 @@ describe('NotebookEditTool', () => {
     seedNotebookRead(filePath);
     const originalContent = fs.readFileSync(filePath, 'utf-8');
 
-    const result = await buildInvocation({
-      notebook_path: filePath,
-      cell_id: 'load-data',
-      new_source: `token = "ghp_${'a'.repeat(36)}"`,
-    }).execute(abortSignal);
-
-    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
-    expect(JSON.stringify(result)).toMatch(
-      /shared with all repository collaborators/i,
-    );
-    // The serialized notebook must never reach disk.
+    // Rejected at validate/build time (parity with edit/write-file), before any
+    // invocation is created — so the serialized notebook never reaches disk.
+    expect(() =>
+      buildInvocation({
+        notebook_path: filePath,
+        cell_id: 'load-data',
+        new_source: `token = "ghp_${'a'.repeat(36)}"`,
+      }),
+    ).toThrow(/shared with all repository collaborators/i);
     expect(fs.readFileSync(filePath, 'utf-8')).toBe(originalContent);
   });
 

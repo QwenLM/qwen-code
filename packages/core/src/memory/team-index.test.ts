@@ -111,4 +111,68 @@ describe('rebuildTeamAutoMemoryIndex', () => {
     expect(content).toContain('[Alpha](feedback/a.md)');
     expect(content).toContain('[Bravo](feedback/b.md)');
   });
+
+  it('refuses to write through a symlinked team root (no write outside the repo)', async () => {
+    // A committed `.qwen/team-memory -> /elsewhere` symlink would otherwise
+    // redirect the generated index outside the repo with no approval.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+      fs.mkdirSync(path.dirname(teamRoot), { recursive: true });
+      fs.symlinkSync(outside, teamRoot, 'dir');
+
+      await expect(rebuildTeamAutoMemoryIndex(projectRoot)).rejects.toThrow(
+        /symlink/,
+      );
+      // Nothing was written into the symlink target.
+      expect(fs.existsSync(path.join(outside, 'MEMORY.md'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a symlinked MEMORY.md instead of writing through it', async () => {
+    // MEMORY.md pre-placed as a symlink to an outside file: noFollow must
+    // replace the link with the regular index, leaving the target untouched.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      writeMemory('feedback/a.md', 'Alpha', 'desc A');
+      const target = path.join(outside, 'secret.md');
+      fs.writeFileSync(target, 'SENTINEL — must not be overwritten');
+      const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
+      fs.symlinkSync(target, indexPath, 'file');
+
+      const content = (await rebuildTeamAutoMemoryIndex(projectRoot)) ?? '';
+
+      // The outside target is untouched, and MEMORY.md is now a real file.
+      expect(fs.readFileSync(target, 'utf-8')).toBe(
+        'SENTINEL — must not be overwritten',
+      );
+      expect(fs.lstatSync(indexPath).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(indexPath, 'utf-8')).toBe(content);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('skips the rewrite when the generated index is byte-identical', async () => {
+    writeMemory('feedback/a.md', 'Alpha', 'desc A');
+    const first = await rebuildTeamAutoMemoryIndex(projectRoot);
+    const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
+
+    // Backdate the file so a real rewrite would visibly bump the mtime.
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(indexPath, past, past);
+    const mtimeBefore = fs.statSync(indexPath).mtimeMs;
+
+    const second = await rebuildTeamAutoMemoryIndex(projectRoot);
+    expect(second).toBe(first);
+    // Unchanged mtime proves no no-op write happened.
+    expect(fs.statSync(indexPath).mtimeMs).toBe(mtimeBefore);
+
+    // A real change still rewrites (mtime moves forward).
+    writeMemory('feedback/b.md', 'Bravo', 'desc B');
+    await rebuildTeamAutoMemoryIndex(projectRoot);
+    expect(fs.statSync(indexPath).mtimeMs).toBeGreaterThan(mtimeBefore);
+  });
 });

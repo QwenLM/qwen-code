@@ -290,14 +290,59 @@ export function isTeamAutoMemPath(
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function realpathNearestExisting(inputPath: string): string {
-  const missingSegments: string[] = [];
+/**
+ * Follow a leading symlink chain at `inputPath` to its eventual target, even
+ * when that target does not exist yet (a dangling link).
+ *
+ * Security-load-bearing: `fs.existsSync` follows links and reports a dangling
+ * symlink as "missing". Relying on it lets an attacker pre-place
+ * `decoy.md -> .qwen/team-memory/leak.md` (target absent) so the path classifies
+ * OUTSIDE team memory and the secret scanner is skipped — while the real write
+ * follows the link INTO team memory. lstat/readlink (no-follow) resolve the link
+ * target so classification matches where the bytes will actually land.
+ */
+function resolveLeafSymlink(inputPath: string): string {
+  const maxHops = 40; // POSIX SYMLOOP_MAX
   let current = path.resolve(inputPath);
+  for (let i = 0; i < maxHops; i++) {
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(current);
+    } catch {
+      return current; // missing or unreadable — nothing left to follow
+    }
+    if (!stat.isSymbolicLink()) {
+      return current;
+    }
+    const target = fs.readlinkSync(current);
+    if (path.isAbsolute(target)) {
+      current = target;
+    } else {
+      // Resolve relative targets against the link's real parent so an
+      // intermediate directory symlink can't mis-resolve the target.
+      let parent: string;
+      try {
+        parent = fs.realpathSync(path.dirname(current));
+      } catch {
+        parent = path.dirname(current);
+      }
+      current = path.resolve(parent, target);
+    }
+  }
+  return current; // chain too deep — caller still range-checks the result
+}
+
+function realpathNearestExisting(inputPath: string): string {
+  // Resolve a leading (possibly dangling) symlink first so a dangling link into
+  // team memory is classified by its target, not treated as a plain missing file.
+  const resolved = resolveLeafSymlink(inputPath);
+  const missingSegments: string[] = [];
+  let current = resolved;
 
   while (!fs.existsSync(current)) {
     const parent = path.dirname(current);
     if (parent === current) {
-      return path.resolve(inputPath);
+      return resolved;
     }
     missingSegments.unshift(path.basename(current));
     current = parent;
@@ -306,7 +351,7 @@ function realpathNearestExisting(inputPath: string): string {
   try {
     return path.join(fs.realpathSync(current), ...missingSegments);
   } catch {
-    return path.resolve(inputPath);
+    return resolved;
   }
 }
 

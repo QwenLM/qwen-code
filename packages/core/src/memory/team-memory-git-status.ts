@@ -64,13 +64,29 @@ export function getTeamMemoryShareabilityWarning(
       `collaborators.`
     );
   }
-  if (isTeamFileGitIgnored(gitRoot, getTeamAutoMemoryIndexPath(projectRoot))) {
-    debugLogger.debug(`Team memory dir ${teamRoot} is git-ignored.`);
+  // Probe BOTH the index and a representative topic file. Judging only by the
+  // index lets a config that re-includes MEMORY.md but ignores the memory files
+  // (e.g. `.qwen/team-memory/*.md` + `!.qwen/team-memory/MEMORY.md`) pass while
+  // sharing nothing: the committed index would point at files no collaborator
+  // can see. 'feedback.md' is a representative topic name; check-ignore matches
+  // the pathname against the ignore rules whether or not the file exists.
+  const indexIgnored = isTeamFileGitIgnored(
+    gitRoot,
+    getTeamAutoMemoryIndexPath(projectRoot),
+  );
+  const topicIgnored = isTeamFileGitIgnored(
+    gitRoot,
+    path.join(teamRoot, 'feedback.md'),
+  );
+  if (indexIgnored || topicIgnored) {
+    debugLogger.debug(
+      `Team memory at ${teamRoot} is git-ignored (index=${indexIgnored}, topic=${topicIgnored}).`,
+    );
     return (
       `Team memory is enabled, but ${teamRoot} is git-ignored, so saved ` +
       `memories are not shared. If your .gitignore excludes '.qwen/' ` +
       `(directory form), change it to '.qwen/*' and re-include ` +
-      `'.qwen/team-memory/'.`
+      `'.qwen/team-memory/' (and its contents, e.g. '!.qwen/team-memory/**').`
     );
   }
   return null;

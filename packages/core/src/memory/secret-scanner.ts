@@ -69,9 +69,13 @@ const SECRET_RULES: readonly SecretRule[] = [
   {
     // New project/service/admin prefixes, the T3BlbkFJ-marker format, and the
     // retired bare `sk-` + 48 base62 chars (archived legacy keys).
+    // Both classes around the T3BlbkFJ literal are upper-bounded ({20,512}, like
+    // `private-key`): two unbounded {20,} quantifiers around a literal that may
+    // be absent backtrack in O(n²) on crafted `sk-…` input (ReDoS). Real keys
+    // are far shorter than the bound, so genuine matches are unaffected.
     id: 'openai-api-key',
     source:
-      'sk-(?:proj|svcacct|admin)-[a-zA-Z0-9_-]{20,}|sk-[a-zA-Z0-9_-]{20,}T3BlbkFJ[a-zA-Z0-9_-]{20,}|sk-[a-zA-Z0-9]{48}',
+      'sk-(?:proj|svcacct|admin)-[a-zA-Z0-9_-]{20,}|sk-[a-zA-Z0-9_-]{20,512}T3BlbkFJ[a-zA-Z0-9_-]{20,512}|sk-[a-zA-Z0-9]{48}',
   },
   {
     id: 'huggingface-access-token',

@@ -72,4 +72,18 @@ describe('getTeamMemoryShareabilityWarning', () => {
     );
     expect(getTeamMemoryShareabilityWarning(repo)).toBeNull();
   });
+
+  it('warns when topic files are ignored even though the index is re-included', () => {
+    const repo = initRepo('topicignored');
+    cleanup.push(repo);
+    // Index re-included, but the actual memory files stay ignored — the shared
+    // index would point at files no collaborator can see. Judging by the index
+    // alone (pre-fix) would wrongly report this as shareable.
+    fs.writeFileSync(
+      path.join(repo, '.gitignore'),
+      '.qwen/team-memory/*.md\n!.qwen/team-memory/MEMORY.md\n',
+    );
+    const warning = getTeamMemoryShareabilityWarning(repo);
+    expect(warning).toContain('git-ignored');
+  });
 });

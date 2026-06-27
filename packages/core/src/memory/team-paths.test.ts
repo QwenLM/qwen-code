@@ -99,6 +99,21 @@ describe('team auto-memory paths', () => {
     );
   });
 
+  it('classifies a dangling symlink pointing INTO team-memory as a team path', () => {
+    const root = getTeamAutoMemoryRoot(projectRoot);
+    fs.mkdirSync(root, { recursive: true });
+    // `decoy.md` lives outside team memory but points at a not-yet-created file
+    // inside it. existsSync(decoy.md) follows the link and reports the missing
+    // target as absent, which (pre-fix) misclassified it OUTSIDE team and let a
+    // secret write skip the scanner while the real write followed the link in.
+    const decoy = path.join(projectRoot, 'decoy.md');
+    const target = path.join(root, 'leak.md');
+    fs.symlinkSync(target, decoy, 'file');
+    expect(fs.existsSync(target)).toBe(false); // dangling
+
+    expect(isTeamAutoMemPath(decoy, projectRoot)).toBe(true);
+  });
+
   it('clearAutoMemoryRootCache invalidates the team root cache', () => {
     // A fresh dir with no git ancestor, so the first resolution falls back to
     // the nested path itself; adding a `.git` later changes the canonical root.

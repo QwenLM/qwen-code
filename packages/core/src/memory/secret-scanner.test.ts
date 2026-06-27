@@ -89,6 +89,18 @@ describe('scanForSecrets', () => {
     expect(scanForSecrets(payload)).toEqual([]);
   });
 
+  it('does not catastrophically backtrack on a long sk- non-match (ReDoS)', () => {
+    // `a-a-a-…`: every char is in the openai key class but the longest
+    // alphanumeric run is 1, so neither the legacy `sk-…{48}` alt nor the
+    // T3BlbkFJ alt can match (no marker). Unbounded {20,} quantifiers around
+    // the absent T3BlbkFJ literal would backtrack O(n^2); the {20,512} bound
+    // keeps this near-instant.
+    const payload = `sk-${'a-'.repeat(50_000)}`;
+    const start = performance.now();
+    expect(scanForSecrets(payload)).toEqual([]);
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
   it('never returns the matched secret value, only rule id and label', () => {
     const secret = `ghp_${'b'.repeat(36)}`;
     const [match] = scanForSecrets(secret);

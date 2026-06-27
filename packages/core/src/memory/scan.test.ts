@@ -35,6 +35,31 @@ describe('auto-memory topic scanning', () => {
     });
   });
 
+  it('parses a CRLF (Windows checkout) topic document', () => {
+    // Team files are read raw (utf-8); a Windows checkout yields `---\r\n`,
+    // which the `^---\n` delimiter would reject — dropping the file from the
+    // shared index. The parser must normalize CRLF first.
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/crlf.md',
+      [
+        '---',
+        'type: project',
+        'name: CRLF Memory',
+        'description: Windows line endings',
+        '---',
+        '',
+        'Body line one.',
+      ].join('\r\n'),
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.type).toBe('project');
+    expect(parsed?.title).toBe('CRLF Memory');
+    expect(parsed?.description).toBe('Windows line endings');
+    // The body is normalized to LF, not left with stray carriage returns.
+    expect(parsed?.body).toBe('Body line one.');
+  });
+
   it('parses a managed auto-memory topic document', () => {
     const parsed = parseAutoMemoryTopicDocument(
       '/tmp/project.md',

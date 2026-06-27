@@ -25,6 +25,7 @@ import type { AutoMemoryMetadata } from './types.js';
 const MAX_INDEX_LINE_CHARS = 150;
 const MAX_INDEX_LINES = 200;
 const MAX_INDEX_BYTES = 25_000;
+const MAX_INDEX_FIELD_CHARS = 120;
 
 function truncateIndexLine(text: string): string {
   if (text.length <= MAX_INDEX_LINE_CHARS) {
@@ -33,8 +34,38 @@ function truncateIndexLine(text: string): string {
   return `${text.slice(0, MAX_INDEX_LINE_CHARS - 1).trimEnd()}…`;
 }
 
+/**
+ * Sanitize an attacker-controlled frontmatter field (title/description) before
+ * embedding it into the COMMITTED MEMORY.md, which loads verbatim into every
+ * collaborator's system prompt. A malicious team-memory file could otherwise
+ * smuggle prompt-injection text or markdown that forges new structure into the
+ * shared context. Strip control / zero-width / bidi chars, collapse all
+ * whitespace (incl. newlines) so the entry can't break out of its one-line list
+ * item, defang code/link markdown, and cap length.
+ */
+function sanitizeIndexField(value: string): string {
+  const cleaned = value
+    // C0/C1 control chars (CR, LF, TAB, ESC, ...) -> space.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    // Zero-width + bidi-override chars that can hide or reorder injected text.
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    // Defang code spans/fences and markdown links so the field can't forge a
+    // fenced "system" block or a clickable link inside the shared doc.
+    .replace(/`/g, "'")
+    .replace(/\]\(/g, '] (')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length <= MAX_INDEX_FIELD_CHARS) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, MAX_INDEX_FIELD_CHARS - 1).trimEnd()}…`;
+}
+
 function docIndexLine(doc: ScannedAutoMemoryDocument): string {
-  return `- [${doc.title}](${doc.relativePath}) — ${doc.description || doc.type}`;
+  const title = sanitizeIndexField(doc.title) || doc.type;
+  const description = sanitizeIndexField(doc.description) || doc.type;
+  return `- [${title}](${doc.relativePath}) — ${description}`;
 }
 
 /**
@@ -198,8 +229,21 @@ export async function rebuildUserAutoMemoryIndex(): Promise<string> {
 export async function rebuildTeamAutoMemoryIndex(
   projectRoot: string,
 ): Promise<string | null> {
-  if (!existsSync(getTeamAutoMemoryRoot(projectRoot))) {
+  const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+  if (!existsSync(teamRoot)) {
     return null;
+  }
+  // Refuse to write through a symlinked team root. A committed
+  // `.qwen/team-memory -> /elsewhere` symlink (or a symlinked dir component)
+  // would otherwise redirect the generated index — and the scanned topic files —
+  // OUTSIDE the repo with no tool approval. `noFollow` below only guards the
+  // MEMORY.md leaf; the directory symlink it cannot catch is rejected here.
+  const rootStat = await fs.lstat(teamRoot);
+  if (rootStat.isSymbolicLink()) {
+    throw new Error(
+      `Refusing to write team memory index: ${teamRoot} is a symlink, which ` +
+        `could redirect the committed index outside the repository.`,
+    );
   }
   const docs = await scanTeamAutoMemoryTopicDocuments(projectRoot);
   // Code-unit comparison, NOT localeCompare: the index is committed and pushed,
@@ -213,8 +257,18 @@ export async function rebuildTeamAutoMemoryIndex(
         : 0,
   );
   const content = buildTeamAutoMemoryIndex(ordered);
-  await atomicWriteFile(getTeamAutoMemoryIndexPath(projectRoot), content, {
+  const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
+  // Skip a byte-identical rewrite: regenerating MEMORY.md every run would churn
+  // its mtime and produce no-op commits that ping-pong between collaborators.
+  const existing = await fs.readFile(indexPath, 'utf-8').catch(() => null);
+  if (existing === content) {
+    return content;
+  }
+  // noFollow: never follow a symlink at MEMORY.md itself — replace the link with
+  // the regular index instead of writing through it to an attacker path.
+  await atomicWriteFile(indexPath, content, {
     encoding: 'utf-8',
+    noFollow: true,
   });
   return content;
 }

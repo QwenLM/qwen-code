@@ -51,7 +51,14 @@ export function parseAutoMemoryTopicDocument(
   mtimeMs = 0,
   relativePath = path.basename(filePath),
 ): ScannedAutoMemoryDocument | null {
-  const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  // Normalize CRLF → LF before matching: the delimiter regex anchors on
+  // `^---\n`, so a Windows checkout (`---\r\n`) would fail to parse and the file
+  // would silently vanish from the shared team index. Team files are read raw
+  // (utf-8) and git may hand them back with CRLF on Windows.
+  const normalized = content.replace(/\r\n/g, '\n');
+  const frontmatterMatch = normalized.match(
+    /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/,
+  );
   if (!frontmatterMatch) {
     return null;
   }
