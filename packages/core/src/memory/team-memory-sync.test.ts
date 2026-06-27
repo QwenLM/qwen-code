@@ -126,7 +126,39 @@ describe('syncTeamMemory', () => {
     ).toBe(true);
   }, 30_000);
 
-  it('reports pull-failed (not silent) when the branch has diverged', async () => {
+  it('reconciles a second writer instead of diverging (commit lands on top)', async () => {
+    const { bare, repo } = freshRemoteAndClone('alice');
+    // Bob advances the remote with his own team memory file.
+    const bob = makeWorkingClone(bare, 'bob');
+    cleanup.push(path.dirname(bob));
+    writeTeamMemory(bob, 'reference/grafana.md', 'oncall dashboard');
+    git(bob, 'add', '--', '.qwen/team-memory');
+    git(bob, 'commit', '-m', 'bob adds reference');
+    git(bob, 'push');
+
+    // Alice has a local (uncommitted) team memory change. Reconcile-first pulls
+    // bob's commit, then commits alice's change on top — no divergence, no wedge.
+    writeTeamMemory(repo, 'feedback/use-real-db.md', 'use real DBs');
+
+    const result = await syncTeamMemory(repo, { message: 'sync' });
+    expect(result.pulled).toBe(true);
+    expect(result.committed).toBe(true);
+    expect(result.pushed).toBe(true);
+    expect(result.skippedReason).toBeUndefined();
+
+    // A fresh clone now has BOTH collaborators' files.
+    const verify = makeWorkingClone(bare, 'verify');
+    cleanup.push(path.dirname(verify));
+    const teamDir = getTeamAutoMemoryRoot(verify);
+    expect(fs.existsSync(path.join(teamDir, 'reference/grafana.md'))).toBe(
+      true,
+    );
+    expect(fs.existsSync(path.join(teamDir, 'feedback/use-real-db.md'))).toBe(
+      true,
+    );
+  }, 30_000);
+
+  it('reports pull-failed (not silent) when the branch has truly diverged', async () => {
     const { bare, repo } = freshRemoteAndClone('alice');
     // Bob advances the remote.
     const bob = makeWorkingClone(bare, 'bob');
@@ -136,14 +168,80 @@ describe('syncTeamMemory', () => {
     git(bob, 'commit', '-m', 'bob adds reference');
     git(bob, 'push');
 
-    // Alice commits her own team memory WITHOUT pulling first → branches diverge.
+    // Alice already has her own unpushed commit on the old base, so the branches
+    // genuinely diverge (each side has a commit the other lacks).
+    fs.writeFileSync(path.join(repo, 'alice-local.txt'), 'diverging work');
+    git(repo, 'add', 'alice-local.txt');
+    git(repo, 'commit', '-m', 'alice diverges');
+
+    // A new team memory change then triggers the sync; reconcile-first refuses.
     writeTeamMemory(repo, 'feedback/use-real-db.md', 'use real DBs');
 
     const result = await syncTeamMemory(repo, { message: 'sync' });
-    expect(result.committed).toBe(true);
     expect(result.pulled).toBe(false);
     expect(result.pushed).toBe(false);
+    // Reconcile failed before the commit, so nothing was committed this cycle.
+    expect(result.committed).toBe(false);
     // The opted-in user must get a signal, not a silent no-op.
     expect(result.skippedReason).toBe('pull-failed');
+  }, 30_000);
+
+  it('commits locally but skips push when there is no upstream', async () => {
+    // A git repo with a commit but no remote / no upstream configured.
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sync-noup-'));
+    cleanup.push(parent);
+    const repo = path.join(parent, 'repo');
+    fs.mkdirSync(repo);
+    git(repo, 'init', '--initial-branch=main');
+    git(repo, 'config', 'user.email', 'solo@example.com');
+    git(repo, 'config', 'user.name', 'solo');
+    fs.writeFileSync(path.join(repo, 'README.md'), 'seed');
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-m', 'seed');
+
+    writeTeamMemory(repo, 'feedback/x.md', 'note');
+    const result = await syncTeamMemory(repo, { message: 'sync' });
+    // Local changes are still persisted, but nothing is pushed without upstream.
+    expect(result.committed).toBe(true);
+    expect(result.pushed).toBe(false);
+    expect(result.skippedReason).toBe('no-upstream');
+  });
+
+  it('unstages the team path when the commit fails (e.g. a failing hook)', async () => {
+    const { repo } = freshRemoteAndClone('alice');
+    // A pre-commit hook that always fails forces the commit step to error out.
+    const hook = path.join(repo, '.git', 'hooks', 'pre-commit');
+    fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+    fs.chmodSync(hook, 0o755);
+
+    writeTeamMemory(repo, 'feedback/x.md', 'note');
+    const result = await syncTeamMemory(repo, { message: 'sync' });
+
+    expect(result.committed).toBe(false);
+    // The team path must NOT be left staged, or the user's next manual commit
+    // would sweep it in.
+    expect(git(repo, 'diff', '--cached', '--name-only').trim()).toBe('');
+  }, 30_000);
+
+  it('does not push commits the sync did not create (branch already ahead)', async () => {
+    const { bare, repo } = freshRemoteAndClone('alice');
+    // Alice has an unrelated local commit that was never pushed.
+    fs.writeFileSync(path.join(repo, 'unrelated.txt'), 'local only');
+    git(repo, 'add', 'unrelated.txt');
+    git(repo, 'commit', '-m', 'unrelated local work');
+
+    // A team memory change then triggers the sync.
+    writeTeamMemory(repo, 'feedback/x.md', 'note');
+    const result = await syncTeamMemory(repo, { message: 'sync' });
+
+    expect(result.committed).toBe(true);
+    expect(result.pushed).toBe(false);
+    expect(result.skippedReason).toBe('local-ahead');
+
+    // The remote must NOT have received the unrelated commit (an unqualified
+    // push would have published it).
+    const verify = makeWorkingClone(bare, 'verify');
+    cleanup.push(path.dirname(verify));
+    expect(fs.existsSync(path.join(verify, 'unrelated.txt'))).toBe(false);
   }, 30_000);
 });

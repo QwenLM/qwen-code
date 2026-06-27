@@ -1455,9 +1455,11 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private readonly enableTeamMemory: boolean;
   private readonly enableTeamMemorySync: boolean;
-  // Latch so the "team memory enabled but not shareable" warning is emitted at
-  // most once per process, even though refreshHierarchicalMemory may re-run.
-  private teamMemoryShareabilityChecked = false;
+  // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
+  // warning is emitted at most once per repo, even though refreshHierarchicalMemory
+  // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
+  // re-checks shareability instead of reusing the first repo's result.
+  private readonly teamMemoryShareabilityChecked = new Set<string>();
   private readonly enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
@@ -2314,51 +2316,59 @@ export class Config {
           'Team memory enabled but inactive: workspace is not trusted.',
         );
       }
-      // When the tier is active, warn (once) if its directory is not actually
-      // git-shareable — no git root, or a directory-form .gitignore swallowing
-      // it — so the tier never silently shares nothing.
-      if (teamMemoryEnabled && !this.teamMemoryShareabilityChecked) {
-        this.teamMemoryShareabilityChecked = true;
-        const shareabilityWarning = getTeamMemoryShareabilityWarning(
-          this.getProjectRoot(),
-        );
+      const teamProjectRoot = this.getProjectRoot();
+      // When the tier is active, warn (once per repo) if its directory is not
+      // actually git-shareable — no git root, or a directory-form .gitignore
+      // swallowing it — so the tier never silently shares nothing.
+      if (
+        teamMemoryEnabled &&
+        !this.teamMemoryShareabilityChecked.has(teamProjectRoot)
+      ) {
+        this.teamMemoryShareabilityChecked.add(teamProjectRoot);
+        const shareabilityWarning =
+          getTeamMemoryShareabilityWarning(teamProjectRoot);
         if (shareabilityWarning) {
           this.warnings.push(shareabilityWarning);
           this.debugLogger.warn(shareabilityWarning);
         }
       }
-      // Best-effort git sync of team memory before reading it, when opted in:
-      // pulls collaborators' updates (and pushes local ones) so the rebuilt
-      // index reflects the latest. Never throws — a failure must not break
-      // session start.
-      if (teamMemoryEnabled && this.getTeamMemorySyncEnabled()) {
-        const syncResult = await syncTeamMemory(this.getProjectRoot(), {
-          message: 'chore(memory): sync team memory',
-        }).catch((err) => {
-          this.debugLogger.warn('team memory sync failed', err);
-          return undefined;
-        });
-        // Surface the silent no-op: the user opted into sync but, e.g., the repo
-        // has no upstream, so nothing is shared. Debug-level — not every session
-        // should warn loudly, but an operator can see why sync did nothing.
-        if (syncResult?.skippedReason) {
-          this.debugLogger.warn(
-            `team memory sync skipped: ${syncResult.skippedReason}`,
-          );
+      // Rebuild the team index BEFORE syncing so the freshly generated MEMORY.md
+      // is what gets committed and pushed, not a stale one. Then, when opted in,
+      // best-effort git sync (never throws — a failure must not break session
+      // start): pull collaborators' updates and push local ones. If the sync
+      // PULLED new files, rebuild once more so the in-prompt index reflects them.
+      let teamAutoMemoryIndex: string | null = null;
+      if (teamMemoryEnabled) {
+        teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
+          teamProjectRoot,
+        ).catch(() => null);
+        if (this.getTeamMemorySyncEnabled()) {
+          const syncResult = await syncTeamMemory(teamProjectRoot, {
+            message: 'chore(memory): sync team memory',
+          }).catch((err) => {
+            this.debugLogger.warn('team memory sync failed', err);
+            return undefined;
+          });
+          // Surface the silent no-op: the user opted into sync but, e.g., the
+          // repo has no upstream, so nothing is shared. Debug-level — not every
+          // session should warn loudly, but an operator can see why sync did
+          // nothing.
+          if (syncResult?.skippedReason) {
+            this.debugLogger.warn(
+              `team memory sync skipped: ${syncResult.skippedReason}`,
+            );
+          }
+          if (syncResult?.pulled) {
+            teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
+              teamProjectRoot,
+            ).catch(() => teamAutoMemoryIndex);
+          }
         }
       }
-      const [managedAutoMemoryIndex, userAutoMemoryIndex, teamAutoMemoryIndex] =
-        await Promise.all([
-          readAutoMemoryIndex(this.getProjectRoot()),
-          readUserAutoMemoryIndex().catch(() => null),
-          // Best-effort like the user-level read: a failure to read the shared
-          // team index must not strip the managed-memory section.
-          teamMemoryEnabled
-            ? rebuildTeamAutoMemoryIndex(this.getProjectRoot()).catch(
-                () => null,
-              )
-            : Promise.resolve(null),
-        ]);
+      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
+        readAutoMemoryIndex(this.getProjectRoot()),
+        readUserAutoMemoryIndex().catch(() => null),
+      ]);
       // Always surface the user-level section so the main assistant knows the
       // dir exists and can route ad-hoc "remember this cross-project" saves
       // there. When empty the prompt builder emits a "MEMORY.md is currently

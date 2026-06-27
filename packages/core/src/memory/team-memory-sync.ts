@@ -13,7 +13,9 @@ import { getTeamAutoMemoryRoot } from './paths.js';
 
 const execFileAsync = promisify(execFile);
 const debugLogger = createDebugLogger('TEAM_MEMORY_SYNC');
-const GIT_TIMEOUT_MS = 30_000;
+// Bounds the worst-case session-start delay: this runs on the awaited
+// session-start path, and there are at most two network steps (pull + push).
+const GIT_TIMEOUT_MS = 15_000;
 
 export interface TeamMemorySyncResult {
   committed: boolean;
@@ -23,7 +25,10 @@ export interface TeamMemorySyncResult {
     | 'not-a-git-repo'
     | 'no-upstream'
     | 'pull-failed'
-    | 'push-failed';
+    | 'push-failed'
+    // The branch carried commits unrelated to this sync, so pushing would
+    // publish them; we created our commit but deliberately did not push.
+    | 'local-ahead';
 }
 
 /**
@@ -36,6 +41,15 @@ async function tryGit(cwd: string, args: string[]): Promise<string | null> {
       cwd,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
+      // SIGTERM may leave a blocked `ssh` child orphaned; SIGKILL reaps it.
+      killSignal: 'SIGKILL',
+      env: {
+        ...process.env,
+        // Force non-interactive git so a missing credential / askpass prompt
+        // fails fast instead of hanging session start on the network steps.
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_SSH_COMMAND: 'ssh -oBatchMode=yes -oConnectTimeout=5',
+      },
     });
     return stdout;
   } catch (error) {
@@ -45,16 +59,46 @@ async function tryGit(cwd: string, args: string[]): Promise<string | null> {
 }
 
 /**
+ * Resolve the explicit single refspec for pushing the current branch only.
+ * Returns null when HEAD is detached or the branch lacks upstream config, so the
+ * caller can skip rather than fall back to an unqualified `git push` (which could
+ * publish other branches under `push.default=matching`).
+ */
+async function resolvePushTarget(
+  gitRoot: string,
+): Promise<{ remote: string; mergeRef: string } | null> {
+  const branch = (
+    await tryGit(gitRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  )?.trim();
+  if (!branch) {
+    return null; // detached HEAD — no branch to push
+  }
+  const remote = (
+    await tryGit(gitRoot, ['config', '--get', `branch.${branch}.remote`])
+  )?.trim();
+  const mergeRef = (
+    await tryGit(gitRoot, ['config', '--get', `branch.${branch}.merge`])
+  )?.trim();
+  if (!remote || !mergeRef) {
+    return null;
+  }
+  return { remote, mergeRef };
+}
+
+/**
  * Sync the team memory directory with the repository's remote. Best-effort and
  * never throws: any git failure is swallowed so it cannot break a session.
  *
- * Steps: commit local team-memory changes (only that path), fast-forward-only
- * pull, then push. `--ff-only` is deliberate — it never creates a merge commit
- * or a conflict; if the branch has diverged it simply skips rather than touching
- * the working tree. Only the team path is staged, so unrelated local changes are
- * never committed. The commit is authored by `opts.author` when supplied
- * (cooperative per-user attribution on a shared daemon), otherwise by the
- * repo's configured git user.
+ * Order is deliberate: fast-forward-only PULL first (reconcile), THEN commit the
+ * local team path on top of upstream, THEN push. Reconciling before committing
+ * keeps a two-writer branch from diverging and wedging `--ff-only`. `--ff-only`
+ * never creates a merge commit or a conflict; a diverged branch is left
+ * untouched and surfaced as `pull-failed`. Only the team path is staged, so
+ * unrelated local changes are never committed; the push is an explicit
+ * single-branch refspec gated on this sync having created the commit, so it can
+ * never publish unrelated local commits. The commit is authored by `opts.author`
+ * when supplied (cooperative per-user attribution on a shared daemon), otherwise
+ * by the repo's configured git user.
  */
 export async function syncTeamMemory(
   projectRoot: string,
@@ -84,7 +128,36 @@ export async function syncTeamMemory(
   }
   const relPath = path.relative(gitRoot, teamRoot) || '.';
 
-  // 1. Commit local team-memory changes (only the team path).
+  // Resolve upstream up-front: it gates both the reconcile-before-commit pull
+  // and whether a push is even possible.
+  const upstream = await tryGit(gitRoot, [
+    'rev-parse',
+    '--abbrev-ref',
+    '--symbolic-full-name',
+    '@{u}',
+  ]);
+
+  // Capture whether the branch was ALREADY ahead of upstream BEFORE this sync.
+  // If so, pushing would publish those unrelated commits, so we must not push
+  // this cycle — only a commit THIS sync creates may be pushed.
+  let wasAheadBeforeSync = false;
+  if (upstream !== null) {
+    const ahead = await tryGit(gitRoot, ['rev-list', '@{u}..HEAD']);
+    wasAheadBeforeSync = !!ahead && ahead.trim().length > 0;
+
+    // 1. Reconcile FIRST — fast-forward-pull upstream BEFORE committing, so the
+    // local commit lands on top of upstream and can ff-push. Committing first
+    // would diverge a two-writer branch and wedge `--ff-only`.
+    result.pulled = (await tryGit(gitRoot, ['pull', '--ff-only'])) !== null;
+    if (!result.pulled) {
+      // ff refused (diverged) or a transient error — nothing can be shared this
+      // cycle. Skip cleanly WITHOUT committing, leaving the working tree as-is.
+      result.skippedReason = 'pull-failed';
+      return result;
+    }
+  }
+
+  // 2. Commit local team-memory changes (only the team path) on top of upstream.
   const status = await tryGit(gitRoot, [
     'status',
     '--porcelain',
@@ -92,7 +165,7 @@ export async function syncTeamMemory(
     relPath,
   ]);
   if (status && status.trim().length > 0) {
-    await tryGit(gitRoot, ['add', '--', relPath]);
+    const staged = (await tryGit(gitRoot, ['add', '--', relPath])) !== null;
     const commitArgs = ['commit', '-m', opts.message];
     if (opts.author) {
       const email = opts.author.email ?? `${opts.author.name}@users.noreply`;
@@ -100,31 +173,39 @@ export async function syncTeamMemory(
     }
     commitArgs.push('--', relPath);
     result.committed = (await tryGit(gitRoot, commitArgs)) !== null;
+    if (!result.committed && staged) {
+      // Commit failed (hook/GPG/missing user.email — tryGit swallowed it).
+      // Unstage the team paths so a user's next manual `git commit` does not
+      // sweep them in; the working tree is left exactly as it was.
+      await tryGit(gitRoot, ['reset', '--quiet', '--', relPath]);
+    }
   }
 
-  // 2. Pull (fast-forward only) + push, only when an upstream is configured.
-  const upstream = await tryGit(gitRoot, [
-    'rev-parse',
-    '--abbrev-ref',
-    '--symbolic-full-name',
-    '@{u}',
-  ]);
+  // 3. Push — only when an upstream exists, THIS sync created the commit, and the
+  // branch was not already ahead (never publish unrelated local commits).
   if (upstream === null) {
     result.skippedReason = 'no-upstream';
     return result;
   }
-  // NOTE: pull/push act on the WHOLE current branch, not just the team path —
-  // git has no path-scoped pull. With `--ff-only` a diverged branch is left
-  // untouched (no merge), but it also means sync silently does nothing until the
-  // divergence is resolved, so surface it as `pull-failed`.
-  result.pulled = (await tryGit(gitRoot, ['pull', '--ff-only'])) !== null;
-  if (!result.pulled) {
-    // ff-only refused (diverged), or a transient git error. Either way nothing
-    // was shared this cycle; a later push would be rejected, so stop and report.
-    result.skippedReason = 'pull-failed';
+  if (!result.committed) {
+    return result; // nothing of ours to share this cycle
+  }
+  if (wasAheadBeforeSync) {
+    result.skippedReason = 'local-ahead';
     return result;
   }
-  result.pushed = (await tryGit(gitRoot, ['push'])) !== null;
+  const pushTarget = await resolvePushTarget(gitRoot);
+  if (!pushTarget) {
+    result.skippedReason = 'push-failed';
+    return result;
+  }
+  // Explicit single-branch refspec — never an unqualified `git push`.
+  result.pushed =
+    (await tryGit(gitRoot, [
+      'push',
+      pushTarget.remote,
+      `HEAD:${pushTarget.mergeRef}`,
+    ])) !== null;
   if (!result.pushed) {
     result.skippedReason = 'push-failed';
   }
