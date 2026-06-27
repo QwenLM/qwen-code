@@ -409,6 +409,19 @@ export class Query implements AsyncIterable<SDKMessage> {
       this.transport.exitError ??
       new Error('Transport closed before control response');
 
+    // Surface a single correlatable line when the transport dies with work
+    // still in flight (e.g. the CLI subprocess crashes mid-continuation):
+    // otherwise oncall sees only scattered rejected promises with no anchor.
+    const pendingCount =
+      this.pendingControlRequests.size + this.pendingMcpResponses.size;
+    if (pendingCount > 0) {
+      logger.error('Transport finalized with pending requests rejected', {
+        pendingControl: this.pendingControlRequests.size,
+        pendingMcp: this.pendingMcpResponses.size,
+        error: rejectionError.message,
+      });
+    }
+
     for (const pending of this.pendingControlRequests.values()) {
       pending.abortController.abort();
       clearTimeout(pending.timeout);
