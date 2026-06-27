@@ -1907,6 +1907,7 @@ describe('ShellTool', () => {
           undefined,
           undefined,
           setPromoteAbortController,
+          () => true,
         );
         await Promise.resolve();
         expect(setPromoteAbortController).toHaveBeenCalledOnce();
@@ -1946,6 +1947,188 @@ describe('ShellTool', () => {
         await promise;
       });
 
+      it('should append the foreground timeout warning to ANSI output', async () => {
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'ansi-slow-build',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => true,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        const ansiChunk: import('../utils/terminalSerializer.js').AnsiOutput = [
+          [
+            {
+              text: 'still running',
+              bold: false,
+              italic: false,
+              dim: false,
+              underline: false,
+              inverse: false,
+              fg: '',
+              bg: '',
+            },
+          ],
+        ];
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        const warningFrame = updateOutputMock.mock.calls.at(-1)?.[0] as {
+          ansiOutput: import('../utils/terminalSerializer.js').AnsiOutput;
+        };
+        const warningToken = warningFrame.ansiOutput.at(-1)?.[0];
+        expect(warningToken).toMatchObject({
+          text: expect.stringContaining('about to time out'),
+          bold: true,
+          fg: '#ff5555',
+        });
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('still running'),
+          output: 'still running',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should not show the Ctrl+B warning when promotion is ambiguous', async () => {
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'ambiguous-slow-build',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => false,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should suppress a stale Ctrl+B warning if promotion becomes ambiguous before the timer fires', async () => {
+        let canPromote = true;
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'stale-warning-slow-build',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => canPromote,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(4_999);
+        canPromote = false;
+        await vi.advanceTimersByTimeAsync(1);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('schedules the warning against the real timeout clock', async () => {
+        mockShellExecutionService.mockImplementationOnce(
+          (_cmd, _cwd, callback) => {
+            mockShellOutputCallback = callback;
+            vi.advanceTimersByTime(6_000);
+            return {
+              pid: 12345,
+              result: new Promise((resolve) => {
+                resolveExecutionPromise = resolve;
+              }),
+            };
+          },
+        );
+        const setPromoteAbortController = vi.fn();
+        const invocation = shellTool.build({
+          command: 'slow-spawn',
+          is_background: false,
+          timeout: 20_000,
+        }) as ShellToolInvocation;
+
+        const promise = invocation.execute(
+          mockAbortSignal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAbortController,
+          () => true,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        expect(updateOutputMock).toHaveBeenLastCalledWith(
+          expect.stringContaining('about to time out'),
+        );
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('done'),
+          output: 'done',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
       it('should not show the Ctrl+B warning outside interactive mode', async () => {
         const interactiveMock = mockConfig as unknown as {
           isInteractive: Mock;
@@ -1962,6 +2145,7 @@ describe('ShellTool', () => {
           undefined,
           undefined,
           vi.fn(),
+          () => true,
         );
         await Promise.resolve();
 
@@ -2018,6 +2202,7 @@ describe('ShellTool', () => {
           undefined,
           undefined,
           vi.fn(),
+          () => true,
         );
         await Promise.resolve();
 
@@ -2064,6 +2249,7 @@ describe('ShellTool', () => {
           undefined,
           undefined,
           setPromoteAbortController,
+          () => true,
         );
 
         ac.abort();

@@ -2057,6 +2057,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
     setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+    canPromoteForegroundShell?: () => boolean,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
 
@@ -2087,7 +2088,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       signal,
       promoteAbortController.signal,
     ]);
+    let timeoutSignalStartedAt: number | null = null;
     if (effectiveTimeout) {
+      timeoutSignalStartedAt = Date.now();
       const timeoutSignal = AbortSignal.timeout(effectiveTimeout);
       combinedSignal = AbortSignal.any([
         signal,
@@ -2167,7 +2170,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let trailingFlushTimer: ReturnType<typeof setTimeout> | null = null;
     let timeoutWarningTimer: ReturnType<typeof setTimeout> | null = null;
     let showTimeoutWarning = false;
-    const timeoutSignalStartedAt = Date.now();
 
     const cancelTrailingFlush = () => {
       if (trailingFlushTimer !== null) {
@@ -2222,7 +2224,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         !updateOutput ||
         combinedSignal.aborted ||
         !this.config.isInteractive() ||
-        setPromoteAbortControllerCallback === undefined
+        setPromoteAbortControllerCallback === undefined ||
+        canPromoteForegroundShell?.() !== true ||
+        timeoutSignalStartedAt === null
       ) {
         return;
       }
@@ -2235,6 +2239,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
       timeoutWarningTimer = setTimeout(() => {
         timeoutWarningTimer = null;
+        if (combinedSignal.aborted || canPromoteForegroundShell?.() !== true) {
+          return;
+        }
         showTimeoutWarning = true;
         doUpdate();
       }, warningDelay);
