@@ -69,34 +69,88 @@ export function unescapeJsonString(raw: string): string {
   }
 }
 
+interface JsonStringFieldMatch {
+  keyOffset: number;
+  valueStart: number;
+  valueEnd: number;
+  nextSearchOffset: number;
+}
+
+function isInlineJsonWhitespace(char: string | undefined): boolean {
+  return char === ' ' || char === '\t';
+}
+
+function findNextJsonStringField(
+  text: string,
+  key: string,
+  searchFrom: number,
+): JsonStringFieldMatch | undefined {
+  const quotedKey = `"${key}"`;
+  let keyOffset = text.indexOf(quotedKey, searchFrom);
+
+  fieldSearch: while (keyOffset >= 0) {
+    let i = keyOffset + quotedKey.length;
+    while (isInlineJsonWhitespace(text[i])) i++;
+
+    if (text[i] !== ':') {
+      keyOffset = text.indexOf(quotedKey, keyOffset + 1);
+      continue;
+    }
+
+    i++;
+    while (isInlineJsonWhitespace(text[i])) i++;
+
+    if (text[i] !== '"') {
+      keyOffset = text.indexOf(quotedKey, keyOffset + 1);
+      continue;
+    }
+
+    const valueStart = i + 1;
+    i = valueStart;
+    while (i < text.length) {
+      if (text[i] === '\n' || text[i] === '\r') {
+        keyOffset = text.indexOf(quotedKey, keyOffset + 1);
+        continue fieldSearch;
+      }
+      if (text[i] === '\\') {
+        const nextChar = text[i + 1];
+        if (nextChar === undefined || nextChar === '\n' || nextChar === '\r') {
+          keyOffset = text.indexOf(quotedKey, keyOffset + 1);
+          continue fieldSearch;
+        }
+        i += 2;
+        continue;
+      }
+      if (text[i] === '"') {
+        return {
+          keyOffset,
+          valueStart,
+          valueEnd: i,
+          nextSearchOffset: i + 1,
+        };
+      }
+      i++;
+    }
+
+    return undefined;
+  }
+
+  return undefined;
+}
+
 /**
  * Extracts a simple JSON string field value from raw text without full parsing.
- * Looks for `"key":"value"` or `"key": "value"` patterns.
+ * Allows same-line spaces/tabs around the colon.
  * Returns the first match, or undefined if not found.
  */
 export function extractJsonStringField(
   text: string,
   key: string,
 ): string | undefined {
-  const patterns = [`"${key}":"`, `"${key}": "`];
-  for (const pattern of patterns) {
-    const idx = text.indexOf(pattern);
-    if (idx < 0) continue;
-
-    const valueStart = idx + pattern.length;
-    let i = valueStart;
-    while (i < text.length) {
-      if (text[i] === '\\') {
-        i += 2;
-        continue;
-      }
-      if (text[i] === '"') {
-        return unescapeJsonString(text.slice(valueStart, i));
-      }
-      i++;
-    }
-  }
-  return undefined;
+  const match = findNextJsonStringField(text, key, 0);
+  return match
+    ? unescapeJsonString(text.slice(match.valueStart, match.valueEnd))
+    : undefined;
 }
 
 /**
@@ -124,55 +178,34 @@ export function extractLastJsonStringFields(
   const out: Record<string, string | undefined> = { [primaryKey]: undefined };
   for (const k of otherKeys) out[k] = undefined;
 
-  const patterns = [`"${primaryKey}":"`, `"${primaryKey}": "`];
-
   let bestPrimaryValue: string | undefined;
   let bestLineStart = -1;
   let bestLineEnd = -1;
   let bestOffset = -1;
 
-  for (const pattern of patterns) {
-    let searchFrom = 0;
-    while (true) {
-      const idx = text.indexOf(pattern, searchFrom);
-      if (idx < 0) break;
-      searchFrom = idx + pattern.length;
+  let searchFrom = 0;
+  while (true) {
+    const match = findNextJsonStringField(text, primaryKey, searchFrom);
+    if (!match) break;
+    searchFrom = match.nextSearchOffset;
 
-      // Line-contains filter first (cheap)
-      const lineStart = text.lastIndexOf('\n', idx) + 1;
-      const eol = text.indexOf('\n', idx);
-      const lineEnd = eol < 0 ? text.length : eol;
-      if (lineContains) {
-        const line = text.slice(lineStart, lineEnd);
-        if (!line.includes(lineContains)) continue;
-      }
+    // Keep metadata matches on the same JSONL record.
+    const lineStart = text.lastIndexOf('\n', match.keyOffset) + 1;
+    const eol = text.indexOf('\n', match.keyOffset);
+    const lineEnd = eol < 0 ? text.length : eol;
+    if (lineContains) {
+      const line = text.slice(lineStart, lineEnd);
+      if (!line.includes(lineContains)) continue;
+    }
 
-      // Validate the value: walk to a non-escaped closing quote. A truncated
-      // trailing write (no closing quote before EOF) is rejected — this is
-      // the guard that keeps crash-recovery safe.
-      const valueStart = idx + pattern.length;
-      let i = valueStart;
-      let terminated = false;
-      while (i < text.length) {
-        if (text[i] === '\\') {
-          i += 2;
-          continue;
-        }
-        if (text[i] === '"') {
-          terminated = true;
-          break;
-        }
-        i++;
-      }
-      if (!terminated) continue;
-
-      // We accept this match; keep it if it's the latest so far.
-      if (idx > bestOffset) {
-        bestOffset = idx;
-        bestLineStart = lineStart;
-        bestLineEnd = lineEnd;
-        bestPrimaryValue = unescapeJsonString(text.slice(valueStart, i));
-      }
+    // We accept this match; keep it if it's the latest so far.
+    if (match.keyOffset > bestOffset) {
+      bestOffset = match.keyOffset;
+      bestLineStart = lineStart;
+      bestLineEnd = lineEnd;
+      bestPrimaryValue = unescapeJsonString(
+        text.slice(match.valueStart, match.valueEnd),
+      );
     }
   }
 
@@ -199,43 +232,29 @@ export function extractLastJsonStringField(
   key: string,
   lineContains?: string,
 ): string | undefined {
-  const patterns = [`"${key}":"`, `"${key}": "`];
   let lastValue: string | undefined;
   let lastOffset = -1;
-  for (const pattern of patterns) {
-    let searchFrom = 0;
-    while (true) {
-      const idx = text.indexOf(pattern, searchFrom);
-      if (idx < 0) break;
+  let searchFrom = 0;
+  while (true) {
+    const match = findNextJsonStringField(text, key, searchFrom);
+    if (!match) break;
+    searchFrom = match.nextSearchOffset;
 
-      // If lineContains is specified, verify the current line contains it
-      if (lineContains) {
-        const lineStart = text.lastIndexOf('\n', idx) + 1;
-        const lineEnd = text.indexOf('\n', idx);
-        const line = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
-        if (!line.includes(lineContains)) {
-          searchFrom = idx + pattern.length;
-          continue;
-        }
+    // If lineContains is specified, verify the current line contains it
+    if (lineContains) {
+      const lineStart = text.lastIndexOf('\n', match.keyOffset) + 1;
+      const lineEnd = text.indexOf('\n', match.keyOffset);
+      const line = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
+      if (!line.includes(lineContains)) {
+        continue;
       }
+    }
 
-      const valueStart = idx + pattern.length;
-      let i = valueStart;
-      while (i < text.length) {
-        if (text[i] === '\\') {
-          i += 2;
-          continue;
-        }
-        if (text[i] === '"') {
-          if (idx > lastOffset) {
-            lastValue = unescapeJsonString(text.slice(valueStart, i));
-            lastOffset = idx;
-          }
-          break;
-        }
-        i++;
-      }
-      searchFrom = i + 1;
+    if (match.keyOffset > lastOffset) {
+      lastValue = unescapeJsonString(
+        text.slice(match.valueStart, match.valueEnd),
+      );
+      lastOffset = match.keyOffset;
     }
   }
   return lastValue;

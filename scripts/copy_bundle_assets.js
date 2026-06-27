@@ -119,6 +119,30 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     );
   }
 
+  // Copy the built Web Shell SPA (index.html + assets/) so the bundled
+  // `qwen serve` can serve the browser UI at its root path. The library
+  // build outputs (dist/index.js, dist/types) are for npm consumers and are
+  // intentionally NOT copied. Source only exists after the web-shell
+  // workspace is built (npm run build); when absent (e.g. a --cli-only
+  // build, or bundling without a prior full build) we warn and skip so the
+  // bundle step never fails — the daemon then runs API-only at runtime.
+  const webShellDistDir = join(root, 'packages', 'web-shell', 'dist');
+  const webShellIndexHtml = join(webShellDistDir, 'index.html');
+  const webShellAssetsDir = join(webShellDistDir, 'assets');
+  if (existsSync(webShellIndexHtml) && existsSync(webShellAssetsDir)) {
+    const destWebShellDir = join(distDir, 'web-shell');
+    mkdirSync(destWebShellDir, { recursive: true });
+    copyFileSync(webShellIndexHtml, join(destWebShellDir, 'index.html'));
+    copyRecursiveSync(webShellAssetsDir, join(destWebShellDir, 'assets'));
+    console.log('Copied Web Shell UI to dist/web-shell/');
+  } else {
+    console.warn(
+      `Warning: Web Shell assets not found at ${webShellDistDir}; ` +
+        'dist/web-shell/ will be absent and `qwen serve` runs API-only. ' +
+        'Run a full `npm run build` before bundling to include the UI.',
+    );
+  }
+
   console.log('\n✅ All bundle assets copied to dist/');
 }
 

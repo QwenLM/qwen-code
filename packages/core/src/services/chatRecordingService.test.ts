@@ -15,6 +15,7 @@ import {
   type ChatRecord,
   type AtCommandRecordPayload,
 } from './chatRecordingService.js';
+import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
@@ -165,6 +166,47 @@ describe('ChatRecordingService', () => {
         parts: modelFacingParts,
       });
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
+    });
+  });
+
+  describe('rewindRecording', () => {
+    it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        lastCompletedUuid: 'assistant-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      chatRecordingService = new ChatRecordingService(mockConfig);
+
+      chatRecordingService.rebuildTurnBoundaries([
+        {
+          uuid: 'user-1',
+          parentUuid: 'pre-resume-parent',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:00.000Z',
+          type: 'user',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'first resumed turn' }] },
+        },
+        {
+          uuid: 'assistant-1',
+          parentUuid: 'user-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:01.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'response' }] },
+          model: 'gemini-pro',
+        },
+      ]);
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 2 });
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(rewind.subtype).toBe('rewind');
+      expect(rewind.parentUuid).toBe('pre-resume-parent');
     });
   });
 
@@ -566,6 +608,88 @@ describe('ChatRecordingService', () => {
     });
 
     it('should keep small file diff resultDisplay unchanged', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'edit',
+            response: { output: 'ok' },
+          },
+        },
+      ];
+      const resultDisplay: FileDiff = {
+        fileName: 'file.txt',
+        fileDiff: '--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-old\n+new',
+        originalContent: 'old',
+        newContent: 'new',
+        diffStat: {
+          model_added_lines: 1,
+          model_removed_lines: 1,
+          model_added_chars: 3,
+          model_removed_chars: 3,
+          user_added_lines: 0,
+          user_removed_lines: 0,
+          user_added_chars: 0,
+          user_removed_chars: 0,
+        },
+      };
+      const metadata = {
+        callId: 'call-1',
+        status: 'success' as const,
+        responseParts: toolResultParts,
+        resultDisplay,
+        error: undefined,
+        errorType: undefined,
+      };
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+
+      expect(record.toolCallResult?.resultDisplay).toBe(resultDisplay);
+      expect(
+        (record.toolCallResult?.resultDisplay as FileDiff).truncatedForSession,
+      ).toBeUndefined();
+    });
+
+    it('compacts large resultDisplay metadata before recording', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { output: 'result' },
+          },
+        },
+      ];
+      const metadata = {
+        callId: 'call-1',
+        status: 'success',
+        responseParts: toolResultParts,
+        resultDisplay: `head-${'x'.repeat(
+          MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+        )}-tail`,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any;
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const resultDisplay = record.toolCallResult?.resultDisplay;
+
+      expect(typeof resultDisplay).toBe('string');
+      expect((resultDisplay as string).length).toBeLessThanOrEqual(
+        MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+      );
+      expect(resultDisplay).toContain('head-');
+      expect(resultDisplay).toContain('-tail');
+      expect(resultDisplay).toContain('truncated for saved session preview');
+      expect(resultDisplay).not.toContain('CLI history display');
+    });
+
+    it('records promptId on tool results when provided', async () => {
       const toolResultParts: Part[] = [
         {
           functionResponse: {

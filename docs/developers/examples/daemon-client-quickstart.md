@@ -156,7 +156,7 @@ for await (const event of client.subscribeEvents(session.sessionId, {
 }
 ```
 
-The daemon retains the last 4000 events per session in a ring buffer; gaps beyond that window won't be re-deliverable.
+The daemon retains the last 8000 events per session in a ring buffer; gaps beyond that window won't be re-deliverable.
 
 ## Voting on permissions
 

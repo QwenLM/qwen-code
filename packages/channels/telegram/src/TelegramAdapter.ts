@@ -256,6 +256,10 @@ export class TelegramChannel extends ChannelBase {
   }
 
   disconnect(): void {
+    for (const interval of this.typingIntervals.values()) {
+      clearInterval(interval);
+    }
+    this.typingIntervals.clear();
     this.bot.stop();
   }
 

@@ -4,11 +4,10 @@ import type {
   Message,
   PermissionRequest,
   TodoItem,
-  TurnCollapseHead,
 } from '../adapters/types';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage } from './messages/AssistantMessage';
+import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import { PlanMessage } from './messages/PlanMessage';
@@ -20,53 +19,54 @@ import { InsightReady } from './InsightReady';
 interface MessageItemProps {
   message: Message;
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   workspaceCwd?: string;
   isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
+  onBranchSession?: () => void;
+  showAssistantActions?: boolean;
+  showAssistantBranch?: boolean;
   shellOutputMaxLines: number;
-  /** Present on a collapsible turn's prompt row; renders the collapse toggle. */
-  collapse?: TurnCollapseHead;
-  onToggleCollapse?: (turnId: string) => void;
 }
 
 export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
-  onConfirm,
   onShowContextDetail,
   workspaceCwd,
   isLatest = false,
   showRetryHint = false,
   onRetryClick,
+  onBranchSession,
+  showAssistantActions = false,
+  showAssistantBranch = false,
   shellOutputMaxLines,
-  collapse,
-  onToggleCollapse,
 }: MessageItemProps) {
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
         return (
-          <UserMessage
-            content={message.content}
-            images={message.images}
-            collapse={collapse}
-            onToggleCollapse={onToggleCollapse}
-          />
+          <UserMessage content={message.content} images={message.images} />
         );
       case 'assistant':
         return (
           <AssistantMessage
             content={message.content}
-            thinking={message.thinking}
             isStreaming={message.isStreaming}
+            timestamp={message.timestamp}
+            onBranchSession={onBranchSession}
+            showFooterActions={showAssistantActions}
+            showBranchAction={showAssistantBranch}
+          />
+        );
+      case 'thinking':
+        return (
+          <ThinkingMessage
+            content={message.content}
+            isStreaming={message.isStreaming}
+            timestamp={message.timestamp}
           />
         );
       case 'tool_group':
@@ -74,7 +74,6 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             pendingApproval={pendingApproval}
-            onConfirm={onConfirm}
             workspaceCwd={workspaceCwd}
             shellOutputMaxLines={shellOutputMaxLines}
           />
@@ -131,8 +130,24 @@ export const MessageItem = memo(function MessageItem({
 
   if (body === null) return null;
 
+  if (message.role === 'assistant') {
+    if (showAssistantActions) {
+      return body;
+    }
+    return (
+      <MessageTimestamp timestamp={message.timestamp}>{body}</MessageTimestamp>
+    );
+  }
+
   return (
-    <MessageTimestamp timestamp={message.timestamp}>{body}</MessageTimestamp>
+    <MessageTimestamp
+      timestamp={message.timestamp}
+      chatMode={message.role === 'user'}
+      copyText={message.role === 'user' ? message.content : undefined}
+      copyTitle="Copy"
+    >
+      {body}
+    </MessageTimestamp>
   );
 }, areMessageItemPropsEqual);
 
@@ -141,29 +156,16 @@ function areMessageItemPropsEqual(
   next: MessageItemProps,
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
-  if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
+  if (prev.onBranchSession !== next.onBranchSession) return false;
+  if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
-  if (prev.onToggleCollapse !== next.onToggleCollapse) return false;
-  if (!turnCollapseEqual(prev.collapse, next.collapse)) return false;
   return areMessagesEqual(prev.message, next.message);
-}
-
-function turnCollapseEqual(
-  a: TurnCollapseHead | undefined,
-  b: TurnCollapseHead | undefined,
-): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return (
-    a.turnId === b.turnId &&
-    a.collapsed === b.collapsed &&
-    a.hiddenCount === b.hiddenCount
-  );
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {
@@ -181,7 +183,12 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'assistant' &&
         prev.content === next.content &&
-        prev.thinking === next.thinking &&
+        prev.isStreaming === next.isStreaming
+      );
+    case 'thinking':
+      return (
+        next.role === 'thinking' &&
+        prev.content === next.content &&
         prev.isStreaming === next.isStreaming
       );
     case 'system':

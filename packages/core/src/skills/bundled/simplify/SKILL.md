@@ -39,7 +39,7 @@ Use `git diff HEAD` whenever staged changes exist. Otherwise use `git diff`.
 
 ## Step 2: Launch three review passes in parallel
 
-Use the `agent` tool and launch all review passes in a single response so they run concurrently. Each pass must receive the same review scope and diff command. These passes are read-only: each one inspects and reports findings only and must not modify files — all edits happen later in Step 4.
+Use the `agent` tool and launch all review passes in a single response so they run concurrently. **Set `subagent_type: "general-purpose"` on every call — each pass must be an awaitable subagent whose findings return to you inline. Do NOT fork them: do not omit `subagent_type`, and never set `subagent_type: "fork"`. A fork runs fire-and-forget and never returns its findings, so there would be nothing to aggregate in Step 3.** Each pass must receive the same review scope and diff command. These passes are read-only: each one inspects and reports findings only and must not modify files — all edits happen later in Step 4.
 
 Keep each review prompt short and focused. Do not paste the full diff into the prompt. Tell each pass to read the diff itself and inspect only files relevant to its findings.
 

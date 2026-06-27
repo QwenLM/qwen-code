@@ -27,7 +27,8 @@ vi.mock('./dream.js', () => ({
   runManagedAutoMemoryDream: vi.fn(),
 }));
 
-vi.mock('./skillReviewAgentPlanner.js', () => ({
+vi.mock('./skillReviewAgentPlanner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./skillReviewAgentPlanner.js')>()),
   runSkillReviewByAgent: vi.fn(),
 }));
 
@@ -136,31 +137,37 @@ describe('MemoryManager', () => {
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
     });
 
-    it('skips extraction when history writes to a memory file', async () => {
-      const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  name: 'write_file',
-                  args: {
-                    file_path: `${projectRoot}/.qwen/memory/user/test.md`,
+    it.each([
+      ['private', '.qwen/memory/user/test.md'],
+      ['team', '.qwen/team-memory/test.md'],
+    ])(
+      'skips extraction when history writes to a %s memory file',
+      async (_label, filePath) => {
+        const mgr = new MemoryManager();
+        const result = await mgr.scheduleExtract({
+          projectRoot,
+          sessionId: 'sess-1',
+          history: [
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'write_file',
+                    args: {
+                      file_path: path.join(projectRoot, filePath),
+                    },
                   },
                 },
-              },
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        });
 
-      expect(result.skippedReason).toBe('memory_tool');
-      expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
-    });
+        expect(result.skippedReason).toBe('memory_tool');
+        expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
+      },
+    );
 
     it('queues a trailing extract when one is already running', async () => {
       let resolveFirst!: (
@@ -348,6 +355,125 @@ describe('MemoryManager', () => {
     });
   });
 
+  // ─── scheduleSkillReview() confirmBeforePersist ───────────────────────────
+
+  describe('scheduleSkillReview() confirmBeforePersist', () => {
+    let tempDir: string;
+    let projectRoot: string;
+    let skillFilePath: string;
+
+    beforeEach(async () => {
+      vi.resetAllMocks();
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-skill-confirm-'));
+      projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      skillFilePath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      // The agent CREATES the skill at run time (it did not exist before the
+      // review) — staging only quarantines newly-created skills, so the mock
+      // must write the file when invoked rather than the test pre-creating it.
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
+        await fs.writeFile(
+          skillFilePath,
+          '---\ndescription: Foo skill\n---\n# Foo\n',
+        );
+        return { touchedSkillFiles: [skillFilePath] };
+      });
+    });
+
+    afterEach(async () => {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('stages the skill and records pendingSkills when confirmBeforePersist is true', async () => {
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      });
+
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+
+      expect(record.status).toBe('completed');
+      const pendingSkills = record.metadata?.['pendingSkills'] as
+        | unknown[]
+        | undefined;
+      expect(pendingSkills).toBeDefined();
+      expect(pendingSkills).toHaveLength(1);
+
+      // The skill must no longer be under .qwen/skills/
+      await expect(fs.access(skillFilePath)).rejects.toThrow();
+    });
+
+    it('leaves the skill in place and sets no pendingSkills when confirmBeforePersist is false', async () => {
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: false,
+      });
+
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+
+      expect(record.status).toBe('completed');
+      expect(record.metadata?.['pendingSkills']).toBeUndefined();
+
+      // The skill must still be under .qwen/skills/
+      await expect(fs.access(skillFilePath)).resolves.toBeUndefined();
+    });
+
+    it('falls back to systemMessage as progress text when staging yields zero pending', async () => {
+      // The skill exists BEFORE the review, so the agent edits it in place and
+      // staging skips it (only new skills are staged) — zero pending, but the
+      // edit is still a durable change, so the agent's systemMessage should win
+      // over the "without durable changes" default.
+      await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
+      await fs.writeFile(skillFilePath, '---\ndescription: Foo\n---\n# Foo\n');
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        await fs.writeFile(
+          skillFilePath,
+          '---\ndescription: Foo v2\n---\n# Foo v2\n',
+        );
+        return {
+          touchedSkillFiles: [skillFilePath],
+          systemMessage: 'Skill review updated 1 file(s).',
+        };
+      });
+      const mgr = new MemoryManager();
+      const record = await mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      }).promise!;
+      expect(record.metadata?.['pendingSkills']).toBeUndefined();
+      expect(record.progressText).toBe('Skill review updated 1 file(s).');
+    });
+  });
+
   // ─── listTasksByType() ────────────────────────────────────────────────────
 
   describe('listTasksByType()', () => {
@@ -455,6 +581,172 @@ describe('MemoryManager', () => {
       });
       await mgr.drain();
       expect(fires.mock.calls.length).toBe(firesBeforeUnsubscribe);
+    });
+  });
+
+  // ─── skill-review subscription + accept/reject ───────────────────────────
+
+  describe('skill-review subscriptions and pending APIs', () => {
+    let tempDir: string;
+    let projectRoot: string;
+    let skillFilePath: string;
+
+    beforeEach(async () => {
+      vi.resetAllMocks();
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-skill-pending-'));
+      projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      skillFilePath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+    });
+
+    afterEach(async () => {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    /** Produce a completed skill-review task with one pending skill. */
+    async function scheduleAndAwait(mgr: MemoryManager) {
+      // The agent creates the skill at run time (not pre-existing) so staging
+      // quarantines it.
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
+        await fs.writeFile(
+          skillFilePath,
+          '---\ndescription: Foo skill\n---\n# Foo\n',
+        );
+        return { touchedSkillFiles: [skillFilePath] };
+      });
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      });
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+      return record;
+    }
+
+    it('skill-review notify wakes type-filtered skill-review subscribers', async () => {
+      const mgr = new MemoryManager();
+      const fn = vi.fn();
+      const dreamFn = vi.fn();
+      const unsub = mgr.subscribe(fn, { taskType: 'skill-review' });
+      const unsubDream = mgr.subscribe(dreamFn, { taskType: 'dream' });
+
+      await scheduleAndAwait(mgr);
+
+      // At minimum storeWith (running) + update (completed) = 2 notifies
+      expect(fn.mock.calls.length).toBeGreaterThanOrEqual(1);
+      // skill-review notifies must NOT wake dream-filtered subscribers
+      expect(dreamFn).not.toHaveBeenCalled();
+      unsub();
+      unsubDream();
+    });
+
+    it('acceptPendingSkillFromTask promotes the skill and removes it from pendingSkills', async () => {
+      const mgr = new MemoryManager();
+      const record = await scheduleAndAwait(mgr);
+
+      const taskId = record.id;
+      await mgr.acceptPendingSkillFromTask(taskId, 'auto-skill-foo');
+
+      // The skill must now exist at its final path under .qwen/skills/
+      const finalPath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      await expect(fs.access(finalPath)).resolves.toBeUndefined();
+
+      // The task record must reflect 0 remaining pending skills
+      const updated = mgr.getTask(taskId);
+      const remaining = updated?.metadata?.['pendingSkills'] as unknown[];
+      expect(remaining).toHaveLength(0);
+    });
+
+    it('rejectPendingSkillFromTask deletes the staged skill and removes it from pendingSkills', async () => {
+      const mgr = new MemoryManager();
+      const record = await scheduleAndAwait(mgr);
+
+      const taskId = record.id;
+      await mgr.rejectPendingSkillFromTask(taskId, 'auto-skill-foo');
+
+      // The skill must NOT exist under .qwen/skills/
+      const finalPath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      await expect(fs.access(finalPath)).rejects.toThrow();
+
+      // The staged dir must also be gone
+      const stagedPath = path.join(
+        projectRoot,
+        '.qwen',
+        'pending-skills',
+        'auto-skill-foo',
+      );
+      await expect(fs.access(stagedPath)).rejects.toThrow();
+
+      // The task record must reflect 0 remaining pending skills
+      const updated = mgr.getTask(taskId);
+      const remaining = updated?.metadata?.['pendingSkills'] as unknown[];
+      expect(remaining).toHaveLength(0);
+    });
+
+    it('concurrent accept (Keep all) removes every entry, not just the last', async () => {
+      const mgr = new MemoryManager();
+      const names = ['auto-skill-a', 'auto-skill-b', 'auto-skill-c'];
+      const files = names.map((n) =>
+        path.join(projectRoot, '.qwen', 'skills', n, 'SKILL.md'),
+      );
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        for (const f of files) {
+          await fs.mkdir(path.dirname(f), { recursive: true });
+          await fs.writeFile(f, '---\ndescription: x\n---\n# x\n');
+        }
+        return { touchedSkillFiles: files };
+      });
+      const record = await mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      }).promise!;
+      const taskId = record.id;
+      const pending = record.metadata?.['pendingSkills'] as Array<{
+        name: string;
+      }>;
+      expect(pending).toHaveLength(3);
+
+      // "Keep all" fires onAccept for each skill concurrently. The race bug
+      // (reading pendingSkills before the await) left all-but-one behind.
+      await Promise.all(
+        pending.map((p) => mgr.acceptPendingSkillFromTask(taskId, p.name)),
+      );
+
+      const remaining = mgr.getTask(taskId)?.metadata?.['pendingSkills'] as
+        | unknown[]
+        | undefined;
+      expect(remaining).toHaveLength(0);
     });
   });
 
@@ -944,6 +1236,402 @@ describe('MemoryManager', () => {
         touchedTopics: [],
         cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
       });
+    });
+  });
+
+  // ─── #5147 regression: trailing queue + memory pressure ─────────────────
+
+  describe('scheduleExtract #5147', () => {
+    /**
+     * B1: When an extract is already running and a new extract is queued,
+     * superseding the trailing request drops the old params reference (the
+     * old history becomes GC-eligible). Verify that only the latest params
+     * are retained and the trailing extract executes correctly.
+     */
+    it('supersedes trailing queue without leaking old history refs', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+
+      const mgr = new MemoryManager();
+
+      let resolveFirst: (
+        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+      ) => void;
+      let resolveTrailing: (
+        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+      ) => void;
+      const firstPromise = new Promise<
+        Awaited<ReturnType<typeof runAutoMemoryExtract>>
+      >((r) => {
+        resolveFirst = r;
+      });
+      const trailingPromise = new Promise<
+        Awaited<ReturnType<typeof runAutoMemoryExtract>>
+      >((r) => {
+        resolveTrailing = r;
+      });
+
+      // First call → starts running
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(firstPromise);
+
+      void mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [
+          { role: 'user', parts: [{ text: 'first history' }] },
+          { role: 'model', parts: [{ text: 'first response' }] },
+        ],
+      });
+
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // Second call while first is running → queues trailing
+      const secondResult = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [
+          { role: 'user', parts: [{ text: 'second history' }] },
+          { role: 'model', parts: [{ text: 'second response' }] },
+        ],
+      });
+      expect(secondResult.skippedReason).toBe('queued');
+
+      // Third call while first is STILL running → supersedes trailing
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(trailingPromise);
+      const thirdResult = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [
+          { role: 'user', parts: [{ text: 'third history' }] },
+          { role: 'model', parts: [{ text: 'third response' }] },
+        ],
+      });
+      expect(thirdResult.skippedReason).toBe('queued');
+      // Still only 1 actual extract call (first is still running)
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // Finish the first extract
+      resolveFirst!({
+        touchedTopics: [],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 2,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      // Wait for the trailing to be picked up and started
+      await vi.waitFor(() => {
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      });
+
+      // Verify the trailing extract received the third call's params,
+      // not the second call's stale history reference.
+      expect(runAutoMemoryExtract).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          history: [
+            { role: 'user', parts: [{ text: 'third history' }] },
+            { role: 'model', parts: [{ text: 'third response' }] },
+          ],
+        }),
+      );
+
+      // Finish the trailing (should use third history, not second)
+      resolveTrailing!({
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 2,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      // Drain to ensure everything settles
+      await mgr.drain({ timeoutMs: 500 });
+    });
+
+    /**
+     * B2: extract is skipped with 'memory_pressure' when the shared
+     * MemoryPressureMonitor reports hard/critical pressure. The cursor is
+     * NOT advanced (runAutoMemoryExtract is never called), so the unread
+     * messages are retried on a later, lower-pressure turn.
+     */
+    it('skips extract with memory_pressure when the monitor reports critical', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('critical'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBe('memory_pressure');
+      expect(result.touchedTopics).toEqual([]);
+      // The cursor is deliberately NOT advanced (no processedOffset) so
+      // unprocessed messages are retried on a later lower-pressure turn.
+      expect(result.cursor.processedOffset).toBeUndefined();
+      // Gate fired before invoking the real extract → cursor untouched.
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+    });
+
+    /**
+     * B3: extract proceeds normally when the monitor reports normal/soft
+     * pressure (only hard/critical gate it).
+     */
+    it('does not skip extract when pressure is normal', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('soft'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * B3c: when getMemoryPressureMonitor() returns undefined, the gate
+     * allows extraction to proceed — the optional-chain returns undefined
+     * (falsy), so isUnderMemoryPressure returns false.
+     */
+    it('does not skip extract when monitor is absent', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue(undefined),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * B3b: 'hard' pressure level also gates extract (not just 'critical').
+     * In production 'hard' is the first level to fire as memory climbs, so
+     * it needs the same coverage as 'critical'.
+     */
+    it('skips extract when monitor reports hard pressure', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('hard'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(result.skippedReason).toBe('memory_pressure');
+      expect(result.cursor.processedOffset).toBeUndefined();
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+    });
+
+    /**
+     * B4: a queued (trailing) extract is also gated. Because the gate lives
+     * in runExtract — the choke point both the direct and queued paths funnel
+     * through — a trailing extract started after pressure spikes is skipped
+     * rather than bypassing the gate via startQueuedExtract.
+     */
+    it('gates queued trailing extracts under memory pressure', async () => {
+      vi.mocked(runAutoMemoryExtract).mockClear();
+
+      let pressure: 'normal' | 'critical' = 'normal';
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn(() => pressure),
+        }),
+      } as Partial<Config>);
+
+      let resolveFirst: (
+        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+      ) => void;
+      const firstPromise = new Promise<
+        Awaited<ReturnType<typeof runAutoMemoryExtract>>
+      >((r) => {
+        resolveFirst = r;
+      });
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(firstPromise);
+
+      const mgr = new MemoryManager();
+
+      // First extract starts running (pressure normal).
+      void mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'first' }] }],
+      });
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // Queue a trailing extract while the first is still running.
+      const queuedResult = await mgr.scheduleExtract({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'trailing' }] }],
+      });
+      expect(queuedResult.skippedReason).toBe('queued');
+
+      // Pressure spikes, then the first extract finishes → trailing dequeues.
+      pressure = 'critical';
+      resolveFirst!({
+        touchedTopics: [],
+        cursor: {
+          sessionId: 'sess',
+          processedOffset: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      // The trailing extract must NOT call the real runAutoMemoryExtract a
+      // second time — the gate in runExtract skips it under pressure.
+      await mgr.drain({ timeoutMs: 500 });
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * B4b: skill review pressure gate lives in runSkillReview (mirroring
+     * the extract pattern), producing a skipped task record.
+     */
+    it('skips skill review when monitor reports hard pressure', async () => {
+      vi.mocked(runSkillReviewByAgent).mockClear();
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('hard'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config,
+      });
+
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+      expect(record.status).toBe('skipped');
+      expect(record.metadata?.['skippedReason']).toBe('memory_pressure');
+      expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+    });
+
+    /**
+     * B4c: after the gate fires, the finally block must clean up the
+     * skillReviewInFlightByProject Map entry. A second call to
+     * scheduleSkillReview must NOT return already_running.
+     */
+    it('cleans up Map entry after pressure gate fires', async () => {
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('hard'),
+        }),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+
+      // First call: gate fires, skipped record pushed to promise.
+      const first = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config,
+      });
+      expect(first.status).toBe('scheduled');
+      await first.promise!;
+
+      vi.mocked(runSkillReviewByAgent).mockClear();
+
+      // Second call: must not return already_running — the Map entry was
+      // cleaned up by the finally block.
+      const second = mgr.scheduleSkillReview({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config,
+      });
+
+      expect(second.status).toBe('scheduled');
+      expect(second.skippedReason).toBeUndefined();
+    });
+
+    /**
+     * B5: scheduleDream also gates on memory pressure. The dream path does
+     * its own structuredClone of full history, so hard/critical pressure
+     * should skip it alongside extract.
+     */
+    it('skips dream with memory_pressure when monitor reports critical', async () => {
+      const config = makeMockConfig({
+        getMemoryPressureMonitor: vi.fn().mockReturnValue({
+          getPressureLevel: vi.fn().mockReturnValue('critical'),
+        }),
+        getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
+      } as Partial<Config>);
+
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleDream({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        config,
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(result.skippedReason).toBe('memory_pressure');
     });
   });
 });

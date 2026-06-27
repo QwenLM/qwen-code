@@ -20,11 +20,13 @@ import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
+  ServeSessionLspStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
+  ServeWorkspaceMcpResourcesStatus,
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
@@ -39,6 +41,7 @@ export interface RewindSnapshotInfo {
 
 export interface RewindRequest {
   promptId: string;
+  rewindFiles?: boolean;
 }
 
 export interface RewindResponse {
@@ -80,6 +83,8 @@ export interface BridgeSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -109,8 +114,14 @@ export interface BridgeBranchSessionRequest {
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
-  title: string;
-  forkedFrom: { sessionId: string; title: string };
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface BridgeForkAgentResult {
+  sessionId: string;
+  description: string;
+  launched: boolean;
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
@@ -119,7 +130,6 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
-  title?: string;
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
@@ -183,7 +193,83 @@ export interface BridgeHeartbeatState {
   clientLastSeenAt: ReadonlyMap<string, number>;
 }
 
+/**
+ * ACP ext-method the spawned `qwen --acp` child calls between tool batches to
+ * pull user messages the browser queued mid-turn. The child-side caller
+ * (`cli/src/acp-integration/session/Session.ts`) and the daemon-side answerer
+ * (`bridgeClient.ts`) both import THIS single definition, so a rename can't
+ * silently desync them into a runtime `-32601 methodNotFound` (which would
+ * latch the drain off for the session). The desktop ACP client answers the same
+ * method from its own in-memory queue; in `qwen serve` the daemon answers it
+ * from `SessionEntry.midTurnMessageQueue`.
+ */
+export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
+/**
+ * One queued mid-turn message. `originatorClientId` is the trusted client id
+ * that pushed it (from `resolveTrustedClientId`), carried so the drain's SSE
+ * echo can be routed/filtered to that client only — a peer attached to the
+ * same session must not dedupe a message it did not queue.
+ */
+export interface MidTurnQueueEntry {
+  text: string;
+  originatorClientId?: string;
+}
+
+export interface BridgeDaemonStatusLimits {
+  maxSessions: number | null;
+  maxPendingPromptsPerSession: number | null;
+  eventRingSize: number;
+  channelIdleTimeoutMs: number;
+  sessionIdleTimeoutMs: number;
+}
+
+export interface BridgeDaemonSessionDiagnostic {
+  sessionId: string;
+  workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
+  clientCount: number;
+  subscriberCount: number;
+  attachCount: number;
+  pendingPromptCount: number;
+  pendingPermissionCount: number;
+  hasActivePrompt: boolean;
+  lastEventId: number;
+  lastSeenAt?: number;
+  currentModelId?: string;
+  currentApprovalMode?: string;
+}
+
+export interface BridgeDaemonStatusSnapshot {
+  limits: BridgeDaemonStatusLimits;
+  sessionCount: number;
+  pendingPermissionCount: number;
+  channelLive: boolean;
+  permissionPolicy: PermissionPolicy;
+  sessions: BridgeDaemonSessionDiagnostic[];
+}
+
+export interface BridgeExtensionsChangedData {
+  refreshed: number;
+  failed: number;
+  status?:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'failed';
+  source?: string;
+  name?: string;
+  version?: string;
+  error?: string;
+}
+
 export interface AcpSessionBridge {
+  /** Read-only daemon diagnostics for status endpoints. */
+  getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
+
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
    * existing session for the same workspace.
@@ -221,10 +307,10 @@ export interface AcpSessionBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `PromptQueueFullError` and pre-aborted signals throw
-   * synchronously so HTTP routes can reject before returning 202. Deferred
-   * failures such as `SessionNotFoundError` may be returned as rejected
-   * promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject before
+   * returning 202. Deferred failures such as `SessionNotFoundError` may be
+   * returned as rejected promises.
    */
   sendPrompt(
     sessionId: string,
@@ -308,6 +394,15 @@ export interface AcpSessionBridge {
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
 
   /**
+   * Live status summary for a single session by id — the same shape
+   * `listWorkspaceSessions` produces per item. Throws
+   * `SessionNotFoundError` when no live session with that id exists on
+   * this daemon. Lets a caller that already holds a session id poll
+   * `hasActivePrompt` / `clientCount` without scanning the whole list.
+   */
+  getSessionSummary(sessionId: string): BridgeSessionSummary;
+
+  /**
    * Record a client heartbeat for the session. Throws
    * `SessionNotFoundError` for unknown ids and `InvalidClientIdError`
    * when the supplied `clientId` is not registered for this session.
@@ -364,6 +459,16 @@ export interface AcpSessionBridge {
   ): Promise<ServeWorkspaceMcpToolsStatus>;
 
   /**
+   * Read discovered MCP resources (`resources/list`) for one server from
+   * the live ACP registry. Drill-down companion to
+   * `getWorkspaceMcpToolsStatus`; the per-server `resourceCount` rides
+   * the base `/workspace/mcp` status.
+   */
+  getWorkspaceMcpResourcesStatus(
+    serverName: string,
+  ): Promise<ServeWorkspaceMcpResourcesStatus>;
+
+  /**
    * Read the live built-in tool registry for the bound workspace.
    * (New in upstream — kept in bridge pending workspace service migration.)
    */
@@ -388,6 +493,9 @@ export interface AcpSessionBridge {
   /** Read the live background task snapshot for a live session. */
   getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
 
+  /** Read sanitized LSP server status for a live session. */
+  getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
   /** Cancel a background task in a live session. */
   cancelSessionTask(
     sessionId: string,
@@ -411,6 +519,20 @@ export interface AcpSessionBridge {
 
   /** Read workspace-level installed extension status. */
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
+
+  /**
+   * Broadcast extension refresh to all active sessions and emit an
+   * `extensions_changed` workspace event when complete.
+   */
+  refreshExtensionsForAllSessions(
+    data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
+  ): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
+
+  /** Emit an extension lifecycle event without refreshing sessions. */
+  broadcastExtensionsChanged(data: BridgeExtensionsChangedData): void;
 
   /**
    * Switch the active model service for a session. Throws
@@ -482,6 +604,35 @@ export interface AcpSessionBridge {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<{ sessionId: string; answer: string | null }>;
+
+  /**
+   * Launch a background fork agent that inherits the live session's current
+   * conversation context. This is CLI `/fork`, not ACP `session/fork`
+   * (which maps to `/branch`).
+   */
+  launchSessionForkAgent(
+    sessionId: string,
+    directive: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeForkAgentResult>;
+
+  /**
+   * Queue a mid-turn user message for the running turn. The ACP child drains
+   * it between tool batches via the `craft/drainMidTurnQueue` ext-method so
+   * the model sees it before the turn ends. Accepted only while the session
+   * is busy (a prompt is queued or active); an idle (or full-queue) session
+   * returns `{ accepted: false }` so the caller falls back to a normal
+   * next-turn prompt. `context.clientId` is authorized against the session
+   * like `/prompt` and `/btw` — throws `InvalidClientIdError` when the id is
+   * not bound to the session, and `SessionNotFoundError` for unknown ids. The
+   * trusted client id is recorded as the message's originator so the drain's
+   * SSE echo only dedupes that client's pending queue.
+   */
+  enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    context?: BridgeClientRequestContext,
+  ): { accepted: boolean };
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).
@@ -621,6 +772,23 @@ export interface AcpSessionBridge {
    * session count.
    */
   isChannelLive(): boolean;
+
+  /** Number of sessions with an active prompt. */
+  readonly activePromptCount: number;
+
+  /**
+   * Epoch-ms timestamp of the last "activity" event (prompt start/end,
+   * session spawn/restore). `null` when the daemon has never processed
+   * any activity since boot.
+   */
+  readonly lastActivityAt: number | null;
+
+  /**
+   * Milliseconds since the last activity event (`Date.now() - lastActivityAt`).
+   * `null` when no activity has occurred since boot. Computed atomically to
+   * avoid race windows between reading `lastActivityAt` and `Date.now()`.
+   */
+  readonly idleSinceMs: number | null;
 
   /** Test/inspection hook: number of permission requests awaiting a vote. */
   readonly pendingPermissionCount: number;

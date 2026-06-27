@@ -15,6 +15,7 @@ import type {
   DaemonUiEvent,
   DaemonUiPermissionOption,
   DaemonUiToolProvenance,
+  DaemonTurnUsage,
   NormalizeDaemonEventOptions,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
@@ -175,6 +176,12 @@ export function normalizeDaemonEvent(
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
+    case 'session_rewound':
+      return normalizeSessionRewound(event, base);
+
+    case 'session_branched':
+      return normalizeSessionBranched(event, base);
+
     case 'prompt_cancelled': {
       // Forward the optional `reason` (e.g. `'forward_failed'` from the
       // bridge's C3 compensating broadcast) so consumers can distinguish a
@@ -187,6 +194,9 @@ export function normalizeDaemonEvent(
 
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
+
+    case 'mid_turn_message_injected':
+      return normalizeMidTurnMessageInjected(event, base);
 
     case 'user_shell_command': {
       const command = getString(event.data, 'command');
@@ -251,8 +261,14 @@ export function normalizeDaemonEvent(
     case 'settings_changed':
       return normalizeSettingsChanged(event, base);
 
+    case 'trust_change_requested':
+      return normalizeTrustChangeRequested(event, base);
+
     case 'workspace_initialized':
       return normalizeWorkspaceInitialized(event, base);
+
+    case 'github_setup_completed':
+      return normalizeGithubSetupCompleted(event, base);
 
     case 'mcp_budget_warning':
       return normalizeMcpBudgetWarning(event, base);
@@ -265,6 +281,9 @@ export function normalizeDaemonEvent(
 
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
+
+    case 'extensions_changed':
+      return normalizeExtensionsChanged(event, base);
 
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
@@ -330,6 +349,48 @@ function normalizeStateResyncRequired(
   ];
 }
 
+function normalizeSessionRewound(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const promptId = getString(event.data, 'promptId');
+  const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
+  if (!promptId || targetTurnIndex === undefined) {
+    return fallbackDebug(event, base, 'malformed session_rewound payload');
+  }
+  const sessionId = getString(event.data, 'sessionId');
+  return [
+    {
+      ...base,
+      type: 'session.rewound',
+      promptId,
+      targetTurnIndex,
+      ...(sessionId ? { sessionId } : {}),
+    },
+  ];
+}
+
+function normalizeSessionBranched(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sourceSessionId = getString(event.data, 'sourceSessionId');
+  const newSessionId = getString(event.data, 'newSessionId');
+  const displayName = getString(event.data, 'displayName');
+  if (!sourceSessionId || !newSessionId || !displayName) {
+    return fallbackDebug(event, base, 'malformed session_branched payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'session.branched',
+      sourceSessionId,
+      newSessionId,
+      displayName,
+    },
+  ];
+}
+
 function normalizeFollowupSuggestion(
   event: DaemonEvent,
   base: NormalizedEventBase,
@@ -347,6 +408,33 @@ function normalizeFollowupSuggestion(
       sessionId,
       suggestion,
       promptId,
+    },
+  ];
+}
+
+function normalizeMidTurnMessageInjected(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  if (!isRecord(event.data)) {
+    return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
+  }
+  const messages = Array.isArray(event.data['messages'])
+    ? event.data['messages'].filter(
+        (message): message is string =>
+          typeof message === 'string' && message.length > 0,
+      )
+    : [];
+  if (messages.length === 0) {
+    return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
+  }
+  return [
+    {
+      ...base,
+      type: 'status',
+      text: `Inserted message: ${messages.join('\n')}`,
+      source: 'mid_turn_message_injected',
+      data: event.data,
     },
   ];
 }
@@ -381,7 +469,7 @@ function createBase(
  * Forward-compat: SDK reads whichever location the daemon eventually emits
  * without requiring a coordinated SDK release.
  */
-function extractServerTimestamp(event: DaemonEvent): number | undefined {
+export function extractServerTimestamp(event: DaemonEvent): number | undefined {
   const direct = (event as { serverTimestamp?: unknown }).serverTimestamp;
   if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
   const envelopeMeta = (event as { _meta?: unknown })._meta;
@@ -471,16 +559,31 @@ function normalizeSessionUpdate(
     }
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
-      if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
-      return [
-        {
+      const meta = extractUpdateMeta(update);
+      const events: DaemonUiEvent[] = [];
+      if (text) {
+        events.push({
           ...base,
           type: 'assistant.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
-        },
-      ];
+          ...(meta ? { meta } : {}),
+        });
+      }
+      // A turn's per-round token usage rides on an otherwise-empty
+      // `agent_message_chunk` (`_meta.usage`, text blank), so this frame is the
+      // only carrier — emit it even when there is no assistant text to show.
+      const usage = extractAssistantUsage(update);
+      if (usage) {
+        events.push({
+          ...base,
+          type: 'assistant.usage' as const,
+          usage,
+          ...(parentToolCallId ? { parentToolCallId } : {}),
+        });
+      }
+      return events;
     }
     case 'agent_thought_chunk': {
       const text = getTextContent(update['content']);
@@ -551,6 +654,38 @@ function extractParentToolCallId(
 ): string | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   return meta ? getString(meta, 'parentToolCallId') : undefined;
+}
+
+function extractUpdateMeta(
+  update: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  return meta ? { ...meta } : undefined;
+}
+
+/**
+ * Read the token usage the daemon stamps on `agent_message_chunk._meta.usage`.
+ * Returns undefined when no usage is present (older agents, non-usage chunks) so
+ * the caller emits no `assistant.usage` event; a present-but-partial frame keeps
+ * whichever side it has and zero-fills the other.
+ */
+function extractAssistantUsage(
+  update: Record<string, unknown>,
+): DaemonTurnUsage | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const usage = meta && isRecord(meta['usage']) ? meta['usage'] : undefined;
+  if (!usage) return undefined;
+  const inputTokens = numberField(usage, 'inputTokens');
+  const outputTokens = numberField(usage, 'outputTokens');
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  // Cached-read tokens are a subset already counted in inputTokens; carried so
+  // renderers can break out the cache hit, not added to the total again.
+  const cachedTokens = numberField(usage, 'cachedReadTokens');
+  return {
+    inputTokens: inputTokens ?? 0,
+    outputTokens: outputTokens ?? 0,
+    ...(cachedTokens !== undefined ? { cachedTokens } : {}),
+  };
 }
 
 function normalizeToolUpdate(
@@ -665,7 +800,7 @@ function normalizePlanUpdate(
     toolCallId: planCallId,
     title: 'Updated Plan',
     status: 'completed',
-    toolName: 'TodoWrite',
+    toolName: 'todo_write',
     toolKind: 'updated_plan',
     content: [
       {
@@ -1079,6 +1214,65 @@ function normalizeWorkspaceInitialized(
   return [{ ...base, type: 'workspace.initialized', path, action }];
 }
 
+function normalizeTrustChangeRequested(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const workspaceCwd = getString(event.data, 'workspaceCwd');
+  const desiredState = getString(event.data, 'desiredState');
+  const reason = getString(event.data, 'reason');
+  if (
+    !workspaceCwd ||
+    (desiredState !== 'trusted' && desiredState !== 'untrusted')
+  ) {
+    return fallbackDebug(event, base, 'bad trust_change_requested payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.trust.change.requested',
+      workspaceCwd,
+      desiredState,
+      ...(reason !== undefined ? { reason } : {}),
+    },
+  ];
+}
+
+function normalizeGithubSetupCompleted(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const releaseTag = getString(event.data, 'releaseTag');
+  const readmeUrl = getString(event.data, 'readmeUrl');
+  if (!releaseTag || !readmeUrl || !isRecord(event.data)) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed github_setup_completed payload',
+    );
+  }
+  const workflows = event.data['workflows'];
+  const warnings = event.data['warnings'];
+  return [
+    {
+      ...base,
+      type: 'workspace.github.setup.completed',
+      releaseTag,
+      readmeUrl,
+      ...(typeof event.data['secretsUrl'] === 'string'
+        ? { secretsUrl: event.data['secretsUrl'] }
+        : {}),
+      workflows: Array.isArray(workflows) ? workflows : [],
+      gitignore: event.data['gitignore'],
+      warnings: Array.isArray(warnings)
+        ? warnings.filter(
+            (warning): warning is string => typeof warning === 'string',
+          )
+        : [],
+    },
+  ];
+}
+
 function normalizeMcpBudgetWarning(
   event: DaemonEvent,
   base: NormalizedEventBase,
@@ -1209,6 +1403,46 @@ function normalizeMcpServerRestartRefused(
       type: 'workspace.mcp.server_restart_refused',
       serverName,
       reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+    },
+  ];
+}
+
+function normalizeExtensionsChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const refreshed = numberField(event.data, 'refreshed');
+  const failed = numberField(event.data, 'failed');
+  const status = getString(event.data, 'status');
+  const source = getString(event.data, 'source');
+  const name = getString(event.data, 'name');
+  const version = getString(event.data, 'version');
+  const error = getString(event.data, 'error');
+  if (refreshed === undefined || failed === undefined) {
+    return fallbackDebug(event, base, 'malformed extensions_changed payload');
+  }
+  if (
+    status !== undefined &&
+    status !== 'installed' &&
+    status !== 'enabled' &&
+    status !== 'disabled' &&
+    status !== 'updated' &&
+    status !== 'uninstalled' &&
+    status !== 'failed'
+  ) {
+    return fallbackDebug(event, base, 'malformed extensions_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.extensions.changed',
+      refreshed,
+      failed,
+      ...(status ? { status } : {}),
+      ...(source ? { source } : {}),
+      ...(name ? { name } : {}),
+      ...(version ? { version } : {}),
+      ...(error ? { error } : {}),
     },
   ];
 }

@@ -24,6 +24,7 @@ import {
   deserializeSnapshots,
   FILE_HISTORY_DIR,
   MAX_SNAPSHOTS,
+  serializeSnapshot,
 } from './fileHistoryService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -1003,11 +1004,11 @@ export class SessionService {
   /**
    * Forks a session to a new sessionId.
    *
-   * Reads the source JSONL into memory, rewrites every record's `sessionId`
-   * to `newSessionId`, stamps `cwd` to this service's project root, rebuilds
-   * the `parentUuid` chain in write order so the fork is a linear
-   * continuation, stamps `forkedFrom: { sessionId, messageUuid }` on every
-   * copied record for audit, and writes the result to `<newId>.jsonl`.
+   * Reads the source JSONL into memory, reconstructs the active record chain,
+   * rewrites every record's `sessionId` to `newSessionId`, stamps `cwd` to this
+   * service's project root, rebuilds the `parentUuid` chain so the fork is a
+   * linear continuation, stamps `forkedFrom: { sessionId, messageUuid }` on
+   * every copied record for audit, and writes the result to `<newId>.jsonl`.
    *
    * Mirrors Claude Code's `/branch` storage model: full in-memory copy + per-
    * message forkedFrom (see claude-code/src/commands/branch/branch.ts).
@@ -1049,14 +1050,31 @@ export class SessionService {
       );
     }
 
-    // Rebuild the parentUuid chain in write order so the fork is a clean
-    // linear descendant. `forkedFrom` captures the origin of each message.
+    // Copy only the active branch. Rewind leaves old records in the JSONL as
+    // abandoned parentUuid branches; copying raw records would resurrect them.
+    const sourceRecords = this.reconstructHistory(records);
+    if (sourceRecords.length === 0) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+
+    // Rebuild the parentUuid chain in active-history order so the fork is a
+    // clean linear descendant. `forkedFrom` captures the origin of each
+    // message.
     let prevUuid: string | null = null;
-    const forked: ChatRecord[] = records.map((record) => {
+    const forked: ChatRecord[] = sourceRecords.map((record) => {
+      const systemPayload =
+        record.type === 'system' && record.subtype === 'file_history_snapshot'
+          ? remapFileHistorySnapshotPayload(
+              record.systemPayload,
+              sourceSessionId,
+              newSessionId,
+            )
+          : record.systemPayload;
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
         cwd: this.projectRoot,
+        systemPayload,
         parentUuid: prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,
@@ -1066,6 +1084,36 @@ export class SessionService {
       prevUuid = record.uuid;
       return next;
     });
+
+    // File-history snapshots are side-channel system records used by /rewind.
+    // They may not sit on the active message leaf copied above, and copied
+    // records may still point at the source session's prompt ids. Remap and
+    // top up snapshots explicitly so /branch sessions expose /rewind/snapshots
+    // immediately after they become live.
+    const sourceSession = await this.loadSession(sourceSessionId);
+    const existingSnapshotPromptIds =
+      collectFileHistorySnapshotPromptIds(forked);
+    const remappedSnapshots = sourceSession?.fileHistorySnapshots
+      ?.map((snapshot) =>
+        remapSnapshotPromptId(snapshot, sourceSessionId, newSessionId),
+      )
+      .filter((snapshot) => !existingSnapshotPromptIds.has(snapshot.promptId));
+    if (remappedSnapshots?.length) {
+      const snapshotRecord: ChatRecord = {
+        uuid: randomUUID(),
+        parentUuid: prevUuid,
+        sessionId: newSessionId,
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        timestamp: new Date().toISOString(),
+        cwd: this.projectRoot,
+        version: records[0].version,
+        systemPayload: {
+          snapshots: remappedSnapshots.map(serializeSnapshot),
+        },
+      };
+      forked.push(snapshotRecord);
+    }
 
     fs.mkdirSync(chatsDir, { recursive: true });
     const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
@@ -1454,6 +1502,67 @@ export function buildApiHistoryFromConversation(
       .filter((content): content is Content => content !== null);
   }
   return result;
+}
+
+function remapSnapshotPromptId(
+  snapshot: FileHistorySnapshot,
+  sourceSessionId: string,
+  newSessionId: string,
+): FileHistorySnapshot {
+  const sourcePrefix = `${sourceSessionId}########`;
+  if (!snapshot.promptId.startsWith(sourcePrefix)) {
+    return snapshot;
+  }
+  return {
+    ...snapshot,
+    promptId: `${newSessionId}########${snapshot.promptId.slice(sourcePrefix.length)}`,
+  };
+}
+
+function remapFileHistorySnapshotPayload(
+  payload: ChatRecord['systemPayload'],
+  sourceSessionId: string,
+  newSessionId: string,
+): ChatRecord['systemPayload'] {
+  const filePayload = payload as FileHistorySnapshotRecordPayload | undefined;
+  if (!Array.isArray(filePayload?.snapshots)) return payload;
+
+  try {
+    const snapshots = deserializeSnapshots(filePayload.snapshots).map(
+      (snapshot) =>
+        serializeSnapshot(
+          remapSnapshotPromptId(snapshot, sourceSessionId, newSessionId),
+        ),
+    );
+    return { snapshots };
+  } catch {
+    return payload;
+  }
+}
+
+function collectFileHistorySnapshotPromptIds(
+  records: ChatRecord[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const record of records) {
+    if (
+      record.type !== 'system' ||
+      record.subtype !== 'file_history_snapshot' ||
+      !record.systemPayload
+    ) {
+      continue;
+    }
+    const payload = record.systemPayload as FileHistorySnapshotRecordPayload;
+    if (!Array.isArray(payload.snapshots)) continue;
+    try {
+      for (const snapshot of deserializeSnapshots(payload.snapshots)) {
+        ids.add(snapshot.promptId);
+      }
+    } catch {
+      // Malformed snapshot records are ignored the same way loadSession does.
+    }
+  }
+  return ids;
 }
 
 /**

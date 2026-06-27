@@ -24,6 +24,7 @@ import { useVimModeState } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { GoalPill, useFooterGoalState } from './GoalPill.js';
+import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
 
 export const Footer: React.FC = () => {
@@ -141,6 +142,10 @@ export const Footer: React.FC = () => {
   if (goalActive) {
     rightItems.push({ key: 'goal', node: <GoalPill /> });
   }
+  const cronTaskCount = useFooterCronTaskCount();
+  if (cronTaskCount > 0) {
+    rightItems.push({ key: 'cron', node: <CronPill count={cronTaskCount} /> });
+  }
 
   // Layout matches upstream: left column has status line (top) + hints/mode
   // (bottom), right section has indicators. Status line and hints coexist.
@@ -202,10 +207,28 @@ export const Footer: React.FC = () => {
               {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
             </Text>
           )}
+        {/* P7-trigger: the current turn was steered toward the Workflow tool
+            by the `workflow` keyword. Hidden during ctrl-quit warnings so they
+            take precedence (matches the worktree indicator above). */}
+        {uiState.workflowKeywordActive &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text color={theme.text.accent} wrap="truncate">
+              {`⚙ ${t('workflow active')}`}
+            </Text>
+          )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {!uiState.isSkillReviewDialogOpen &&
+            (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
+              <Text color={theme.status.warning}>
+                {` ⚠ ${t('{{count}} skill(s) pending review', {
+                  count: String(uiState.skillReviewPending!.skills.length),
+                })}`}
+              </Text>
+            )}
         </Box>
       </Box>
 

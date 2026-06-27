@@ -17,7 +17,11 @@ import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import type { CallableTool, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
-import { updateMCPServerStatus, MCPServerStatus } from './mcp-client.js';
+import {
+  MCPServerStatus,
+  removeMCPServerStatus,
+  updateMCPServerStatus,
+} from './mcp-client.js';
 
 vi.mock('node:fs/promises');
 
@@ -91,6 +95,7 @@ describe('DiscoveredMCPTool', () => {
   });
 
   afterEach(() => {
+    removeMCPServerStatus(serverName);
     vi.restoreAllMocks();
   });
 
@@ -1275,6 +1280,7 @@ describe('DiscoveredMCPTool', () => {
 
       const connectionError = new Error('Connection closed');
 
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
       (mockMcpClient.callTool as any).mockRejectedValueOnce(connectionError);
 
       const reconnectTool = new DiscoveredMCPTool(
@@ -1304,12 +1310,30 @@ describe('DiscoveredMCPTool', () => {
         callTool: vi.fn(),
       };
 
+      const retryClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        retryClient,
+      );
+
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(retryTool);
       const mockConfig = {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
           discoverToolsForServer,
-          ensureTool: vi.fn().mockResolvedValue(null),
+          ensureTool,
         }),
       };
 
@@ -1336,6 +1360,70 @@ describe('DiscoveredMCPTool', () => {
       ).rejects.toThrow('Invalid parameters');
 
       expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('should not retry aborted calls even when the server is disconnected', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(),
+      };
+
+      const retryClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const retryTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        retryClient,
+      );
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(retryTool);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      (mockMcpClient.callTool as any).mockRejectedValue(abortError);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      const invocation = reconnectTool.build(params);
+      await expect(
+        invocation.execute(new AbortController().signal),
+      ).rejects.toThrow('The operation was aborted');
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+      expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
     it('should not retry after reconnection attempt fails', async () => {
@@ -1370,6 +1458,7 @@ describe('DiscoveredMCPTool', () => {
       };
 
       const connectionError = new Error('ECONNREFUSED');
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
       (mockMcpClient.callTool as any).mockRejectedValue(connectionError);
 
       const reconnectTool = new DiscoveredMCPTool(
@@ -1455,6 +1544,7 @@ describe('DiscoveredMCPTool', () => {
         );
 
         const invocation = reconnectTool.build(params);
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
         await invocation.execute(new AbortController().signal);
 
         expect(discoverToolsForServer).toHaveBeenCalled();

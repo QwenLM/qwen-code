@@ -95,7 +95,10 @@ describe('mcp list command', () => {
     MockedClient.mockImplementation(() => mockClient);
     mockedCreateTransport.mockResolvedValue(mockTransport);
     MockedExtensionManager.mockImplementation(() => mockExtensionManager);
-    mockedIsWorkspaceTrusted.mockReturnValue(true);
+    mockedIsWorkspaceTrusted.mockReturnValue({
+      isTrusted: true,
+      source: 'file',
+    });
     mockedAssembleMcpServers.mockImplementation((servers) => servers ?? {});
     mockedLoadMcpApprovals.mockReturnValue({
       getState: vi.fn(() => 'approved'),
@@ -109,6 +112,22 @@ describe('mcp list command', () => {
 
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'No MCP servers configured.',
+    );
+  });
+
+  it('passes explicit untrusted workspace state to the extension manager', async () => {
+    mockedLoadSettings.mockReturnValue({ merged: { mcpServers: {} } });
+    mockedIsWorkspaceTrusted.mockReturnValue({
+      isTrusted: false,
+      source: 'file',
+    });
+
+    await listMcpServers();
+
+    expect(MockedExtensionManager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isWorkspaceTrusted: false,
+      }),
     );
   });
 

@@ -305,6 +305,19 @@ export const AGENT_FLAGS = {
   defaultModesEnabled: true,
 } as const
 
+function canOfferMidTurnAttachments(
+  attachments?: FileAttachment[],
+): boolean {
+  if (!attachments?.length) {
+    return true
+  }
+
+  return attachments.every((attachment) => {
+    if (!attachment.mimeType?.startsWith('image/')) return false
+    return typeof attachment.base64 === 'string' && attachment.base64.length > 0
+  })
+}
+
 const MAX_ADMIN_REMEMBER_MINUTES = 60
 const MAX_ANNOTATIONS_PER_MESSAGE = 200
 const MAX_ANNOTATION_JSON_BYTES = 32 * 1024
@@ -2868,7 +2881,7 @@ export class SessionManager implements ISessionManager {
   }
 
   private hasNoRenderableLocalMessages(managed: ManagedSession): boolean {
-    const loadedMessageCount = managed.messages.length
+    const loadedMessageCount = managed.messages?.length ?? 0
     const persistedMessageCount = managed.messageCount ?? loadedMessageCount
     return loadedMessageCount === 0 && persistedMessageCount === 0
   }
@@ -2882,16 +2895,11 @@ export class SessionManager implements ISessionManager {
       QWEN_CODE_CONNECTION_SLUG
     )
       return false
-    if (managed.messages.length > 0) return false
-    if (managed.name && !this.isExternalSessionPlaceholderTitle(managed.name))
+    if (!this.hasNoRenderableLocalMessages(managed)) return false
+    const title = typeof managed.name === 'string' ? managed.name : undefined
+    if (title && !this.isExternalSessionPlaceholderTitle(title))
       return false
     if (managed.preview || managed.lastMessageRole) return false
-    if (
-      [managed.createdAt, managed.lastUsedAt, managed.lastMessageAt].some(
-        (timestamp) => typeof timestamp === 'number' && timestamp > 0,
-      )
-    )
-      return false
 
     return true
   }
@@ -4729,6 +4737,68 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  private createMidTurnMessagesDrainedCallback(
+    managed: ManagedSession,
+  ): (messageIds: string[]) => void {
+    return (messageIds: string[]) => {
+      const drainedEntries: Array<{
+        messageId?: string
+        optimisticMessageId?: string
+      }> = []
+      for (const messageId of messageIds) {
+        const index = managed.messageQueue.findIndex((entry) => {
+          if (!entry.midTurnPending) return false
+          if (
+            entry.messageId === messageId ||
+            entry.optimisticMessageId === messageId
+          ) {
+            return true
+          }
+          if (!entry.messageId && !entry.optimisticMessageId) {
+            return entry.message === messageId
+          }
+          return false
+        })
+        if (index >= 0) {
+          const [entry] = managed.messageQueue.splice(index, 1)
+          drainedEntries.push({
+            messageId: entry.messageId,
+            optimisticMessageId: entry.optimisticMessageId,
+          })
+        }
+      }
+      if (drainedEntries.length < messageIds.length) {
+        sessionLog.warn(
+          `Mid-turn drain acknowledgement matched ${drainedEntries.length}/${messageIds.length} entries for session ${managed.id}`,
+        )
+      }
+      if (drainedEntries.length > 0) {
+        sessionLog.info(
+          `Acknowledged ${drainedEntries.length} mid-turn queued message(s) for session ${managed.id}`,
+        )
+        for (const entry of drainedEntries) {
+          if (!entry.messageId) continue
+          const existingMessage = managed.messages.find(
+            (m) => m.id === entry.messageId,
+          )
+          if (!existingMessage) continue
+          existingMessage.isQueued = false
+          this.sendEvent(
+            {
+              type: 'user_message',
+              sessionId: managed.id,
+              message: existingMessage,
+              status: 'accepted',
+              optimisticMessageId: entry.optimisticMessageId,
+            },
+            managed.workspace.id,
+          )
+        }
+        this.persistSession(managed)
+      }
+    }
+  }
+
   private async createAgentForManagedSession(
     managed: ManagedSession,
   ): Promise<AgentInstance> {
@@ -4978,48 +5048,8 @@ export class SessionManager implements ISessionManager {
         })
       }
 
-      const onMidTurnMessagesDrained = (messages: string[]) => {
-        const drainedEntries: Array<{
-          messageId?: string
-          optimisticMessageId?: string
-        }> = []
-        for (const message of messages) {
-          const index = managed.messageQueue.findIndex(
-            (entry) => entry.midTurnPending && entry.message === message,
-          )
-          if (index >= 0) {
-            const [entry] = managed.messageQueue.splice(index, 1)
-            drainedEntries.push({
-              messageId: entry.messageId,
-              optimisticMessageId: entry.optimisticMessageId,
-            })
-          }
-        }
-        if (drainedEntries.length > 0) {
-          sessionLog.info(
-            `Acknowledged ${drainedEntries.length} mid-turn queued message(s) for session ${managed.id}`,
-          )
-          for (const entry of drainedEntries) {
-            if (!entry.messageId) continue
-            const existingMessage = managed.messages.find(
-              (m) => m.id === entry.messageId,
-            )
-            if (!existingMessage) continue
-            existingMessage.isQueued = false
-            this.sendEvent(
-              {
-                type: 'user_message',
-                sessionId: managed.id,
-                message: existingMessage,
-                status: 'accepted',
-                optimisticMessageId: entry.optimisticMessageId,
-              },
-              managed.workspace.id,
-            )
-          }
-          this.persistSession(managed)
-        }
-      }
+      const onMidTurnMessagesDrained =
+        this.createMidTurnMessagesDrainedCallback(managed)
 
       // ============================================================
       // Construct backend via factory
@@ -8097,15 +8127,6 @@ export class SessionManager implements ISessionManager {
     // injection point is available, keep the message queued for the next turn.
     if (managed.isProcessing) {
       const agent = managed.agent
-      const canInjectMidTurn =
-        !attachments?.length &&
-        !storedAttachments?.length &&
-        (agent?.enqueueMidTurnMessage?.(message) ?? false)
-
-      sessionLog.info(
-        `Session ${sessionId} ${canInjectMidTurn ? 'queued message for mid-turn injection' : 'queued message for next turn'}`,
-      )
-
       // Create user message for UI
       const userMessage: Message = {
         id: generateMessageId(),
@@ -8116,6 +8137,21 @@ export class SessionManager implements ISessionManager {
         textElements: options?.textElements,
         isQueued: true,
       }
+      const hasStoredAttachmentsWithoutLivePayload =
+        (storedAttachments?.length ?? 0) > 0 && !attachments?.length
+      const canInjectMidTurn =
+        !hasStoredAttachmentsWithoutLivePayload &&
+        canOfferMidTurnAttachments(attachments) &&
+        (agent?.enqueueMidTurnMessage?.(message, attachments, {
+          messageId: userMessage.id,
+          optimisticMessageId: options?.optimisticMessageId,
+        }) ??
+          false)
+
+      sessionLog.info(
+        `Session ${sessionId} ${canInjectMidTurn ? 'queued message for mid-turn injection' : 'queued message for next turn'}`,
+      )
+
       managed.messages.push(userMessage)
 
       // Always show the message as queued while the current turn is still

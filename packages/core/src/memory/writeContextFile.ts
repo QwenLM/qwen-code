@@ -231,7 +231,7 @@ function resolveContextFilePath(
   // appending to a stale `QWEN.md` — clients then observed "I just
   // wrote content but it's missing from /workspace/memory". Mirrors the
   // discovery path's `getAllGeminiMdFilenames()` usage in
-  // `workspaceMemory.ts:collectWorkspaceMemoryStatus`.
+  // `workspace-memory.ts:collectWorkspaceMemoryStatus`.
   const filename = getCurrentGeminiMdFilename();
   if (scope === 'workspace') {
     return path.join(projectRoot, filename);

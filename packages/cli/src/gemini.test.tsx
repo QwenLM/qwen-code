@@ -13,13 +13,14 @@ import {
   afterEach,
   type MockInstance,
 } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   createNonInteractivePromptId,
   main,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
-  startInteractiveUI,
 } from './gemini.js';
+import { startInteractiveUI } from './ui/startInteractiveUI.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
@@ -28,6 +29,31 @@ import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
+
+describe('gemini import boundary', () => {
+  it('does not statically import ACP or noninteractive auth branches', () => {
+    const source = readFileSync('src/gemini.tsx', 'utf8');
+
+    expect(source).not.toContain(
+      "import { runAcpAgent } from './acp-integration/acpAgent.js'",
+    );
+    expect(source).not.toContain(
+      "import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js'",
+    );
+    expect(source).not.toContain(
+      "import { initializeApp } from './core/initializer.js'",
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/acp-integration\/acpAgent\.js['"]\s*\)/,
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/validateNonInterActiveAuth\.js['"]\s*\)/,
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/core\/initializer\.js['"]\s*\)/,
+    );
+  });
+});
 
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
@@ -116,6 +142,24 @@ vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
 }));
 
+vi.mock('./ui/AppContainer.js', () => ({
+  AppContainer: () => null,
+}));
+
+// Stub the settings watcher: main() constructs one and calls startWatching()
+// in non-bare mode. The real implementation reads settings.user/.workspace
+// paths and arms chokidar file watchers, neither of which these main()-flow
+// tests supply or want as a side effect.
+vi.mock('./config/settingsWatcher.js', () => ({
+  SettingsWatcher: class {
+    startWatching() {}
+    stopWatching() {}
+    addChangeListener() {
+      return () => {};
+    }
+  },
+}));
+
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
@@ -191,6 +235,7 @@ describe('gemini.tsx main function', () => {
         getDebugMode: () => false,
         getListExtensions: () => false,
         getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
         initialize: vi.fn(),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
         getIdeMode: () => false,
@@ -317,6 +362,7 @@ describe('gemini.tsx main function', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -362,7 +408,128 @@ describe('gemini.tsx main function', () => {
         projectHooks: undefined,
       },
       expect.any(Function),
+      undefined,
+      // settingsWatcher: not started in bare mode
+      undefined,
     );
+  });
+
+  it('writes non-interactive warnings discovered during config initialization', async () => {
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const validatorModule = await import('./validateNonInterActiveAuth.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const initializerModule = await import('./core/initializer.js');
+    const startupWarningsModule = await import('./utils/startupWarnings.js');
+    const userStartupWarningsModule = await import(
+      './utils/userStartupWarnings.js'
+    );
+
+    mockWriteStderrLine.mockClear();
+    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    });
+    vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
+    vi.spyOn(
+      userStartupWarningsModule,
+      'getUserStartupWarnings',
+    ).mockResolvedValue([]);
+    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+
+    let initialized = false;
+    const configStub = {
+      isInteractive: () => false,
+      getQuestion: () => 'hello',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn().mockImplementation(async () => {
+        initialized = true;
+      }),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getFailedMcpServerNames: () => [],
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => (initialized ? ['late memory warning'] : []),
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getContentGeneratorConfig: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      getProxy: () => undefined,
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
+      configStub,
+    );
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      processExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('late memory warning');
   });
 
   it('creates non-interactive prompt ids that preserve session correlation', () => {
@@ -628,6 +795,7 @@ describe('gemini.tsx main function', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -761,6 +929,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -871,6 +1040,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -957,6 +1127,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
@@ -1113,6 +1284,7 @@ describe('startInteractiveUI', () => {
     expect(options).toEqual({
       exitOnCtrlC: false,
       isScreenReaderEnabled: false,
+      alternateScreen: false,
     });
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)

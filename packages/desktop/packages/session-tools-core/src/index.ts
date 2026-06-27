@@ -80,6 +80,8 @@ export {
   // Multi-header credential helpers
   detectCredentialMode,
   getEffectiveHeaderNames,
+  SOURCE_SLUG_REGEX,
+  assertValidSourceSlug,
 } from './source-helpers.ts';
 
 // Validation
@@ -135,6 +137,13 @@ export type {
 } from './context.ts';
 
 export { createNodeFileSystem } from './context.ts';
+
+// Path security
+export {
+  isPathInsideOrEqual,
+  isPathWithinDirectory,
+  isPathWithinDirectoryForCreation,
+} from './runtime/path-security.ts';
 
 // Handlers
 export {

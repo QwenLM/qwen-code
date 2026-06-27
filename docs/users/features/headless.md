@@ -406,6 +406,6 @@ These messages keep CI runners alive and let you monitor progress. They do not a
 ## Resources
 
 - [CLI Configuration](../configuration/settings#command-line-arguments) - Complete configuration guide
-- [Authentication](../configuration/settings#environment-variables-for-api-access) - Setup authentication
+- [Authentication](../configuration/auth.md) - Setup authentication
 - [Commands](../features/commands) - Interactive commands reference
 - [Tutorials](../quickstart) - Step-by-step automation guides

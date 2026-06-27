@@ -9,18 +9,16 @@
  *
  * These exercise the daemon end-to-end without needing a working model
  * credential: they spawn a real `node packages/cli/dist/index.js serve`
- * (which itself spawns real `qwen --acp` children), then probe the HTTP
- * surface. The agent's `initialize` + `newSession` handshake works
- * without auth, so session creation, listing, cancellation, validation,
- * SSE wiring, the CORS guard, the bearer-auth guard and shutdown all
- * run here.
+ * with dummy OpenAI auth env, then probe the HTTP surface without issuing
+ * model calls. Session creation, listing, cancellation, validation, SSE
+ * wiring, the CORS guard, the bearer-auth guard and shutdown all run here.
  *
- * Tests that require an actual model call (streaming prompts, real
- * permission flows, Last-Event-ID resume across a real reconnect) live
- * in `qwen-serve-streaming.test.ts` and skip when no auth is set.
+ * Tests that require prompt streaming or real permission flows live in
+ * `qwen-serve-streaming.test.ts`, backed by the local fake OpenAI server.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -45,11 +43,13 @@ const TOKEN = 'integration-test-token';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
+let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
 
 beforeAll(async () => {
+  homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
   daemon = spawn(
     process.execPath,
     [
@@ -78,17 +78,25 @@ beforeAll(async () => {
       // capabilities baseline below assumes their default state; a
       // dev machine exporting any of these would otherwise fail the
       // exact-equality assertion.
-      env: Object.fromEntries(
-        Object.entries(process.env).filter(
-          ([k]) =>
-            ![
-              'QWEN_SERVE_PROMPT_DEADLINE_MS',
-              'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
-              'QWEN_SERVE_RATE_LIMIT',
-              'QWEN_SERVE_NO_MCP_POOL',
-            ].includes(k),
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([k]) =>
+              ![
+                'QWEN_SERVE_PROMPT_DEADLINE_MS',
+                'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
+                'QWEN_SERVE_RATE_LIMIT',
+                'QWEN_SERVE_NO_MCP_POOL',
+              ].includes(k),
+          ),
         ),
-      ),
+        HOME: homeDir,
+        QWEN_HOME: path.join(homeDir, '.qwen'),
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+      },
     },
   );
   // Read stdout until we see the listening line + parse the port.
@@ -122,9 +130,15 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  if (!daemon || daemon.exitCode !== null) return;
-  daemon.kill('SIGTERM');
-  await new Promise((r) => daemon.once('exit', r));
+  try {
+    if (!daemon || daemon.exitCode !== null) return;
+    daemon.kill('SIGTERM');
+    await new Promise((r) => daemon.once('exit', r));
+  } finally {
+    if (homeDir) {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }
 }, 15_000);
 
 describe('qwen serve — bearer auth (timing-safe compare)', () => {
@@ -209,14 +223,19 @@ describe('qwen serve — capabilities envelope', () => {
     //
     // Conditional tags absent under this suite's spawn flags (no
     // `--require-auth` / `--allow-origin` / deadline env vars /
-    // rate-limit opt-in): `require_auth`, `allow_origin`,
-    // `prompt_absolute_deadline`, `writer_idle_timeout`, `rate_limit`.
+    // rate-limit opt-in, no configured batch ASR model): `require_auth`,
+    // `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`,
+    // `workspace_voice_transcription`, `rate_limit`.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
-    // `workspace_settings` / `workspace_reload` (the CLI serve path
-    // always wires `persistSetting` and the workspace service).
+    // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
+    // `workspace_trust`, `workspace_github_setup`, and
+    // `workspace_reload` (the CLI serve path always wires
+    // `persistSetting`, the workspace service, and route-local
+    // workspace helpers).
     expect(caps.features).toEqual([
       'health',
+      'daemon_status',
       'capabilities',
       'session_create',
       'session_scope_override',
@@ -248,6 +267,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_supported_commands',
       'session_tasks',
       'session_stats',
+      'session_lsp',
+      'session_status',
       'session_close',
       'session_metadata',
       'mcp_guardrails',
@@ -260,7 +281,11 @@ describe('qwen serve — capabilities envelope', () => {
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_settings',
+      'workspace_permissions',
+      'workspace_voice',
+      'workspace_trust',
       'workspace_init',
+      'workspace_github_setup',
       'workspace_mcp_restart',
       'session_recap',
       'session_btw',
@@ -276,6 +301,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_extensions',
       'session_branch',
       'workspace_reload',
+      'voice_transcribe',
     ]);
   });
 });
@@ -555,6 +581,61 @@ describe('qwen serve — PATCH /session/:id/metadata', () => {
       body: JSON.stringify({ displayName: 42 }),
     });
     expect(res.status).toBe(400);
+    await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — prompt clientId admission', () => {
+  // Validates the three real-daemon behaviors that DaemonSessionClient's
+  // clientId self-heal relies on (see
+  // docs/superpowers/specs/2026-06-24-daemon-clientid-self-heal-design.md).
+  // Model-free: prompt admission (where invalid_client_id is decided) runs
+  // before any model call, so promptNonBlocking returns 202 on acceptance
+  // without reaching the (unreachable, fake) model.
+  it('rejects an unregistered prompt clientId and re-registers via resume', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const prompt = { prompt: [{ type: 'text', text: 'hi' }] };
+
+    // (1) An unregistered clientId (e.g. one held across a daemon restart) is
+    //     rejected at admission with 400 invalid_client_id — the exact signal
+    //     the SDK self-heals on.
+    const rejected = await client
+      .promptNonBlocking(
+        session.sessionId,
+        prompt,
+        undefined,
+        'client-never-registered',
+      )
+      .catch((err: unknown) => err);
+    expect(rejected).toBeInstanceOf(DaemonHttpError);
+    expect((rejected as DaemonHttpError).status).toBe(400);
+    expect((rejected as DaemonHttpError).body).toMatchObject({
+      code: 'invalid_client_id',
+    });
+
+    // (2) resume re-registers and mints a fresh, valid clientId.
+    const reattached = await client.resumeSession(session.sessionId, {
+      workspaceCwd: REPO_ROOT,
+    });
+    expect(reattached.clientId).toBeTypeOf('string');
+    expect(reattached.clientId).not.toBe('client-never-registered');
+
+    // (3) Retrying admission with the fresh clientId is accepted (202),
+    //     proving reattach + retry recovers the turn end-to-end.
+    const accepted = await client.promptNonBlocking(
+      session.sessionId,
+      prompt,
+      undefined,
+      reattached.clientId,
+    );
+    expect(accepted).toMatchObject({ promptId: expect.any(String) });
+
+    // The accepted turn dispatches to the unreachable fake model
+    // asynchronously; cancel so nothing lingers past the test.
+    await client.cancel(session.sessionId, reattached.clientId).catch(() => {});
     await client.closeSession(session.sessionId);
   });
 });

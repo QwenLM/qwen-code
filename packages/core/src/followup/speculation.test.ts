@@ -63,32 +63,30 @@ describe('startSpeculation', () => {
     forkedAgentMocks.runForkedAgent.mockResolvedValue({
       jsonResult: { suggestion: '' },
     });
-    forkedAgentMocks.sendMessageStream.mockImplementation(
-      async function* () {
-        if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
-          yield {
-            type: 'chunk',
-            value: {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        functionCall: {
-                          id: 'call_123',
-                          name: 'read_file',
-                          args: { path: 'a.ts' },
-                        },
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_123',
+                        name: 'read_file',
+                        args: { path: 'a.ts' },
                       },
-                    ],
-                  },
+                    },
+                  ],
                 },
-              ],
-            },
-          };
-        }
-      },
-    );
+              },
+            ],
+          },
+        };
+      }
+    });
 
     const state = await startSpeculation(config, 'read a.ts');
     await vi.waitFor(() => {
@@ -97,9 +95,7 @@ describe('startSpeculation', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(state.messages[1].parts?.[0].functionCall?.id).toBe('call_123');
-    expect(state.messages[2].parts?.[0].functionResponse?.id).toBe(
-      'call_123',
-    );
+    expect(state.messages[2].parts?.[0].functionResponse?.id).toBe('call_123');
 
     await abortSpeculation(state);
   });

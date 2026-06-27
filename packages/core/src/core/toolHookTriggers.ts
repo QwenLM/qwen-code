@@ -99,8 +99,9 @@ export interface PostToolBatchHookResult {
  * @param messageBus - The message bus instance
  * @param toolName - Name of the tool being executed
  * @param toolInput - Input parameters for the tool
- * @param toolUseId - Unique identifier for this tool use
+ * @param toolUseId - Unique identifier for this tool use (internal format, e.g., toolu_xxx)
  * @param permissionMode - Current permission mode
+ * @param tool_call_id - Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
  * @returns PreToolUseHookResult indicating whether to proceed and any modifications
  */
 export async function firePreToolUseHook(
@@ -110,6 +111,7 @@ export async function firePreToolUseHook(
   toolUseId: string,
   permissionMode: string,
   signal?: AbortSignal,
+  tool_call_id?: string,
 ): Promise<PreToolUseHookResult> {
   if (!messageBus) {
     return { shouldProceed: true };
@@ -128,6 +130,7 @@ export async function firePreToolUseHook(
           tool_name: toolName,
           tool_input: toolInput,
           tool_use_id: toolUseId,
+          ...(tool_call_id && { tool_call_id }),
         },
         signal,
       },
@@ -216,8 +219,9 @@ export async function firePreToolUseHook(
  * @param toolName - Name of the tool that was executed
  * @param toolInput - Input parameters that were used
  * @param toolResponse - Response from the tool execution
- * @param toolUseId - Unique identifier for this tool use
+ * @param toolUseId - Unique identifier for this tool use (internal format, e.g., toolu_xxx)
  * @param permissionMode - Current permission mode
+ * @param tool_call_id - Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
  * @returns PostToolUseHookResult with any additional context
  */
 export async function firePostToolUseHook(
@@ -228,6 +232,7 @@ export async function firePostToolUseHook(
   toolUseId: string,
   permissionMode: string,
   signal?: AbortSignal,
+  tool_call_id?: string,
 ): Promise<PostToolUseHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -247,6 +252,7 @@ export async function firePostToolUseHook(
           tool_input: toolInput,
           tool_response: toolResponse,
           tool_use_id: toolUseId,
+          ...(tool_call_id && { tool_call_id }),
         },
         signal,
       },
@@ -300,12 +306,13 @@ export async function firePostToolUseHook(
  * Fire PostToolUseFailure hook via MessageBus and process the result
  *
  * @param messageBus - The message bus instance
- * @param toolUseId - Unique identifier for this tool use
+ * @param toolUseId - Unique identifier for this tool use (internal format, e.g., toolu_xxx)
  * @param toolName - Name of the tool that failed
  * @param toolInput - Input parameters that were used
  * @param errorMessage - Error message describing the failure
  * @param errorType - Optional error type classification
  * @param isInterrupt - Whether the failure was caused by user interruption
+ * @param tool_call_id - Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
  * @returns PostToolUseFailureHookResult with any additional context
  */
 export async function firePostToolUseFailureHook(
@@ -317,6 +324,7 @@ export async function firePostToolUseFailureHook(
   isInterrupt?: boolean,
   permissionMode?: string,
   signal?: AbortSignal,
+  tool_call_id?: string,
 ): Promise<PostToolUseFailureHookResult> {
   if (!messageBus) {
     return {};
@@ -333,6 +341,7 @@ export async function firePostToolUseFailureHook(
         input: {
           permission_mode: permissionMode,
           tool_use_id: toolUseId,
+          ...(tool_call_id && { tool_call_id }),
           tool_name: toolName,
           tool_input: toolInput,
           error: errorMessage,

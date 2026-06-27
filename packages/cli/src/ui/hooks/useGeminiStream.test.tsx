@@ -35,7 +35,7 @@ import {
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
-import { MessageType, StreamingState } from '../types.js';
+import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 
@@ -44,6 +44,7 @@ const mockSendMessageStream = vi
   .fn()
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
+const mockRunVisionBridge = vi.hoisted(() => vi.fn());
 
 const MockedGeminiClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -106,6 +107,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     activeGoalEquals: mockActiveGoalEquals,
     setActiveGoal: mockSetActiveGoal,
     clearActiveGoal: mockClearActiveGoal,
+    runVisionBridge: mockRunVisionBridge,
   };
 });
 
@@ -276,6 +278,7 @@ describe('useGeminiStream', () => {
       .mockClear()
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
+    mockRunVisionBridge.mockReset();
   });
 
   afterEach(() => {
@@ -332,6 +335,7 @@ describe('useGeminiStream', () => {
           props.history,
           props.addItem,
           props.config,
+          true,
           props.loadedSettings,
           props.onDebugMessage,
           props.handleSlashCommand,
@@ -407,6 +411,330 @@ describe('useGeminiStream', () => {
           type: SendMessageType.Notification,
           notificationDisplayText: displayText,
         }),
+      );
+    });
+  });
+
+  describe('vision bridge gate', () => {
+    const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
+    const enableBridge = (primaryAcceptsImages = false) => {
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: () =>
+          primaryAcceptsImages ? { image: true } : {},
+        getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+      });
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'describe' }, imagePart],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+    };
+
+    it('runs the bridge and replaces image parts with text for text-only models', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+      expect(sent).toContain('[transcribed image]');
+      expect(sent).not.toContain('inlineData');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.VISION_NOTICE,
+          text: expect.stringContaining('Converted 1 image(s) to text via vm'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.VISION_NOTICE,
+          text: expect.stringContaining(
+            'Your image and prompt/context were sent',
+          ),
+        }),
+        expect.any(Number),
+      );
+      // The transcription is fed to the model (asserted above via `sent`) but
+      // must NOT be echoed in the notice — showing it there duplicated the
+      // description that the model already surfaces in its answer.
+      const visionNotice = mockAddItem.mock.calls.find(
+        (c) =>
+          c[0]?.type === MessageType.VISION_NOTICE &&
+          String(c[0]?.text).includes('Converted'),
+      );
+      expect(String(visionNotice?.[0]?.text)).not.toContain(
+        '[transcribed image]',
+      );
+    });
+
+    it('does not query bridge config for text-only messages', async () => {
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: vi.fn(() => ({})),
+        getDefaultVisionBridgeModel: vi.fn(() => ({ id: 'vision-model' })),
+      });
+      handleAtCommandSpy.mockResolvedValue({
+        processedQuery: [{ text: 'describe without images' }],
+        shouldProceed: true,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('describe without images');
+      });
+
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(mockConfig.getEffectiveInputModalities).not.toHaveBeenCalled();
+      expect(mockConfig.getDefaultVisionBridgeModel).not.toHaveBeenCalled();
+    });
+
+    it('keeps the turn alive with text plus a note when the bridge fails', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'failed',
+        parts: [
+          { text: 'describe' },
+          {
+            text: '[Vision bridge could not interpret the attached image(s): timed out.]',
+          },
+        ],
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'vm',
+        modelEndpoint: 'vision.example.com',
+        egressOccurred: true,
+        error: 'timed out',
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+      expect(sent).toContain('could not interpret');
+      expect(sent).not.toContain('inlineData');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining(
+            'Your image and prompt/context were sent to vm (vision.example.com).',
+          ),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('does not expose raw provider errors in the bridge failure notice', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'failed',
+        parts: [
+          { text: 'describe' },
+          {
+            text: '[Vision bridge could not interpret the attached image(s): the vision model request failed.]',
+          },
+        ],
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'vm',
+        modelEndpoint: 'vision.example.com',
+        egressOccurred: true,
+        error: '401 from https://signed.example.com?token=secret',
+      });
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.not.stringContaining('token=secret'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('vision model request failed'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('shows egress disclosure after cancellation if image data was already sent', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockImplementation(({ signal }) => {
+        Object.defineProperty(signal, 'aborted', {
+          value: true,
+          configurable: true,
+        });
+        return Promise.resolve({
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          modelId: 'vm',
+          modelEndpoint: 'vision.example.com',
+          egressOccurred: true,
+        });
+      });
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.VISION_NOTICE,
+          text: expect.stringContaining(
+            'Your image and prompt/context were sent to vm (vision.example.com).',
+          ),
+        }),
+        expect.any(Number),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('does not show a bridge notice after cancellation before dispatch', async () => {
+      enableBridge();
+      mockRunVisionBridge.mockImplementation(({ signal }) => {
+        Object.defineProperty(signal, 'aborted', {
+          value: true,
+          configurable: true,
+        });
+        return Promise.resolve({
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          modelId: 'vm',
+        });
+      });
+
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+
+      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('were sent to'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('skips the bridge when the primary model already accepts images', async () => {
+      enableBridge(/* primaryAcceptsImages */ true);
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      // The image is sent straight to the (multimodal) primary model.
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        'inlineData',
+      );
+    });
+
+    it('runs the bridge when primary model modalities are unknown', async () => {
+      enableBridge();
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: () => ({}),
+      });
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vm',
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        '[transcribed image]',
+      );
+      expect(
+        JSON.stringify(mockSendMessageStream.mock.calls[0][0]),
+      ).not.toContain('inlineData');
+    });
+
+    it('skips the bridge when no image-capable model is available', async () => {
+      enableBridge();
+      Object.assign(mockConfig, {
+        getDefaultVisionBridgeModel: () => undefined,
+      });
+      const { result, mockSendMessageStream } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('@img.png describe');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockRunVisionBridge).not.toHaveBeenCalled();
+      expect(JSON.stringify(mockSendMessageStream.mock.calls[0][0])).toContain(
+        'inlineData',
+      );
+    });
+  });
+
+  it('labels loop wakeup cron notifications as Loop', async () => {
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            prompt: string;
+            cronExpr?: string;
+            missed?: boolean;
+          }) => void,
+        ) => {
+          callback({ prompt: '/loop check status', cronExpr: '@wakeup' });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: 'Loop: /loop check status' },
+        expect.any(Number),
       );
     });
   });
@@ -589,6 +917,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -688,6 +1017,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -720,7 +1050,7 @@ describe('useGeminiStream', () => {
       text: `\n[User message received during tool execution]: ${queuedPrompt}`,
     };
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      expectedMidTurnMessage,
+      [expectedMidTurnMessage],
       queuedPrompt,
     );
     const queuedPromptAddItemIndex = mockAddItem.mock.calls.findIndex(
@@ -744,6 +1074,905 @@ describe('useGeminiStream', () => {
       'prompt-id-midturn',
       { type: SendMessageType.ToolResult },
     );
+  });
+
+  it('resolves mid-turn @ image messages before submitting tool results', async () => {
+    const queuedPrompt = 'inspect @/tmp/screenshot.png';
+    const resolvedImagePart: Part = {
+      inlineData: {
+        mimeType: 'image/png',
+        data: 'iVBORw0KGgo=',
+      },
+    };
+    const resolvedTextPart: Part = { text: 'inspect @/tmp/screenshot.png' };
+    const transcriptPart: Part = { text: '[mid-turn image transcript]' };
+    const recordMidTurnUserMessage = vi.fn();
+    const recordAtCommand = vi.fn();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+      getChatRecordingService: vi.fn(() => ({
+        recordMidTurnUserMessage: vi.fn(),
+      })),
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [transcriptPart],
+      transcript: '[mid-turn image transcript]',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vm',
+    });
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordAtCommand,
+      recordMidTurnUserMessage,
+    });
+    const resolveAtCommandQuerySpy = vi
+      .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+      .mockResolvedValue({
+        processedQuery: [resolvedTextPart, resolvedImagePart],
+        shouldProceed: true,
+        recording: {
+          filesRead: ['/tmp/screenshot.png'],
+          status: 'success',
+        },
+      });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-image',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    const expectedMidTurnParts: Part[] = [
+      {
+        text: `\n[User message received during tool execution]: ${transcriptPart.text}`,
+      },
+    ];
+    expect(mockRunVisionBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [resolvedTextPart, resolvedImagePart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.VISION_NOTICE,
+        text: expect.stringContaining('to text via'),
+      }),
+      expect.any(Number),
+    );
+    // Notice is header-only; the transcript reaches the model, not the notice.
+    const midTurnNotice = mockAddItem.mock.calls.find(
+      (c) =>
+        c[0]?.type === MessageType.VISION_NOTICE &&
+        String(c[0]?.text).includes('to text via'),
+    );
+    expect(String(midTurnNotice?.[0]?.text)).not.toContain(
+      '[mid-turn image transcript]',
+    );
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('[mid-turn image transcript]');
+    expect(sent).not.toContain('inlineData');
+    expect(resolveAtCommandQuerySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: queuedPrompt,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      expectedMidTurnParts,
+      queuedPrompt,
+    );
+    expect(recordAtCommand).toHaveBeenCalledWith({
+      filesRead: ['/tmp/screenshot.png'],
+      status: 'success',
+      userText: queuedPrompt,
+    });
+    expect(handleAtCommandSpy).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [...toolCallResponseParts, ...expectedMidTurnParts],
+      expect.any(AbortSignal),
+      'prompt-id-midturn-image',
+      { type: SendMessageType.ToolResult },
+    );
+  });
+
+  it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
+    const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
+    const resolvedImagePart: Part = {
+      inlineData: {
+        mimeType: 'image/png',
+        data: 'iVBORw0KGgo=',
+      },
+    };
+    const resolvedTextPart: Part = {
+      text: 'inspect @/tmp/screenshot.png and summarize',
+    };
+    const recordMidTurnUserMessage = vi.fn();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+      getChatRecordingService: vi.fn(() => ({
+        recordMidTurnUserMessage: vi.fn(),
+      })),
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: false,
+      status: 'failed',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelId: 'vm',
+      egressOccurred: true,
+      error: 'provider failed',
+    });
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedImagePart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
+    >);
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-bridge-fail',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      await capturedOnComplete?.(completedToolCalls);
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('inspect @/tmp/screenshot.png and summarize');
+    expect(sent).not.toContain('inlineData');
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      [
+        {
+          text: `\n[User message received during tool execution]: ${resolvedTextPart.text}`,
+        },
+      ],
+      queuedPrompt,
+    );
+  });
+
+  it('skips mid-turn @ injection when resolution should not proceed', async () => {
+    const queuedPrompt = 'inspect @/tmp/missing.png';
+    const recordMidTurnUserMessage = vi.fn();
+    const recordAtCommand = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordAtCommand,
+      recordMidTurnUserMessage,
+    });
+    const toolDisplays = [
+      {
+        callId: 'client-read-midturn-at-error',
+        name: 'Read File(s)',
+        description: 'Error attempting to read files',
+        status: ToolCallStatus.Error,
+        resultDisplay: 'Error reading files (/tmp/missing.png): not found',
+        confirmationDetails: undefined,
+      },
+    ];
+    const resolveAtCommandQuerySpy = vi
+      .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+      .mockResolvedValue({
+        processedQuery: null,
+        shouldProceed: false,
+        toolDisplays,
+        recording: {
+          filesRead: ['/tmp/missing.png'],
+          status: 'error',
+          message: 'Error reading files (/tmp/missing.png): not found',
+        },
+      });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-at-error',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    expect(resolveAtCommandQuerySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: queuedPrompt,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(recordAtCommand).toHaveBeenCalledWith({
+      filesRead: ['/tmp/missing.png'],
+      status: 'error',
+      message: 'Error reading files (/tmp/missing.png): not found',
+      userText: queuedPrompt,
+    });
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'tool_group',
+        tools: toolDisplays,
+      },
+      expect.any(Number),
+    );
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      toolCallResponseParts,
+      expect.any(AbortSignal),
+      'prompt-id-midturn-at-error',
+      { type: SendMessageType.ToolResult },
+    );
+  });
+
+  it('warns and skips mid-turn @ injection when resolution fails', async () => {
+    const queuedPrompt = 'inspect @/tmp/unreadable.png';
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockRejectedValue(
+      new Error('permission denied'),
+    );
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-at-throw',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.WARNING,
+        text: 'Could not attach file: permission denied',
+      },
+      expect.any(Number),
+    );
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      toolCallResponseParts,
+      expect.any(AbortSignal),
+      'prompt-id-midturn-at-throw',
+      { type: SendMessageType.ToolResult },
+    );
+  });
+
+  it('times out stalled mid-turn @ resolution before submitting tool results', async () => {
+    vi.useFakeTimers();
+
+    const queuedPrompt = 'inspect @/tmp/slow.png';
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    let resolveSignal: AbortSignal | undefined;
+    let rejectResolve: ((error: Error) => void) | undefined;
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      ({ signal }) => {
+        resolveSignal = signal;
+        return new Promise((_, reject) => {
+          rejectResolve = reject;
+          signal.addEventListener(
+            'abort',
+            () =>
+              reject(
+                signal.reason instanceof Error
+                  ? signal.reason
+                  : new Error('aborted'),
+              ),
+            { once: true },
+          );
+        });
+      },
+    );
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-timeout',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    let completePromise: Promise<void> | undefined;
+    await act(async () => {
+      if (capturedOnComplete) {
+        completePromise = capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    try {
+      expect(resolveSignal).toBeDefined();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(resolveSignal?.aborted).toBe(true);
+      await act(async () => {
+        await completePromise;
+      });
+    } finally {
+      if (!resolveSignal?.aborted) {
+        rejectResolve?.(new Error('cleanup'));
+        await completePromise;
+      }
+    }
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips mid-turn @ fallback side effects when cancelled during resolution', async () => {
+    const queuedPrompt = 'inspect @/tmp/cancelled.png';
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    let resolveSignal: AbortSignal | undefined;
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      ({ signal }) => {
+        resolveSignal = signal;
+        return new Promise(() => {});
+      },
+    );
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-cancel',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        completedToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    let completePromise: Promise<void> | undefined;
+    act(() => {
+      if (capturedOnComplete) {
+        completePromise = capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(resolveSignal).toBeDefined();
+    });
+
+    await act(async () => {
+      result.current.cancelOngoingRequest();
+      await completePromise;
+    });
+
+    expect(resolveSignal?.aborted).toBe(true);
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('does not show mid-turn @ fallback warnings after cancellation and timeout overlap', async () => {
+    vi.useFakeTimers();
+
+    const queuedPrompt = 'inspect @/tmp/cancelled-slow.png';
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-cancel-timeout',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        completedToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    let completePromise: Promise<void> | undefined;
+    act(() => {
+      if (capturedOnComplete) {
+        completePromise = capturedOnComplete(completedToolCalls);
+      }
+    });
+    expect(completePromise).toBeDefined();
+
+    act(() => {
+      result.current.cancelOngoingRequest();
+      vi.advanceTimersByTime(10_000);
+    });
+    await act(async () => {
+      await completePromise;
+    });
+
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.WARNING,
+        text: expect.stringContaining('Could not attach file:'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
   it('handles mid-turn drain when chat recording is not configured', async () => {
@@ -801,6 +2030,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -889,6 +2119,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1001,6 +2232,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1047,6 +2279,387 @@ describe('useGeminiStream', () => {
       // No message should be sent back to the API for a turn with only cancellations
       expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
+  });
+
+  it('does not schedule tool calls collected before a LoopDetected halt', async () => {
+    mockUseReactToolScheduler.mockImplementation(() => [
+      [],
+      mockScheduleToolCalls,
+      mockMarkToolsAsSubmitted,
+    ]);
+
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        // Two identical calls stream before the always-on consecutive guard
+        // halts the turn. The TUI must NOT execute them — it should halt
+        // cleanly like the non-interactive runner.
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'rep-1',
+            name: 'run_shell_command',
+            args: { command: 'echo loop' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-loop-halt',
+          },
+        };
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'rep-2',
+            name: 'run_shell_command',
+            args: { command: 'echo loop' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-loop-halt',
+          },
+        };
+        yield { type: ServerGeminiEventType.LoopDetected };
+      })(),
+    );
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('repeat a tool');
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    // The calls streamed before the halt must not be scheduled for execution.
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+  });
+
+  it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete ??= onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-dup',
+              providerCallId: 'tool-dup',
+              name: 'shell',
+              args: { command: 'echo first' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-dup',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-dup',
+              providerCallId: 'tool-dup',
+              name: 'shell',
+              args: { command: 'echo second' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-dup',
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'done',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+    expect(mockScheduleToolCalls.mock.calls[0][0]).toEqual([
+      expect.objectContaining({
+        callId: 'tool-dup',
+        providerCallId: 'tool-dup',
+        args: { command: 'echo first' },
+      }),
+    ]);
+
+    const completedToolCall = {
+      request: {
+        callId: 'tool-dup',
+        providerCallId: 'tool-dup',
+        name: 'shell',
+        args: { command: 'echo first' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-tui-dup',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'tool-dup',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'tool-dup',
+              name: 'shell',
+              response: { output: 'first' },
+            },
+          },
+        ],
+        resultDisplay: 'first',
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'shell',
+        displayName: 'Shell',
+        description: 'Run a command',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'echo first',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([completedToolCall]);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts).toHaveLength(2);
+    expect(toolResultParts[0].functionResponse?.response?.['output']).toBe(
+      'first',
+    );
+    expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-dup"',
+    );
+    expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits a synthetic response for history-paired duplicate provider ids without scheduling', async () => {
+    const client = new MockedGeminiClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['tool-history']));
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'shell',
+              args: { command: 'echo duplicate' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history',
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts[0].functionResponse?.id).toBe('tool-history');
+    expect(toolResultParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-history"',
+    );
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
+  it('drops repeated history-paired duplicate provider ids after the first synthetic response', async () => {
+    const client = new MockedGeminiClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['tool-history']));
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'shell',
+              args: { command: 'echo duplicate' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'shell',
+              args: { command: 'echo duplicate again' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-fresh',
+              providerCallId: 'tool-fresh',
+              name: 'shell',
+              args: { command: 'echo fresh' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history-loop',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts).toHaveLength(1);
+    expect(toolResultParts[0].functionResponse?.id).toBe('tool-history');
+    expect(toolResultParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-history"',
+    );
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
+  it('does not deduplicate tool calls without provider ids in the TUI stream', async () => {
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'generated-1',
+            name: 'shell',
+            args: { command: 'pwd' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-tui-no-provider',
+          },
+        };
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'generated-2',
+            name: 'shell',
+            args: { command: 'pwd' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-tui-no-provider',
+          },
+        };
+      })(),
+    );
+
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('run shell twice');
+    });
+
+    expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+    expect(mockScheduleToolCalls.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ callId: 'generated-1' }),
+      expect.objectContaining({ callId: 'generated-2' }),
+    ]);
   });
 
   it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
@@ -1151,6 +2764,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1289,6 +2903,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1436,6 +3051,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1551,6 +3167,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1673,6 +3290,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1874,6 +3492,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -1999,6 +3618,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -2137,6 +3757,7 @@ describe('useGeminiStream', () => {
           historyWithToolGroup,
           mockAddItem,
           config,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -2318,6 +3939,7 @@ describe('useGeminiStream', () => {
           history,
           mockAddItem,
           config,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -2553,10 +4175,85 @@ describe('useGeminiStream', () => {
       expect(result.current.pendingHistoryItems).toEqual([
         expect.objectContaining({
           type: 'gemini_thought',
-          text: 'Thinking',
+          durationMs: expect.any(Number),
         }),
       ]);
       expect(result.current.thought).toEqual({ description: 'Thinking' });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('splits oversized streamed thoughts so the pending item stays bounded', async () => {
+      vi.useFakeTimers();
+
+      const splitLimit = 16_384;
+      const tailLength = 123;
+      const longThought = 'a'.repeat(splitLimit * 2 + tailLength);
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, max?: number) =>
+          max !== undefined && s.length > max ? max : s.length,
+      );
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      const mockStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Thought,
+          value: { description: longThought },
+        };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      const thoughtItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) =>
+            item.type === 'gemini_thought' ||
+            item.type === 'gemini_thought_content',
+        );
+      expect(thoughtItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: 'a'.repeat(splitLimit),
+          durationMs: expect.any(Number),
+        }),
+        expect.objectContaining({
+          type: 'gemini_thought_content',
+          text: 'a'.repeat(splitLimit),
+        }),
+      ]);
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought_content',
+          text: 'a'.repeat(tailLength),
+        }),
+      ]);
+      expect(result.current.thought?.description).toHaveLength(4_096);
 
       act(() => {
         result.current.cancelOngoingRequest();
@@ -2624,7 +4321,7 @@ describe('useGeminiStream', () => {
       expect(result.current.pendingHistoryItems).toEqual([
         expect.objectContaining({
           type: 'gemini_thought',
-          text: 'Thinking',
+          durationMs: expect.any(Number),
         }),
       ]);
       expect(result.current.thought).toEqual({ description: 'Thinking' });
@@ -2673,10 +4370,10 @@ describe('useGeminiStream', () => {
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
-        {
+        expect.objectContaining({
           type: 'gemini',
           text: 'Initial',
-        },
+        }),
         expect.any(Number),
       );
 
@@ -2740,6 +4437,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -2789,6 +4487,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -2845,6 +4544,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -2904,6 +4604,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -2985,6 +4686,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3040,6 +4742,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3097,6 +4800,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3170,6 +4874,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3233,6 +4938,109 @@ describe('useGeminiStream', () => {
         }),
         expect.any(Number),
       );
+    });
+
+    it('cancels pending self-paced loop wakeups and notifies on a tick-in-flight abort', async () => {
+      const cancelAllWakeups = vi.fn().mockReturnValue(2);
+      (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue({
+        cancelAllWakeups,
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {}); // keep the tick open
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        result.current.submitQuery('keep checking the deploy');
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      expect(cancelAllWakeups).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Stopped the self-paced loop: cancelled 2 pending wakeups.',
+        },
+        expect.any(Number),
+      );
+      // The count is annotated onto the abort telemetry (4th ctor arg).
+      expect(MockedApiCancelEvent.mock.calls.at(-1)?.[3]).toBe(2);
+    });
+
+    it('uses the singular form when exactly one wakeup was cancelled', async () => {
+      const cancelAllWakeups = vi.fn().mockReturnValue(1);
+      (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue({
+        cancelAllWakeups,
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {}); // keep the tick open
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        result.current.submitQuery('keep checking the deploy');
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Stopped the self-paced loop: cancelled 1 pending wakeup.',
+        },
+        expect.any(Number),
+      );
+      expect(MockedApiCancelEvent.mock.calls.at(-1)?.[3]).toBe(1);
+    });
+
+    it('shows no loop notice when the abort cancelled no wakeups', async () => {
+      const cancelAllWakeups = vi.fn().mockReturnValue(0);
+      (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue({
+        cancelAllWakeups,
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {}); // keep the tick open
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        result.current.submitQuery('ordinary request');
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      // Always attempted; only the user-facing notice and the telemetry
+      // annotation are gated on a positive count.
+      expect(cancelAllWakeups).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('self-paced loop'),
+        }),
+        expect.any(Number),
+      );
+      expect(MockedApiCancelEvent.mock.calls.at(-1)?.[3]).toBeUndefined();
     });
 
     it('should prevent further processing after cancellation', async () => {
@@ -3518,6 +5326,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -3575,6 +5384,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           testConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4068,6 +5878,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4123,6 +5934,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4179,6 +5991,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4291,6 +6104,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -4345,6 +6159,7 @@ describe('useGeminiStream', () => {
         [],
         mockAddItem,
         mockConfig,
+        true,
         mockLoadedSettings,
         mockOnDebugMessage,
         mockHandleSlashCommand,
@@ -4419,6 +6234,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4487,6 +6303,11 @@ describe('useGeminiStream', () => {
     });
 
     it('should accumulate streamed thought descriptions', async () => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -4497,6 +6318,7 @@ describe('useGeminiStream', () => {
             type: ServerGeminiEventType.Thought,
             value: { subject: '', description: 'more' },
           };
+          await holdStream;
           yield {
             type: ServerGeminiEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
@@ -4510,6 +6332,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4528,15 +6351,112 @@ describe('useGeminiStream', () => {
       );
 
       await act(async () => {
-        await result.current.submitQuery('Streamed thought');
+        void result.current.submitQuery('Streamed thought');
+        await Promise.resolve();
+        await Promise.resolve();
       });
 
       await waitFor(() => {
         expect(result.current.thought?.description).toBe('thinking more');
       });
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          durationMs: expect.any(Number),
+        }),
+      ]);
+
+      await act(async () => {
+        releaseStream();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+    });
+
+    it('should count streamed thought descriptions toward the response length', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Count streamed thought');
+      });
+
+      expect(result.current.streamingResponseLengthRef.current).toBe(
+        'thinking'.length,
+      );
+    });
+
+    it('should not count blank thought chunks toward the response length', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: '\n\n' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Ignore blank thought');
+      });
+
+      expect(result.current.streamingResponseLengthRef.current).toBe(0);
+    });
+
+    it('should sum multiple streamed thought chunks toward the response length', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking ' },
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'more' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Count streamed thought chunks');
+      });
+
+      expect(result.current.streamingResponseLengthRef.current).toBe(
+        'thinking more'.length,
+      );
     });
 
     it('should render descriptions from subject-bearing thought chunks', async () => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -4553,6 +6473,7 @@ describe('useGeminiStream', () => {
               description: ' user mentioned globally installed qwen,',
             },
           };
+          await holdStream;
           yield {
             type: ServerGeminiEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
@@ -4563,22 +6484,298 @@ describe('useGeminiStream', () => {
       const { result } = renderTestHook();
 
       await act(async () => {
-        await result.current.submitQuery('Streamed thought');
+        void result.current.submitQuery('Streamed thought');
+        await Promise.resolve();
+        await Promise.resolve();
       });
 
       await waitFor(() => {
+        expect(result.current.thought).toEqual({
+          subject: 'Evaluating installation approach',
+          description: 'The user mentioned globally installed qwen,',
+        });
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: expect.stringMatching(/^gemini_thought/),
+        }),
+        expect.any(Number),
+      );
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          durationMs: expect.any(Number),
+        }),
+      ]);
+
+      await act(async () => {
+        releaseStream();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+    });
+
+    it('should commit thought to history with durationMs on Finished', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning about the problem' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then finish');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('reasoning about the problem'),
+          durationMs: expect.any(Number),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should commit thought to history when Content arrives', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'analyzing the question' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'The answer is 42',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then answer');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() =>
         expect(mockAddItem).toHaveBeenCalledWith(
           expect.objectContaining({
             type: 'gemini_thought',
-            text: 'The user mentioned globally installed qwen,',
+            text: expect.stringContaining('analyzing the question'),
+            durationMs: expect.any(Number),
+          }),
+          expect.any(Number),
+        ),
+      );
+
+      // Content should also be committed
+      await waitFor(() =>
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: expect.stringContaining('The answer is 42'),
+          }),
+          expect.any(Number),
+        ),
+      );
+    });
+
+    it('should commit thought to history on UserCancelled', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'deep thinking' },
+          };
+          yield { type: ServerGeminiEventType.UserCancelled };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('think then cancel');
+      });
+
+      await waitFor(() =>
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('deep thinking'),
+            durationMs: expect.any(Number),
+          }),
+          expect.any(Number),
+        ),
+      );
+    });
+
+    it('should commit thought to history on Error', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking before error' },
+          };
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { message: 'Something went wrong', retryable: false },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then error');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() =>
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('thinking before error'),
+            durationMs: expect.any(Number),
+          }),
+          expect.any(Number),
+        ),
+      );
+    });
+
+    it('should commit thought to history when ToolCallRequest arrives', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'planning tool usage' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery('think then tool call');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('planning tool usage'),
+          durationMs: expect.any(Number),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should commit thought to history on non-continuation Retry', async () => {
+      vi.useFakeTimers();
+      try {
+        let emitRetry: (() => void) | undefined;
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'reasoning before retry' },
+            };
+            // Wait for the buffered thought to be flushed to state before
+            // the Retry event discards remaining buffered events.
+            await new Promise<void>((resolve) => {
+              emitRetry = resolve;
+            });
+            yield {
+              type: ServerGeminiEventType.Retry,
+              isContinuation: false,
+            };
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'retried response',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+        const { result } = renderTestHook();
+
+        await act(async () => {
+          void result.current.submitQuery('think then retry');
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        // Advance past STREAM_UPDATE_THROTTLE_MS (60ms) so the thought
+        // buffer flushes and populates pendingThoughtItem state.
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+          await Promise.resolve();
+        });
+
+        // Now emit the Retry event; commitPendingThought should find the
+        // flushed thought in pendingThoughtItemRef.
+        await act(async () => {
+          emitRetry?.();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+          await Promise.resolve();
+        });
+
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('reasoning before retry'),
+            durationMs: expect.any(Number),
           }),
           expect.any(Number),
         );
-      });
-      expect(result.current.thought).toEqual({
-        subject: 'Evaluating installation approach',
-        description: 'The user mentioned globally installed qwen,',
-      });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should show a retry countdown and update pending history over time', async () => {
@@ -4619,6 +6816,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -4735,6 +6933,7 @@ describe('useGeminiStream', () => {
             [],
             mockAddItem,
             mockConfig,
+            true,
             mockLoadedSettings,
             mockOnDebugMessage,
             mockHandleSlashCommand,
@@ -4808,6 +7007,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -4878,6 +7078,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5007,6 +7208,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5062,6 +7264,7 @@ describe('useGeminiStream', () => {
           [],
           mockAddItem,
           mockConfig,
+          true,
           mockLoadedSettings,
           mockOnDebugMessage,
           mockHandleSlashCommand,
@@ -5283,10 +7486,10 @@ describe('useGeminiStream', () => {
         });
 
         expect(mockAddItem).toHaveBeenCalledWith(
-          {
+          expect.objectContaining({
             type: 'gemini',
             text: 'First call content',
-          },
+          }),
           expect.any(Number),
         );
         expect(mainAbortSignal?.aborted).toBe(true);
@@ -6129,6 +8332,224 @@ describe('useGeminiStream', () => {
           expect.any(Number),
         );
       });
+    });
+  });
+
+  describe('cron scheduler initialization', () => {
+    // Renders useGeminiStream wired to a provided cron scheduler mock, with a
+    // controllable isConfigInitialized gate. `config` identity is stable across
+    // rerenders so the cron effect only re-runs when `initialized` flips.
+    const renderCronHook = (scheduler: unknown, initialized: boolean) => {
+      const cronConfig = {
+        ...mockConfig,
+        isCronEnabled: vi.fn(() => true),
+        getCronScheduler: vi.fn(() => scheduler),
+      } as unknown as Config;
+      return renderHook(
+        (props: { initialized: boolean }) =>
+          useGeminiStream(
+            new MockedGeminiClientClass(cronConfig),
+            [],
+            mockAddItem,
+            cronConfig,
+            props.initialized,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand as unknown as (
+              cmd: PartListUnion,
+            ) => Promise<SlashCommandProcessorResult | false>,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        { initialProps: { initialized } },
+      );
+    };
+
+    it('defers enableDurable and start until isConfigInitialized is true', async () => {
+      const callOrder: string[] = [];
+      const scheduler = {
+        // A real async gap before recording: a synchronous push would make the
+        // order assertion pass even if production dropped the `await`.
+        enableDurable: vi.fn().mockImplementation(async () => {
+          await new Promise((r) => setTimeout(r, 10));
+          callOrder.push('enableDurable');
+        }),
+        start: vi.fn().mockImplementation(() => {
+          callOrder.push('start');
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      const { rerender } = renderCronHook(scheduler, false);
+
+      // Before initialization: the scheduler must not be touched.
+      expect(scheduler.enableDurable).not.toHaveBeenCalled();
+      expect(scheduler.start).not.toHaveBeenCalled();
+
+      rerender({ initialized: true });
+
+      await waitFor(() => {
+        expect(scheduler.start).toHaveBeenCalled();
+      });
+      // enableDurable is awaited before start despite the 10ms gap.
+      expect(callOrder).toEqual(['enableDurable', 'start']);
+    });
+
+    it('does not start scheduler when isConfigInitialized remains false', async () => {
+      const scheduler = {
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      renderCronHook(scheduler, false);
+
+      // Give effects time to run.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(scheduler.enableDurable).not.toHaveBeenCalled();
+      expect(scheduler.start).not.toHaveBeenCalled();
+    });
+
+    it('does not start scheduler if unmounted during the enableDurable gap', async () => {
+      // enableDurable stays pending until we resolve it by hand, so we can
+      // unmount inside the async gap — the exact race the `stopped` flag guards.
+      let resolveEnable: () => void = () => {};
+      const scheduler = {
+        enableDurable: vi.fn().mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              resolveEnable = resolve;
+            }),
+        ),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      const { unmount } = renderCronHook(scheduler, true);
+
+      await waitFor(() => {
+        expect(scheduler.enableDurable).toHaveBeenCalled();
+      });
+      expect(scheduler.start).not.toHaveBeenCalled();
+
+      // Unmount while enableDurable is still in flight, then let it resolve.
+      unmount();
+      resolveEnable();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // The stopped guard must suppress the late start(); cleanup ran stop().
+      expect(scheduler.start).not.toHaveBeenCalled();
+      expect(scheduler.stop).toHaveBeenCalled();
+    });
+
+    it('still starts the scheduler when enableDurable rejects', async () => {
+      const scheduler = {
+        enableDurable: vi.fn().mockRejectedValue(new Error('lock contention')),
+        start: vi.fn(),
+        stop: vi.fn(),
+        getExitSummary: vi.fn(() => null),
+        hasPendingWork: false,
+      };
+
+      renderCronHook(scheduler, true);
+
+      // A failed enableDurable must NOT skip start(): session-only cron tasks
+      // (created via cron_create during this session) still need the scheduler
+      // running — only durable/persistent tasks are lost. Regression guard for
+      // the catch falling through instead of returning (#5022 review).
+      await waitFor(() => {
+        expect(scheduler.start).toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('timestamp attachment', () => {
+    it('attaches a numeric timestamp to gemini items via commitItem', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Hello world',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test');
+      });
+
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      const geminiCalls = mockAddItem.mock.calls.filter(
+        (call: any[]) => call[0]?.type === 'gemini',
+      );
+      expect(geminiCalls.length).toBeGreaterThanOrEqual(1);
+      const geminiItem = geminiCalls[0][0];
+      expect(typeof geminiItem.timestamp).toBe('number');
+      expect(geminiItem.timestamp).toBeGreaterThan(0);
+    });
+
+    it('does not attach timestamp to non-gemini items', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'response',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test');
+      });
+
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      const nonGeminiCalls = mockAddItem.mock.calls.filter(
+        (call: any[]) => call[0]?.type !== 'gemini',
+      );
+      expect(nonGeminiCalls.length).toBeGreaterThanOrEqual(1);
+      for (const call of nonGeminiCalls) {
+        expect(call[0]).not.toHaveProperty('timestamp');
+      }
     });
   });
 });

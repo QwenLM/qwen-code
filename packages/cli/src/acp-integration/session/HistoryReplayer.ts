@@ -18,6 +18,17 @@ import type { SessionContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 
+export const MISSING_TOOL_RESULT_MESSAGE =
+  'Tool result missing from saved history; the previous run likely ended ' +
+  'before this tool completed.';
+
+interface PendingReplayToolCall {
+  callId: string;
+  toolName: string;
+  timestamp?: string;
+  recordId: string;
+}
+
 /**
  * Handles replaying session history on session load.
  *
@@ -29,6 +40,10 @@ export class HistoryReplayer {
   private readonly ctx: SessionContext;
   private readonly messageEmitter: MessageEmitter;
   private readonly toolCallEmitter: ToolCallEmitter;
+  private readonly pendingReplayToolCalls = new Map<
+    string,
+    PendingReplayToolCall
+  >();
 
   constructor(ctx: SessionContext) {
     this.ctx = ctx;
@@ -42,8 +57,39 @@ export class HistoryReplayer {
    * @param records - Array of chat records to replay
    */
   async replay(records: ChatRecord[]): Promise<void> {
-    for (const record of records) {
-      await this.replayRecord(record);
+    this.pendingReplayToolCalls.clear();
+    try {
+      let replayError: unknown;
+      try {
+        for (const record of records) {
+          await this.replayRecord(record);
+        }
+      } catch (error) {
+        replayError = error;
+      }
+
+      let danglingError: unknown;
+      try {
+        await this.failDanglingToolCalls();
+      } catch (error) {
+        danglingError = error;
+      }
+
+      if (replayError && danglingError) {
+        throw new AggregateError(
+          [replayError, danglingError],
+          'Replay and dangling-cleanup both failed',
+        );
+      }
+      if (replayError) {
+        throw replayError;
+      }
+      if (danglingError) {
+        throw danglingError;
+      }
+    } finally {
+      this.pendingReplayToolCalls.clear();
+      this.setActiveRecordId(null);
     }
   }
 
@@ -52,70 +98,84 @@ export class HistoryReplayer {
    */
   private async replayRecord(record: ChatRecord): Promise<void> {
     this.setActiveRecordId(record.uuid, record.timestamp);
-    switch (record.type) {
-      case 'user':
-        // Notification/cron records hold raw XML/prompt the user never
-        // typed; replay the friendly displayText so the assistant's reply
-        // has an antecedent in the ACP transcript.
-        if (record.subtype === 'notification' || record.subtype === 'cron') {
-          const displayText = (
-            record.systemPayload as NotificationRecordPayload | undefined
-          )?.displayText;
-          if (displayText) {
-            await this.messageEmitter.emitUserMessage(
-              displayText,
+    try {
+      switch (record.type) {
+        case 'user':
+          // Notification/cron records hold raw XML/prompt the user never
+          // typed; replay the friendly displayText so the assistant's reply
+          // has an antecedent in the ACP transcript.
+          if (record.subtype === 'notification' || record.subtype === 'cron') {
+            const displayText = (
+              record.systemPayload as NotificationRecordPayload | undefined
+            )?.displayText;
+            if (displayText) {
+              await this.messageEmitter.emitUserMessage(
+                displayText,
+                record.timestamp,
+              );
+            }
+            break;
+          }
+          if (record.subtype === 'mid_turn_user_message') {
+            const displayText = (
+              record.systemPayload as NotificationRecordPayload | undefined
+            )?.displayText;
+            if (displayText) {
+              await this.messageEmitter.emitUserMessage(
+                displayText,
+                record.timestamp,
+              );
+            } else if (record.message) {
+              await this.replayContent(
+                record.message,
+                'user',
+                record.timestamp,
+                record.uuid,
+              );
+            }
+            break;
+          }
+          if (record.message) {
+            await this.replayContent(
+              record.message,
+              'user',
               record.timestamp,
+              record.uuid,
             );
           }
           break;
-        }
-        if (record.subtype === 'mid_turn_user_message') {
-          const displayText = (
-            record.systemPayload as NotificationRecordPayload | undefined
-          )?.displayText;
-          if (displayText) {
-            await this.messageEmitter.emitUserMessage(
-              displayText,
+
+        case 'assistant':
+          if (record.message) {
+            await this.replayContent(
+              record.message,
+              'assistant',
               record.timestamp,
+              record.uuid,
             );
-          } else if (record.message) {
-            await this.replayContent(record.message, 'user', record.timestamp);
+          }
+          if (record.usageMetadata) {
+            await this.replayUsageMetadata(record.usageMetadata);
           }
           break;
-        }
-        if (record.message) {
-          await this.replayContent(record.message, 'user', record.timestamp);
-        }
-        break;
 
-      case 'assistant':
-        if (record.message) {
-          await this.replayContent(
-            record.message,
-            'assistant',
-            record.timestamp,
-          );
-        }
-        if (record.usageMetadata) {
-          await this.replayUsageMetadata(record.usageMetadata);
-        }
-        break;
+        case 'tool_result':
+          await this.replayToolResult(record);
+          break;
 
-      case 'tool_result':
-        await this.replayToolResult(record);
-        break;
+        case 'system':
+          if (record.subtype === 'slash_command') {
+            await this.replaySlashCommandResult(record);
+          }
+          // Other system subtypes (compression, telemetry, at_command) are skipped.
+          break;
 
-      case 'system':
-        if (record.subtype === 'slash_command') {
-          await this.replaySlashCommandResult(record);
-        }
-        // Other system subtypes (compression, telemetry, at_command) are skipped.
-        break;
-
-      default:
-        break;
+        default:
+          break;
+      }
+    } finally {
+      this.setActiveRecordId(null);
     }
-    this.setActiveRecordId(null);
   }
 
   /**
@@ -130,6 +190,7 @@ export class HistoryReplayer {
     content: Content,
     role: 'user' | 'assistant',
     timestamp?: string,
+    recordId?: string,
   ): Promise<void> {
     for (const part of content.parts ?? []) {
       // Text content
@@ -146,15 +207,25 @@ export class HistoryReplayer {
       // Function call (tool start)
       if ('functionCall' in part && part.functionCall) {
         const functionName = part.functionCall.name ?? '';
-        const callId = part.functionCall.id ?? `${functionName}-${Date.now()}`;
+        const sourceCallId = part.functionCall.id;
+        const callId = sourceCallId ?? `${functionName}-${Date.now()}`;
 
-        await this.toolCallEmitter.emitStart({
+        const emitted = await this.toolCallEmitter.emitStart({
           toolName: functionName,
           callId,
           args: part.functionCall.args as Record<string, unknown>,
           status: 'in_progress',
           timestamp,
         });
+
+        if (emitted && role === 'assistant' && recordId && sourceCallId) {
+          this.pendingReplayToolCalls.set(callId, {
+            callId,
+            toolName: functionName,
+            timestamp,
+            recordId,
+          });
+        }
       }
     }
   }
@@ -179,7 +250,8 @@ export class HistoryReplayer {
     }
 
     const result = record.toolCallResult;
-    const callId = result?.callId ?? record.uuid;
+    const callId = this.getToolResultCallId(record);
+    this.pendingReplayToolCalls.delete(callId);
 
     // Extract tool name from the function response in message if available
     const toolName = this.extractToolNameFromRecord(record);
@@ -207,6 +279,30 @@ export class HistoryReplayer {
       await this.emitTaskUsageFromResultDisplay(
         resultDisplay as AgentResultDisplay,
       );
+    }
+  }
+
+  private async failDanglingToolCalls(): Promise<void> {
+    let firstError: unknown;
+    for (const pending of this.pendingReplayToolCalls.values()) {
+      this.setActiveRecordId(pending.recordId, pending.timestamp);
+      try {
+        await this.toolCallEmitter.emitResult({
+          toolName: pending.toolName,
+          callId: pending.callId,
+          success: false,
+          message: [],
+          error: new Error(MISSING_TOOL_RESULT_MESSAGE),
+          timestamp: pending.timestamp,
+        });
+      } catch (error) {
+        firstError ??= error;
+      } finally {
+        this.setActiveRecordId(null);
+      }
+    }
+    if (firstError) {
+      throw firstError;
     }
   }
 
@@ -281,6 +377,29 @@ export class HistoryReplayer {
       }
     }
     return '';
+  }
+
+  private getToolResultCallId(record: ChatRecord): string {
+    const resultCallId = record.toolCallResult?.callId;
+    if (typeof resultCallId === 'string' && resultCallId.length > 0) {
+      return resultCallId;
+    }
+    return this.extractFunctionResponseIdFromRecord(record) ?? record.uuid;
+  }
+
+  private extractFunctionResponseIdFromRecord(
+    record: ChatRecord,
+  ): string | undefined {
+    if (record.message?.parts) {
+      for (const part of record.message.parts) {
+        const id =
+          'functionResponse' in part ? part.functionResponse?.id : undefined;
+        if (typeof id === 'string' && id.length > 0) {
+          return id;
+        }
+      }
+    }
+    return undefined;
   }
 
   private setActiveRecordId(recordId: string | null, timestamp?: string): void {

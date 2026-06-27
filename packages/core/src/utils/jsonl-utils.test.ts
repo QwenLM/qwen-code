@@ -199,6 +199,32 @@ describe('read() / readLines() with malformed lines', () => {
     expect(await read(path.join(tmpRoot, 'does-not-exist.jsonl'))).toEqual([]);
   });
 
+  it('can rethrow non-ENOENT read errors for user-visible callers', async () => {
+    const file = tmpFile('{"a":1}\n');
+    const error = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    const spy = vi.spyOn(fs, 'createReadStream').mockImplementationOnce(() => {
+      throw error;
+    });
+
+    try {
+      await expect(read(file, { throwOnNonEnoentError: true })).rejects.toThrow(
+        'permission denied',
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('still returns [] for missing files when rethrowing read errors', async () => {
+    await expect(
+      read(path.join(tmpRoot, 'does-not-exist.jsonl'), {
+        throwOnNonEnoentError: true,
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it('readLines respects the limit when objects come from recovery', async () => {
     // Two clean lines, then a glued pair. Asking for 3 should yield 3.
     const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}{"i":4}\n{"i":5}\n');

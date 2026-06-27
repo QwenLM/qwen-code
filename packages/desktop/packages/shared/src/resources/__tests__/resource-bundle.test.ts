@@ -381,6 +381,20 @@ describe('resource-bundle', () => {
       expect(warnings.some(w => w.includes('nonexistent'))).toBe(true)
     })
 
+    it('skips legacy invalid source directories when exporting all sources', () => {
+      const wsDir = createTestWorkspace(tmpDir)
+      createTestSource(wsDir, 'valid-source')
+
+      const legacyDir = join(wsDir, 'sources', 'legacy-source-')
+      mkdirSync(legacyDir, { recursive: true })
+      writeFileSync(join(legacyDir, 'config.json'), '{}')
+
+      const { bundle, warnings } = exportResources(wsDir, { sources: 'all' })
+
+      expect(bundle.resources.sources?.map(source => source.slug)).toEqual(['valid-source'])
+      expect(warnings.some(w => w.includes('legacy-source-') && w.includes('invalid slug'))).toBe(true)
+    })
+
     it('skips skills without SKILL.md', () => {
       const wsDir = createTestWorkspace(tmpDir)
       // Create a skill dir with no SKILL.md

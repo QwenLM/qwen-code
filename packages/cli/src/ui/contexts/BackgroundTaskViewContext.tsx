@@ -259,6 +259,15 @@ export function BackgroundTaskViewProvider({
         }
         break;
       }
+      case 'workflow':
+        // Aborts the orchestrator + in-flight dispatches via the
+        // registry's cancel — flips status to 'cancelled' and signals
+        // the AbortController the WorkflowTool wired into the run.
+        // The tool's catch arm sees signal.aborted and records the
+        // terminal in the registry; the registry.cancel here is the
+        // first half of that race (idempotent on either ordering).
+        config.getWorkflowRunRegistry().cancel(target.runId, Date.now());
+        break;
       default: {
         const _exhaustive: never = target;
         throw new Error(

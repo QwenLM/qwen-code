@@ -20,7 +20,7 @@ import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
 } from '../types.js';
-import type { AcpSessionBridge } from '../../acpSessionBridge.js';
+import type { AcpSessionBridge } from '../../acp-session-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Test fixtures

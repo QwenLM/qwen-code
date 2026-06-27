@@ -109,6 +109,29 @@ export function generateServerToken(): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
 }
 
+const PORT_VALUE_PATTERN = /^\d+$/
+
+export function parseServerPort(name: string, value: string | number | undefined, defaultPort: number): number {
+  const raw = value ?? defaultPort
+  let port: number
+
+  if (typeof raw === 'number') {
+    port = raw
+  } else {
+    const trimmed = raw.trim()
+    if (!PORT_VALUE_PATTERN.test(trimmed)) {
+      throw new Error(`Invalid ${name}: expected an integer port between 0 and 65535, got ${JSON.stringify(raw)}`)
+    }
+    port = Number(trimmed)
+  }
+
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`Invalid ${name}: expected an integer port between 0 and 65535, got ${String(raw)}`)
+  }
+
+  return port
+}
+
 // ---------------------------------------------------------------------------
 // Startup lock file
 // ---------------------------------------------------------------------------
@@ -284,11 +307,9 @@ export async function bootstrapServer<TSessionManager, THandlerDeps>(
   const sessionManager = options.createSessionManager()
 
   const rpcHost = options.rpcHost ?? process.env.CRAFT_RPC_HOST ?? '127.0.0.1'
-  const rpcPortRaw = options.rpcPort ?? parseInt(process.env.CRAFT_RPC_PORT ?? '9100', 10)
-  if (!Number.isFinite(rpcPortRaw) || rpcPortRaw < 0 || rpcPortRaw > 65535) {
-    throw new Error(`Invalid RPC port: ${rpcPortRaw}`)
-  }
-  const rpcPort = Math.trunc(rpcPortRaw)
+  const rpcPort = options.rpcPort != null
+    ? parseServerPort('rpcPort', options.rpcPort, 9100)
+    : parseServerPort('CRAFT_RPC_PORT', process.env.CRAFT_RPC_PORT, 9100)
 
   const wsServer = new WsRpcServer({
     host: rpcHost,

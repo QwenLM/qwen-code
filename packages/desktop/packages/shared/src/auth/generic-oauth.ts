@@ -17,7 +17,7 @@ import { generatePKCE, generateState } from './pkce.ts';
  * GitHub (and some other providers) return form-encoded unless you send Accept: application/json.
  * We send Accept: application/json but tolerate form-encoded as a fallback.
  */
-function parseTokenResponse(body: string, contentType: string | null): Record<string, string> {
+function parseTokenResponse(body: string, contentType: string | null): Record<string, unknown> {
   if (contentType?.includes('application/json')) {
     return JSON.parse(body);
   }
@@ -29,6 +29,43 @@ function parseTokenResponse(body: string, contentType: string | null): Record<st
     // Not JSON — try form-urlencoded
   }
   return Object.fromEntries(new URLSearchParams(body));
+}
+
+function readStringField(data: Record<string, unknown>, field: string): string | undefined {
+  const value = data[field];
+  return typeof value === 'string' && value.length > 0
+    ? value
+    : undefined;
+}
+
+function readAccessToken(data: Record<string, unknown>): string | null {
+  return readStringField(data, 'access_token') ?? null;
+}
+
+function parseExpiresIn(data: Record<string, unknown>): number | undefined {
+  const raw = data.expires_in;
+  if (raw == null || raw === '') return undefined;
+
+  if (typeof raw === 'number') {
+    if (Number.isSafeInteger(raw) && raw >= 0) return raw;
+    throw new Error('Token response has invalid expires_in');
+  }
+
+  const trimmed = String(raw).trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error('Token response has invalid expires_in');
+  }
+
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error('Token response has invalid expires_in');
+  }
+
+  return value;
+}
+
+function expiresAtFromSeconds(expiresIn: number | undefined): number | undefined {
+  return expiresIn == null ? undefined : Date.now() + expiresIn * 1000;
 }
 
 // ============================================================
@@ -123,16 +160,19 @@ export async function exchangeGenericOAuth(params: OAuthExchangeParams): Promise
     const data = parseTokenResponse(responseBody, response.headers.get('content-type'));
 
     if (data.error) {
-      return { success: false, error: `OAuth error: ${data.error} — ${data.error_description ?? ''}` };
+      return { success: false, error: `OAuth error: ${String(data.error)} — ${String(data.error_description ?? '')}` };
     }
 
-    const expiresIn = data.expires_in ? parseInt(data.expires_in, 10) : undefined;
+    const accessToken = readAccessToken(data);
+    if (!accessToken) {
+      return { success: false, error: 'Token exchange response missing access_token' };
+    }
 
     return {
       success: true,
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
-      expiresAt: expiresIn ? Date.now() + expiresIn * 1000 : undefined,
+      accessToken,
+      refreshToken: readStringField(data, 'refresh_token'),
+      expiresAt: expiresAtFromSeconds(parseExpiresIn(data)),
       oauthClientId: params.clientId,
       oauthClientSecret: params.clientSecret,
     };
@@ -186,18 +226,17 @@ export async function refreshGenericOAuthToken(
   const data = parseTokenResponse(responseBody, response.headers.get('content-type'));
 
   if (data.error) {
-    throw new Error(`OAuth refresh error: ${data.error} — ${data.error_description ?? ''}`);
+    throw new Error(`OAuth refresh error: ${String(data.error)} — ${String(data.error_description ?? '')}`);
   }
 
-  if (!data.access_token) {
+  const accessToken = readAccessToken(data);
+  if (!accessToken) {
     throw new Error('Token refresh response missing access_token');
   }
 
-  const expiresIn = data.expires_in ? parseInt(data.expires_in, 10) : undefined;
-
   return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresAt: expiresIn ? Date.now() + expiresIn * 1000 : undefined,
+    accessToken,
+    refreshToken: readStringField(data, 'refresh_token'),
+    expiresAt: expiresAtFromSeconds(parseExpiresIn(data)),
   };
 }

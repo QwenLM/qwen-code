@@ -29,6 +29,7 @@ import {
 } from '@/components/info'
 import type { LoadedSource, McpToolWithPermission } from '../../shared/types'
 import type { PermissionsConfigFile } from '@craft-agent/shared/agent/modes'
+import { isIconUrl } from '@craft-agent/shared/utils/icon-constants'
 
 interface SourceInfoPageProps {
   sourceSlug: string
@@ -318,7 +319,7 @@ export default function SourceInfoPage({ sourceSlug, workspaceId, onDelete }: So
   const handleOpenUrl = useCallback(async () => {
     if (!source || !sourceUrl) return
     if (window.electronAPI) {
-      if (sourceUrl.startsWith('http://') || sourceUrl.startsWith('https://')) {
+      if (isIconUrl(sourceUrl)) {
         await window.electronAPI.openUrl(sourceUrl)
       } else {
         await window.electronAPI.showInFolder(sourceUrl)

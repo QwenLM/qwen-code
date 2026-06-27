@@ -55,6 +55,24 @@ interface SuggestionsDisplayProps {
 export const MAX_SUGGESTIONS_TO_SHOW = 8;
 export { MAX_WIDTH };
 
+/**
+ * In @-mention mode a wide resource-reference column must still leave the row's
+ * description at least this many columns, so an unusually long reference can't
+ * shrink the description away entirely.
+ */
+const MIN_DESCRIPTION_WIDTH = 12;
+const ACTIVE_MARKER_WIDTH = 2;
+
+/**
+ * Collapse all runs of whitespace (including newlines from multi-line
+ * SKILL.md/command descriptions) into single spaces so a description renders
+ * as a single logical line. Without this, frontmatter line breaks are
+ * preserved verbatim and a single long description can fill the whole terminal.
+ */
+export function normalizeDescription(description: string): string {
+  return description.replace(/\s+/g, ' ').trim();
+}
+
 export function SuggestionsDisplay({
   suggestions,
   activeIndex,
@@ -91,8 +109,26 @@ export function SuggestionsDisplay({
   const maxLabelLength = Math.max(
     ...suggestions.map((s) => getFullLabel(s).length),
   );
-  const commandColumnWidth =
-    mode === 'slash' ? Math.min(maxLabelLength, Math.floor(width * 0.5)) : 0;
+  // Width of the left label column. In slash mode every row shares one
+  // half-width command column. In @-mention (reverse) mode only rows WITH a
+  // description (MCP resources/servers) share a column — sized to the longest
+  // such reference so the references stay intact and their descriptions line
+  // up, capped so the description keeps a minimum readable width — while plain
+  // file rows (no description) keep the full row width. The reference takes
+  // priority over its description, which truncates.
+  const describedLabelLengths = suggestions
+    .filter((s) => s.description)
+    .map((s) => getFullLabel(s).length);
+  const contentWidth = Math.max(width - ACTIVE_MARKER_WIDTH, 1);
+  const labelColumnWidth =
+    mode === 'slash'
+      ? Math.min(maxLabelLength, Math.floor(contentWidth * 0.5))
+      : describedLabelLengths.length > 0
+        ? Math.min(
+            Math.max(...describedLabelLengths),
+            Math.max(contentWidth - MIN_DESCRIPTION_WIDTH - 2, 1),
+          )
+        : 0;
 
   return (
     <Box flexDirection="column" width={width}>
@@ -107,7 +143,7 @@ export function SuggestionsDisplay({
         const isLong = displayLabel.length >= MAX_WIDTH;
         const expansionIndicatorWidth = isActive && isLong ? 3 : 0;
         const descriptionColumnWidth = Math.max(
-          width - commandColumnWidth - 2 - expansionIndicatorWidth,
+          contentWidth - labelColumnWidth - 2 - expansionIndicatorWidth,
           1,
         );
         const labelElement = (
@@ -122,9 +158,12 @@ export function SuggestionsDisplay({
 
         return (
           <Box key={`${suggestion.value}-${originalIndex}`} flexDirection="row">
+            <Box width={ACTIVE_MARKER_WIDTH} flexShrink={0}>
+              <Text color={textColor}>{isActive ? '> ' : '  '}</Text>
+            </Box>
             <Box
-              {...(mode === 'slash'
-                ? { width: commandColumnWidth, flexShrink: 0 as const }
+              {...(mode === 'slash' || suggestion.description
+                ? { width: labelColumnWidth, flexShrink: 0 as const }
                 : { flexShrink: 1 as const })}
             >
               <Box>
@@ -148,8 +187,8 @@ export function SuggestionsDisplay({
                 flexShrink={1}
                 paddingLeft={2}
               >
-                <Text color={textColor} wrap="wrap">
-                  {suggestion.description}
+                <Text color={textColor} wrap="truncate-end">
+                  {normalizeDescription(suggestion.description)}
                 </Text>
               </Box>
             )}

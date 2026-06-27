@@ -477,7 +477,14 @@ export class ChatCompressionService {
 
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
+      skipOutputLanguagePreference: true,
       model,
+      // Stream so a slow compression inference keeps the HTTP connection alive.
+      // Non-streaming returns no bytes until the whole summary is generated, so
+      // behind a BFF gateway with a short `proxy_read_timeout` a long inference
+      // is killed with a 504 (surfaced as a 422) mid-compression, breaking the
+      // session. See https://github.com/QwenLM/qwen-code/issues/5861.
+      stream: true,
       // Best-effort: failures fall back to NOOP and the next turn re-triggers
       // compression anyway, so don't burn 7 retries blocking the user mid-turn.
       maxAttempts: 1,

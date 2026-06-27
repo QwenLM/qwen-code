@@ -391,11 +391,7 @@ export async function persistAndTruncateToolResult(
       `Session tool result budget exhausted (${budgetUsed} + ${byteSize} > ${MAX_SESSION_BYTES}), skipping disk persistence`,
     );
     return {
-      content: buildStub(
-        content,
-        byteSize,
-        '(session disk budget exhausted)',
-      ),
+      content: buildStub(content, byteSize, '(session disk budget exhausted)'),
       bytesWritten: 0,
     };
   }
@@ -405,7 +401,9 @@ export async function persistAndTruncateToolResult(
   // eslint-disable-next-line no-control-regex
   const safeCallId = path.basename(callId).replace(/\x00/g, '_');
   if (!safeCallId || safeCallId === '.' || safeCallId === '..') {
-    debugLogger.warn(`Invalid callId for disk persistence: ${JSON.stringify(callId)}`);
+    debugLogger.warn(
+      `Invalid callId for disk persistence: ${JSON.stringify(callId)}`,
+    );
     config.trackToolResultBytes(-byteSize);
     return {
       content: buildStub(content, byteSize, '(invalid callId)'),
@@ -432,10 +430,7 @@ export async function persistAndTruncateToolResult(
   } catch (error) {
     // Rollback budget reservation on write failure
     config.trackToolResultBytes(-byteSize);
-    debugLogger.warn(
-      `Failed to persist tool result to ${outputFile}:`,
-      error,
-    );
+    debugLogger.warn(`Failed to persist tool result to ${outputFile}:`, error);
     try {
       const fallback = await truncateAndSaveToFile(
         content,

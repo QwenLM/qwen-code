@@ -16,6 +16,7 @@ import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { getPendingGatedMcpServers } from '../../config/mcpApprovals.js';
 import { assembleMcpServers } from '../../config/mcpServers.js';
+import { getCurrentLanguage } from '../../i18n/index.js';
 
 async function getMcpServersFromConfig(
   extensionManager?: ExtensionManager,
@@ -24,8 +25,9 @@ async function getMcpServersFromConfig(
   const extManager =
     extensionManager ??
     new ExtensionManager({
-      isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+      isWorkspaceTrusted: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
       telemetrySettings: settings.merged.telemetry,
+      locale: getCurrentLanguage(),
     });
 
   if (!extensionManager) {
@@ -57,7 +59,11 @@ async function getMcpServersFromConfig(
 async function createMinimalConfig(): Promise<Config> {
   const settings = loadSettings();
   const cwd = process.cwd();
-  const fileService = new FileDiscoveryService(cwd);
+  const fileFiltering = settings.merged.context?.fileFiltering;
+  const fileService = new FileDiscoveryService(
+    cwd,
+    fileFiltering?.customIgnoreFiles,
+  );
   const mcpServers = await getMcpServersFromConfig();
 
   const config = new Config({
@@ -69,6 +75,7 @@ async function createMinimalConfig(): Promise<Config> {
     pendingMcpServers: getPendingGatedMcpServers(mcpServers, cwd),
     fileDiscoveryService: fileService,
     mcpServerCommand: settings.merged.mcp?.serverCommand,
+    ...(fileFiltering !== undefined ? { fileFiltering } : {}),
   });
 
   await config.initialize();
@@ -117,8 +124,9 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
 async function reconnectAllMcpServers(): Promise<void> {
   const settings = loadSettings();
   const extensionManager = new ExtensionManager({
-    isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+    isWorkspaceTrusted: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
     telemetrySettings: settings.merged.telemetry,
+    locale: getCurrentLanguage(),
   });
   await extensionManager.refreshCache();
 

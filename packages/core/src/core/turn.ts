@@ -18,7 +18,7 @@ import type {
   ToolResult,
   ToolResultDisplay,
 } from '../tools/tools.js';
-import type { ToolErrorType } from '../tools/tool-error.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
@@ -35,6 +35,7 @@ import {
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import { getProviderToolCallId } from './toolCallIdUtils.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -98,6 +99,11 @@ export interface GeminiFinishedEventValue {
 
 export interface ToolCallRequestInfo {
   callId: string;
+  /**
+   * Original tool-call id emitted by the provider/model. When present, this is
+   * the idempotency key for suppressing duplicate provider tool calls.
+   */
+  providerCallId?: string;
   name: string;
   args: Record<string, unknown>;
   isClientInitiated: boolean;
@@ -115,6 +121,68 @@ export interface ToolCallResponseInfo {
   errorType: ToolErrorType | undefined;
   contentLength?: number;
   modelOverride?: string;
+}
+
+function duplicateProviderToolCallMessage(providerCallId: string): string {
+  return `Duplicate provider tool call id "${providerCallId}" was already handled. The duplicate tool call was ignored and not executed again.`;
+}
+
+export function createDuplicateProviderToolCallResponse(
+  request: ToolCallRequestInfo,
+): ToolCallResponseInfo {
+  const providerCallId = request.providerCallId ?? request.callId;
+  const message = duplicateProviderToolCallMessage(providerCallId);
+  return {
+    callId: request.callId,
+    responseParts: [
+      {
+        functionResponse: {
+          id: request.callId,
+          name: request.name,
+          response: { error: message },
+        },
+      },
+    ],
+    resultDisplay: message,
+    error: new Error(message),
+    errorType: ToolErrorType.EXECUTION_FAILED,
+  };
+}
+
+export function markDuplicateProviderToolCallResponseSent(
+  providerCallId: string,
+  duplicateProviderToolCallResponseIds: Set<string>,
+): void {
+  duplicateProviderToolCallResponseIds.add(providerCallId);
+}
+
+export function findRepeatedDuplicateProviderToolCall<T>(
+  items: readonly T[],
+  getProviderCallId: (item: T) => string | undefined,
+  handledProviderToolCallIds: ReadonlySet<string>,
+  duplicateProviderToolCallResponseIds: ReadonlySet<string>,
+): T | undefined {
+  const repeatedProviderIds = new Map<string, number>();
+  for (const item of items) {
+    const providerCallId = getProviderCallId(item);
+    if (!providerCallId || !handledProviderToolCallIds.has(providerCallId)) {
+      continue;
+    }
+    repeatedProviderIds.set(
+      providerCallId,
+      (repeatedProviderIds.get(providerCallId) ?? 0) + 1,
+    );
+  }
+
+  return items.find((item) => {
+    const providerCallId = getProviderCallId(item);
+    return (
+      providerCallId !== undefined &&
+      handledProviderToolCallIds.has(providerCallId) &&
+      (duplicateProviderToolCallResponseIds.has(providerCallId) ||
+        (repeatedProviderIds.get(providerCallId) ?? 0) > 1)
+    );
+  });
 }
 
 export interface ServerToolCallConfirmationDetails {
@@ -457,11 +525,13 @@ export class Turn {
     const callId =
       fnCall.id ??
       `${fnCall.name}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const providerCallId = getProviderToolCallId(fnCall) ?? fnCall.id;
     const name = fnCall.name || 'undefined_tool_name';
     const args = (fnCall.args || {}) as Record<string, unknown>;
 
     const toolCallRequest: ToolCallRequestInfo = {
       callId,
+      ...(providerCallId ? { providerCallId } : {}),
       name,
       args,
       isClientInitiated: false,

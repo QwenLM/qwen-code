@@ -14,7 +14,10 @@ import {
 import { type LoadedSettings } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
-import { initializeI18n, type SupportedLanguage } from '../i18n/index.js';
+import {
+  initializeI18n,
+  resolveLanguageSetting,
+} from '../i18n/index.js';
 
 export interface InitializationResult {
   authError: string | null;
@@ -35,11 +38,9 @@ export async function initializeApp(
   settings: LoadedSettings,
 ): Promise<InitializationResult> {
   // Initialize i18n system
-  const languageSetting =
-    process.env['QWEN_CODE_LANG'] ||
-    (settings.merged.general?.language as string) ||
-    'auto';
-  await initializeI18n(languageSetting as SupportedLanguage | 'auto');
+  await initializeI18n(
+    resolveLanguageSetting(settings.merged.general?.language as string),
+  );
 
   // Use authType from modelsConfig which respects CLI --auth-type argument
   // over settings.security.auth.selectedType

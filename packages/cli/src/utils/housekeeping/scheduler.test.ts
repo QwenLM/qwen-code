@@ -17,6 +17,7 @@ import {
   _runHousekeepingForTesting,
   _runPassForTesting,
   _FILE_HISTORY_MARKER_FOR_TESTING,
+  _getSubagentMarkerPathForTesting,
 } from './scheduler.js';
 import {
   noteInteraction,
@@ -38,9 +39,15 @@ function makeSettings(cleanupPeriodDays?: number): LoadedSettings {
   } as unknown as LoadedSettings;
 }
 
-function makeConfig(sessionId: string | (() => string)): Config {
+function makeConfig(
+  sessionId: string | (() => string),
+  projectDir?: string,
+): Config {
   return {
     getSessionId: typeof sessionId === 'function' ? sessionId : () => sessionId,
+    // Only wire storage when a projectDir is given so existing file-history
+    // tests (no projectDir) skip the subagent sweep via runHousekeeping's guard.
+    storage: projectDir ? { getProjectDir: () => projectDir } : undefined,
   } as unknown as Config;
 }
 
@@ -111,6 +118,59 @@ describe('_runHousekeepingForTesting', () => {
     expect(
       fs.existsSync(path.join(qwenHome, _FILE_HISTORY_MARKER_FOR_TESTING)),
     ).toBe(true);
+  });
+
+  it('sweeps old subagent transcripts under <projectDir>/subagents, protecting the current session', async () => {
+    const projectDir = path.join(qwenHome, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const subagentsRoot = path.join(projectDir, 'subagents');
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    const recent = new Date(Date.now() - 1 * MS_PER_DAY);
+    mkSessionDir(subagentsRoot, 'current-session', old); // protected (current)
+    mkSessionDir(subagentsRoot, 'stale-session', old); // swept
+    mkSessionDir(subagentsRoot, 'recent-session', recent); // kept (young)
+
+    await _runHousekeepingForTesting(
+      makeConfig('current-session', projectDir),
+      makeSettings(30),
+    );
+
+    expect(fs.readdirSync(subagentsRoot).sort()).toEqual([
+      'current-session',
+      'recent-session',
+    ]);
+    expect(
+      fs.existsSync(_getSubagentMarkerPathForTesting(qwenHome, projectDir)),
+    ).toBe(true);
+    expect(fs.existsSync(path.join(projectDir, '.subagent-cleanup'))).toBe(
+      false,
+    );
+  });
+
+  it('throttles the subagent sweep per project (second pass does not re-sweep)', async () => {
+    const projectDir = path.join(qwenHome, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const subagentsRoot = path.join(projectDir, 'subagents');
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    mkSessionDir(subagentsRoot, 'stale-1', old);
+
+    await _runHousekeepingForTesting(
+      makeConfig('current', projectDir),
+      makeSettings(30),
+    );
+    expect(fs.existsSync(path.join(subagentsRoot, 'stale-1'))).toBe(false);
+    expect(
+      fs.existsSync(_getSubagentMarkerPathForTesting(qwenHome, projectDir)),
+    ).toBe(true);
+
+    // A fresh old dir + an immediate second pass: the per-project marker
+    // throttles it, so the new dir is NOT swept.
+    mkSessionDir(subagentsRoot, 'stale-2', old);
+    await _runHousekeepingForTesting(
+      makeConfig('current', projectDir),
+      makeSettings(30),
+    );
+    expect(fs.existsSync(path.join(subagentsRoot, 'stale-2'))).toBe(true);
   });
 
   it('re-reads sessionId on every pass (defends against /clear)', async () => {

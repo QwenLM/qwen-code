@@ -84,6 +84,17 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should preserve equals signs in env values', async () => {
+    await parser.parseAsync('add my-server /path/to/server -e TOKEN=a=b=c');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        command: '/path/to/server',
+        env: { TOKEN: 'a=b=c' },
+      }),
+    });
+  });
+
   it('should auto-detect http transport when commandOrUrl is an https URL', async () => {
     await parser.parseAsync('add http-server https://example.com/mcp');
 
@@ -100,6 +111,16 @@ describe('mcp add command', () => {
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'http-server': {
         httpUrl: 'http://localhost:8080/mcp',
+      },
+    });
+  });
+
+  it('should auto-detect http transport when commandOrUrl uses an uppercase URL scheme', async () => {
+    await parser.parseAsync('add http-server HTTPS://example.com/mcp');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'http-server': {
+        httpUrl: 'HTTPS://example.com/mcp',
       },
     });
   });

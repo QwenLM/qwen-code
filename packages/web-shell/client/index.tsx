@@ -57,19 +57,23 @@ export function WebShellWithProviders({
 /** Alias for consumers who prefer a standalone naming style. */
 export const StandaloneWebShell = WebShellWithProviders;
 
-export type { WebShellProps } from './App';
+export type { WebShellProps, WebShellSidebarOptions } from './App';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
 export type {
   CommandDisplayCategory,
   CommandDisplayCategoryOrder,
 } from './utils/commandDisplay';
+export type { ComposerToolbarAction } from './components/ChatEditor';
 export type {
   MarkdownContentSource,
   MarkdownRenderContext,
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  ComposerToolbarStartRenderer,
+  WebShellComposerToolbarStartRenderInfo,
+  WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
   WebShellMarkdownCustomization,
 } from './customization';

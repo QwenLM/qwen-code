@@ -88,8 +88,8 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | `model`                |         | Current model name without reasoning level                         |
 | `git-branch`           | Yes     | Current Git branch name (hidden when not in a git repo)            |
 | `context-remaining`    | Yes     | Percentage of context window remaining (e.g. `Context 65.7% left`) |
-| `total-input-tokens`   |         | Total input tokens used in session (e.g. `30.0k in`)               |
-| `total-output-tokens`  |         | Total output tokens used in session (e.g. `5.0k out`)              |
+| `total-input-tokens`   |         | Cumulative input tokens used in session (e.g. `30.0k total in`)    |
+| `total-output-tokens`  |         | Cumulative output tokens used in session (e.g. `5.0k total out`)   |
 | `current-dir`          | Yes     | Current working directory                                          |
 | `project-name`         |         | Project name (basename of working directory)                       |
 | `pull-request-number`  |         | Open PR number for the current branch (requires `gh` CLI)          |
@@ -102,6 +102,8 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | `session-id`           |         | Current session identifier                                         |
 
 Items marked **Default** are pre-selected when you first open the `/statusline` dialog.
+
+`total-input-tokens` and `total-output-tokens` are session totals. They add up token usage across turns, so input tokens can grow quickly because each new model request includes the current conversation context again. Use `used-tokens` when you want the current prompt size instead of cumulative session spend.
 
 ### Example output
 

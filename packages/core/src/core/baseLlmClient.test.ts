@@ -60,10 +60,12 @@ vi.mock('../models/content-generator-config.js', () => ({
 }));
 
 const mockGenerateContent = vi.fn();
+const mockGenerateContentStream = vi.fn();
 const mockEmbedContent = vi.fn();
 
 const mockContentGenerator = {
   generateContent: mockGenerateContent,
+  generateContentStream: mockGenerateContentStream,
   embedContent: mockEmbedContent,
 } as unknown as Mocked<ContentGenerator>;
 
@@ -129,6 +131,21 @@ const createMockTextResponse = (text: string): GenerateContentResponse =>
       },
     ],
   }) as GenerateContentResponse;
+
+// Builds an async generator that yields one response per text delta, then an
+// optional trailing usage-only chunk — mirroring how the streaming pipeline
+// emits content deltas followed by a final chunk carrying usageMetadata.
+async function* mockTextStream(
+  chunks: string[],
+  usage?: GenerateContentResponse['usageMetadata'],
+): AsyncGenerator<GenerateContentResponse> {
+  for (const text of chunks) {
+    yield createMockTextResponse(text);
+  }
+  if (usage) {
+    yield { usageMetadata: usage } as GenerateContentResponse;
+  }
+}
 
 describe('BaseLlmClient', () => {
   let client: BaseLlmClient;
@@ -554,11 +571,199 @@ describe('BaseLlmClient', () => {
     });
   });
 
+  describe('generateText - streaming', () => {
+    it('routes through generateContentStream, concatenates deltas, trims once, and captures final-chunk usage', async () => {
+      const usage = {
+        promptTokenCount: 11,
+        candidatesTokenCount: 7,
+        totalTokenCount: 18,
+      };
+      mockGenerateContentStream.mockImplementation(async () =>
+        mockTextStream(['  Hello', ', ', 'world  '], usage),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(mockGenerateContentStream).toHaveBeenCalledTimes(1);
+      // The streaming branch builds the same request object as the non-stream
+      // path: resolved model, contents, and a config carrying the abortSignal.
+      expect(mockGenerateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'test-model',
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          config: expect.objectContaining({
+            abortSignal: abortController.signal,
+          }),
+        }),
+        'p',
+      );
+      expect(mockGenerateContent).not.toHaveBeenCalled();
+      // Deltas are concatenated, then trimmed once at the end.
+      expect(result.text).toBe('Hello, world');
+      expect(result.usage).toEqual(usage);
+    });
+
+    it('drops thought parts and tolerates a stream that omits usage', async () => {
+      async function* streamWithThought(): AsyncGenerator<GenerateContentResponse> {
+        yield createMockTextResponse('answer');
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'reasoning', thought: true }],
+              },
+              index: 0,
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      }
+      mockGenerateContentStream.mockImplementation(async () =>
+        streamWithThought(),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(result.text).toBe('answer');
+      expect(result.usage).toBeUndefined();
+    });
+
+    it('does not stream when stream is omitted (non-streaming path, still trimmed)', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('  plain  '),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+      });
+
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      expect(mockGenerateContentStream).not.toHaveBeenCalled();
+      expect(result.text).toBe('plain');
+    });
+
+    it('propagates a mid-stream error and never returns the partial text', async () => {
+      async function* failingStream(): AsyncGenerator<GenerateContentResponse> {
+        yield createMockTextResponse('partial');
+        throw new Error('connection reset');
+      }
+      mockGenerateContentStream.mockImplementation(async () => failingStream());
+
+      // A failure after some deltas have arrived rejects the whole call — the
+      // accumulated 'partial' text is never surfaced as a success — and, since
+      // the signal isn't aborted, the error is reported like the non-streaming
+      // path. This is the gateway-timeout-mid-inference scenario the PR targets.
+      await expect(
+        client.generateText({
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          model: 'test-model',
+          abortSignal: abortController.signal,
+          promptId: 'p',
+          stream: true,
+        }),
+      ).rejects.toThrow('connection reset');
+      expect(vi.mocked(reportError)).toHaveBeenCalled();
+    });
+
+    it('surfaces an abort that fires mid-stream and skips error reporting', async () => {
+      async function* abortingStream(): AsyncGenerator<GenerateContentResponse> {
+        yield createMockTextResponse('chunk');
+        abortController.abort();
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+      mockGenerateContentStream.mockImplementation(async () =>
+        abortingStream(),
+      );
+
+      // The `abortSignal.aborted` guard in the catch block rethrows the original
+      // error unwrapped and skips reportError, so a user-initiated cancellation
+      // mid-stream surfaces verbatim and is not logged as an API failure.
+      await expect(
+        client.generateText({
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          model: 'test-model',
+          abortSignal: abortController.signal,
+          promptId: 'p',
+          stream: true,
+        }),
+      ).rejects.toThrow('The operation was aborted.');
+      expect(vi.mocked(reportError)).not.toHaveBeenCalled();
+    });
+
+    it('returns an empty result for a stream that yields no chunks', async () => {
+      // A stream that closes immediately (no content, no usage) must resolve to
+      // an empty string rather than throw — the boundary the streaming branch
+      // introduces. mockTextStream([]) yields nothing.
+      mockGenerateContentStream.mockImplementation(async () =>
+        mockTextStream([]),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(result.text).toBe('');
+      expect(result.usage).toBeUndefined();
+    });
+
+    it('captures usage that rides the final content-bearing chunk', async () => {
+      // Realistic Gemini/OpenAI shape: usageMetadata arrives on the last chunk
+      // that *also* carries a text delta. Text and usage are read independently
+      // per chunk, so the trailing text must not be dropped when usage is read.
+      const usage = {
+        promptTokenCount: 5,
+        candidatesTokenCount: 3,
+        totalTokenCount: 8,
+      };
+      async function* usageOnTextChunk(): AsyncGenerator<GenerateContentResponse> {
+        yield createMockTextResponse('Hello, ');
+        const finalChunk = createMockTextResponse('world');
+        finalChunk.usageMetadata = usage;
+        yield finalChunk;
+      }
+      mockGenerateContentStream.mockImplementation(async () =>
+        usageOnTextChunk(),
+      );
+
+      const result = await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(result.text).toBe('Hello, world');
+      expect(result.usage).toEqual(usage);
+    });
+  });
+
   describe('per-model resolution', () => {
     const fastModel = 'fast-model';
     const fastGenerateContent = vi.fn();
+    const fastGenerateContentStream = vi.fn();
     const fastContentGenerator = {
       generateContent: fastGenerateContent,
+      generateContentStream: fastGenerateContentStream,
       embedContent: vi.fn(),
     } as unknown as Mocked<ContentGenerator>;
 
@@ -570,6 +775,7 @@ describe('BaseLlmClient', () => {
         async (fn) => await (fn as () => Promise<unknown>)(),
       );
       fastGenerateContent.mockReset();
+      fastGenerateContentStream.mockReset();
       mockCreateContentGenerator.mockReset();
       mockBuildAgentContentGeneratorConfig.mockReset();
       getResolvedModel.mockReset();
@@ -665,6 +871,90 @@ describe('BaseLlmClient', () => {
         }),
       );
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails closed (throws) for an unregistered model when failClosed is set', async () => {
+      getResolvedModel.mockReturnValue(undefined); // not registered anywhere
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await expect(
+        c.resolveForModel('ghost-model', { failClosed: true }),
+      ).rejects.toThrow(/not registered/i);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('fails closed (throws) when generator creation fails and failClosed is set', async () => {
+      getResolvedModel.mockImplementation((authType: string, model: string) =>
+        authType === AuthType.USE_ANTHROPIC && model === fastModel
+          ? {
+              authType: AuthType.USE_ANTHROPIC,
+              envKey: 'ANTHROPIC_API_KEY',
+              baseUrl: 'https://api.anthropic.com',
+            }
+          : undefined,
+      );
+      mockCreateContentGenerator.mockRejectedValue(
+        new Error('missing credential'),
+      );
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await expect(
+        c.resolveForModel(fastModel, { failClosed: true }),
+      ).rejects.toThrow(/missing credential/i);
+    });
+
+    it('falls back to the main generator for an unregistered model when failClosed is not set', async () => {
+      getResolvedModel.mockReturnValue(undefined);
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel('ghost-model');
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('streams through a per-model generator resolved by model (compression path)', async () => {
+      // chatCompressionService passes both `model` and `stream: true`, so the
+      // streaming branch must run on the resolveForModel-selected generator,
+      // not the constructor-injected default.
+      getResolvedModel.mockReturnValue({
+        authType: AuthType.USE_ANTHROPIC,
+        envKey: 'ANTHROPIC_API_KEY',
+      });
+      const usage = {
+        promptTokenCount: 2,
+        candidatesTokenCount: 2,
+        totalTokenCount: 4,
+      };
+      fastGenerateContentStream.mockImplementation(async () =>
+        mockTextStream(['fast ', 'stream'], usage),
+      );
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+      const result = await c.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        model: fastModel,
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        stream: true,
+      });
+
+      expect(fastGenerateContentStream).toHaveBeenCalledTimes(1);
+      // Streamed against the resolved per-model identity, not the main model.
+      expect(fastGenerateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: fastModel,
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          config: expect.objectContaining({
+            abortSignal: abortController.signal,
+          }),
+        }),
+        'p',
+      );
+      // The constructor-injected default generator must not be touched.
+      expect(mockGenerateContentStream).not.toHaveBeenCalled();
+      expect(result.text).toBe('fast stream');
+      expect(result.usage).toEqual(usage);
     });
 
     it('caches the per-model generator across resolveForModel calls', async () => {

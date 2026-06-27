@@ -549,6 +549,20 @@ describe('languageCommand', () => {
       );
     });
 
+    it('should normalize output language name "english" to "English"', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'output english');
+
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'general.outputLanguage',
+        'English',
+      );
+    });
+
     it('should normalize locale code "de" to "German"', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');

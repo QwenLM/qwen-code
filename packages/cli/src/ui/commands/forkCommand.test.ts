@@ -25,6 +25,7 @@ vi.mock('../../i18n/index.js', () => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({ debug: () => undefined }),
   ToolNames: { AGENT: 'agent' },
+  FORK_SUBAGENT_TYPE: 'fork',
 }));
 
 describe('forkCommand', () => {
@@ -171,12 +172,13 @@ describe('forkCommand', () => {
     expect(mockGetTool).toHaveBeenCalledWith('agent');
 
     // Builds a background fork: full directive as prompt, run_in_background,
-    // no subagent_type (→ implicit FORK_AGENT).
+    // and an explicit subagent_type "fork" (→ FORK_AGENT; omitting it would
+    // select a general-purpose subagent instead).
     expect(mockBuild).toHaveBeenCalledTimes(1);
     const builtParams = mockBuild.mock.calls[0][0];
     expect(builtParams.prompt).toBe('review the current code');
     expect(builtParams.run_in_background).toBe(true);
-    expect(builtParams.subagent_type).toBeUndefined();
+    expect(builtParams.subagent_type).toBe('fork');
     expect(builtParams.description).toBeTruthy();
 
     expect(mockExecute).toHaveBeenCalledTimes(1);

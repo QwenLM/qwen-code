@@ -38,6 +38,7 @@ const mockGetSystemEncoding = vi.hoisted(() =>
 );
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
+const mockSpawnSync = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
@@ -76,6 +77,7 @@ vi.mock('@lydell/node-pty', () => ({
 }));
 vi.mock('child_process', () => ({
   spawn: mockCpSpawn,
+  spawnSync: mockSpawnSync,
 }));
 vi.mock('../utils/textUtils.js', () => ({
   isBinary: mockIsBinary,
@@ -116,6 +118,11 @@ vi.mock('../utils/systemEncoding.js', () => ({
 const mockProcessKill = vi
   .spyOn(process, 'kill')
   .mockImplementation(() => true);
+
+// Production resolves taskkill by absolute System32 path (never the bare name)
+// to avoid PATH/CWD binary planting. Compute the expected path the same way so
+// assertions stay in sync across platforms (SystemRoot is unset off Windows).
+const TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
 const shellExecutionConfig = {
   terminalWidth: 80,
@@ -311,6 +318,63 @@ describe('ShellExecutionService', () => {
         type: 'data',
         chunk: createExpectedAnsiOutput('file1.txt'),
       });
+    });
+
+    it('disposes PTY terminal resources on natural exit', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+      const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
+
+      const { result } = await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      expect(dataDisposableStub.dispose).toHaveBeenCalled();
+      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+      expect(removeListenerSpy).toHaveBeenCalledWith(
+        'error',
+        expect.any(Function),
+      );
+      // One terminal is used for live PTY rendering, another for final replay.
+      expect(terminalDisposeSpy).toHaveBeenCalledTimes(2);
+
+      terminalDisposeSpy.mockRestore();
+    });
+
+    it('disposes PTY resources and resolves when final render throws', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+      mockSerializeTerminalToText.mockImplementationOnce(() => {
+        throw new Error('final render failed');
+      });
+
+      const { result } = await simulateExecution(
+        'render-fails-on-exit',
+        (pty) => {
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        },
+        {
+          ...shellExecutionConfig,
+          disableDynamicLineTrimming: false,
+        },
+      );
+
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe('');
+      expect(dataDisposableStub.dispose).toHaveBeenCalled();
+      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+      // One terminal is used for live PTY rendering, another for final replay.
+      expect(terminalDisposeSpy).toHaveBeenCalledTimes(2);
+
+      terminalDisposeSpy.mockRestore();
     });
 
     it('should strip ANSI codes from output', async () => {
@@ -704,6 +768,7 @@ describe('ShellExecutionService', () => {
     });
 
     it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       // Critical: do NOT fire onExit — the child is still alive after the
       // background-promote abort. The result Promise must resolve via the
       // abort handler's own immediate resolve, not via the exit handler.
@@ -738,6 +803,39 @@ describe('ShellExecutionService', () => {
         -mockPtyProcess.pid,
         'SIGKILL',
       );
+      expect(terminalDisposeSpy).toHaveBeenCalled();
+
+      terminalDisposeSpy.mockRestore();
+    });
+
+    it('background-promote replay failure falls back to full decoded raw output', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+      mockSerializeTerminalToText.mockImplementationOnce(() => {
+        throw new Error('replay failed');
+      });
+      const output = Array.from(
+        { length: 250 },
+        (_, index) => `line-${index}`,
+      ).join('\n');
+
+      const { result } = await simulateExecution(
+        'long-running-output',
+        (pty, ac) => {
+          pty.onData.mock.calls[0][0](output);
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_replay_fallback',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      expect(result.output).toContain('line-0');
+      expect(result.output).toContain('line-249');
+      // One terminal is used for replay, another for the promoted snapshot.
+      expect(terminalDisposeSpy).toHaveBeenCalledTimes(2);
+
+      terminalDisposeSpy.mockRestore();
     });
 
     it('post-promotion: PTY data is no longer routed to onOutputEvent (handoff boundary)', async () => {
@@ -1186,6 +1284,467 @@ describe('ShellExecutionService', () => {
       expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
+    });
+  });
+
+  describe('Windows process cleanup (#5873)', () => {
+    // Under ConPTY, ptyProcess.kill() does not kill the pwsh process tree
+    // (microsoft/node-pty#333). These pin that the PTY paths now reap pwsh via
+    // taskkill on Windows — tree-kill on cancel, shell-pid-only on normal
+    // completion — so idle pwsh processes don't accumulate until OOM.
+
+    beforeEach(() => {
+      // windowsKillPid attaches an 'error' listener to the spawned taskkill
+      // child so a failed launch can't crash the CLI; the mock must therefore
+      // return something with .on(). The top-level beforeEach leaves
+      // mockCpSpawn returning undefined.
+      mockCpSpawn.mockReturnValue(new EventEmitter());
+      // The PTY cancel path now taskkills synchronously (spawnSync); default it
+      // to a clean exit so the result-inspecting logging doesn't fire.
+      mockSpawnSync.mockReturnValue({ status: 0 });
+    });
+
+    it('cancel on win32 tree-kills via taskkill, with a ptyProcess.kill fallback', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (pty, abortController) => {
+          abortController.abort();
+          pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      // Cancel tree-kills (/t) SYNCHRONOUSLY (spawnSync) so taskkill enumerates
+      // the tree before ptyProcess.kill() fires ClosePseudoConsole. See #5873.
+      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/t',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+      // The finalizer reap (async cpSpawn via windowsKillPid) must ALSO
+      // tree-kill on cancel — positively asserted so removing the reap or
+      // forcing cancelKillDispatched=false fails here, not just trivially via
+      // the negative check below. See #5873.
+      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/t',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+      // ...and it must never downgrade to a shell-only (/f without /t) kill
+      // that could leave the abandoned descendant tree behind. See #5873.
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+      // ...and still calls ptyProcess.kill() so that if taskkill cannot launch,
+      // the ConPTY host is torn down and onExit fires (the cancel can't hang).
+      // See #5873.
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+      // Ordering is the race fix: the sync taskkill must enumerate/kill the
+      // tree BEFORE ptyProcess.kill() fires ClosePseudoConsole. See #5873.
+      expect(mockSpawnSync.mock.invocationCallOrder[0]).toBeLessThan(
+        mockPtyProcess.kill.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('normal completion on win32 reaps a still-alive pty by shell pid only (no /t)', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // isPtyActive -> process.kill(pid, 0) returns true (default mock):
+      // node-pty reported exit but the pwsh process is still alive.
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      // Reap kills only the shell pid — no /t — so a child the command
+      // intentionally detached (e.g. Start-Process) survives. See #5873.
+      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/t',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+    });
+
+    it('normal completion on win32 swallows a taskkill launch error (no crash)', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // windowsKillPid attaches a no-op 'error' listener so a failed taskkill
+      // launch (reported as an async EventEmitter 'error' event, not a throw)
+      // can't crash the CLI from this cleanup path. See #5873.
+      const taskkillProc = new EventEmitter();
+      mockCpSpawn.mockReturnValue(taskkillProc);
+
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      // By now the finalizer reap has spawned taskkill (taskkillProc) and
+      // attached its 'error' listener; firing the launch error must be
+      // swallowed. Without the listener this emit would throw (EventEmitter
+      // re-raises an 'error' with no handler) — i.e. the production crash.
+      expect(() =>
+        taskkillProc.emit('error', new Error('spawn taskkill ENOENT')),
+      ).not.toThrow();
+    });
+
+    it('normal completion on win32 does NOT taskkill when the pty already exited', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // isPtyActive -> process.kill(pid, 0) throws => the process is gone, so
+      // the reap is skipped (avoids killing a possibly-reused pid).
+      mockProcessKill.mockImplementation(
+        (_pid: number, signal?: string | number) => {
+          if (signal === 0) {
+            throw new Error('ESRCH');
+          }
+          return true;
+        },
+      );
+
+      try {
+        const { result } = await simulateExecution('echo hi', (pty) => {
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        });
+
+        expect(result.exitCode).toBe(0);
+        expect(mockCpSpawn).not.toHaveBeenCalledWith(
+          TASKKILL,
+          expect.anything(),
+        );
+      } finally {
+        // clearAllMocks() resets calls but not implementations — restore the
+        // default liveness mock so later tests see isPtyActive === true.
+        mockProcessKill.mockImplementation(() => true);
+      }
+    });
+
+    it('normal completion on non-win32 never taskkills', async () => {
+      // Default platform is 'linux'.
+      const { result } = await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, expect.anything());
+    });
+
+    it('exit cleanup on win32 tree-kills via taskkill and tears down the host', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockSpawnSync.mockReturnValue({ error: undefined });
+      const pid = mockPtyProcess.pid;
+      ShellExecutionService['activePtys'].set(pid, {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ptyProcess: mockPtyProcess as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        headlessTerminal: { dispose: vi.fn() } as any,
+      });
+
+      ShellExecutionService.cleanup();
+      ShellExecutionService['activePtys'].delete(pid);
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/t',
+        '/pid',
+        String(pid),
+      ]);
+      // The ConPTY host is torn down unconditionally, alongside the tree-kill.
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+    });
+
+    it('exit cleanup on win32 still tears down the host when taskkill exits non-zero', () => {
+      mockPlatform.mockReturnValue('win32');
+      // taskkill launched (no spawn error) but failed — e.g. access denied, or
+      // the pid was already gone. result.error is undefined, so we must not
+      // treat that as success and skip the host teardown.
+      mockSpawnSync.mockReturnValue({ status: 1, error: undefined });
+      const pid = mockPtyProcess.pid;
+      ShellExecutionService['activePtys'].set(pid, {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ptyProcess: mockPtyProcess as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        headlessTerminal: { dispose: vi.fn() } as any,
+      });
+
+      ShellExecutionService.cleanup();
+      ShellExecutionService['activePtys'].delete(pid);
+
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+    });
+
+    it('cancel on win32 still resolves when ptyProcess.kill throws', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // The host-teardown fallback in performCancelKill is wrapped in try/catch;
+      // a throwing kill (pty already gone) must not break the cancel. See #5873.
+      mockPtyProcess.kill.mockImplementation(() => {
+        throw new Error('pty already gone');
+      });
+
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (pty, abortController) => {
+          abortController.abort();
+          pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+    });
+
+    it('cancel on win32 with an already-dead shell skips the finalizer reap', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // performCancelKill already killed the shell, so by the time the finalizer
+      // runs the liveness check fails (ESRCH) — the common cancel-on-healthy-
+      // ConPTY flow. The cancel still tree-kills (performCancelKill), and the
+      // finalizer adds no shell-only kill. See #5873.
+      mockProcessKill.mockImplementation(
+        (_pid: number, signal?: string | number) => {
+          if (signal === 0) {
+            throw new Error('ESRCH');
+          }
+          return true;
+        },
+      );
+
+      try {
+        const { result } = await simulateExecution(
+          'sleep 10',
+          (pty, abortController) => {
+            abortController.abort();
+            pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
+          },
+        );
+
+        expect(result.aborted).toBe(true);
+        // performCancelKill's sync tree-kill still runs...
+        expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
+          '/f',
+          '/t',
+          '/pid',
+          String(mockPtyProcess.pid),
+        ]);
+        // ...but the finalizer reap is skipped (isPtyActive false via ESRCH),
+        // so no async taskkill fires there.
+        expect(mockCpSpawn).not.toHaveBeenCalledWith(
+          TASKKILL,
+          expect.anything(),
+        );
+      } finally {
+        mockProcessKill.mockImplementation(() => true);
+      }
+    });
+
+    it('exit cleanup falls back to ptyProcess.kill when taskkill spawnSync throws', () => {
+      mockPlatform.mockReturnValue('win32');
+      // spawnSync can throw on a synchronous arg/setup failure; the catch in
+      // killPty must swallow it and still tear down the host. See #5873.
+      mockSpawnSync.mockImplementationOnce(() => {
+        throw new Error('spawnSync EACCES');
+      });
+      const pid = mockPtyProcess.pid;
+      ShellExecutionService['activePtys'].set(pid, {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ptyProcess: mockPtyProcess as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        headlessTerminal: { dispose: vi.fn() } as any,
+      });
+
+      ShellExecutionService.cleanup();
+      ShellExecutionService['activePtys'].delete(pid);
+
+      expect(mockPtyProcess.kill).toHaveBeenCalled();
+    });
+
+    it('exit cleanup tree-kills child_process children via the absolute taskkill', () => {
+      mockPlatform.mockReturnValue('win32');
+      const childPid = 54321;
+      ShellExecutionService['activeChildProcesses'].add(childPid);
+
+      ShellExecutionService.cleanup();
+      ShellExecutionService['activeChildProcesses'].delete(childPid);
+
+      // Pins killChildProcesses on the absolute System32 path — a regression to
+      // the bare 'taskkill' name reopens the binary-planting hole. See #5873.
+      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/t',
+        '/pid',
+        String(childPid),
+      ]);
+    });
+
+    it('win32 taskkill is invoked by absolute System32 path, not the bare name', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      // The executable must be the trusted absolute System32 path — never the
+      // bare 'taskkill', which Windows spawn would resolve through PATH/CWD and
+      // could be hijacked by a planted taskkill.exe/.bat. See #5873.
+      const cmd = mockCpSpawn.mock.calls.find((c) =>
+        /taskkill/i.test(String(c[0])),
+      )?.[0];
+      expect(cmd).toBe(TASKKILL);
+      expect(cmd).toMatch(/^[A-Za-z]:\\.*\\System32\\taskkill\.exe$/i);
+      expect(cmd).not.toBe('taskkill');
+    });
+
+    it('a late abort after a normal exit does NOT tree-kill (no cancel retro-flag)', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'echo hi',
+        (pty, abortController) => {
+          // Command exits normally FIRST...
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+          // ...then an unrelated abort lands during the finalize window. The
+          // abort listener is already removed and performCancelKill never ran,
+          // so cancelKillDispatched stays false and the reap must stay
+          // shell-pid-only — detached children must not be tree-killed.
+          abortController.abort();
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/t',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+    });
+
+    it('win32 promoted shell reaps its lingering pwsh on natural exit (shell-pid-only)', async () => {
+      mockPlatform.mockReturnValue('win32');
+      const settleCalls: ShellPostPromoteSettleInfo[] = [];
+
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (_pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_5873_reap',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        { postPromote: { onSettle: (info) => settleCalls.push(info) } },
+      );
+      expect(result.promoted).toBe(true);
+
+      // Drive the promoted PTY's natural exit. The post-promote settle path
+      // must reap the lingering ConPTY shell — shell-pid-only, since the
+      // command finished and any detached child should survive. Before this
+      // fix the reap only ran in the foreground finalizer, so backgrounded
+      // shells still leaked the pwsh process. See #5873.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+      expect(settleCalls).toHaveLength(1);
+      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/t',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+    });
+
+    it('win32 promoted shell reaps on natural exit even with onData only (no onSettle)', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (_pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_5873_ondata',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        // onData only — the reap must fire BEFORE firePostSettle's
+        // `!postPromote?.onSettle` early return. See #5873.
+        { postPromote: { onData: () => {} } },
+      );
+      expect(result.promoted).toBe(true);
+
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
+        '/f',
+        '/pid',
+        String(mockPtyProcess.pid),
+      ]);
+    });
+
+    it('win32 promoted shell skips the post-settle reap when the pty already exited', async () => {
+      mockPlatform.mockReturnValue('win32');
+
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (_pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_5873_settle_esrch',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        { postPromote: { onSettle: () => {} } },
+      );
+      // Promote succeeded while the shell was still alive (default liveness).
+      expect(result.promoted).toBe(true);
+
+      // Now the shell has exited: the post-settle liveness check fails (ESRCH),
+      // so the firePostSettle reap must be skipped (no taskkill against a
+      // possibly-reused pid). Mirrors the foreground finalizer's guard. See #5873.
+      mockProcessKill.mockImplementation(
+        (_pid: number, signal?: string | number) => {
+          if (signal === 0) {
+            throw new Error('ESRCH');
+          }
+          return true;
+        },
+      );
+      try {
+        const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+        const postPromoteExitHandler =
+          onExitRegistrations[onExitRegistrations.length - 1][0];
+        postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+        expect(mockCpSpawn).not.toHaveBeenCalledWith(
+          TASKKILL,
+          expect.anything(),
+        );
+      } finally {
+        mockProcessKill.mockImplementation(() => true);
+      }
     });
   });
 
@@ -1838,7 +2397,7 @@ describe('ShellExecutionService child_process fallback', () => {
       },
       {
         platform: 'win32',
-        expectedCommand: 'taskkill',
+        expectedCommand: TASKKILL,
         expectedExit: { code: 1 },
       },
     ])(
@@ -1871,15 +2430,114 @@ describe('ShellExecutionService child_process fallback', () => {
             );
           } else {
             expect(mockCpSpawn).toHaveBeenCalledWith(expectedCommand, [
-              '/pid',
-              String(mockChildProcess.pid),
               '/f',
               '/t',
+              '/pid',
+              String(mockChildProcess.pid),
             ]);
           }
         });
       },
     );
+
+    it('win32 cancel falls back to child.kill when taskkill cannot launch', async () => {
+      mockPlatform.mockReturnValue('win32');
+      // The shell spawn returns mockChildProcess; the taskkill spawn returns a
+      // separate emitter so its launch 'error' can be fired in isolation
+      // (without also tripping the shell child's own 'error' handler).
+      const taskkillProc = new EventEmitter();
+      mockCpSpawn.mockReturnValueOnce(mockChildProcess); // shell
+      mockCpSpawn.mockReturnValueOnce(taskkillProc); // performCancelKill taskkill
+
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (cp, abortController) => {
+          abortController.abort();
+          // taskkill could not launch -> async 'error' event (not a throw).
+          taskkillProc.emit('error', new Error('spawn taskkill ENOENT'));
+          // The child.kill() fallback makes the real child exit; settle it.
+          cp.emit('exit', 1, null);
+          cp.emit('close', 1, null);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      // Without the fallback the abort would hang waiting for an exit that
+      // never comes. See #5873.
+      expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    });
+
+    it('win32 cancel falls back to child.kill when taskkill exits non-zero', async () => {
+      mockPlatform.mockReturnValue('win32');
+      const taskkillProc = new EventEmitter();
+      mockCpSpawn.mockReturnValueOnce(mockChildProcess); // shell
+      mockCpSpawn.mockReturnValueOnce(taskkillProc); // performCancelKill taskkill
+
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (cp, abortController) => {
+          abortController.abort();
+          // taskkill launched but failed to kill the tree (e.g. access denied
+          // on an elevated child): non-zero exit, no 'error' event.
+          taskkillProc.emit('exit', 1);
+          // The child.kill() fallback makes the real child exit; settle it.
+          cp.emit('exit', 1, null);
+          cp.emit('close', 1, null);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      // The 'exit' handler must fall back to child.kill on a non-zero taskkill
+      // exit, else the cancel hangs (no 'error', child still alive). See #5873.
+      expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    });
+
+    it('win32 cancel does NOT fall back to child.kill when taskkill exits 0', async () => {
+      mockPlatform.mockReturnValue('win32');
+      const taskkillProc = new EventEmitter();
+      mockCpSpawn.mockReturnValueOnce(mockChildProcess); // shell
+      mockCpSpawn.mockReturnValueOnce(taskkillProc); // performCancelKill taskkill
+
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (cp, abortController) => {
+          abortController.abort();
+          // taskkill succeeded (exit 0): it killed the tree, so the fallback
+          // must NOT fire — pins the `if (code !== 0)` guard against removal
+          // or inversion.
+          taskkillProc.emit('exit', 0);
+          cp.emit('exit', 1, null);
+          cp.emit('close', 1, null);
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(mockChildProcess.kill).not.toHaveBeenCalled();
+    });
+
+    it('win32 cancel does NOT fall back to child.kill when the child already exited', async () => {
+      mockPlatform.mockReturnValue('win32');
+      const taskkillProc = new EventEmitter();
+      mockCpSpawn.mockReturnValueOnce(mockChildProcess); // shell
+      mockCpSpawn.mockReturnValueOnce(taskkillProc); // performCancelKill taskkill
+
+      const { result } = await simulateExecution(
+        'sleep 10',
+        (cp, abortController) => {
+          abortController.abort();
+          // The child exits naturally BEFORE taskkill reports failure (taskkill
+          // can be slow to report). This sets `exited = true`...
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+          // ...so the late taskkill error must NOT fall back to child.kill on a
+          // dead (possibly pid-reused) child — pins the `if (!exited)` guard.
+          taskkillProc.emit('error', new Error('spawn taskkill ENOENT'));
+        },
+      );
+
+      expect(result.aborted).toBe(true);
+      expect(mockChildProcess.kill).not.toHaveBeenCalled();
+    });
 
     it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
       mockPlatform.mockReturnValue('linux');

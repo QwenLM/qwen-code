@@ -1,8 +1,13 @@
-import { memo } from 'react';
-import { PromptChevron } from '../PromptChevron';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { isSafeImageSrc } from './Markdown';
 import { useI18n } from '../../i18n';
-import type { TurnCollapseHead } from '../../adapters/types';
 import styles from './UserMessage.module.css';
 
 interface UserMessageImage {
@@ -13,60 +18,93 @@ interface UserMessageImage {
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
-  /** When set, renders a toggle that folds/unfolds this turn's steps. */
-  collapse?: TurnCollapseHead;
-  onToggleCollapse?: (turnId: string) => void;
 }
 
 export const UserMessage = memo(function UserMessage({
   content,
   images,
-  collapse,
-  onToggleCollapse,
 }: UserMessageProps) {
   const { t } = useI18n();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+
+  const measureOverflow = useCallback(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    setOverflowing(el.scrollHeight > 400);
+  }, []);
+
+  useLayoutEffect(() => {
+    setExpanded(false);
+    measureOverflow();
+  }, [content, images?.length, measureOverflow]);
+
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measureOverflow);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [measureOverflow]);
+
   return (
-    <div className={styles.message}>
-      <span className={styles.prefix}>
-        <PromptChevron />
-      </span>
-      <div className={styles.body}>
-        {images && images.length > 0 && (
-          <div className={styles.images}>
-            {images.map((img, index) => {
-              const src = img.data.startsWith('data:')
-                ? img.data
-                : `data:${img.mimeType};base64,${img.data}`;
-              if (!isSafeImageSrc(src)) return null;
-              return (
-                <img
-                  key={index}
-                  src={src}
-                  alt={`User uploaded image ${index + 1}`}
-                  className={styles.imageThumb}
-                />
-              );
-            })}
-          </div>
-        )}
-        {content}
-      </div>
-      {collapse && onToggleCollapse && (
-        <button
-          type="button"
-          className={styles.collapseToggle}
-          onClick={() => onToggleCollapse(collapse.turnId)}
-          aria-expanded={!collapse.collapsed}
-          aria-label={
-            collapse.collapsed ? t('turn.expand') : t('turn.collapse')
-          }
-          title={collapse.collapsed ? t('turn.expand') : t('turn.collapse')}
+    <div className={styles.chatMessageRow}>
+      <div className={styles.chatBubble}>
+        <div
+          ref={contentRef}
+          className={`${styles.chatContent} ${
+            overflowing && !expanded ? styles.chatContentCollapsed : ''
+          }`}
         >
-          {collapse.collapsed
-            ? `⌄ ${t('turn.hiddenSteps', { count: collapse.hiddenCount })}`
-            : '⌃'}
-        </button>
-      )}
+          {images && images.length > 0 && (
+            <div className={styles.chatImages}>
+              {images.map((img, index) => {
+                const src = img.data.startsWith('data:')
+                  ? img.data
+                  : `data:${img.mimeType};base64,${img.data}`;
+                if (!isSafeImageSrc(src)) return null;
+                return (
+                  <img
+                    key={index}
+                    src={src}
+                    alt={`User uploaded image ${index + 1}`}
+                    className={styles.chatImageThumb}
+                    onLoad={measureOverflow}
+                  />
+                );
+              })}
+            </div>
+          )}
+          {content}
+        </div>
+        {overflowing && (
+          <button
+            type="button"
+            className={styles.toggleButton}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            <span>
+              {expanded ? t('userMessage.showLess') : t('userMessage.showMore')}
+            </span>
+            <svg
+              className={`${styles.toggleIcon} ${
+                expanded ? styles.toggleIconExpanded : ''
+              }`}
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+            >
+              <path
+                d="m4 6 4 4 4-4"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        )}
+      </div>
     </div>
   );
 });

@@ -21,6 +21,7 @@ import {
   DaemonHttpError,
   DaemonSessionClient,
   createDaemonTranscriptStore,
+  extractServerTimestamp,
   matchTurnEvent,
   normalizeDaemonEvent,
   type DaemonEvent,
@@ -30,7 +31,7 @@ import {
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
-import { createDaemonSessionActions } from './actions.js';
+import { createDaemonSessionActions, getPromptSettledKey } from './actions.js';
 import {
   detachDaemonClient,
   getStableClientId,
@@ -43,6 +44,7 @@ import {
   getReplayTokenUsage,
   getTokenCountFromUsage,
   mapProviderStatus,
+  mapSessionContextModels,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -62,6 +64,10 @@ import {
   parseSidechannelFollowupSuggestion,
   publishSidechannelFollowupSuggestion,
 } from '../followupSidechannel.js';
+import {
+  parseSidechannelMidTurnInjected,
+  publishSidechannelMidTurnInjected,
+} from '../midTurnInjectedSidechannel.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -73,6 +79,7 @@ import type {
   DaemonSessionProviderProps,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
+  SettledPrompt,
 } from './types.js';
 
 export type {
@@ -96,6 +103,19 @@ export type {
   DaemonWorkspaceEventSignals,
   SendPromptOptions,
 } from './types.js';
+
+function assistantDoneFromTurnEvent(
+  event: DaemonEvent,
+  reason: string,
+): DaemonUiEvent {
+  const serverTimestamp = extractServerTimestamp(event);
+  return {
+    type: 'assistant.done',
+    reason,
+    eventId: event.id,
+    ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+  };
+}
 
 const DaemonStoreContext = createContext<DaemonTranscriptStore | undefined>(
   undefined,
@@ -137,6 +157,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   toolsVersion: 0,
   settingsVersion: 0,
   mcpVersion: 0,
+  extensionsVersion: 0,
   initVersion: 0,
   authVersion: 0,
 };
@@ -195,6 +216,7 @@ export function DaemonSessionProvider({
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
+  const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
   const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
     undefined,
   );
@@ -203,6 +225,9 @@ export function DaemonSessionProvider({
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const heartbeatSupportedRef = useRef(false);
+  const settledRestoredActivePromptSessionsRef = useRef<
+    WeakSet<DaemonSessionClient>
+  >(new WeakSet());
   const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
   const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
   const loadWarningsRef = useRef(loadWarnings);
@@ -215,6 +240,8 @@ export function DaemonSessionProvider({
   loadWarningsRef.current = loadWarnings;
   const modelServiceId = createSessionRequest?.modelServiceId;
   const sessionScope = createSessionRequest?.sessionScope;
+  const createSessionRequestRef = useRef(createSessionRequest);
+  createSessionRequestRef.current = createSessionRequest;
   const [promptStatus, setPromptStatus] = useState<DaemonPromptStatus>('idle');
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
     initialSessionId,
@@ -252,6 +279,7 @@ export function DaemonSessionProvider({
   );
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
+  const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
 
   useEffect(() => {
     if (!autoConnect) return undefined;
@@ -277,6 +305,13 @@ export function DaemonSessionProvider({
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
+      let hasCurrentSessionActivePrompt = () => false;
+      // Set when the user explicitly deletes the session (server
+      // publishes session_closed with reason 'client_close').
+      // Reconnecting would auto-create a new session, undoing the
+      // user's delete. Other session_closed reasons (idle_timeout,
+      // last_client_detached) fall through to normal reconnect.
+      let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
         try {
@@ -441,6 +476,36 @@ export function DaemonSessionProvider({
           }
 
           const activeSession = session;
+          // Prompt activity is session state returned by /load. Surface it
+          // immediately so a refreshed page shows the running state without
+          // waiting for auxiliary data such as providers, commands, or context.
+          //
+          // `activePromptsRef` only tracks prompts submitted by this browser
+          // instance. After a page refresh, `/load` can attach to a daemon
+          // session whose prompt is still running, but there is no local
+          // controller/promise to put in `activePromptsRef`. Keep that restored
+          // live state separately so `session.replay_complete` (history caught
+          // up) does not get mistaken for `turn_complete` (prompt finished).
+          const restoredActivePromptSettled =
+            settledRestoredActivePromptSessionsRef.current.has(activeSession);
+          let restoredActivePrompt =
+            activeSession.hasActivePrompt === true &&
+            !restoredActivePromptSettled;
+          const settleRestoredActivePrompt = () => {
+            // `hasActivePrompt` is a load/resume snapshot on this session client.
+            // Once a terminal event consumes it, keep it consumed across SSE
+            // reconnects for the same client; later prompts from this page are
+            // still tracked independently in activePromptsRef.
+            settledRestoredActivePromptSessionsRef.current.add(activeSession);
+            restoredActivePrompt = false;
+          };
+          const hasSessionActivePrompt = () =>
+            restoredActivePrompt ||
+            activePromptsRef.current.has(activeSession.sessionId);
+          hasCurrentSessionActivePrompt = hasSessionActivePrompt;
+          hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
+          setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
+
           const [providerResult, commandResult, contextResult] =
             await Promise.allSettled([
               client.workspaceProviders(),
@@ -470,19 +535,42 @@ export function DaemonSessionProvider({
               ? loadWarningsRef.current?.context
               : undefined,
           ].filter((warning): warning is string => Boolean(warning));
-          const { models, currentModel, contextWindow } =
-            mapProviderStatus(providers);
+          const providerModelStatus = mapProviderStatus(providers);
+          const contextModelStatus = mapSessionContextModels(context);
+          const sessionModels =
+            contextModelStatus && contextModelStatus.models.length > 0
+              ? contextModelStatus.models
+              : providerModelStatus.models;
+          const sessionCurrentModel =
+            contextModelStatus?.currentModel ??
+            providerModelStatus.currentModel;
+          const providerContextWindow =
+            sessionCurrentModel === providerModelStatus.currentModel
+              ? providerModelStatus.contextWindow
+              : providerModelStatus.models.find(
+                  (model) => model.id === sessionCurrentModel,
+                )?.contextWindow;
+          const sessionContextWindow =
+            contextModelStatus?.contextWindow ??
+            sessionModels.find((model) => model.id === sessionCurrentModel)
+              ?.contextWindow ??
+            providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
           const currentMode = getCurrentMode(context);
 
           setConnection((current) => ({
             status: 'connected',
             sessionId: activeSession.sessionId,
+            // Surface the bound client id so consumers can recognize their own
+            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+            ...(activeSession.clientId
+              ? { clientId: activeSession.clientId }
+              : {}),
             workspaceCwd: activeSession.workspaceCwd,
             commands,
             skills,
-            models,
-            currentModel,
+            models: sessionModels,
+            currentModel: sessionCurrentModel,
             currentMode,
             displayName:
               getSessionDisplayName(activeSession.state) ??
@@ -508,7 +596,7 @@ export function DaemonSessionProvider({
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
-            contextWindow,
+            contextWindow: sessionContextWindow,
             providers,
             supportedCommands,
             context,
@@ -518,11 +606,6 @@ export function DaemonSessionProvider({
               activeSession.lastEventId != null ||
               undefined,
           }));
-          setPromptStatus(
-            activePromptsRef.current.has(activeSession.sessionId)
-              ? 'streaming'
-              : 'idle',
-          );
           if (loadWarningTexts.length > 0) {
             store.dispatch(
               loadWarningTexts.map((text) => ({
@@ -581,12 +664,13 @@ export function DaemonSessionProvider({
                   const stopReason =
                     (replayEvent.data as DaemonTurnCompleteData | undefined)
                       ?.stopReason ?? 'end_turn';
-                  allUiEvents.push({
-                    type: 'assistant.done',
-                    reason: stopReason,
-                  });
+                  allUiEvents.push(
+                    assistantDoneFromTurnEvent(replayEvent, stopReason),
+                  );
                 } else if (replayEvent.type === 'turn_error') {
-                  allUiEvents.push({ type: 'assistant.done', reason: 'error' });
+                  allUiEvents.push(
+                    assistantDoneFromTurnEvent(replayEvent, 'error'),
+                  );
                 }
               } catch (error) {
                 const message =
@@ -616,6 +700,7 @@ export function DaemonSessionProvider({
             for (const replayEvent of replayEvents) {
               settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
+                settledPromptsRef.current,
                 activeSession.sessionId,
                 replayEvent,
                 store,
@@ -623,19 +708,6 @@ export function DaemonSessionProvider({
                 passiveAssistantDoneTimerRef,
                 { requireBoundPromptId: true },
               );
-            }
-            // If replay has events but no terminal signal
-            // (turn_complete/turn_error/prompt_cancelled), the turn was
-            // likely still in progress — seed promptStatus so the loading
-            // indicator shows immediately instead of flickering.
-            const hasTurnTerminalEvent = replayEvents.some(
-              (e) =>
-                e.type === 'turn_complete' ||
-                e.type === 'turn_error' ||
-                e.type === 'prompt_cancelled',
-            );
-            if (replayEvents.length > 0 && !hasTurnTerminalEvent) {
-              setPromptStatus((s) => (s === 'idle' ? 'waiting' : s));
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
@@ -647,8 +719,34 @@ export function DaemonSessionProvider({
 
           let sawEvent = false;
           let resyncRequested = false;
-          let epochReplayUiEvents: DaemonUiEvent[] | undefined;
-          let epochReplaySourceEvents: DaemonEvent[] = [];
+          const requestEpochResetReload = () => {
+            // An epoch reset means the daemon/EventBus timeline was rebuilt.
+            // The current SSE cursor and any restored/local prompt activity may
+            // describe the old epoch, so do a full /load and let
+            // hasActivePrompt from that fresh snapshot become authoritative.
+            const active = activePromptsRef.current.get(
+              activeSession.sessionId,
+            );
+            active?.controller.abort();
+            activePromptsRef.current.delete(activeSession.sessionId);
+            if (restoredActivePrompt) {
+              settleRestoredActivePrompt();
+            }
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setPromptStatus('idle');
+            store.reset();
+            activeSession.setLastEventId(0);
+            reconnectSessionId = activeSession.sessionId;
+            resyncRequested = true;
+            session = undefined;
+            sessionRef.current = undefined;
+            hasCurrentSessionActivePromptRef.current = () => false;
+            setConnection((current) => ({
+              ...current,
+              status: 'connecting',
+              error: undefined,
+            }));
+          };
           for await (const event of activeSession.events({
             signal: abort.signal,
             maxQueued,
@@ -663,6 +761,12 @@ export function DaemonSessionProvider({
               if (followupSuggestion) {
                 publishSidechannelFollowupSuggestion(followupSuggestion);
                 continue;
+              }
+              const midTurnInjected = parseSidechannelMidTurnInjected(event);
+              if (midTurnInjected) {
+                // Keep the sidechannel for queue dedupe, but still normalize the
+                // event below so chat UIs can render the inserted-message status.
+                publishSidechannelMidTurnInjected(midTurnInjected);
               }
               const normalizedUiEvents = normalizeAndFilterEvent(
                 event,
@@ -681,89 +785,54 @@ export function DaemonSessionProvider({
                     ? (event.data as Record<string, unknown>).reason
                     : undefined;
                 if (reason === 'epoch_reset') {
-                  setPromptStatus('idle');
-                  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                  activeSession.setLastEventId(0);
-                  epochReplayUiEvents = [];
-                  epochReplaySourceEvents = [];
-                  continue;
+                  requestEpochResetReload();
+                  break;
                 }
-              }
-              if (epochReplayUiEvents) {
-                epochReplaySourceEvents.push(event);
-                epochReplayUiEvents.push(...uiEvents);
-                if (event.type === 'turn_complete') {
-                  const stopReason =
-                    (event.data as DaemonTurnCompleteData | undefined)
-                      ?.stopReason ?? 'end_turn';
-                  epochReplayUiEvents.push({
-                    type: 'assistant.done',
-                    reason: stopReason,
-                  });
-                } else if (event.type === 'turn_error') {
-                  epochReplayUiEvents.push({
-                    type: 'assistant.done',
-                    reason: 'error',
-                  });
-                }
-
-                const replayComplete = uiEvents.some(
-                  (uiEvent) => uiEvent.type === 'session.replay_complete',
-                );
-                if (replayComplete) {
-                  if (!activePromptsRef.current.has(activeSession.sessionId)) {
-                    clearPassiveAssistantDoneTimer(
-                      passiveAssistantDoneTimerRef,
-                    );
-                    epochReplayUiEvents.push({
-                      type: 'assistant.done',
-                      reason: 'replay_complete',
-                    });
-                    setPromptStatus('idle');
-                  }
-                  const replayUiEvents = epochReplayUiEvents;
-                  const replaySourceEvents = epochReplaySourceEvents;
-                  epochReplayUiEvents = undefined;
-                  epochReplaySourceEvents = [];
-                  store.reset();
-                  if (replayUiEvents.length > 0) {
-                    store.dispatch(replayUiEvents);
-                    bumpWorkspaceEventSignals(
-                      replayUiEvents,
-                      setWorkspaceEventSignals,
-                    );
-                  }
-                  for (const replayEvent of replaySourceEvents) {
-                    settleActivePromptFromTurnEvent(
-                      activePromptsRef.current,
-                      activeSession.sessionId,
-                      replayEvent,
-                      store,
-                      setPromptStatus,
-                      passiveAssistantDoneTimerRef,
-                      { requireBoundPromptId: true },
-                    );
-                  }
-                  setConnection((c) => ({ ...c, catchingUp: undefined }));
-                }
-                continue;
               }
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
+                const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
-                  current === 'waiting' ? 'streaming' : current,
+                  current === 'waiting' ||
+                  (current === 'idle' && hasGenerationSignal)
+                    ? 'streaming'
+                    : current,
                 );
               }
               const activePromptSettled = settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
+                settledPromptsRef.current,
                 activeSession.sessionId,
                 event,
                 store,
                 setPromptStatus,
                 passiveAssistantDoneTimerRef,
               );
+              let restoredPromptSettled = false;
+              if (
+                !activePromptSettled &&
+                restoredActivePrompt &&
+                (event.type === 'turn_complete' || event.type === 'turn_error')
+              ) {
+                // A refreshed page restores an already-running prompt without a
+                // local ActivePrompt entry or prompt promise to settle. The daemon
+                // terminal event is still authoritative, so end the restored
+                // running state here instead of relying on the observer branch.
+                settleRestoredActivePrompt();
+                restoredPromptSettled = true;
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                const stopReason =
+                  event.type === 'turn_complete'
+                    ? ((event.data as DaemonTurnCompleteData | undefined)
+                        ?.stopReason ?? 'end_turn')
+                    : 'error';
+                store.dispatch(assistantDoneFromTurnEvent(event, stopReason));
+                if (!hasSessionActivePrompt()) {
+                  setPromptStatus('idle');
+                }
+              }
               const shouldGuardAssistant =
-                !activePromptsRef.current.has(activeSession.sessionId) &&
+                !hasSessionActivePrompt() &&
                 store.getSnapshot().activeAssistantBlockId != null;
               const eventsToDispatch = shouldGuardAssistant
                 ? uiEvents.filter((e) => e.type !== 'debug')
@@ -772,17 +841,28 @@ export function DaemonSessionProvider({
               for (const uiEvent of uiEvents) {
                 if (
                   uiEvent.type === 'prompt.cancelled' &&
-                  uiEvent.originatorClientId !== activeSession.clientId
+                  (restoredActivePrompt ||
+                    uiEvent.originatorClientId !== activeSession.clientId)
                 ) {
-                  setPromptStatus('idle');
+                  store.dispatch(
+                    assistantDoneFromTurnEvent(event, 'cancelled'),
+                  );
+                  const cancellingRestoredPrompt = restoredActivePrompt;
+                  settleRestoredActivePrompt();
+                  restoredPromptSettled = true;
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                  activePromptsRef.current.delete(activeSession.sessionId);
+                  if (!cancellingRestoredPrompt) {
+                    activePromptsRef.current.delete(activeSession.sessionId);
+                  }
+                  if (!hasSessionActivePrompt()) {
+                    setPromptStatus('idle');
+                  }
                 } else if (uiEvent.type === 'session.replay_complete') {
                   setConnection((c) => ({ ...c, catchingUp: undefined }));
                   if (store.getSnapshot().awaitingResync) {
                     store.clearAwaitingResync();
                   }
-                  if (!activePromptsRef.current.has(activeSession.sessionId)) {
+                  if (!hasSessionActivePrompt()) {
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
                     );
@@ -794,9 +874,14 @@ export function DaemonSessionProvider({
                   }
                 }
               }
+              // A restored active prompt is not in activePromptsRef because this
+              // browser did not submit it. Treat it as active here too; otherwise
+              // the passive observer timer can briefly mark a still-running turn
+              // idle between sparse tool/thinking updates.
               const isObserver =
                 !activePromptSettled &&
-                !activePromptsRef.current.has(activeSession.sessionId);
+                !restoredPromptSettled &&
+                !hasSessionActivePrompt();
               if (isObserver) {
                 const hasUserMsg = uiEvents.some(
                   (e) => e.type === 'user.text.delta',
@@ -814,11 +899,11 @@ export function DaemonSessionProvider({
                 const stopReason =
                   (event.data as DaemonTurnCompleteData | undefined)
                     ?.stopReason ?? 'end_turn';
-                store.dispatch({ type: 'assistant.done', reason: stopReason });
+                store.dispatch(assistantDoneFromTurnEvent(event, stopReason));
                 setPromptStatus('idle');
               } else if (isObserver && event.type === 'turn_error') {
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                store.dispatch({ type: 'assistant.done', reason: 'error' });
+                store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
                 setPromptStatus('idle');
               } else if (isObserver && hasActiveGenerationSignal(uiEvents)) {
                 schedulePassiveAssistantDone(
@@ -830,24 +915,26 @@ export function DaemonSessionProvider({
                 );
               }
               // ── state_resync_required handling ──────────────────────
-              // Two sub-cases:
-              //   epoch_reset — daemon restarted but ring is intact; reset
-              //     store + rewind lastEventId so subsequent events rebuild
-              //     the transcript from the ring on this same SSE stream.
-              //   ring_evicted — too many events accumulated while we were
-              //     disconnected; the ring lost earlier events, so we must
-              //     break out and do a full session load (PATH B).
+              // Resyncs are transcript recovery signals, not prompt terminal
+              // signals. For epoch_reset and ring_evicted we reload the session
+              // snapshot; the fresh /load response is the source of truth for
+              // hasActivePrompt and transcript replay.
               if (event.type === 'state_resync_required') {
                 const reason =
                   typeof event.data === 'object' && event.data !== null
                     ? (event.data as Record<string, unknown>).reason
                     : undefined;
-                setPromptStatus('idle');
-                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                store.reset();
-                if (reason === 'epoch_reset') {
-                  activeSession.setLastEventId(0);
-                } else {
+                if (reason !== 'epoch_reset') {
+                  // Resync asks us to rebuild transcript state, but it is not a
+                  // prompt terminal signal. Keep loading alive for local/restored
+                  // prompts until turn_complete, turn_error, or prompt_cancelled.
+                  if (!hasSessionActivePrompt()) {
+                    setPromptStatus('idle');
+                    clearPassiveAssistantDoneTimer(
+                      passiveAssistantDoneTimerRef,
+                    );
+                  }
+                  store.reset();
                   // Ring eviction means the SSE replay window has a real gap.
                   // Resetting and continuing on the same stream can only replay
                   // the surviving tail; reload the session snapshot instead so
@@ -859,6 +946,7 @@ export function DaemonSessionProvider({
                   resyncRequested = true;
                   session = undefined;
                   sessionRef.current = undefined;
+                  hasCurrentSessionActivePromptRef.current = () => false;
                   setConnection((current) => ({
                     ...current,
                     status: 'connecting',
@@ -866,6 +954,27 @@ export function DaemonSessionProvider({
                   }));
                   break;
                 }
+              }
+              // session_closed with reason 'client_close' means the
+              // user explicitly deleted the session. Stop the
+              // reconnect loop — without this, the next iteration
+              // would call createOrAttach and auto-create a new
+              // session, undoing the user's delete action.
+              // Other reasons (idle_timeout, last_client_detached)
+              // fall through to the normal reconnect path.
+              if (
+                event.type === 'session_closed' &&
+                (event.data as Record<string, unknown> | undefined)?.reason ===
+                  'client_close'
+              ) {
+                userDeletedSession = true;
+                const closedSessionId = activeSession.sessionId;
+                const active = activePromptsRef.current.get(closedSessionId);
+                active?.controller.abort();
+                activePromptsRef.current.delete(closedSessionId);
+                session = undefined;
+                sessionRef.current = undefined;
+                break;
               }
             } catch (error) {
               const message =
@@ -885,17 +994,42 @@ export function DaemonSessionProvider({
               );
             }
           }
+          if (userDeletedSession) {
+            // Session was explicitly closed (user deleted it). Do NOT
+            // reconnect — doing so would auto-create a new session.
+            // Note: we intentionally do NOT call setRestoreSessionId(undefined)
+            // here because restoreSessionId is in the useEffect dependency
+            // array — changing it would trigger an effect re-run that could
+            // create a new session via createOrAttach.
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
+            setPromptStatus('idle');
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setConnection((current) => ({
+              ...current,
+              status: 'disconnected',
+              sessionId: undefined,
+              error: undefined,
+            }));
+            return;
+          }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current?.sessionId === activeSession.sessionId) {
-              clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-              setPromptStatus('idle');
               console.debug('[DaemonSessionProvider] SSE stream ended');
-              store.dispatch({
-                type: 'assistant.done',
-                reason: 'stream_ended',
-              });
+              if (!hasSessionActivePrompt()) {
+                // A transport close is only a safe "done" signal for passive
+                // observers. When a local/restored prompt is still active, the
+                // daemon may continue running while we reconnect via
+                // Last-Event-ID, so keep the prompt in streaming state until a
+                // real turn_complete/turn_error/prompt_cancelled arrives.
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                setPromptStatus('idle');
+                store.dispatch({
+                  type: 'assistant.done',
+                  reason: 'stream_ended',
+                });
+              }
             }
             setConnection((current) => ({
               ...current,
@@ -919,8 +1053,13 @@ export function DaemonSessionProvider({
             active?.controller.abort();
             activePromptsRef.current.delete(failedSessionId);
           }
-          clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-          setPromptStatus('idle');
+          // Retriable transport failures are not prompt terminal events. Keep
+          // restored/local prompts in streaming state until the daemon sends
+          // turn_complete, turn_error, or prompt_cancelled.
+          if (isAuthFailure || isTerminal || !hasCurrentSessionActivePrompt()) {
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setPromptStatus('idle');
+          }
           const pendingLoad = pendingSessionLoadRef.current;
           if (
             pendingLoad &&
@@ -947,6 +1086,7 @@ export function DaemonSessionProvider({
                 status: 'disconnected',
                 sessionId: undefined,
                 error: message,
+                catchingUp: undefined,
               }));
               return;
             }
@@ -988,6 +1128,7 @@ export function DaemonSessionProvider({
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
+            catchingUp: undefined,
           }));
           return;
         }
@@ -1013,6 +1154,7 @@ export function DaemonSessionProvider({
       const session = sessionRef.current;
       disposed = true;
       abort.abort();
+      hasCurrentSessionActivePromptRef.current = () => false;
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       if (pendingSessionLoadRef.current) {
@@ -1106,10 +1248,22 @@ export function DaemonSessionProvider({
         store,
         sessionRef,
         activePromptsRef,
+        settledPromptsRef,
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
         passiveAssistantDoneTimerRef,
+        hasSessionActivePrompt: () =>
+          hasCurrentSessionActivePromptRef.current(),
+        resetCurrentSessionActivePrompt: () => {
+          hasCurrentSessionActivePromptRef.current = () => false;
+        },
+        getCreateSessionRequest: () => ({
+          ...createSessionRequestRef.current,
+          sessionScope: 'thread',
+          workspaceCwd:
+            resolvedWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
+        }),
         addNotice,
         setConnection,
         setPromptStatus,
@@ -1141,6 +1295,7 @@ export function DaemonSessionProvider({
 
 function settleActivePromptFromTurnEvent(
   activePrompts: Map<string, ActivePrompt>,
+  settledPrompts: Map<string, SettledPrompt>,
   sessionId: string,
   event: DaemonEvent,
   store: DaemonTranscriptStore,
@@ -1167,29 +1322,29 @@ function settleActivePromptFromTurnEvent(
   try {
     const result = matchTurnEvent(event, promptId);
     if (!result) return false;
-    store.dispatch({ type: 'assistant.done', reason: result.stopReason });
+    store.dispatch(assistantDoneFromTurnEvent(event, result.stopReason));
     setPromptStatus('idle');
     if (active.resolve) {
       activePrompts.delete(sessionId);
       active.resolve(result);
     } else {
-      activePrompts.set(sessionId, {
-        ...active,
-        promptId,
-        pendingResult: result,
+      activePrompts.delete(sessionId);
+      settledPrompts.set(getPromptSettledKey(sessionId, promptId), {
+        status: 'resolved',
+        result,
       });
     }
   } catch (error) {
-    store.dispatch({ type: 'assistant.done', reason: 'error' });
+    store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
     setPromptStatus('idle');
     if (active.reject) {
       activePrompts.delete(sessionId);
       active.reject(error);
     } else {
-      activePrompts.set(sessionId, {
-        ...active,
-        promptId,
-        pendingError: error,
+      activePrompts.delete(sessionId);
+      settledPrompts.set(getPromptSettledKey(sessionId, promptId), {
+        status: 'rejected',
+        error,
       });
     }
   }
@@ -1545,7 +1700,7 @@ function getNumber(
 }
 
 function bumpWorkspaceEventSignals(
-  events: ReadonlyArray<{ type: string }>,
+  events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
 ): void {
   let memory = 0;
@@ -1553,6 +1708,10 @@ function bumpWorkspaceEventSignals(
   let tools = 0;
   let settings = 0;
   let mcp = 0;
+  let extensions = 0;
+  let lastExtensionChange:
+    | DaemonWorkspaceEventSignals['lastExtensionChange']
+    | undefined;
   let init = 0;
   let auth = 0;
 
@@ -1576,6 +1735,18 @@ function bumpWorkspaceEventSignals(
       case 'workspace.mcp.server_restart_refused':
         mcp += 1;
         break;
+      case 'workspace.extensions.changed':
+        extensions += 1;
+        lastExtensionChange = {
+          ...(event.status ? { status: event.status } : {}),
+          ...(event.source ? { source: event.source } : {}),
+          ...(event.name ? { name: event.name } : {}),
+          ...(event.version ? { version: event.version } : {}),
+          ...(event.error ? { error: event.error } : {}),
+          refreshed: event.refreshed,
+          failed: event.failed,
+        };
+        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -1591,7 +1762,8 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  if (memory + agents + tools + settings + mcp + init + auth === 0) return;
+  if (memory + agents + tools + settings + mcp + extensions + init + auth === 0)
+    return;
 
   setSignals((current) => ({
     memoryVersion: current.memoryVersion + memory,
@@ -1599,6 +1771,8 @@ function bumpWorkspaceEventSignals(
     toolsVersion: current.toolsVersion + tools,
     settingsVersion: current.settingsVersion + settings,
     mcpVersion: current.mcpVersion + mcp,
+    extensionsVersion: current.extensionsVersion + extensions,
+    ...(lastExtensionChange ? { lastExtensionChange } : {}),
     initVersion: current.initVersion + init,
     authVersion: current.authVersion + auth,
   }));

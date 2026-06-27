@@ -36,11 +36,55 @@ export function isAbortError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Best-effort one-line description of an error's `cause`, used to surface the
+ * underlying syscall behind opaque wrappers like undici's `TypeError: fetch
+ * failed` (whose own message carries nothing). Returns `undefined` when there
+ * is no useful detail.
+ *
+ * Handles three shapes:
+ *   - `AggregateError` (undici retries multiple addresses, e.g. IPv6 `::1` then
+ *     IPv4 `127.0.0.1`): its own `message` is empty, so unwrap `.errors[]`.
+ *   - a plain `Error` with a Node `code` (e.g. `ECONNREFUSED`) but possibly an
+ *     empty message — prefer `code`, combine with message when both add signal.
+ *   - any other value — stringify.
+ */
+function describeErrorCause(cause: unknown): string | undefined {
+  if (cause == null) return undefined;
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((e) => describeSingleError(e))
+      .filter((s): s is string => Boolean(s));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+  return describeSingleError(cause);
+}
+
+function describeSingleError(err: unknown): string | undefined {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code;
+    const codeStr = typeof code === 'string' ? code : undefined;
+    const msg = err.message?.trim();
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr || (err.name !== 'Error' ? err.name : undefined);
+  }
+  if (err && typeof err === 'object' && 'code' in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string' && code) return code;
+  }
+  const str = String(err);
+  return str && str !== '[object Object]' ? str : undefined;
+}
+
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    const cause = error.cause;
-    if (cause instanceof Error && cause.message !== error.message) {
-      return `${error.message} (cause: ${cause.message})`;
+    const detail = describeErrorCause(error.cause);
+    if (detail && detail !== error.message) {
+      return `${error.message} (cause: ${detail})`;
     }
     return error.message;
   }

@@ -28,6 +28,8 @@ vi.mock('../telemetry/index.js', () => ({
   })),
   DEFAULT_TELEMETRY_TARGET: 'none',
   DEFAULT_OTLP_ENDPOINT: '',
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
   isTelemetrySdkInitialized: vi.fn().mockReturnValue(false),
   shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
   refreshSessionContext: vi.fn(),
@@ -100,6 +102,13 @@ const baseParams: ConfigParameters = {
   usageStatisticsEnabled: false,
   overrideExtensions: [],
 };
+
+// Each test re-imports config.js's full transitive module graph cold
+// (afterEach calls vi.resetModules() so the module-level sessionEnvClaimed
+// flag resets). That cold transform+evaluate runs several seconds and, under
+// a contended CI runner, crosses the 5s default — a flaky timeout, not a hang.
+// The reset is load-bearing for what these tests check, so give them headroom.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 describe('Config sessionEnvClaimed guard', () => {
   let originalEnv: string | undefined;

@@ -23,7 +23,20 @@ const rootDir = join(__dirname, '..');
 // Budget includes the DaemonTransport interface + DaemonTransportClosedError +
 // RestSseTransport (default transport, constructed by DaemonClient).
 // Bumped from 116KB to 118KB for the transport abstraction layer (~1.5KB).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 118 * 1024;
+// Bumped from 118KB to 119KB for the mid-turn drain surface (enqueue methods +
+// `mid_turn_message_injected` event type/guard/registration, ~150 bytes).
+// Bumped from 119KB to 122KB for the workspace extension management surface
+// (install/update/enable/disable/uninstall/refresh/check update endpoints).
+// Bumped from 122KB to 124KB for daemon fork-session APIs/events.
+// Bumped from 124KB to 125KB for rewind/branch transcript/session APIs.
+// Bumped from 125KB to 126KB for the workspace permissions rules API
+// (workspacePermissions + set/add/remove rule methods + types, ~718 bytes).
+// Bumped from 126KB to 127KB for prompt clientId self-heal.
+// Bumped from 127KB to 130KB for daemon workspace voice, trust, permissions,
+// session LSP helper APIs, and the full daemon route table.
+// Bumped from 130KB to 131KB for the workspace MCP resources drill-down
+// (workspaceMcpResources client method + route + resource status types).
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 131 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });

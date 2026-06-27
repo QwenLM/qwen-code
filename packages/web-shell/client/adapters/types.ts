@@ -12,6 +12,7 @@ import type {
   DaemonInsightReadyMessage,
   DaemonPlanMessage,
   DaemonSystemMessage,
+  DaemonThinkingMessage,
   DaemonToolGroupMessage,
   DaemonUserMessage,
   DaemonUserShellMessage,
@@ -29,6 +30,7 @@ export type StreamingState = DaemonStreamingState;
 
 export type UserMessage = DaemonUserMessage;
 export type AssistantMessage = DaemonAssistantMessage;
+export type ThinkingMessage = DaemonThinkingMessage;
 export type InsightErrorMessage = DaemonInsightErrorMessage;
 export type InsightProgressMessage = DaemonInsightProgressMessage;
 export type InsightReadyMessage = DaemonInsightReadyMessage;
@@ -51,6 +53,33 @@ export interface TurnCollapseHead {
   collapsed: boolean;
   /** number of display rows hidden behind the toggle while collapsed. */
   hiddenCount: number;
+  /**
+   * Wall-clock span from the prompt to the turn's last step, in ms. Derived
+   * from block timestamps (so it survives replay); undefined when either end
+   * lacks a timestamp. Approximate — a step's own runtime past its start is not
+   * captured.
+   */
+  elapsedMs?: number;
+  /**
+   * Per-turn token usage, summed from the turn's assistant messages. Both fields
+   * are present together or the pair is undefined (older sessions stamp no
+   * usage). Sub-agent tokens are included (see the SDK reducer).
+   */
+  inputTokens?: number;
+  outputTokens?: number;
+  /** Cached-read tokens — a subset of inputTokens, surfaced only when > 0. */
+  cachedTokens?: number;
+  /** Number of tool calls shown in this turn. */
+  toolCallCount?: number;
+  /** Number of assistant thinking blocks shown in this turn. */
+  thinkingCount?: number;
+  /**
+   * Prompt wall-clock (ms) for a still-running turn. Present only while the turn
+   * is active; the row ticks `now - liveStartedAt` once a second so the elapsed
+   * advances smoothly instead of jumping per step. Absent once complete, when
+   * the frozen `elapsedMs` is shown.
+   */
+  liveStartedAt?: number;
 }
 
 export interface ContentBlock {

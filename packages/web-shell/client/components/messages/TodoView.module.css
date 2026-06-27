@@ -16,18 +16,18 @@
 .num {
   flex-shrink: 0;
   text-align: right;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
 
 .icon {
   width: 14px;
   flex-shrink: 0;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .text {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 /* The collapsed summary keeps each row to one line so a long task title never
@@ -42,7 +42,7 @@
 
 .inProgress .icon,
 .inProgress .text {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .completed .icon {
@@ -53,9 +53,9 @@
    item lingers as crossed-off. A summary row is an event ("just completed")
    that reads as an accomplishment, so it stays in normal text. */
 .list .completed .text {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   text-decoration: line-through;
-  text-decoration-color: var(--text-dimmed);
+  text-decoration-color: var(--muted-foreground);
 }
 
 /* Each expanded-list entry stacks its row above an optional detail panel. */
@@ -76,13 +76,14 @@
   color: inherit;
   text-align: left;
   cursor: pointer;
+  font-size: 13px;
 }
 
 .detailChevron {
   flex-shrink: 0;
   margin-left: auto;
   padding-left: 8px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 /* Indented under its row and aligned past the status icon. */
@@ -92,7 +93,7 @@
   gap: 6px;
   margin: 3px 0 6px 20px;
   padding-left: 8px;
-  border-left: 1px solid var(--border-color);
+  border-left: 1px solid var(--border);
   font-size: 12px;
 }
 
@@ -103,7 +104,7 @@
 }
 
 .detailSectionTitle {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 11px;
 }
 
@@ -119,20 +120,20 @@
 }
 
 .detailLabel {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .detailValue {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
 
 /* The elapsed duration trails the end time as a dimmed parenthetical. */
 .detailDuration {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .detailHint {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-style: italic;
 }

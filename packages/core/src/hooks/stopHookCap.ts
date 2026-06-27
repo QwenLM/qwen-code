@@ -19,11 +19,17 @@ export function normalizeStopHookBlockingCap(value: unknown): number {
     : DEFAULT_STOP_HOOK_BLOCK_CAP;
 }
 
+function parseStopHookBlockingCapEnv(value: string): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed)
+    ? normalizeStopHookBlockingCap(parsed)
+    : DEFAULT_STOP_HOOK_BLOCK_CAP;
+}
+
 export function resolveStopHookBlockingCap(configValue?: number): number {
   const envValue = process.env[STOP_HOOK_BLOCK_CAP_ENV];
   if (envValue !== undefined && envValue.trim() !== '') {
-    const parsed = Number(envValue);
-    return normalizeStopHookBlockingCap(parsed);
+    return parseStopHookBlockingCapEnv(envValue);
   }
 
   return normalizeStopHookBlockingCap(configValue);

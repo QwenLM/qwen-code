@@ -11,10 +11,15 @@ import type {
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
+  DaemonForkSessionResult,
   DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
+  DaemonRewindResult,
+  DaemonRewindSnapshotInfo,
+  DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskStatus,
@@ -41,6 +46,14 @@ export type DaemonConnectionStatus =
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
+  /**
+   * Daemon-confirmed client identity bound to this session (the value sent as
+   * `X-Qwen-Client-Id`). Consumers use it to recognize their OWN
+   * originator-stamped frames — e.g. the web-shell dedupes a
+   * `mid_turn_message_injected` batch only when its `originatorClientId`
+   * matches this id (a peer on the same session must keep its own entry).
+   */
+  clientId?: string;
   workspaceCwd?: string;
   commands?: DaemonCommandInfo[];
   skills?: string[];
@@ -139,6 +152,7 @@ export type DaemonNoticeOperation =
   | 'cancel_prompt'
   | 'load_session'
   | 'resume_session'
+  | 'create_session'
   | 'close_session'
   | 'rename_session'
   | 'release_session'
@@ -149,9 +163,13 @@ export type DaemonNoticeOperation =
   | 'cancel_task'
   | 'clear_goal'
   | 'load_stats'
+  | 'rewind_snapshots'
+  | 'rewind_session'
   | 'refresh_commands'
   | 'recap_session'
   | 'btw_session'
+  | 'branch_session'
+  | 'fork_session'
   | 'stream'
   | 'normalize_event';
 
@@ -263,9 +281,12 @@ export interface DaemonSessionActions {
     answers?: Record<string, string>,
   ): Promise<boolean>;
   heartbeat(): Promise<HeartbeatResult | undefined>;
-  listSessions(): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string): Promise<void>;
-  resumeSession(sessionId: string): Promise<void>;
+  listSessions(options?: {
+    pageSize?: number;
+  }): Promise<DaemonSessionSummary[]>;
+  loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  createSession(): Promise<DaemonSession>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
@@ -276,10 +297,25 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  getRewindSnapshots(): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
+  rewindSession(
+    promptId: string,
+    opts?: { rewindFiles?: boolean },
+  ): Promise<DaemonRewindResult>;
   btwSession(
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
+  /**
+   * Best-effort: queue a message typed while a turn is running so the daemon
+   * can drain it mid-turn. Resolves `{ accepted: false }` (never throws/raises
+   * a notice) when there is no session, the session is idle, or the push
+   * fails — the caller then keeps the message in its own next-turn queue.
+   */
+  enqueueMidTurnMessage(
+    message: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonMidTurnMessageResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
   cancelTask(
@@ -288,6 +324,14 @@ export interface DaemonSessionActions {
   ): Promise<{ cancelled: boolean }>;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
+  branchSession(
+    name?: string,
+  ): Promise<{ sessionId: string; displayName: string }>;
+  forkSession(directive: string): Promise<DaemonForkSessionResult>;
+}
+
+export interface SessionSwitchOptions {
+  deferTranscriptReset?: boolean;
 }
 
 export interface DaemonSessionContextValue {
@@ -303,6 +347,22 @@ export interface DaemonWorkspaceEventSignals {
   toolsVersion: number;
   settingsVersion: number;
   mcpVersion: number;
+  extensionsVersion: number;
+  lastExtensionChange?: {
+    status?:
+      | 'installed'
+      | 'enabled'
+      | 'disabled'
+      | 'updated'
+      | 'uninstalled'
+      | 'failed';
+    source?: string;
+    name?: string;
+    version?: string;
+    error?: string;
+    refreshed: number;
+    failed: number;
+  };
   initVersion: number;
   authVersion: number;
 }
@@ -312,9 +372,11 @@ export interface ActivePrompt {
   promptId?: string;
   resolve?: (result: PromptResult) => void;
   reject?: (error: unknown) => void;
-  pendingResult?: PromptResult;
-  pendingError?: unknown;
 }
+
+export type SettledPrompt =
+  | { status: 'resolved'; result: PromptResult }
+  | { status: 'rejected'; error: unknown };
 
 export interface PendingSessionLoad {
   id: number;

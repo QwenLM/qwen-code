@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   DaemonWorkspaceProvider,
   DaemonSessionProvider,
@@ -94,7 +94,7 @@ function StandaloneApp() {
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
   );
-  const initialSessionId = useMemo(() => getSessionIdFromUrl(), []);
+  const [sessionId] = useState<string | undefined>(() => getSessionIdFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   const handleThemeChange = useCallback((nextTheme: WebShellTheme) => {
     setTheme(nextTheme);
@@ -108,7 +108,8 @@ function StandaloneApp() {
   return (
     <DaemonWorkspaceProvider baseUrl={baseUrl} token={DAEMON_TOKEN}>
       <DaemonSessionProvider
-        initialSessionId={initialSessionId}
+        key={sessionId ?? 'new'}
+        initialSessionId={sessionId}
         suppressOwnUserEcho
       >
         <App
@@ -116,6 +117,7 @@ function StandaloneApp() {
           onThemeChange={handleThemeChange}
           language={language}
           onLanguageChange={handleLanguageChange}
+          sidebar
           compactThinking
         />
       </DaemonSessionProvider>

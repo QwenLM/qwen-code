@@ -44,6 +44,11 @@ export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
+/** Root dir holding every session's subagent transcripts: `<projectDir>/subagents/`. */
+export function getSubagentsRootDir(projectDir: string): string {
+  return path.join(projectDir, 'subagents');
+}
+
 /**
  * Returns the directory holding all subagent transcripts for a given session.
  * Layout: `<projectDir>/subagents/<sessionId>/`.
@@ -60,8 +65,7 @@ export function getSubagentSessionDir(
   // Sanitize sessionId defensively (UUIDs are safe; resumed/external IDs
   // could carry path-traversal bytes).
   return path.join(
-    projectDir,
-    'subagents',
+    getSubagentsRootDir(projectDir),
     sanitizeFilenameComponent(sessionId),
   );
 }

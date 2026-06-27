@@ -14,7 +14,10 @@
   top: 2px;
   right: 4px;
   z-index: 5;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--background) 92%, transparent);
+  border-radius: 4px;
+  padding: 1px 4px;
   font-size: 11px;
   line-height: 1.4;
   white-space: nowrap;
@@ -24,5 +27,72 @@
 }
 
 .row:hover > .tip {
+  opacity: 1;
+}
+
+/* Chat mode: timestamp shown at bottom-right on hover */
+.chatRow {
+  position: relative;
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.chatTip {
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--background) 92%, transparent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chatActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: -24px;
+  margin-right: 4px;
+  z-index: 5;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chatActions .chatTip {
+  opacity: 1;
+}
+
+.copyButton {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--background) 92%, transparent);
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.copyButton:hover,
+.copyButton:focus-visible {
+  color: var(--muted-foreground);
+  outline: none;
+}
+
+.copyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chatRow:hover > .chatActions,
+.chatRow:focus-within > .chatActions {
   opacity: 1;
 }

@@ -85,7 +85,20 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
   id: string;
   role: 'assistant';
   content: string;
-  thinking?: string;
+  isStreaming?: boolean;
+  /**
+   * Token usage folded onto this assistant block by the daemon SDK reducer
+   * (summed when several blocks merge into one message). Summed again across a
+   * turn's assistant messages for the per-turn total shown on the fold toggle.
+   * Absent on sessions whose agent predates usage stamping.
+   */
+  usage?: { inputTokens: number; outputTokens: number; cachedTokens?: number };
+}
+
+export interface DaemonThinkingMessage extends DaemonMessageMeta {
+  id: string;
+  role: 'thinking';
+  content: string;
   isStreaming?: boolean;
 }
 
@@ -150,6 +163,7 @@ export interface DaemonInsightErrorMessage extends DaemonMessageMeta {
 export type DaemonMessage =
   | DaemonUserMessage
   | DaemonAssistantMessage
+  | DaemonThinkingMessage
   | DaemonToolGroupMessage
   | DaemonPlanMessage
   | DaemonSystemMessage

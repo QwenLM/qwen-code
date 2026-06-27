@@ -3,10 +3,12 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { extname, join, resolve } from 'node:path';
 
 interface BrandInput {
@@ -130,10 +132,15 @@ async function run(cmd: string[], cwd: string): Promise<void> {
   }
 }
 
+interface BrandAssetsResult {
+  macIcon: string;
+  hasAssetsCar: boolean;
+}
+
 async function writeBrandAssets(
   config: BrandConfig,
   desktopRoot: string,
-): Promise<string> {
+): Promise<BrandAssetsResult> {
   const requireFromDesktop = createRequire(join(desktopRoot, 'package.json'));
   const sharp = requireFromDesktop('sharp') as typeof import('sharp');
   const electronDir = join(desktopRoot, 'apps', 'electron');
@@ -157,7 +164,7 @@ async function writeBrandAssets(
   await writePng(join(brandDir, 'dock.png'), 512);
   await writePng(join(brandDir, 'symbol.png'), 512);
 
-  if (process.platform !== 'darwin') return 'icon.png';
+  if (process.platform !== 'darwin') return { macIcon: 'icon.png', hasAssetsCar: false };
 
   const iconset = join(brandDir, 'icon.iconset');
   rmSync(iconset, { recursive: true, force: true });
@@ -184,7 +191,91 @@ async function writeBrandAssets(
     ['iconutil', '-c', 'icns', iconset, '-o', join(brandDir, 'icon.icns')],
     brandDir,
   );
-  return 'icon.icns';
+
+  const hasAssetsCar = await compileAssetsCar(config, brandDir, writePng);
+  return { macIcon: 'icon.icns', hasAssetsCar };
+}
+
+async function compileAssetsCar(
+  config: BrandConfig,
+  brandDir: string,
+  writePng: (output: string, size: number) => Promise<void>,
+): Promise<boolean> {
+  const xcassets = join(brandDir, 'Assets.xcassets');
+  const appiconset = join(xcassets, 'AppIcon.appiconset');
+  rmSync(xcassets, { recursive: true, force: true });
+  mkdirSync(appiconset, { recursive: true });
+
+  writeFileSync(
+    join(xcassets, 'Contents.json'),
+    JSON.stringify({ info: { author: 'xcode', version: 1 } }),
+  );
+
+  const entries = [
+    { file: 'icon_16.png', size: 16, scale: '1x', dims: '16x16' },
+    { file: 'icon_32.png', size: 32, scale: '2x', dims: '16x16' },
+    { file: 'icon_32.png', size: 32, scale: '1x', dims: '32x32' },
+    { file: 'icon_64.png', size: 64, scale: '2x', dims: '32x32' },
+    { file: 'icon_128.png', size: 128, scale: '1x', dims: '128x128' },
+    { file: 'icon_256.png', size: 256, scale: '2x', dims: '128x128' },
+    { file: 'icon_256.png', size: 256, scale: '1x', dims: '256x256' },
+    { file: 'icon_512.png', size: 512, scale: '2x', dims: '256x256' },
+    { file: 'icon_512.png', size: 512, scale: '1x', dims: '512x512' },
+    { file: 'icon_1024.png', size: 1024, scale: '2x', dims: '512x512' },
+  ];
+
+  const uniqueSizes = new Set(entries.map((e) => e.size));
+  for (const size of uniqueSizes) {
+    await writePng(join(appiconset, `icon_${size}.png`), size);
+  }
+
+  writeFileSync(
+    join(appiconset, 'Contents.json'),
+    JSON.stringify({
+      images: entries.map((e) => ({
+        filename: e.file,
+        idiom: 'mac',
+        scale: e.scale,
+        size: e.dims,
+      })),
+      info: { author: 'xcode', version: 1 },
+    }),
+  );
+
+  const outDir = mkdtempSync(join(tmpdir(), 'assets-car-'));
+  const partialPlist = join(outDir, 'partial-info.plist');
+  const proc = Bun.spawn({
+    cmd: [
+      'xcrun', 'actool', xcassets,
+      '--compile', outDir,
+      '--app-icon', 'AppIcon',
+      '--platform', 'macosx',
+      '--minimum-deployment-target', '14.0',
+      '--output-partial-info-plist', partialPlist,
+    ],
+    cwd: brandDir,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    console.log('Warning: actool compilation failed, skipping Assets.car');
+    rmSync(xcassets, { recursive: true, force: true });
+    return false;
+  }
+
+  const compiledCar = join(outDir, 'Assets.car');
+  if (!existsSync(compiledCar)) {
+    console.log('Warning: actool produced no Assets.car, skipping');
+    rmSync(xcassets, { recursive: true, force: true });
+    return false;
+  }
+
+  copyFileSync(compiledCar, join(brandDir, 'Assets.car'));
+  rmSync(xcassets, { recursive: true, force: true });
+  rmSync(outDir, { recursive: true, force: true });
+  console.log('Assets.car compiled successfully');
+  return true;
 }
 
 function tsString(value: string): string {
@@ -203,8 +294,11 @@ function helpMenuLinks(config: BrandConfig): string {
     ]`;
 }
 
-function brandBlock(config: BrandConfig, macIcon: string): string {
+function brandBlock(config: BrandConfig, macIcon: string, hasAssetsCar: boolean): string {
   const resourceDir = `resources/brands/${config.brandId}`;
+  const liquidGlassLine = hasAssetsCar
+    ? `\n      liquidGlassAssetsCar: ${tsString(`${resourceDir}/Assets.car`)},`
+    : '';
 
   return `  ${tsString(config.brandId)}: {
     id: ${tsString(config.brandId)},
@@ -223,7 +317,7 @@ function brandBlock(config: BrandConfig, macIcon: string): string {
       macIcon: ${tsString(`${resourceDir}/${macIcon}`)},
       winIcon: ${tsString(`${resourceDir}/icon.png`)},
       linuxIcon: ${tsString(`${resourceDir}/icon.png`)},
-      devDockIcon: ${tsString(`${resourceDir}/dock.png`)},
+      devDockIcon: ${tsString(`${resourceDir}/dock.png`)},${liquidGlassLine}
     },
     credits: '',
     creditsShort: '',
@@ -236,6 +330,7 @@ function registerBrand(
   config: BrandConfig,
   desktopRoot: string,
   macIcon: string,
+  hasAssetsCar: boolean,
 ): void {
   const brandingPath = join(
     desktopRoot,
@@ -259,15 +354,15 @@ function registerBrand(
 
   writeFileSync(
     brandingPath,
-    source.replace(marker, `\n${brandBlock(config, macIcon)}${marker}`),
+    source.replace(marker, `\n${brandBlock(config, macIcon, hasAssetsCar)}${marker}`),
   );
 }
 
 async function main(): Promise<void> {
   const desktopRoot = desktopRootFromArgs();
   const config = loadConfig(configPathFromArgs());
-  const macIcon = await writeBrandAssets(config, desktopRoot);
-  registerBrand(config, desktopRoot, macIcon);
+  const { macIcon, hasAssetsCar } = await writeBrandAssets(config, desktopRoot);
+  registerBrand(config, desktopRoot, macIcon, hasAssetsCar);
 
   console.log(`Created brand ${config.brandId}`);
   console.log(`App name: ${config.appName}`);
@@ -275,6 +370,9 @@ async function main(): Promise<void> {
   console.log(
     `Assets: ${join(desktopRoot, 'apps', 'electron', 'resources', 'brands', config.brandId)}`,
   );
+  if (hasAssetsCar) {
+    console.log('Assets.car: generated (macOS 26+ Liquid Glass icon)');
+  }
 }
 
 main().catch((error: unknown) => {

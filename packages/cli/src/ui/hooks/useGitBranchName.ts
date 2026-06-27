@@ -4,72 +4,54 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { isCommandAvailable, execCommand } from '@qwen-code/qwen-code-core';
-import fs from 'node:fs';
-import fsPromises from 'node:fs/promises';
-import path from 'node:path';
+import { useState, useEffect } from 'react';
+import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
 
+/**
+ * Tracks the current git branch (or a short commit hash when detached) for
+ * `cwd`, read directly from `.git` via core's gitDirect helpers — no `git`
+ * subprocess. Re-reads automatically when the repository's reflog moves
+ * (branch switch, commit, reset).
+ */
 export function useGitBranchName(cwd: string): string | undefined {
   const [branchName, setBranchName] = useState<string | undefined>(undefined);
 
-  const fetchBranchName = useCallback(async () => {
-    try {
-      if (!isCommandAvailable('git').available) {
-        return;
-      }
-
-      const { stdout } = await execCommand(
-        'git',
-        ['rev-parse', '--abbrev-ref', 'HEAD'],
-        { cwd },
-      );
-      const branch = stdout.toString().trim();
-      if (branch && branch !== 'HEAD') {
-        setBranchName(branch);
-      } else {
-        const { stdout: hashStdout } = await execCommand(
-          'git',
-          ['rev-parse', '--short', 'HEAD'],
-          { cwd },
-        );
-        setBranchName(hashStdout.toString().trim());
-      }
-    } catch (_error) {
-      setBranchName(undefined);
-    }
-  }, [cwd, setBranchName]);
-
   useEffect(() => {
-    fetchBranchName(); // Initial fetch
+    let cancelled = false;
+    let dispose: (() => void) | undefined;
 
-    const gitLogsHeadPath = path.join(cwd, '.git', 'logs', 'HEAD');
-    let watcher: fs.FSWatcher | undefined;
+    const refresh = async () => {
+      const name = await resolveBranchName(cwd);
+      if (!cancelled) setBranchName(name);
+    };
 
-    const setupWatcher = async () => {
-      try {
-        // Check if .git/logs/HEAD exists, as it might not in a new repo or orphaned head
-        await fsPromises.access(gitLogsHeadPath, fs.constants.F_OK);
-        watcher = fs.watch(gitLogsHeadPath, (eventType: string) => {
-          // Changes to .git/logs/HEAD (appends) indicate HEAD has likely changed
-          if (eventType === 'change' || eventType === 'rename') {
-            // Handle rename just in case
-            fetchBranchName();
-          }
-        });
-      } catch (_watchError) {
-        // Silently ignore watcher errors (e.g. permissions or file not existing),
-        // similar to how exec errors are handled.
-        // The branch name will simply not update automatically.
+    const init = async () => {
+      await refresh();
+      if (cancelled) return;
+      const disposer = await watchRepoBranch(cwd, () => {
+        // Guard the watcher-triggered refresh too: the synchronous try/catch
+        // inside watchRepoBranch can't observe an async rejection.
+        void refresh().catch(() => {});
+      });
+      // The component may have unmounted while we were resolving the watcher;
+      // if so, dispose immediately rather than leaking the subscription.
+      if (cancelled) {
+        disposer();
+      } else {
+        dispose = disposer;
       }
     };
 
-    setupWatcher();
+    // Defensive: init() shouldn't reject (resolveBranchName / watchRepoBranch
+    // swallow their own errors), but guard so a future change can't surface an
+    // unhandled rejection on the render path.
+    void init().catch(() => {});
 
     return () => {
-      watcher?.close();
+      cancelled = true;
+      dispose?.();
     };
-  }, [cwd, fetchBranchName]);
+  }, [cwd]);
 
   return branchName;
 }

@@ -32,7 +32,6 @@ const MAGIC_SIGNATURES: Array<{ bytes: number[]; ext: string }> = [
   { bytes: [0x42, 0x4D], ext: '.bmp' },                        // BM
   { bytes: [0x49, 0x44, 0x33], ext: '.mp3' },                  // ID3 (MP3 with ID3 tag)
   { bytes: [0xFF, 0xFB], ext: '.mp3' },                        // MP3 frame sync
-  { bytes: [0x52, 0x49, 0x46, 0x46], ext: '.wav' },           // RIFF (WAV container)
   { bytes: [0x4F, 0x67, 0x67, 0x53], ext: '.ogg' },           // OggS
   { bytes: [0x66, 0x4C, 0x61, 0x43], ext: '.flac' },          // fLaC
 ];
@@ -117,6 +116,23 @@ export function looksLikeBinary(buffer: Buffer): boolean {
  */
 export function detectExtensionFromMagic(buffer: Buffer): string {
   if (buffer.length < 8) return '';
+
+  // RIFF is a shared container (WAV, WebP, AVI); the four-character form tag at
+  // bytes 8-11 is what actually distinguishes them, so the "RIFF" prefix alone
+  // is ambiguous and must not be assumed to be WAV.
+  if (
+    buffer.length >= 12 &&
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46
+  ) {
+    const form = buffer.toString('ascii', 8, 12);
+    if (form === 'WEBP') return '.webp';
+    if (form === 'AVI ') return '.avi';
+    if (form === 'WAVE') return '.wav';
+    return '';
+  }
 
   for (const sig of MAGIC_SIGNATURES) {
     if (sig.bytes.every((byte, i) => buffer[i] === byte)) {
