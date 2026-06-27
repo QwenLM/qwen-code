@@ -133,7 +133,10 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
-import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import {
+  insertAfterFunctionResponses,
+  normalizePartList,
+} from '../../utils/nonInteractiveHelpers.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -1544,39 +1547,41 @@ export class Session implements SessionContext {
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
             if (systemReminders.length > 0) {
-              // Insert reminders after any leading functionResponse parts so a
-              // tool-result continuation (interrupted_turn) keeps tool_result
-              // blocks first, as Anthropic-compatible backends require. With no
-              // leading functionResponses this is equivalent to prepending.
-              const firstNonFr = parts.findIndex(
-                (part) => !part.functionResponse,
-              );
-              const at = firstNonFr === -1 ? parts.length : firstNonFr;
-              parts = [
-                ...parts.slice(0, at),
-                ...systemReminders,
-                ...parts.slice(at),
-              ];
+              // On an `interrupted_prompt` continuation the replayed orphaned
+              // user run can already carry the reminders that were prepended on
+              // the original send. Re-inserting would show the model duplicate
+              // (and, if approval mode changed since, conflicting) reminders, so
+              // skip when one is already present — mirrors the
+              // `hasSystemReminderPart` guard in nonInteractiveCli.ts.
+              const alreadyHasReminder =
+                isContinue &&
+                parts.some((part) =>
+                  isSystemReminderContent({ role: 'user', parts: [part] }),
+                );
+              if (!alreadyHasReminder) {
+                // Insert after any leading functionResponse parts so a
+                // tool-result continuation (interrupted_turn) keeps tool_result
+                // blocks first, as Anthropic-compatible backends require. With
+                // no leading functionResponses this is equivalent to prepending.
+                parts = insertAfterFunctionResponses(parts, systemReminders);
+              }
             }
 
             // Phase C: one-shot worktree restore notice, set by acpAgent on
             // --resume / loadSession when the session's worktree is still alive.
-            // Prepended exactly once, then cleared so it doesn't repeat on
-            // subsequent turns.
+            // Inserted exactly once, then cleared so it doesn't repeat on
+            // subsequent turns. Uses the same insert-after-functionResponses
+            // helper as the reminders above (a continuation closing dangling
+            // tool calls leads with functionResponses, and text before them
+            // violates the tool_result-first ordering). Because the reminders
+            // are inserted first, the resulting order on such a continuation is
+            // `[...functionResponses, worktreeNotice, ...systemReminders, ...]`;
+            // Session.worktree.test.ts locks this ordering.
             if (this.pendingWorktreeNotice) {
-              // Insert after any leading functionResponse parts (same reason as
-              // the reminders above): a continuation that closes dangling tool
-              // calls leads with functionResponses, and prepending text before
-              // them violates the tool_result-first ordering. Normal prompts
-              // have no leading functionResponses, so this still prepends.
               const noticePart = {
                 text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
               };
-              const firstNonFr = parts.findIndex(
-                (part) => !part.functionResponse,
-              );
-              const at = firstNonFr === -1 ? parts.length : firstNonFr;
-              parts = [...parts.slice(0, at), noticePart, ...parts.slice(at)];
+              parts = insertAfterFunctionResponses(parts, [noticePart]);
               this.pendingWorktreeNotice = null;
             }
 

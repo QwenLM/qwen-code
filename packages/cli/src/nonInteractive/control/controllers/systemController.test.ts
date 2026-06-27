@@ -245,7 +245,7 @@ describe('SystemController', () => {
           { subtype: 'continue_last_turn' },
           'continue-2',
         ),
-      ).rejects.toThrow(/continue_last_turn is not available/);
+      ).rejects.toThrow(/was not registered on ControlContext/);
     });
   });
 });

@@ -499,6 +499,7 @@ class Session {
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
     const detection = detectTurnInterruption(historyTail);
     debugLogger.info('[Session] requestContinueLastTurn detection', {
+      sessionId: this.sessionId,
       kind: detection.kind,
     });
     if (detection.kind === 'none') {
@@ -518,6 +519,7 @@ class Session {
     this.pendingContinueTurn = true;
     this.ensureProcessingStarted();
     debugLogger.info('[Session] continue_last_turn accepted', {
+      sessionId: this.sessionId,
       kind: detection.kind,
     });
     return { accepted: true, interruption: detection.kind };

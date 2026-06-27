@@ -401,7 +401,8 @@ export class SystemController extends BaseController {
   private async handleContinueLastTurn(): Promise<Record<string, unknown>> {
     if (!this.context.onContinueLastTurn) {
       throw new Error(
-        'continue_last_turn is not available in this mode (no session callback registered)',
+        'continue_last_turn callback (onContinueLastTurn) was not registered on ' +
+          'ControlContext — check session wiring',
       );
     }
 
