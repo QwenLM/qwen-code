@@ -98,6 +98,20 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Read txt files');
   });
 
+  it('renders the dim 🔎 notice for "vision_notice" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: MessageType.VISION_NOTICE,
+      text: 'Converted 1 image(s) to text via vm.',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('🔎');
+    expect(output).toContain('Converted 1 image(s) to text via vm.');
+  });
+
   it('renders StatsDisplay for "stats" type', () => {
     const item: HistoryItem = {
       ...baseItem,

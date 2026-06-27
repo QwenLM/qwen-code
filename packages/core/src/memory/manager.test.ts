@@ -137,31 +137,37 @@ describe('MemoryManager', () => {
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
     });
 
-    it('skips extraction when history writes to a memory file', async () => {
-      const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  name: 'write_file',
-                  args: {
-                    file_path: `${projectRoot}/.qwen/memory/user/test.md`,
+    it.each([
+      ['private', '.qwen/memory/user/test.md'],
+      ['team', '.qwen/team-memory/test.md'],
+    ])(
+      'skips extraction when history writes to a %s memory file',
+      async (_label, filePath) => {
+        const mgr = new MemoryManager();
+        const result = await mgr.scheduleExtract({
+          projectRoot,
+          sessionId: 'sess-1',
+          history: [
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'write_file',
+                    args: {
+                      file_path: path.join(projectRoot, filePath),
+                    },
                   },
                 },
-              },
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        });
 
-      expect(result.skippedReason).toBe('memory_tool');
-      expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
-    });
+        expect(result.skippedReason).toBe('memory_tool');
+        expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
+      },
+    );
 
     it('queues a trailing extract when one is already running', async () => {
       let resolveFirst!: (

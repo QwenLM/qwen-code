@@ -1096,6 +1096,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isModelDialogOpen,
     isFastModelMode,
     isVoiceModelMode,
+    isVisionModelMode,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -3456,8 +3457,12 @@ export const AppContainer = (props: AppContainerProps) => {
         // character left if the prompt has focus. Cosmetic; tracked
         // for a follow-up that introduces a `consumed` return value
         // on KeypressHandler so global handlers can swallow keys.
-        const executingShell = pendingToolCallsRef.current.find(
-          (tc) =>
+        const promotableShells = pendingToolCallsRef.current.filter(
+          (
+            tc,
+          ): tc is TrackedExecutingToolCall & {
+            promoteAbortController: AbortController;
+          } =>
             tc.status === 'executing' &&
             // Defense-in-depth: also gate on the tool name. Today only
             // the shell tool's invocation wires `promoteAbortController`,
@@ -3467,8 +3472,9 @@ export const AppContainer = (props: AppContainerProps) => {
             // whose service has no promote-handoff handler.
             tc.request.name === ToolNames.SHELL &&
             tc.promoteAbortController !== undefined,
-        ) as TrackedExecutingToolCall | undefined;
-        if (executingShell?.promoteAbortController) {
+        );
+        if (promotableShells.length === 1) {
+          const executingShell = promotableShells[0];
           debugLogger.debug(
             `Ctrl+B promote: matched executing shell tool call ${executingShell.request.callId}`,
           );
@@ -3478,9 +3484,10 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
         debugLogger.debug(
-          `Ctrl+B promote: no executing shell tool call; falling through ` +
+          `Ctrl+B promote: expected exactly one executing shell tool call; falling through ` +
             `(streamingState=${streamingState}, ` +
-            `pendingToolCalls=${pendingToolCallsRef.current.length})`,
+            `pendingToolCalls=${pendingToolCallsRef.current.length}, ` +
+            `promotableShells=${promotableShells.length})`,
         );
       }
     },
@@ -3627,6 +3634,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3765,6 +3773,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,

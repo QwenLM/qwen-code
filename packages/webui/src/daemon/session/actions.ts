@@ -37,6 +37,7 @@ import type {
   DaemonSessionActions,
   SettledPrompt,
   PendingSessionLoad,
+  SessionSwitchOptions,
 } from './types.js';
 
 interface RefBox<T> {
@@ -54,6 +55,7 @@ export interface CreateDaemonSessionActionsArgs {
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
   hasSessionActivePrompt: () => boolean;
+  resetCurrentSessionActivePrompt: () => void;
   addNotice: AddDaemonSessionNotice;
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
@@ -74,6 +76,7 @@ export function createDaemonSessionActions({
   passiveAssistantDoneTimerRef,
   getCreateSessionRequest,
   hasSessionActivePrompt,
+  resetCurrentSessionActivePrompt,
   addNotice,
   setConnection,
   setPromptStatus,
@@ -85,6 +88,7 @@ export function createDaemonSessionActions({
   function startSessionSwitch(
     sessionId: string,
     mode: 'load' | 'resume',
+    opts?: SessionSwitchOptions,
   ): Promise<void> {
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
@@ -120,14 +124,48 @@ export function createDaemonSessionActions({
         reject,
       };
     });
+    const currentSessionId = sessionRef.current?.sessionId;
+    const activePrompt = currentSessionId
+      ? activePromptsRef.current.get(currentSessionId)
+      : undefined;
+    activePrompt?.reject?.(
+      new DOMException('Session switch interrupted prompt wait', 'AbortError'),
+    );
+    if (currentSessionId) {
+      activePromptsRef.current.delete(currentSessionId);
+    }
+    resetCurrentSessionActivePrompt();
+    setConnection((current) => ({
+      ...current,
+      status: 'connecting',
+      error: undefined,
+      catchingUp: true,
+    }));
     setPromptStatus('idle');
     settledPromptsRef.current.clear();
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-    store.reset();
+    if (!opts?.deferTranscriptReset) {
+      store.reset();
+    }
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
     setRestoreSessionNonce((nonce) => nonce + 1);
-    return loadPromise;
+    if (!opts?.deferTranscriptReset) {
+      return loadPromise;
+    }
+    return loadPromise.catch((error: unknown) => {
+      if (!isAbortError(error)) {
+        store.reset();
+        const message = error instanceof Error ? error.message : String(error);
+        setConnection((current) => ({
+          ...current,
+          status: 'disconnected',
+          error: message,
+          catchingUp: undefined,
+        }));
+      }
+      throw error;
+    });
   }
 
   return {
@@ -369,12 +407,12 @@ export function createDaemonSessionActions({
       return withActionTimeout(session.heartbeat(), 'Heartbeat timed out');
     },
 
-    async listSessions() {
+    async listSessions(options) {
       const session = sessionRef.current;
       if (!session) return [];
       try {
         return await withActionTimeout(
-          session.client.listWorkspaceSessions(session.workspaceCwd),
+          session.client.listWorkspaceSessions(session.workspaceCwd, options),
           'List sessions timed out',
         );
       } catch (error) {
@@ -387,12 +425,12 @@ export function createDaemonSessionActions({
       }
     },
 
-    async loadSession(sessionId) {
-      return startSessionSwitch(sessionId, 'load');
+    async loadSession(sessionId, opts) {
+      return startSessionSwitch(sessionId, 'load', opts);
     },
 
-    async resumeSession(sessionId) {
-      return startSessionSwitch(sessionId, 'resume');
+    async resumeSession(sessionId, opts) {
+      return startSessionSwitch(sessionId, 'resume', opts);
     },
 
     async createSession() {

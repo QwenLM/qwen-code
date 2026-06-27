@@ -96,6 +96,7 @@ import type {
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpStatus,
   ServeWorkspaceMcpToolsStatus,
+  ServeWorkspaceMcpResourcesStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
@@ -387,6 +388,9 @@ interface FakeBridgeOpts {
   workspaceMcpToolsImpl?: (
     serverName: string,
   ) => Promise<ServeWorkspaceMcpToolsStatus>;
+  workspaceMcpResourcesImpl?: (
+    serverName: string,
+  ) => Promise<ServeWorkspaceMcpResourcesStatus>;
   workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
   workspaceToolsImpl?: () => Promise<ServeWorkspaceToolsStatus>;
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
@@ -566,6 +570,7 @@ interface FakeBridge extends AcpSessionBridge {
   summaryCalls: string[];
   workspaceMcpCalls: number;
   workspaceMcpToolsCalls: string[];
+  workspaceMcpResourcesCalls: string[];
   workspaceSkillsCalls: number;
   workspaceToolsCalls: number;
   workspaceProvidersCalls: number;
@@ -693,6 +698,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const summaryCalls: string[] = [];
   let workspaceMcpCalls = 0;
   const workspaceMcpToolsCalls: string[] = [];
+  const workspaceMcpResourcesCalls: string[] = [];
   let workspaceSkillsCalls = 0;
   let workspaceToolsCalls = 0;
   let workspaceProvidersCalls = 0;
@@ -790,6 +796,16 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       initialized: true,
       acpChannelLive: false,
       tools: [],
+    }));
+  const workspaceMcpResourcesImpl =
+    opts.workspaceMcpResourcesImpl ??
+    (async (serverName: string) => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      serverName,
+      initialized: true,
+      acpChannelLive: false,
+      resources: [],
     }));
   const workspaceProvidersImpl =
     opts.workspaceProvidersImpl ??
@@ -1096,6 +1112,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     listCalls,
     summaryCalls,
     workspaceMcpToolsCalls,
+    workspaceMcpResourcesCalls,
     extensionEvents,
     sessionContextCalls,
     sessionContextUsageCalls,
@@ -1248,6 +1265,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getWorkspaceMcpToolsStatus(serverName) {
       workspaceMcpToolsCalls.push(serverName);
       return workspaceMcpToolsImpl(serverName);
+    },
+    async getWorkspaceMcpResourcesStatus(serverName) {
+      workspaceMcpResourcesCalls.push(serverName);
+      return workspaceMcpResourcesImpl(serverName);
     },
     async getWorkspaceSkillsStatus() {
       workspaceSkillsCalls += 1;
@@ -12478,6 +12499,41 @@ describe('GET /workspace/mcp/:server/tools', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_server_name');
     expect(bridge.workspaceMcpToolsCalls).toHaveLength(0);
+  });
+});
+
+describe('GET /workspace/mcp/:server/resources', () => {
+  it('returns resources for a valid server name', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .get('/workspace/mcp/my-server/resources')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ serverName: 'my-server', resources: [] });
+    expect(bridge.workspaceMcpResourcesCalls).toEqual(['my-server']);
+  });
+
+  it('decodes URL-encoded server names', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .get('/workspace/mcp/my%20server/resources')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(bridge.workspaceMcpResourcesCalls).toEqual(['my server']);
+  });
+
+  it('400 when server name exceeds length limit', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const longName = 'a'.repeat(300);
+    const res = await request(app)
+      .get(`/workspace/mcp/${longName}/resources`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_server_name');
+    expect(bridge.workspaceMcpResourcesCalls).toHaveLength(0);
   });
 });
 

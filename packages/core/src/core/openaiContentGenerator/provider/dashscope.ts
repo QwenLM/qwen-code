@@ -205,9 +205,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       tools = updatedTools;
     }
 
-    // Apply output token limits using parent class logic
-    // Uses capped default (min of model limit and CAPPED_DEFAULT_MAX_TOKENS=8K)
-    // Requests hitting the cap get one clean retry at 64K (geminiChat.ts)
+    // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
     const extraBody = this.contentGeneratorConfig.extra_body;

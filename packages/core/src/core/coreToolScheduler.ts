@@ -795,6 +795,12 @@ const RETRY_LOOP_STOP_DIRECTIVE =
   'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
   'instead of retrying.';
 
+/** Directive injected when a truncated file-modifying call repeats. */
+const TRUNCATION_RETRY_LOOP_DIRECTIVE =
+  '\n\n⚠️ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
+  'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
+  'or explain to the user that the content is too large to write safely in one call.';
+
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
@@ -1773,6 +1779,28 @@ export class CoreToolScheduler {
     }
   }
 
+  /**
+   * Increments the retry counter for a (tool, errorMessage) pair and prunes any
+   * other error counters for the same tool, so a different failure on the same
+   * tool restarts the count rather than tripping the loop threshold. Shared by
+   * the truncated-Edit rejection path and the schema-validation failure path so
+   * both feed the same RETRY LOOP DETECTED detector.
+   */
+  private recordRetryableToolError(
+    toolName: string,
+    errorMessage: string,
+  ): number {
+    const errorKey = `${toolName}:${errorMessage}`;
+    const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
+    for (const key of this.validationRetryCounts.keys()) {
+      if (key.startsWith(`${toolName}:`) && key !== errorKey) {
+        this.validationRetryCounts.delete(key);
+      }
+    }
+    this.validationRetryCounts.set(errorKey, count);
+    return count;
+  }
+
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -1879,7 +1907,15 @@ export class CoreToolScheduler {
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content, even if params failed schema validation.
         if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
+          const count = this.recordRetryableToolError(
+            reqInfo.name,
+            TRUNCATION_EDIT_REJECTION,
+          );
+          const truncationError = new Error(
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? `${TRUNCATION_EDIT_REJECTION}${TRUNCATION_RETRY_LOOP_DIRECTIVE}`
+              : TRUNCATION_EDIT_REJECTION,
+          );
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -1910,14 +1946,10 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const errorKey = `${reqInfo.name}:${invocationOrError.message}`;
-          const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
-          for (const key of this.validationRetryCounts.keys()) {
-            if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
-              this.validationRetryCounts.delete(key);
-            }
-          }
-          this.validationRetryCounts.set(errorKey, count);
+          const count = this.recordRetryableToolError(
+            reqInfo.name,
+            invocationOrError.message,
+          );
 
           const finalError =
             count >= VALIDATION_RETRY_LOOP_THRESHOLD
@@ -3234,12 +3266,25 @@ export class CoreToolScheduler {
           );
           this.notifyToolCallsUpdate();
         };
+        const canPromoteForegroundShell = () => {
+          const promotableShells = this.toolCalls.filter(
+            (tc) =>
+              tc.status === 'executing' &&
+              tc.request.name === ToolNames.SHELL &&
+              tc.promoteAbortController !== undefined,
+          );
+          return (
+            promotableShells.length === 1 &&
+            promotableShells[0]?.request.callId === callId
+          );
+        };
         promise = invocation.execute(
           signal,
           liveOutputCallback,
           shellExecutionConfig,
           setPidCallback,
           setPromoteAbortControllerCallback,
+          canPromoteForegroundShell,
         );
       } else {
         promise = invocation.execute(
@@ -3934,15 +3979,18 @@ export class CoreToolScheduler {
         if (this.onAllToolCallsComplete) {
           await this.onAllToolCallsComplete(completedCalls);
         }
-        this.notifyToolCallsUpdate();
       } finally {
-        this.isFinalizingToolCalls = false;
-        // Always drain the queue, even if completion callbacks throw.
-        if (this.requestQueue.length > 0) {
-          const next = this.requestQueue.shift()!;
-          this._schedule(next.request, next.signal)
-            .then(next.resolve)
-            .catch(next.reject);
+        try {
+          this.notifyToolCallsUpdate();
+        } finally {
+          this.isFinalizingToolCalls = false;
+          // Always drain the queue, even if completion callbacks throw.
+          if (this.requestQueue.length > 0) {
+            const next = this.requestQueue.shift()!;
+            this._schedule(next.request, next.signal)
+              .then(next.resolve)
+              .catch(next.reject);
+          }
         }
       }
     }

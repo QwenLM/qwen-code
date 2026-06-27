@@ -4033,6 +4033,109 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual([]);
   });
 
+  it('clears transcript immediately for default session switches', async () => {
+    const nextSession = createDeferred<MockSession>();
+    const currentSession = createMockSession({
+      replaySnapshot: createTextReplaySnapshot('old transcript'),
+    });
+    sdkMocks.sessions.push(currentSession);
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => nextSession.promise,
+    );
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'old transcript' },
+    ]);
+
+    const loadPromise = requireActions(actions)
+      .loadSession('session-b')
+      .catch(() => undefined);
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual([]);
+    nextSession.resolve(
+      createMockSession({
+        sessionId: 'session-b',
+        replaySnapshot: createTextReplaySnapshot('new transcript'),
+      }),
+    );
+    await act(async () => {
+      await loadPromise;
+      await flushPromises();
+    });
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'new transcript' },
+    ]);
+  });
+
+  it('keeps transcript until replay for deferred session switches', async () => {
+    const nextSession = createDeferred<MockSession>();
+    const currentSession = createMockSession({
+      replaySnapshot: createTextReplaySnapshot('old transcript'),
+    });
+    sdkMocks.sessions.push(currentSession);
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => nextSession.promise,
+    );
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'old transcript' },
+    ]);
+
+    const loadPromise = requireActions(actions)
+      .loadSession('session-b', { deferTranscriptReset: true })
+      .catch(() => undefined);
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.catchingUp).toBe(true);
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'old transcript' },
+    ]);
+    nextSession.resolve(
+      createMockSession({
+        sessionId: 'session-b',
+        replaySnapshot: createTextReplaySnapshot('new transcript'),
+      }),
+    );
+    await act(async () => {
+      await loadPromise;
+      await flushPromises();
+    });
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'new transcript' },
+    ]);
+  });
+
   it('does not reconnect when event processing options change', async () => {
     const session = createMockSession({ events: createIdleEvents() });
     sdkMocks.sessions.push(session);
@@ -5977,6 +6080,31 @@ describe('DaemonSessionProvider', () => {
 function requireActions<T>(actions: T | undefined): T {
   if (!actions) throw new Error('actions were not initialized');
   return actions;
+}
+
+function createTextReplaySnapshot(text: string): MockSession['replaySnapshot'] {
+  return {
+    compactedReplay: [
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+          },
+        },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'turn_complete',
+        data: { stopReason: 'end_turn' },
+      },
+    ],
+    liveJournal: [],
+  };
 }
 
 function createMockSession(opts: Partial<MockSession> = {}): MockSession {
