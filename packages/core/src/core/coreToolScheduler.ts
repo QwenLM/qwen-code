@@ -1773,6 +1773,28 @@ export class CoreToolScheduler {
     }
   }
 
+  /**
+   * Increments the retry counter for a (tool, errorMessage) pair and prunes any
+   * other error counters for the same tool, so a different failure on the same
+   * tool restarts the count rather than tripping the loop threshold. Shared by
+   * the truncated-Edit rejection path and the schema-validation failure path so
+   * both feed the same RETRY LOOP DETECTED detector.
+   */
+  private recordRetryableToolError(
+    toolName: string,
+    errorMessage: string,
+  ): number {
+    const errorKey = `${toolName}:${errorMessage}`;
+    const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
+    for (const key of this.validationRetryCounts.keys()) {
+      if (key.startsWith(`${toolName}:`) && key !== errorKey) {
+        this.validationRetryCounts.delete(key);
+      }
+    }
+    this.validationRetryCounts.set(errorKey, count);
+    return count;
+  }
+
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -1879,7 +1901,15 @@ export class CoreToolScheduler {
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content, even if params failed schema validation.
         if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
+          const count = this.recordRetryableToolError(
+            reqInfo.name,
+            TRUNCATION_EDIT_REJECTION,
+          );
+          const truncationError = new Error(
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? `${TRUNCATION_EDIT_REJECTION}${RETRY_LOOP_STOP_DIRECTIVE}`
+              : TRUNCATION_EDIT_REJECTION,
+          );
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -1910,14 +1940,10 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const errorKey = `${reqInfo.name}:${invocationOrError.message}`;
-          const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
-          for (const key of this.validationRetryCounts.keys()) {
-            if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
-              this.validationRetryCounts.delete(key);
-            }
-          }
-          this.validationRetryCounts.set(errorKey, count);
+          const count = this.recordRetryableToolError(
+            reqInfo.name,
+            invocationOrError.message,
+          );
 
           const finalError =
             count >= VALIDATION_RETRY_LOOP_THRESHOLD
