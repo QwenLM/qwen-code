@@ -430,7 +430,7 @@ describe('Session', () => {
       expect(promptSpy).not.toHaveBeenCalled();
     });
 
-    it('accepts an interrupted prompt and starts a continuation carrying the continue meta flag', async () => {
+    it('accepts an interrupted prompt as the classification only, without firing the turn itself', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue([
         { role: 'user', parts: [{ text: 'unanswered question' }] },
       ]);
@@ -444,15 +444,11 @@ describe('Session', () => {
         accepted: true,
         interruption: 'interrupted_prompt',
       });
-      // prompt() is fired fire-and-forget; flush the microtask queue.
+      // continueLastTurn is now a pure accept/reject pre-check — the daemon
+      // bridge drives the actual turn through sendPrompt, so the agent must NOT
+      // fire its own internal prompt() here.
       await Promise.resolve();
-      expect(promptSpy).toHaveBeenCalledTimes(1);
-      const request = promptSpy.mock.calls[0]![0] as {
-        prompt: unknown[];
-        _meta?: Record<string, unknown>;
-      };
-      expect(request.prompt).toEqual([]);
-      expect(request._meta?.['qwen.daemon.continueLastTurn']).toBe(true);
+      expect(promptSpy).not.toHaveBeenCalled();
     });
 
     it('classifies a turn with dangling tool calls as interrupted_turn', async () => {

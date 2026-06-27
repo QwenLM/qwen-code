@@ -2176,6 +2176,103 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('strips a client-spoofed continue meta key (only continueSession may set it)', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'spoof continue' }],
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as PromptRequest);
+
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
+      ).toBe(undefined);
+      await bridge.shutdown();
+    });
+
+    it('routes an accepted continueSession through sendPrompt with the trusted continue meta', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/continue') {
+            return { accepted: true, interruption: 'interrupted_prompt' };
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const decision = await bridge.continueSession(session.sessionId);
+      expect(decision).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+
+      // The continuation runs through the tracked prompt path (fire-and-forget),
+      // so the agent receives a prompt() carrying the re-armed continue meta.
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(handle.agent.promptCalls[0]?.prompt).toEqual([]);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
+      ).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('does not dispatch a continuation turn when continueSession is rejected', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/continue') {
+            return { accepted: false, interruption: 'none' };
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const decision = await bridge.continueSession(session.sessionId);
+      expect(decision).toEqual({ accepted: false, interruption: 'none' });
+
+      // Let any erroneous fire-and-forget dispatch settle, then assert none ran.
+      await Promise.resolve();
+      expect(handle.agent.promptCalls).toHaveLength(0);
+
+      await bridge.shutdown();
+    });
+
+    it('rejects continueSession with an unregistered client id before running the pre-check', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/continue') {
+            return { accepted: true, interruption: 'interrupted_prompt' };
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // No client ids are registered on this session, so any id is untrusted.
+      await expect(
+        bridge.continueSession(session.sessionId, {
+          clientId: 'not-registered',
+        }),
+      ).rejects.toThrow();
+      // Validation precedes the pre-check, so neither the control method nor a
+      // continuation turn runs.
+      expect(handle.agent.promptCalls).toHaveLength(0);
+
+      await bridge.shutdown();
+    });
+
     it('honors retry once after a turn_error', async () => {
       let calls = 0;
       const handle = makeChannel({

@@ -1160,17 +1160,17 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Resume an unfinished previous turn — an interrupted prompt (the model never
-   * answered) or a turn left with dangling tool calls — without injecting a
-   * synthetic "continue" user message. Classifies from persisted history; if a
-   * continuation applies it runs as a normal turn, streamed through the usual
-   * session update channel. Idempotent no-op when the last turn ended cleanly
-   * or a prompt is already in flight.
+   * Classify whether an unfinished previous turn can be resumed — an
+   * interrupted prompt (the model never answered) or a turn left with dangling
+   * tool calls — without injecting a synthetic "continue" user message.
+   * Classifies from persisted history. Idempotent no-op (accepted:false) when
+   * the last turn ended cleanly or a prompt is already in flight.
    *
-   * Returns immediately with the classification; the continuation runs
-   * fire-and-forget so the daemon control method can ack without blocking on
-   * the full turn. Powers `qwen/control/session/continue` and the SDK's
-   * `continueLastTurn`.
+   * This is the accept/reject pre-check only — it does NOT fire the turn. When
+   * accepted, the daemon bridge drives the continuation through the normal
+   * prompt-admission path (`sendPrompt` with the trusted continue meta) so it is
+   * tracked like any other prompt; `prompt()` then re-detects/strips
+   * authoritatively. Powers `qwen/control/session/continue`.
    */
   async continueLastTurn(): Promise<{
     accepted: boolean;
@@ -1198,28 +1198,13 @@ export class Session implements SessionContext {
       return { accepted: false, interruption: detection.kind };
     }
 
-    // Fire-and-forget: prompt() re-detects and drives the continuation through
-    // the normal send/tool loop, streaming updates to attached clients. Errors
-    // surface on the session stream, so swallow here to keep the ack clean.
-    const continueRequest = {
-      prompt: [],
-      sessionId: this.sessionId,
-    } as PromptRequest;
-    (continueRequest as { _meta?: Record<string, unknown> })._meta = {
-      [DAEMON_CONTINUE_META_KEY]: true,
-    };
-    void this.prompt(continueRequest).catch(async (error) => {
-      debugLogger.error('[Session] continueLastTurn failed', error);
-      // prompt()'s finally still emits conversation_finished, but the failure
-      // itself would otherwise be log-only — surface it to attached clients so
-      // a continuation error is visible rather than a silently stalled turn.
-      await this.#emitAgentDiagnosticMessageSafely(
-        `Continuation failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        '[Session] failed to emit continuation failure diagnostic',
-      );
-    });
+    // Accepted. This method only classifies — the daemon bridge drives the
+    // actual continuation through the normal prompt-admission path
+    // (`sendPrompt` with the trusted continue meta), so the turn is tracked
+    // like any other prompt and `prompt()` re-detects/strips authoritatively.
+    // Firing an internal `this.prompt()` here would bypass that tracking (the
+    // daemon would report the session idle and a racing prompt could abort the
+    // continuation), which is exactly what routing through the bridge fixes.
 
     return { accepted: true, interruption: detection.kind };
   }

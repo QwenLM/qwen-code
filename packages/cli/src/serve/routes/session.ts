@@ -482,8 +482,20 @@ export function registerSessionRoutes(
           .json({ error: '`sessionId` route parameter is required' });
         return;
       }
+      // Forward the originator so the bridge can attribute the continuation
+      // turn (it now runs through the prompt-admission path, same as
+      // POST /session/:id/prompt).
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
       try {
-        res.status(200).json(await bridge.continueSession(sessionId));
+        res
+          .status(200)
+          .json(
+            await bridge.continueSession(
+              sessionId,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'POST /session/:id/continue',

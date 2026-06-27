@@ -166,6 +166,13 @@ export interface BridgeClientRequestContext {
    * pending HTTP 202 request.
    */
   promptId?: string;
+  /**
+   * Internal: set ONLY by `continueSession` to re-arm the continuation meta
+   * key that `sendPrompt` strips from untrusted callers. HTTP routes never
+   * populate this from request input, so an external caller cannot use it to
+   * smuggle a continuation through the prompt path.
+   */
+  continue?: boolean;
 }
 
 /**
@@ -515,7 +522,10 @@ export interface AcpSessionBridge {
    * last turn ended cleanly. Mirrors the SDK's `continueLastTurn` and the core
    * `detectTurnInterruption` classification.
    */
-  continueSession(sessionId: string): Promise<{
+  continueSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }>;
