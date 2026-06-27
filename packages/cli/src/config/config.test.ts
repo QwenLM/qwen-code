@@ -22,6 +22,7 @@ import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockUpdateHandler = vi.hoisted(() => vi.fn());
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
@@ -36,6 +37,14 @@ vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
   clearScreen: vi.fn(),
+}));
+
+vi.mock('../commands/update.js', () => ({
+  updateCommand: {
+    command: 'update',
+    describe: 'mock update command',
+    handler: mockUpdateHandler,
+  },
 }));
 
 const createNativeLspServiceInstance = () => ({
@@ -260,6 +269,20 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.prompt).toBe('test prompt');
     expect(argv.promptInteractive).toBeUndefined();
+  });
+
+  it('registers update as an exiting subcommand', async () => {
+    process.argv = ['node', 'script.js', 'update'];
+    mockUpdateHandler.mockResolvedValue(undefined);
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockUpdateHandler).toHaveBeenCalled();
+    expect(mockExit).toHaveBeenCalledWith(0);
+    mockExit.mockRestore();
   });
 
   it('should allow --prompt-interactive without --prompt', async () => {

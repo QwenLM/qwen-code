@@ -45,6 +45,8 @@ const performStandaloneUpdate = vi.fn();
 const getPackageJson = vi.fn();
 const writeStdoutLine = vi.fn();
 const writeStderrLine = vi.fn();
+const initializeI18n = vi.fn();
+const resolveLanguageSetting = vi.fn((language?: string) => language || 'auto');
 
 vi.mock('../config/settings.js', () => ({ loadSettings }));
 vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
@@ -59,6 +61,14 @@ vi.mock('../utils/stdioHelpers.js', () => ({
   writeStdoutLine,
   writeStderrLine,
 }));
+vi.mock('../i18n/index.js', () => ({
+  initializeI18n,
+  resolveLanguageSetting,
+  t: (key: string, params?: Record<string, string>) =>
+    key.replace(/\{\{(\w+)\}\}/g, (_, param: string) =>
+      params?.[param] ?? `{{${param}}}`,
+    ),
+}));
 
 const { updateCommand } = await import('./update.js');
 
@@ -70,7 +80,7 @@ const updateArgs: ArgumentsCamelCase<object> = {
 function settings(enableAutoUpdate?: boolean) {
   return {
     merged: {
-      general: { enableAutoUpdate },
+      general: { enableAutoUpdate, language: 'zh' },
     },
   };
 }
@@ -98,6 +108,8 @@ describe('update command', () => {
 
     await updateCommand.handler(updateArgs);
 
+    expect(resolveLanguageSetting).toHaveBeenCalledWith('zh');
+    expect(initializeI18n).toHaveBeenCalledWith('zh');
     expect(getInstallationInfo).toHaveBeenCalledWith(expect.any(String), false);
     expect(writeStdoutLine).toHaveBeenCalledWith('Update available: 1.2.3');
     expect(writeStdoutLine).toHaveBeenCalledWith(
@@ -206,6 +218,21 @@ describe('update command', () => {
 
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Failed to check for updates. Please check your network or registry configuration.',
+    );
+    expect(process.exitCode).toBe(1);
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('sets a non-zero exit code when the update check is skipped', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'skipped',
+      reason: 'development mode',
+    });
+
+    await updateCommand.handler(updateArgs);
+
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'Unable to check for updates: development mode',
     );
     expect(process.exitCode).toBe(1);
     expect(getInstallationInfo).not.toHaveBeenCalled();

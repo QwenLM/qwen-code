@@ -9,6 +9,7 @@ import updateNotifier from 'update-notifier';
 import semver from 'semver';
 import { getPackageJson } from '../../utils/package.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 
 const debugLogger = createDebugLogger('UPDATE_CHECK');
 
@@ -86,11 +87,13 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
       );
 
       if (bestUpdate && semver.gt(bestUpdate.latest, version)) {
-        const message = `A new version of Qwen Code is available! ${version} → ${bestUpdate.latest}`;
         return {
           status: 'update',
           info: {
-            message,
+            message: t(
+              'A new version of Qwen Code is available! {{current}} → {{latest}}',
+              { current: version, latest: bestUpdate.latest },
+            ),
             update: { ...bestUpdate, current: version },
           },
         };
@@ -99,11 +102,13 @@ export async function checkForUpdatesDetailed(): Promise<UpdateCheckResult> {
       const updateInfo = await createNotifier('latest').fetchInfo();
 
       if (updateInfo && semver.gt(updateInfo.latest, version)) {
-        const message = `Qwen Code update available! ${version} → ${updateInfo.latest}`;
         return {
           status: 'update',
           info: {
-            message,
+            message: t('Qwen Code update available! {{current}} → {{latest}}', {
+              current: version,
+              latest: updateInfo.latest,
+            }),
             update: { ...updateInfo, current: version },
           },
         };

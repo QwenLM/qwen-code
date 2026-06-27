@@ -2094,6 +2094,10 @@ export default {
   // Update command
   'Check for Qwen Code updates and install if available':
     '檢查 Qwen Code 更新並安裝（如果可用）',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code 有可用更新！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code 有新版本可用！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
   'Failed to check for updates. Please check your network or registry configuration.':
     '檢查更新失敗。請檢查網路或 registry 設定。',
@@ -2104,7 +2108,7 @@ export default {
     '更新已下載。將在結束目前工作階段後套用。',
   'Update failed: {{error}}': '更新失敗：{{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
-    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+    '自動更新失敗：{{error}}。請重新執行安裝程式以手動更新。',
   'Run the following to update:': '執行以下命令進行更新：',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     '無法自動更新此獨立安裝。請從以下位址重新安裝：',

@@ -2061,6 +2061,10 @@ export default {
   // Update command
   'Check for Qwen Code updates and install if available':
     'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Actualització de Qwen Code disponible! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Hi ha una versió nova de Qwen Code disponible! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} està actualitzat!',
   'Failed to check for updates. Please check your network or registry configuration.':
@@ -2073,7 +2077,7 @@ export default {
     "Actualització descarregada. S'aplicarà després de sortir d'aquesta sessió.",
   'Update failed: {{error}}': 'Actualització fallida: {{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
-    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+    'Ha fallat l’actualització automàtica: {{error}}. Torneu a executar l’instal·lador per actualitzar manualment.',
   'Run the following to update:': 'Executeu el següent per actualitzar:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'No es pot actualitzar automàticament aquesta instal·lació autònoma. Reinstal·leu des de:',

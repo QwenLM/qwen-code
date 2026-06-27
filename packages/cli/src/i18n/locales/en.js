@@ -2501,6 +2501,10 @@ export default {
   // Update command
   'Check for Qwen Code updates and install if available':
     'Check for Qwen Code updates and install if available',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code update available! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'A new version of Qwen Code is available! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} is up to date!',
   'Failed to check for updates. Please check your network or registry configuration.':

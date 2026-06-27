@@ -5,7 +5,7 @@
  */
 
 import type { CommandModule } from 'yargs';
-import { t } from '../i18n/index.js';
+import { initializeI18n, resolveLanguageSetting, t } from '../i18n/index.js';
 
 export const updateCommand: CommandModule = {
   command: 'update',
@@ -32,6 +32,9 @@ export const updateCommand: CommandModule = {
 
     const cwd = process.cwd();
     const settings = loadSettings(cwd, false);
+    await initializeI18n(
+      resolveLanguageSetting(settings.merged.general?.language as string),
+    );
 
     const updateCheck = await checkForUpdatesDetailed();
 

@@ -2080,6 +2080,10 @@ export default {
   // Update command
   'Check for Qwen Code updates and install if available':
     'Проверить обновления Qwen Code и установить при наличии',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Доступно обновление Qwen Code! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Доступна новая версия Qwen Code! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
   'Failed to check for updates. Please check your network or registry configuration.':
     'Не удалось проверить обновления. Проверьте сеть или настройки registry.',
@@ -2091,7 +2095,7 @@ export default {
     'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
   'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
   'Automatic update failed: {{error}}. Re-run the installer to update manually.':
-    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+    'Автоматическое обновление не удалось: {{error}}. Повторно запустите установщик, чтобы обновить вручную.',
   'Run the following to update:': 'Выполните следующую команду для обновления:',
   'Unable to auto-update this standalone installation. Please reinstall from:':
     'Невозможно автоматически обновить эту автономную установку. Переустановите с:',
