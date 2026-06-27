@@ -377,6 +377,24 @@ export function assertValidSourceSlug(sourceSlug: string): void {
   }
 }
 
+function getSourceValidationFile(slug: string): string {
+  try {
+    assertValidSourceSlug(slug);
+    return `sources/${slug}/config.json`;
+  } catch {
+    return 'sources/<invalid>/config.json';
+  }
+}
+
+function getSourcePermissionsValidationFile(sourceSlug: string): string {
+  try {
+    assertValidSourceSlug(sourceSlug);
+    return `sources/${sourceSlug}/permissions.json`;
+  } catch {
+    return 'sources/<invalid>/permissions.json';
+  }
+}
+
 // MCP source supports two transport types:
 // - HTTP/SSE: requires url and authType
 // - Stdio: requires command (and optional args, env)
@@ -534,7 +552,7 @@ export function validateSourceConfigContent(jsonString: string): ValidationResul
  */
 export function validateSource(workspaceId: string, slug: string): ValidationResult {
   const sourcesDir = getWorkspaceSourcesPath(workspaceId);
-  const file = `sources/${slug}/config.json`;
+  const file = getSourceValidationFile(slug);
 
   try {
     assertValidSourceSlug(slug);
@@ -1482,6 +1500,7 @@ export function validateWorkspacePermissions(workspaceRoot: string): ValidationR
  * @param sourceSlug - Source slug
  */
 export function validateSourcePermissions(workspaceRoot: string, sourceSlug: string): ValidationResult {
+  const file = getSourcePermissionsValidationFile(sourceSlug);
   let permissionsPath: string;
   try {
     permissionsPath = getSourcePermissionsPath(workspaceRoot, sourceSlug);
@@ -1489,7 +1508,7 @@ export function validateSourcePermissions(workspaceRoot: string, sourceSlug: str
     return {
       valid: false,
       errors: [{
-        file: `sources/${sourceSlug}/permissions.json`,
+        file,
         path: '',
         message: error instanceof Error ? error.message : 'Invalid source slug',
         severity: 'error',
@@ -1498,7 +1517,7 @@ export function validateSourcePermissions(workspaceRoot: string, sourceSlug: str
     };
   }
 
-  return validatePermissionsFile(permissionsPath, `sources/${sourceSlug}/permissions.json`);
+  return validatePermissionsFile(permissionsPath, file);
 }
 
 /**
