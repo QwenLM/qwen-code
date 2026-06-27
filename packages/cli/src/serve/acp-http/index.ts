@@ -170,18 +170,16 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const path = opts.path ?? '/acp';
-  const dispatcher = new AcpDispatcher(
-    bridge,
-    opts.boundWorkspace,
-    opts.workspace,
-    opts.fsFactory,
-    opts.deviceFlowRegistry,
-    opts.sessionShellCommandEnabled === true,
-  );
+  const dispatcherRef: { current?: AcpDispatcher } = {};
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.
   const registry = new ConnectionRegistry(
-    (req, clientId) => dispatcher.cancelAbandonedPermission(req, clientId),
+    (req, clientId) => {
+      if (!dispatcherRef.current) {
+        throw new Error('ACP dispatcher not initialized');
+      }
+      return dispatcherRef.current.cancelAbandonedPermission(req, clientId);
+    },
     // Best-effort bridge detach so a torn-down connection's bridge-stamped
     // client ids don't linger in the bridge's voter/known-client sets.
     (sessionId, clientId) => {
@@ -195,6 +193,16 @@ export function mountAcpHttp(
     },
     opts.maxConnections,
   );
+  const dispatcher = new AcpDispatcher(
+    bridge,
+    opts.boundWorkspace,
+    opts.workspace,
+    opts.fsFactory,
+    opts.deviceFlowRegistry,
+    opts.sessionShellCommandEnabled === true,
+    registry,
+  );
+  dispatcherRef.current = dispatcher;
 
   // ── POST /acp ──────────────────────────────────────────────────────
   app.post(path, async (req: Request, res: Response) => {

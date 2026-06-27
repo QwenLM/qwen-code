@@ -72,7 +72,12 @@ import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSettingsPartialPersistError,
 } from '../workspace-service/types.js';
-import type { AcpConnection } from './connection-registry.js';
+import type {
+  AcpConnection,
+  ConnectionRegistry,
+  PendingClientRequest,
+  PendingClientRequestRef,
+} from './connection-registry.js';
 import {
   QWEN_META_KEY,
   QWEN_METHOD_NS,
@@ -96,7 +101,13 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+type PermissionResponse = Parameters<
+  HttpAcpBridge['respondToSessionPermission']
+>[2];
+
 const SESSION_SHELL_METHOD = `${QWEN_METHOD_NS}session/shell`;
+const INVALID_PERMISSION_OUTCOME_ERROR =
+  '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
 
 const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/heartbeat`,
@@ -178,6 +189,7 @@ const CONN_ROUTED_METHODS = new Set<string>([
   'session/list',
   'session/close',
   'session/fork',
+  'session/permission',
   ...ALL_QWEN_VENDOR_METHODS,
 ]);
 
@@ -273,6 +285,31 @@ function validatePrompt(params: Record<string, unknown>): void {
   ) {
     throw new AcpParamError('each `prompt` element must be an object');
   }
+}
+
+function parsePermissionResponse(
+  params: Record<string, unknown>,
+): PermissionResponse {
+  const outcome = params['outcome'];
+  if (!isObject(outcome)) {
+    throw new AcpParamError(INVALID_PERMISSION_OUTCOME_ERROR);
+  }
+  if (outcome['outcome'] !== 'cancelled') {
+    if (
+      outcome['outcome'] !== 'selected' ||
+      typeof outcome['optionId'] !== 'string' ||
+      outcome['optionId'].length === 0
+    ) {
+      throw new AcpParamError(INVALID_PERMISSION_OUTCOME_ERROR);
+    }
+  }
+
+  const response: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (key === 'sessionId' || key === 'requestId') continue;
+    response[key] = value;
+  }
+  return response as PermissionResponse;
 }
 
 /**
@@ -431,6 +468,7 @@ export class AcpDispatcher {
     private readonly fsFactory?: WorkspaceFileSystemFactory,
     private readonly deviceFlowRegistry?: DeviceFlowRegistry,
     private readonly sessionShellCommandEnabled: boolean = false,
+    private readonly registry?: ConnectionRegistry,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -671,6 +709,27 @@ export class AcpDispatcher {
       ),
     );
     return false;
+  }
+
+  private findPendingClientRequest(
+    conn: AcpConnection,
+    id: string,
+  ): PendingClientRequestRef | undefined {
+    const req = conn.pending.get(id);
+    if (req) return { conn, id, req };
+    return this.registry?.findPendingClientRequest(id);
+  }
+
+  private dropResolvedPermission(
+    conn: AcpConnection,
+    id: string,
+    req: PendingClientRequest,
+  ): void {
+    if (this.registry) {
+      this.registry.deletePendingPermission(req.sessionId, req.bridgeRequestId);
+      return;
+    }
+    conn.pending.delete(id);
   }
 
   /**
@@ -1002,6 +1061,71 @@ export class AcpDispatcher {
           if (!this.requireOwned(conn, sessionId, id)) return;
           validatePrompt(params);
           await this.handlePrompt(conn, sessionId, id, params, loopback);
+          return;
+        }
+
+        case 'session/permission': {
+          const requestId =
+            typeof params['requestId'] === 'string' ? params['requestId'] : '';
+          if (!requestId) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`requestId` is required'),
+              );
+            }
+            return;
+          }
+          const response = parsePermissionResponse(params);
+          const sessionIdParam =
+            typeof params['sessionId'] === 'string' &&
+            params['sessionId'].length > 0
+              ? params['sessionId']
+              : undefined;
+          const pendingRef = this.registry?.findPendingPermission(
+            requestId,
+            sessionIdParam,
+          );
+          const sessionId = sessionIdParam ?? pendingRef?.req.sessionId;
+          if (!sessionId) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, 'No pending permission request', {
+                  httpStatus: 404,
+                  requestId,
+                }),
+              );
+            }
+            return;
+          }
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const accepted = this.bridge.respondToSessionPermission(
+            sessionId,
+            requestId,
+            response,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          if (!accepted) {
+            this.registry?.deletePendingPermission(sessionId, requestId);
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  sessionIdParam
+                    ? 'No pending permission request for session'
+                    : 'No pending permission request',
+                  {
+                    httpStatus: 404,
+                    ...(sessionIdParam ? { sessionId } : {}),
+                    requestId,
+                  },
+                ),
+              );
+            }
+            return;
+          }
+          this.registry?.deletePendingPermission(sessionId, requestId);
+          this.replyConn(conn, id, {});
           return;
         }
 
@@ -2868,12 +2992,15 @@ export class AcpDispatcher {
     msg: JsonRpcResponse,
     fromLoopback: boolean,
   ): void {
-    // Our outbound request ids are strings (`_qwen_perm_N`); a client echoes
+    // Our outbound request ids are strings (`_qwen_perm_<conn>_N`); a client echoes
     // the same id verbatim. Anything else can't match a pending entry.
     const id = msg.id;
     if (typeof id !== 'string') return;
-    const pending = conn.pending.get(id);
-    if (!pending) return;
+    const pendingRef = this.findPendingClientRequest(conn, id);
+    if (!pendingRef) return;
+    const pendingConn = pendingRef.conn;
+    const pending = pendingRef.req;
+    if (pendingConn !== conn && !conn.ownsSession(pending.sessionId)) return;
     // NOTE: do NOT delete the pending entry yet. Keep it until either the
     // bridge vote OR the cancel fallback runs — if both somehow fail, the
     // entry survives so a later session/connection teardown
@@ -2899,7 +3026,7 @@ export class AcpDispatcher {
         >[2],
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
-      conn.pending.delete(id); // vote landed — safe to drop
+      this.dropResolvedPermission(pendingConn, id, pending);
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
@@ -2910,9 +3037,9 @@ export class AcpDispatcher {
       // permanently stuck with no recovery path.
       const cancelled = this.cancelAbandonedPermission(
         pending,
-        conn.sessions.get(pending.sessionId)?.clientId,
+        pendingConn.sessions.get(pending.sessionId)?.clientId,
       );
-      if (cancelled) conn.pending.delete(id);
+      if (cancelled) this.dropResolvedPermission(pendingConn, id, pending);
     }
   }
 

@@ -87,6 +87,12 @@ export interface PendingClientRequest {
   kind: 'permission';
 }
 
+export interface PendingClientRequestRef {
+  conn: AcpConnection;
+  id: string;
+  req: PendingClientRequest;
+}
+
 export interface AcpConnectionDiagnostic {
   connectionIdPrefix: string;
   fromLoopback: boolean;
@@ -180,13 +186,13 @@ export class AcpConnection {
 
   /**
    * Allocate a fresh JSON-RPC id for an agent→client request. STRING-typed
-   * (`_qwen_perm_N`) so it can never collide with a client-originated id —
+   * (`_qwen_perm_<conn>_N`) so it can never collide with a client-originated id —
    * JSON-RPC 2.0 permits clients to use any number (incl. negatives) or
    * string, so a numeric namespace wasn't actually safe.
    */
   nextId(): string {
     this.idCounter += 1;
-    return `_qwen_perm_${this.idCounter}`;
+    return `_qwen_perm_${this.connectionId}_${this.idCounter}`;
   }
 
   touch(): void {
@@ -452,6 +458,46 @@ export class ConnectionRegistry {
     const conn = this.byId.get(connectionId);
     conn?.touch();
     return conn;
+  }
+
+  findPendingClientRequest(id: string): PendingClientRequestRef | undefined {
+    for (const conn of this.byId.values()) {
+      const req = conn.pending.get(id);
+      if (req) return { conn, id, req };
+    }
+    return undefined;
+  }
+
+  findPendingPermission(
+    requestId: string,
+    sessionId?: string,
+  ): PendingClientRequestRef | undefined {
+    for (const conn of this.byId.values()) {
+      for (const [id, req] of conn.pending) {
+        if (
+          req.kind === 'permission' &&
+          req.bridgeRequestId === requestId &&
+          (sessionId === undefined || req.sessionId === sessionId)
+        ) {
+          return { conn, id, req };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  deletePendingPermission(sessionId: string, requestId: string): void {
+    for (const conn of this.byId.values()) {
+      for (const [id, req] of conn.pending) {
+        if (
+          req.kind === 'permission' &&
+          req.sessionId === sessionId &&
+          req.bridgeRequestId === requestId
+        ) {
+          conn.pending.delete(id);
+        }
+      }
+    }
   }
 
   delete(connectionId: string): boolean {

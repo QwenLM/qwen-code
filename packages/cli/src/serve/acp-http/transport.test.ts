@@ -913,6 +913,187 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('cross-connection permission response resolves for a co-owned session', async () => {
+    let resolvedWith: unknown;
+    bridge.respondToSessionPermission = ((
+      sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      resolvedWith = { sessionId, requestId, resp };
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-cross',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      return { stopReason: 'end_turn' };
+    };
+    const streamConnId = await initialize();
+    await newSession(streamConnId);
+    const voterConnId = await initialize();
+    await newSession(voterConnId, 100);
+    const sessStream = await openStream(streamConnId, 'sess-1');
+    const reader = frameReader(sessStream);
+    try {
+      await post(streamConnId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'rm' }],
+        },
+      });
+      const reqFrame = (await reader.next()) as { id: string };
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await waitUntil(() => resolvedWith !== undefined);
+      expect(resolvedWith).toEqual({
+        sessionId: 'sess-1',
+        requestId: 'perm-cross',
+        resp: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+    } finally {
+      reader.close();
+    }
+  });
+
+  it('ignores cross-connection permission responses for unowned sessions', async () => {
+    const votes: unknown[] = [];
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      _requestId: string,
+      resp: unknown,
+    ) => {
+      votes.push(resp);
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-unowned',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      return { stopReason: 'end_turn' };
+    };
+    const streamConnId = await initialize();
+    await newSession(streamConnId);
+    const voterConnId = await initialize();
+    const sessStream = await openStream(streamConnId, 'sess-1');
+    const reader = frameReader(sessStream);
+    try {
+      await post(streamConnId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'rm' }],
+        },
+      });
+      const reqFrame = (await reader.next()) as { id: string };
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(votes).toEqual([]);
+
+      await post(streamConnId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await waitUntil(() => votes.length === 1);
+    } finally {
+      reader.close();
+    }
+  });
+
+  it('session/permission resolves by bridge request id and replies on the connection stream', async () => {
+    let resolvedWith: unknown;
+    bridge.respondToSessionPermission = ((
+      sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      resolvedWith = { sessionId, requestId, resp };
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-route',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'rm' }],
+        },
+      });
+      await sessReader.next();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 8,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-route',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const ack = (await connReader.next()) as {
+        id: number;
+        result?: unknown;
+      };
+      expect(ack).toEqual({ jsonrpc: '2.0', id: 8, result: {} });
+      expect(resolvedWith).toEqual({
+        sessionId: 'sess-1',
+        requestId: 'perm-route',
+        resp: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
   it('standard session/set_config_option (model) routes to the bridge', async () => {
     const connId = await initialize();
     await newSession(connId);
