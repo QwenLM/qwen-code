@@ -2273,6 +2273,79 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('tracks a continuation as a busy prompt and queues a racing prompt behind it (no idle window, no abort)', async () => {
+      // End-to-end guard for the IDX-7 fix: while a continuation runs, the
+      // daemon must report the session BUSY (not idle), and a racing
+      // POST /prompt must queue behind it via the FIFO rather than be admitted
+      // into a "hidden" continuation and abort it.
+      let releaseContinuation: (() => void) | undefined;
+      const handle = makeChannel({
+        promptImpl: async () => {
+          // The first prompt is the continuation — hang so we can observe the
+          // busy state and the queued racing prompt. Later prompts return at
+          // once.
+          if (!releaseContinuation) {
+            await new Promise<void>((r) => {
+              releaseContinuation = r;
+            });
+          }
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/continue') {
+            return { accepted: true, interruption: 'interrupted_prompt' };
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const decision = await bridge.continueSession(session.sessionId);
+      expect(decision.accepted).toBe(true);
+      // Continuation has reached the agent and is now hanging.
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+
+      const summaryOf = () =>
+        bridge
+          .getDaemonStatusSnapshot()
+          .sessions.find((s) => s.sessionId === session.sessionId);
+
+      // #1: not idle during the continuation.
+      expect(summaryOf()?.hasActivePrompt).toBe(true);
+      expect(summaryOf()?.pendingPromptCount).toBe(1);
+
+      // #2: a racing prompt queues behind the continuation (FIFO), it does not
+      // run concurrently and does not abort the continuation.
+      const racing = bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'racing prompt' }],
+          },
+          undefined,
+          { clientId: session.clientId },
+        )
+        .catch(() => {});
+      await vi.waitFor(() => {
+        expect(summaryOf()?.pendingPromptCount).toBe(2);
+      });
+      // Still queued — only the continuation has reached the agent.
+      expect(handle.agent.promptCalls).toHaveLength(1);
+
+      // Releasing the continuation lets the queued prompt run in order.
+      releaseContinuation?.();
+      await racing;
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(2);
+      });
+
+      await bridge.shutdown();
+    });
+
     it('honors retry once after a turn_error', async () => {
       let calls = 0;
       const handle = makeChannel({

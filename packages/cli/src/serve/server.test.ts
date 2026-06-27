@@ -606,6 +606,7 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   clearSessionGoalCalls: string[];
   continueSessionCalls: string[];
+  continueSessionContexts: Array<BridgeClientRequestContext | undefined>;
   sessionHooksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
@@ -715,6 +716,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
   const continueSessionCalls: string[] = [];
+  const continueSessionContexts: Array<BridgeClientRequestContext | undefined> =
+    [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
@@ -1123,6 +1126,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
     continueSessionCalls,
+    continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
     setLanguageCalls,
@@ -1337,8 +1341,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       clearSessionGoalCalls.push(sessionId);
       return clearSessionGoalImpl(sessionId);
     },
-    async continueSession(sessionId) {
+    async continueSession(sessionId, context) {
       continueSessionCalls.push(sessionId);
+      continueSessionContexts.push(context);
       return continueSessionImpl(sessionId);
     },
     async getSessionHooksStatus(sessionId) {
@@ -4891,6 +4896,32 @@ describe('createServeApp', () => {
         interruption: 'interrupted_prompt',
       });
       expect(bridge.continueSessionCalls).toEqual(['s-1']);
+    });
+
+    it('forwards X-Qwen-Client-Id to continueSession', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async () => ({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-xyz');
+
+      expect(res.status).toBe(200);
+      // The originator must reach the bridge so the continuation turn is
+      // attributed the same way POST /session/:id/prompt is.
+      expect(bridge.continueSessionContexts).toEqual([{ clientId: 'client-xyz' }]);
     });
 
     it('maps session continue bridge errors', async () => {
