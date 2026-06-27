@@ -93,9 +93,20 @@ export async function handleConfigValidate(
 
     case 'sources': {
       if (sourceSlug) {
-        const sourcePath = getSourceConfigPath(ctx.workspacePath, sourceSlug);
-        const result = validateJsonFileHasFields(sourcePath, ['slug', 'name', 'type']);
-        return successResponse(formatValidationResult(result));
+        try {
+          const sourcePath = getSourceConfigPath(ctx.workspacePath, sourceSlug);
+          const result = validateJsonFileHasFields(sourcePath, ['slug', 'name', 'type']);
+          return successResponse(formatValidationResult(result));
+        } catch (error) {
+          return successResponse(formatValidationResult({
+            valid: false,
+            errors: [{
+              path: 'sourceSlug',
+              message: error instanceof Error ? error.message : 'Invalid source slug',
+            }],
+            warnings: [],
+          }));
+        }
       } else {
         // Validate all sources
         const sourcesDir = join(ctx.workspacePath, 'sources');

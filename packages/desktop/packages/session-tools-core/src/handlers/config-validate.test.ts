@@ -55,3 +55,27 @@ describe('config-validate automations target', () => {
     expect(result.content[0]?.text).toContain('No automations.json');
   });
 });
+
+describe('config-validate source fallback', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'config-validate-sources-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns a structured validation result for invalid source slugs', async () => {
+    const result = await handleConfigValidate(createCtx(tempDir), {
+      target: 'sources',
+      sourceSlug: '../sessions',
+    });
+
+    const text = result.content[0]?.text ?? '';
+    expect(result.isError).toBe(false);
+    expect(text).toContain('Validation failed');
+    expect(text).toContain('sourceSlug: Invalid source slug: "../sessions"');
+  });
+});

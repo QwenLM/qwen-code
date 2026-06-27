@@ -74,6 +74,7 @@ export interface WireError {
 
 export type ErrorCode =
   | 'HANDLER_ERROR'
+  | 'INVALID_ARGUMENT'
   | 'CHANNEL_NOT_FOUND'
   | 'AUTH_FAILED'
   | 'PROTOCOL_VERSION_UNSUPPORTED'

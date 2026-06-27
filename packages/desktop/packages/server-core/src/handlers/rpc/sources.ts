@@ -52,7 +52,14 @@ export function registerSourcesHandlers(server: RpcServer, deps: HandlerDeps): v
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`)
     const { deleteSource } = await import('@craft-agent/shared/sources')
-    deleteSource(workspace.rootPath, sourceSlug)
+    try {
+      deleteSource(workspace.rootPath, sourceSlug)
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('Invalid source slug')) {
+        ;(error as Error & { code?: string }).code = 'INVALID_ARGUMENT'
+      }
+      throw error
+    }
 
     // Clean up stale slug from workspace default sources
     const { loadWorkspaceConfig, saveWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
