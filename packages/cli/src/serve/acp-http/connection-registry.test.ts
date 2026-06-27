@@ -95,6 +95,34 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('finds and clears pending permissions across connections', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const connA = registry.create(true);
+      const connB = registry.create(true);
+      expect(connA).toBeDefined();
+      expect(connB).toBeDefined();
+      if (!connA || !connB) return;
+
+      const idA = connA.nextId();
+      const idB = connB.nextId();
+      expect(idA).not.toBe(idB);
+
+      connA.pending.set(idA, {
+        sessionId: 'sess-1',
+        bridgeRequestId: 'perm-1',
+        kind: 'permission',
+      });
+      expect(registry.findPendingClientRequest(idA)?.conn).toBe(connA);
+      expect(registry.findPendingPermission('perm-1', 'sess-1')?.id).toBe(idA);
+
+      registry.deletePendingPermission('sess-1', 'perm-1');
+      expect(registry.findPendingClientRequest(idA)).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('non-resume attach flushes all pre-attach buffered frames WITH their bus id', () => {
     const registry = new ConnectionRegistry();
     try {

@@ -120,9 +120,10 @@ function permissionRequestToEvent(
  * response resolves its pending request (so e.g. `session/prompt` doesn't hang
  * waiting on a reply it would otherwise never observe), a notification becomes
  * a `DaemonEvent`, and a `session/request_permission` request is surfaced as a
- * `permission_request` event (responding to it is the §1.7 follow-up). The
- * connection-scoped stream still carries replies to connection-level requests
- * (e.g. `initialize`, `session/new`).
+ * `permission_request` event. Consumers answer with the normal REST-like SDK
+ * permission methods, which this transport maps to `session/permission` over
+ * `/acp`. The connection-scoped stream still carries replies to
+ * connection-level requests (e.g. `initialize`, `session/new`).
  */
 export class AcpHttpTransport implements DaemonTransport {
   private readonly baseUrl: string;
@@ -423,8 +424,7 @@ export class AcpHttpTransport implements DaemonTransport {
           }
 
           // (2) Agent→client permission request → surface as an event so the
-          // consumer can show it. Responding (POSTing the vote) is the §1.7
-          // permission-coordination follow-up; here we only deliver it.
+          // consumer can show it and answer via respondToSessionPermission().
           if (method === 'session/request_permission') {
             const ev = permissionRequestToEvent(msg, busId);
             if (ev) yield ev;

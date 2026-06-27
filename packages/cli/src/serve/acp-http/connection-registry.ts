@@ -107,6 +107,12 @@ export interface PendingClientRequest {
   kind: 'permission';
 }
 
+export interface PendingClientRequestRef {
+  conn: AcpConnection;
+  id: string;
+  req: PendingClientRequest;
+}
+
 export interface AcpConnectionDiagnostic {
   connectionIdPrefix: string;
   fromLoopback: boolean;
@@ -206,7 +212,7 @@ export class AcpConnection {
    */
   nextId(): string {
     this.idCounter += 1;
-    return `_qwen_perm_${this.idCounter}`;
+    return `_qwen_perm_${this.connectionId}_${this.idCounter}`;
   }
 
   touch(): void {
@@ -575,6 +581,38 @@ export class ConnectionRegistry {
     const conn = this.byId.get(connectionId);
     conn?.touch();
     return conn;
+  }
+
+  findPendingClientRequest(id: string): PendingClientRequestRef | undefined {
+    for (const conn of this.byId.values()) {
+      const req = conn.pending.get(id);
+      if (req) return { conn, id, req };
+    }
+    return undefined;
+  }
+
+  findPendingPermission(
+    requestId: string,
+    sessionId?: string,
+  ): PendingClientRequestRef | undefined {
+    for (const conn of this.byId.values()) {
+      for (const [id, req] of conn.pending) {
+        if (req.bridgeRequestId !== requestId) continue;
+        if (sessionId !== undefined && req.sessionId !== sessionId) continue;
+        return { conn, id, req };
+      }
+    }
+    return undefined;
+  }
+
+  deletePendingPermission(sessionId: string, requestId: string): void {
+    for (const conn of this.byId.values()) {
+      for (const [id, req] of conn.pending) {
+        if (req.sessionId === sessionId && req.bridgeRequestId === requestId) {
+          conn.pending.delete(id);
+        }
+      }
+    }
   }
 
   delete(connectionId: string): boolean {

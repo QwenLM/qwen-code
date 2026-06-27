@@ -72,7 +72,12 @@ import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSettingsPartialPersistError,
 } from '../workspace-service/types.js';
-import type { AcpConnection } from './connection-registry.js';
+import type {
+  AcpConnection,
+  ConnectionRegistry,
+  PendingClientRequest,
+  PendingClientRequestRef,
+} from './connection-registry.js';
 import {
   QWEN_META_KEY,
   QWEN_METHOD_NS,
@@ -178,6 +183,7 @@ const CONN_ROUTED_METHODS = new Set<string>([
   'session/list',
   'session/close',
   'session/fork',
+  'session/permission',
   ...ALL_QWEN_VENDOR_METHODS,
 ]);
 
@@ -273,6 +279,30 @@ function validatePrompt(params: Record<string, unknown>): void {
   ) {
     throw new AcpParamError('each `prompt` element must be an object');
   }
+}
+
+function parsePermissionResponse(
+  params: Record<string, unknown>,
+): Parameters<HttpAcpBridge['respondToSessionPermission']>[2] {
+  const outcome = params['outcome'];
+  if (
+    typeof outcome !== 'object' ||
+    outcome === null ||
+    !(
+      (outcome as Record<string, unknown>)['outcome'] === 'cancelled' ||
+      ((outcome as Record<string, unknown>)['outcome'] === 'selected' &&
+        typeof (outcome as Record<string, unknown>)['optionId'] === 'string' &&
+        ((outcome as Record<string, unknown>)['optionId'] as string).length > 0)
+    )
+  ) {
+    throw new AcpParamError(
+      '`outcome` must be cancelled or selected with a non-empty optionId',
+    );
+  }
+  const response: Record<string, unknown> = { ...params, outcome };
+  delete response['sessionId'];
+  delete response['requestId'];
+  return response as Parameters<HttpAcpBridge['respondToSessionPermission']>[2];
 }
 
 /**
@@ -431,6 +461,7 @@ export class AcpDispatcher {
     private readonly fsFactory?: WorkspaceFileSystemFactory,
     private readonly deviceFlowRegistry?: DeviceFlowRegistry,
     private readonly sessionShellCommandEnabled: boolean = false,
+    private readonly registry?: ConnectionRegistry,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -483,6 +514,37 @@ export class AcpDispatcher {
       );
     }
     return { clientId, fromLoopback };
+  }
+
+  private ensurePermissionPending(
+    conn: AcpConnection,
+    sessionId: string,
+    bridgeRequestId: string,
+  ): string {
+    for (const [existingId, req] of conn.pending) {
+      if (
+        req.kind === 'permission' &&
+        req.sessionId === sessionId &&
+        req.bridgeRequestId === bridgeRequestId
+      ) {
+        return existingId;
+      }
+    }
+    const id = conn.nextId();
+    conn.pending.set(id, { sessionId, bridgeRequestId, kind: 'permission' });
+    return id;
+  }
+
+  private dropResolvedPermission(
+    conn: AcpConnection,
+    id: string,
+    req: PendingClientRequest,
+  ): void {
+    if (this.registry) {
+      this.registry.deletePendingPermission(req.sessionId, req.bridgeRequestId);
+    } else {
+      conn.pending.delete(id);
+    }
   }
 
   /**
@@ -1002,6 +1064,77 @@ export class AcpDispatcher {
           if (!this.requireOwned(conn, sessionId, id)) return;
           validatePrompt(params);
           await this.handlePrompt(conn, sessionId, id, params, loopback);
+          return;
+        }
+
+        case 'session/permission': {
+          const requestId =
+            typeof params['requestId'] === 'string' ? params['requestId'] : '';
+          if (!requestId) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`requestId` is required'),
+              );
+            }
+            return;
+          }
+          const response = parsePermissionResponse(params);
+          let sessionId =
+            typeof params['sessionId'] === 'string'
+              ? params['sessionId']
+              : undefined;
+          if (sessionId !== undefined) {
+            if (!this.requireOwned(conn, sessionId, id)) return;
+          } else {
+            const pending = this.registry?.findPendingPermission(requestId);
+            sessionId = pending?.req.sessionId;
+            if (sessionId === undefined) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    'No pending permission request',
+                    { httpStatus: 404, requestId },
+                  ),
+                );
+              }
+              return;
+            }
+            if (!conn.ownsSession(sessionId)) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    'Permission request is not owned by this connection',
+                  ),
+                );
+              }
+              return;
+            }
+          }
+          const accepted = this.bridge.respondToSessionPermission(
+            sessionId,
+            requestId,
+            response,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          if (!accepted) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'No pending permission request for session',
+                  { httpStatus: 404, sessionId, requestId },
+                ),
+              );
+            }
+            return;
+          }
+          this.registry?.deletePendingPermission(sessionId, requestId);
+          this.replyConn(conn, id, {});
           return;
         }
 
@@ -2829,30 +2962,28 @@ export class AcpDispatcher {
           toolCall: unknown;
           options: unknown;
         };
-        // A permission request MUST reach a LIVE session stream. Going
-        // through `sendSession` would (a) silently drop the frame if the
-        // session was torn down (lookup-only), or (b) buffer it pre-attach
-        // where `pushCapped` could evict it under event throughput — either
-        // way the `pending` entry is orphaned and the agent's prompt blocks
-        // on a vote forever. So deliver DIRECTLY to a live stream, and if
-        // there is none, cancel (deny-safe) rather than register+stall.
+        const frameFor = (id: string) =>
+          request(id, 'session/request_permission', {
+            sessionId: data.sessionId,
+            toolCall: data.toolCall,
+            options: data.options,
+            _meta: { [QWEN_META_KEY]: { requestId: data.requestId } },
+          });
+        // A permission request normally MUST reach a LIVE session stream.
+        // During reconnect grace (or the tiny close-before-detach window) the
+        // binding is intentionally alive with no usable stream, so defer
+        // through the session buffer/ring replay instead of auto-denying.
+        // Outside that reconnect path, keep the deny-safe cancel.
         const binding = conn.sessions.get(sessionId);
         if (!binding?.stream || binding.stream.isClosed) {
-          // KNOWN GAP (tracked as the §1.7 cross-connection permission
-          // follow-up): when this fires DURING a reconnect grace window
-          // (`binding.graceTimer` set), the prompt is intentionally kept alive,
-          // but the permission is still cancel-denied here — so a client
-          // reconnecting within grace can't vote on it (ring replay re-delivers
-          // the request, but the mediator already resolved it cancelled). Log a
-          // breadcrumb so an operator can correlate an auto-denied permission
-          // with a transient disconnect. The structural fix (defer the
-          // permission across grace) belongs with the permission-coordination
-          // follow-up, not this content-stream PR.
-          if (binding?.graceTimer) {
-            writeStderrLine(
-              `qwen serve: /acp permission cancel during reconnect grace ` +
-                `(${logSafe(sessionId)}); vote not deferred (see §1.7 follow-up)`,
+          if (binding?.graceTimer || binding?.stream?.isClosed) {
+            const id = this.ensurePermissionPending(
+              conn,
+              sessionId,
+              data.requestId,
             );
+            conn.sendSession(sessionId, frameFor(id), event.id);
+            return;
           }
           const cancelled = this.cancelAbandonedPermission(
             { sessionId, bridgeRequestId: data.requestId },
@@ -2874,32 +3005,11 @@ export class AcpDispatcher {
           }
           return;
         }
-        // Idempotent under ring replay: a `permission_request` is an
-        // id-bearing ring event, so a reconnect whose `Last-Event-ID` precedes
-        // a still-unanswered request replays it here. Reuse the existing
-        // pending entry for this bridge requestId (re-send the SAME outbound id
-        // for catch-up) instead of minting a second id + entry — which would
-        // orphan one until teardown and double-prompt a client that doesn't
-        // dedupe on `_meta.requestId`.
-        let id: string | undefined;
-        for (const [existingId, p] of conn.pending) {
-          if (
-            p.kind === 'permission' &&
-            p.sessionId === sessionId &&
-            p.bridgeRequestId === data.requestId
-          ) {
-            id = existingId;
-            break;
-          }
-        }
-        if (id === undefined) {
-          id = conn.nextId();
-          conn.pending.set(id, {
-            sessionId,
-            bridgeRequestId: data.requestId,
-            kind: 'permission',
-          });
-        }
+        const id = this.ensurePermissionPending(
+          conn,
+          sessionId,
+          data.requestId,
+        );
         // INVARIANT: this sends straight to `binding.stream` (not via
         // `conn.sendSession`) and is safe ONLY because `translateEvent` runs
         // synchronously from the pump — `binding.stream` was checked non-null
@@ -2907,12 +3017,7 @@ export class AcpDispatcher {
         // between that check and this send: a detach during the gap would set
         // `binding.stream = undefined` and this would throw `TypeError`.
         void binding.stream.send(
-          request(id, 'session/request_permission', {
-            sessionId: data.sessionId,
-            toolCall: data.toolCall,
-            options: data.options,
-            _meta: { [QWEN_META_KEY]: { requestId: data.requestId } },
-          }),
+          frameFor(id),
           // Carry the bus cursor: a permission request is a real sequenced
           // event, so the client must resume past it.
           event.id,
@@ -2962,12 +3067,17 @@ export class AcpDispatcher {
     msg: JsonRpcResponse,
     fromLoopback: boolean,
   ): void {
-    // Our outbound request ids are strings (`_qwen_perm_N`); a client echoes
-    // the same id verbatim. Anything else can't match a pending entry.
+    // Our outbound request ids are strings (`_qwen_perm_<conn>_N`); a client
+    // echoes the same id verbatim. Anything else can't match a pending entry.
     const id = msg.id;
     if (typeof id !== 'string') return;
-    const pending = conn.pending.get(id);
-    if (!pending) return;
+    const localPending = conn.pending.get(id);
+    const pendingRef: PendingClientRequestRef | undefined = localPending
+      ? { conn, id, req: localPending }
+      : this.registry?.findPendingClientRequest(id);
+    if (!pendingRef) return;
+    const { conn: pendingConn, req: pending } = pendingRef;
+    if (pendingConn !== conn && !conn.ownsSession(pending.sessionId)) return;
     // NOTE: do NOT delete the pending entry yet. Keep it until either the
     // bridge vote OR the cancel fallback runs — if both somehow fail, the
     // entry survives so a later session/connection teardown
@@ -2993,7 +3103,7 @@ export class AcpDispatcher {
         >[2],
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
-      conn.pending.delete(id); // vote landed — safe to drop
+      this.dropResolvedPermission(pendingConn, id, pending);
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
@@ -3004,9 +3114,9 @@ export class AcpDispatcher {
       // permanently stuck with no recovery path.
       const cancelled = this.cancelAbandonedPermission(
         pending,
-        conn.sessions.get(pending.sessionId)?.clientId,
+        pendingConn.sessions.get(pending.sessionId)?.clientId,
       );
-      if (cancelled) conn.pending.delete(id);
+      if (cancelled) pendingConn.pending.delete(id);
     }
   }
 

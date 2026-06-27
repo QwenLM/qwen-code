@@ -380,6 +380,34 @@ describe('AcpHttpTransport', () => {
 
       transport.dispose();
     });
+
+    it('POST /session/:id/permission/:requestId sends session/permission', async () => {
+      const { fetch, calls } = initAwareFetch();
+      const transport = new AcpHttpTransport('http://d', undefined, fetch);
+
+      const res = await transport.fetch('http://d/session/s1/permission/p1', {
+        method: 'POST',
+        body: JSON.stringify({
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const permissionCall = calls
+        .filter((c) => c.url.endsWith('/acp') && c.method === 'POST')
+        .find((c) => {
+          if (!c.body) return false;
+          return JSON.parse(c.body).method === 'session/permission';
+        });
+      expect(permissionCall).toBeDefined();
+      expect(JSON.parse(permissionCall!.body!).params).toEqual({
+        sessionId: 's1',
+        requestId: 'p1',
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+
+      transport.dispose();
+    });
   });
 
   // ---- Error handling ---------------------------------------------------
