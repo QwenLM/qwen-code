@@ -50,6 +50,12 @@ const FILE_READ_WINDOW = 15;
 // Action stagnation tracking
 const STAGNATION_THRESHOLD = 8;
 
+// Similar shell inspection commands are precise enough to guard always-on
+// when the model keeps rewriting read-only repository checks instead of
+// making progress. Use the same threshold as the heuristic action-stagnation
+// guard to leave room for legitimate branch-review inspection.
+const SHELL_COMMAND_STAGNATION_THRESHOLD = STAGNATION_THRESHOLD;
+
 // Global tool call duplicate tracking: how many times the same (tool, args)
 // pair must appear across the entire turn (not necessarily consecutively)
 // before it is treated as a loop.
@@ -98,6 +104,12 @@ export class LoopDetectionService {
   // the model keeps calling one tool with varying arguments.
   private sameNameStreak = 0;
   private lastSeenToolName: string | null = null;
+
+  // Always-on shell inspection stagnation tracking. This is narrower than
+  // action stagnation: it only covers read-only git inspection commands that
+  // are semantically equivalent even when the shell text varies.
+  private lastShellInspectionKey: string | null = null;
+  private shellInspectionStreak = 0;
 
   // Cold-start gate for READ_FILE_LOOP: the opening exploration of a prompt
   // is almost always read-heavy (list + parallel reads). Until at least one
@@ -285,6 +297,14 @@ export class LoopDetectionService {
       return true;
     }
 
+    if (
+      !this.disabledForSession &&
+      this.checkShellCommandStagnation(event.value)
+    ) {
+      this.loopDetected = true;
+      return true;
+    }
+
     if (this.checkTurnToolCallCap()) {
       this.loopDetected = true;
       return true;
@@ -312,6 +332,60 @@ export class LoopDetectionService {
       return true;
     }
     return false;
+  }
+
+  private checkShellCommandStagnation(toolCall: {
+    name: string;
+    args: object;
+  }): boolean {
+    const key = this.getShellInspectionKey(toolCall);
+    if (!key) {
+      this.lastShellInspectionKey = null;
+      this.shellInspectionStreak = 0;
+      return false;
+    }
+
+    if (this.lastShellInspectionKey === key) {
+      this.shellInspectionStreak++;
+    } else {
+      this.lastShellInspectionKey = key;
+      this.shellInspectionStreak = 1;
+    }
+
+    if (this.shellInspectionStreak >= SHELL_COMMAND_STAGNATION_THRESHOLD) {
+      this.lastLoopType = LoopType.SHELL_COMMAND_STAGNATION;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.SHELL_COMMAND_STAGNATION, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  private getShellInspectionKey(toolCall: {
+    name: string;
+    args: object;
+  }): string | null {
+    if (toolCall.name !== 'run_shell_command') {
+      return null;
+    }
+
+    const command = (toolCall.args as { command?: unknown }).command;
+    if (typeof command !== 'string') {
+      return null;
+    }
+
+    return this.isGitInspectionCommand(command)
+      ? 'run_shell_command:git-inspection'
+      : null;
+  }
+
+  private isGitInspectionCommand(command: string): boolean {
+    return /(?:^|[;&|]\s*)git(?:\s+(?:-C\s+\S+|--no-pager))*\s+(?:status|diff|ls-files)\b/i.test(
+      command,
+    );
   }
 
   /**
@@ -752,6 +826,8 @@ export class LoopDetectionService {
   private resetToolCallCount(): void {
     this.lastToolCallKey = null;
     this.toolCallRepetitionCount = 0;
+    this.lastShellInspectionKey = null;
+    this.shellInspectionStreak = 0;
   }
 
   private resetContentTracking(resetHistory = true): void {
