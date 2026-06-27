@@ -1953,6 +1953,7 @@ export async function loadCliConfig(
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     computerUseMaxImageDimension:
       settings.tools?.computerUse?.maxImageDimension,
+    computerUseIdleTimeoutMs: settings.tools?.computerUse?.idleTimeoutMs,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
