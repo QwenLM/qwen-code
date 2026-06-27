@@ -112,6 +112,8 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the model spent too many consecutive calls reading files without making progress',
   [LoopType.ACTION_STAGNATION]:
     'the model kept calling the same tool without making progress',
+  [LoopType.SHELL_COMMAND_STAGNATION]:
+    'the model repeated similar shell inspection commands without making progress',
   [LoopType.GLOBAL_TOOL_CALL_DUPLICATE]:
     'the model repeated the same tool call across the turn, even when not back-to-back',
   [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
@@ -129,6 +131,7 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
   const isAlwaysOn =
     loopType === LoopType.TURN_TOOL_CALL_CAP ||
     loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
+    loopType === LoopType.SHELL_COMMAND_STAGNATION ||
     loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
   const hint = isAlwaysOn
     ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'

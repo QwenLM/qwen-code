@@ -221,6 +221,78 @@ describe('LoopDetectionService', () => {
     });
   });
 
+  describe('Shell Command Stagnation (Always-On Circuit Breaker)', () => {
+    it('halts repeated git inspection command variants via the always-on guard', () => {
+      const commands = [
+        'git status --short',
+        'git status --short && git diff --stat',
+        'git diff --name-only HEAD',
+        'git status --porcelain=v1',
+        'git diff --stat HEAD',
+        'git -C . status --short',
+        'git --no-pager diff --stat',
+        'git ls-files --modified',
+      ];
+
+      for (const command of commands.slice(0, -1)) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command,
+              description: 'Inspect repository changes',
+            }),
+          ),
+        ).toBe(false);
+      }
+
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('run_shell_command', {
+            command: commands.at(-1),
+            description: 'Inspect repository changes',
+          }),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.SHELL_COMMAND_STAGNATION);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'shell_command_stagnation',
+        }),
+      );
+    });
+
+    it('does not halt file-specific git diff review commands', () => {
+      const commands = [
+        'git status --short',
+        'git diff --stat',
+        'git diff -- src/a.ts',
+        'git diff -- src/b.ts',
+        'git diff -- src/c.ts',
+        'git diff -- src/d.ts',
+        'git diff -- src/e.ts',
+        'git diff -- src/f.ts',
+      ];
+
+      for (const command of commands) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command,
+              description: 'Inspect repository changes',
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'shell_command_stagnation',
+        }),
+      );
+    });
+  });
+
   describe('Content Loop Detection', () => {
     const generateRandomString = (length: number) => {
       let result = '';
