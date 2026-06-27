@@ -468,9 +468,25 @@ export function mountAcpHttp(
     // Both are identity-guarded so a stale stream can't act on a newer one.
     const onPumpSettled = () => {
       if (stream.isClosed) {
+        // Transport-closed → detach-with-grace. detachSessionStream logs the
+        // detach breadcrumb itself (with the grace window).
         conn.detachSessionStream(sessionId, stream, SESSION_GRACE_MS);
       } else if (conn.sessions.get(sessionId)?.stream === stream) {
+        // Pump ended while the stream is still open (subprocess done / iterator
+        // error) → the stream is a zombie; full close now. Logged so the
+        // operator trail can tell this apart from a transport-close detach.
+        writeStderrLine(
+          `qwen serve: /acp session stream pump ended while open ` +
+            `(${logSafe(sessionId)}) — closing`,
+        );
         conn.closeSessionStream(sessionId);
+      } else {
+        // Guard mismatch: a stale stream's pump settled after a newer reclaim
+        // already took over. No-op, but log it so the trail isn't silent.
+        writeStderrLine(
+          `qwen serve: /acp session stream pump settled for a superseded ` +
+            `stream (${logSafe(sessionId)}) — no-op`,
+        );
       }
     };
     void dispatcher
@@ -479,7 +495,7 @@ export function mountAcpHttp(
         writeStderrLine(
           `qwen serve: /acp event pump error (${logSafe(sessionId)}, lastEventId=${
             lastEventId ?? 'none'
-          }): ${err instanceof Error ? err.message : String(err)}`,
+          }): ${logSafe(err instanceof Error ? err.message : String(err))}`,
         );
         onPumpSettled();
       });

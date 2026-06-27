@@ -255,6 +255,13 @@ export class AcpHttpTransport implements DaemonTransport {
     if (opts.lastEventId !== undefined) {
       headers['Last-Event-ID'] = String(opts.lastEventId);
     }
+    // NOTE: `opts.maxQueued` does NOT apply to this transport. The REST
+    // `/session/:id/events` surface accepted it as a per-subscription queue
+    // bound, but the `/acp` session stream is backed by the daemon's
+    // server-controlled EventBus ring (a fixed `DEFAULT_RING_SIZE`), so there
+    // is no client-tunable queue to forward it to. It's intentionally ignored
+    // here rather than silently mis-applied; the field stays on the shared
+    // `DaemonTransportSubscribeOptions` for the REST transport.
 
     // Connect-phase timeout.
     const connectCtrl = new AbortController();
@@ -359,6 +366,12 @@ export class AcpHttpTransport implements DaemonTransport {
         signal.addEventListener('abort', onAbort, { once: true });
       }
     });
+    // If `signal` is already aborted at entry, the `while (!signal?.aborted)`
+    // loop below never runs, so `Promise.race` never consumes this rejection.
+    // Attach a no-op handler so that early-abort case can't surface as an
+    // unhandled rejection (Node `UnhandledPromiseRejectionWarning` / browser
+    // `unhandledrejection`). The race still settles on the same rejection.
+    abortPromise.catch(() => {});
 
     try {
       while (!signal?.aborted) {

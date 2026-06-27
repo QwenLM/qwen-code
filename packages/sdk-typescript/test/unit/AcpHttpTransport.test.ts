@@ -698,4 +698,63 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     expect((events[0].data as { requestId: string }).requestId).toBe('req-1');
     expect(events[0].id).toBe(9);
   });
+
+  it('writes the Last-Event-ID header on the outbound GET when resuming', async () => {
+    // The entire resume value proposition depends on this cursor reaching the
+    // wire; without this assertion a regression would silently degrade to
+    // live-only with no test failing.
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    for await (const _e of t.subscribeEvents('sess-1', { lastEventId: 42 })) {
+      // drain (empty stream)
+    }
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall).toBeDefined();
+    expect(getCall?.headers['last-event-id']).toBe('42');
+  });
+
+  it('omits the Last-Event-ID header on a first (non-resume) connect', async () => {
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    await collect(t, 'sess-1');
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall?.headers['last-event-id']).toBeUndefined();
+  });
+
+  it('does not raise an unhandled rejection when the signal is already aborted at entry', async () => {
+    // The mock fetch ignores the signal, so the read loop is reached with
+    // `signal.aborted === true`: the loop never enters and `Promise.race`
+    // never consumes the abort rejection. The no-op `.catch` on abortPromise
+    // keeps that from surfacing as an unhandled rejection (which vitest would
+    // fail the run on).
+    const { fetch } = sessionStreamFetch([
+      frame(1, {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk', text: 'x' },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const ctrl = new AbortController();
+    ctrl.abort();
+
+    const out: unknown[] = [];
+    for await (const e of t.subscribeEvents('sess-1', {
+      signal: ctrl.signal,
+    })) {
+      out.push(e);
+    }
+    expect(out).toEqual([]); // aborted at entry → no frames consumed
+    // Give any stray rejection a tick to surface before the test ends.
+    await new Promise((r) => setTimeout(r, 0));
+  });
 });
