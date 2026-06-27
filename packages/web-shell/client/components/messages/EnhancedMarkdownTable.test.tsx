@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, type ReactNode } from 'react';
+import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
@@ -666,6 +666,42 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(container.textContent).not.toContain('✓');
     expect(container.textContent).toContain('Quick copy');
+  });
+
+  it('keeps copy feedback working under StrictMode effect replay', async () => {
+    mockClipboard();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <I18nProvider language="en">
+            <EnhancedMarkdownTable>
+              <thead>
+                <tr>
+                  <th>Team</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Alpha</td>
+                </tr>
+              </tbody>
+            </EnhancedMarkdownTable>
+          </I18nProvider>
+        </StrictMode>,
+      );
+    });
+    mounted.push({ root, container });
+
+    await act(async () => {
+      textButton(container, 'Quick copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Copied!');
   });
 
   it('keeps quick copy feedback visible for the latest click', async () => {

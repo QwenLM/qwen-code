@@ -1184,8 +1184,9 @@ function InteractiveMarkdownTable({
     resetCopiedSelection();
   }, [resetCopiedSelection, selection]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
       if (copiedVisibleTimerRef.current) {
         clearTimeout(copiedVisibleTimerRef.current);
@@ -1195,9 +1196,8 @@ function InteractiveMarkdownTable({
         clearTimeout(copiedSelectionTimerRef.current);
         copiedSelectionTimerRef.current = null;
       }
-    },
-    [],
-  );
+    };
+  }, []);
 
   useEffect(() => {
     if (!openFilterMenu) return;
