@@ -142,7 +142,7 @@ export class CronListTool extends BaseDeclarativeTool<
       false, // canUpdateOutput
       true, // shouldDefer — low-frequency inspection tool
       false, // alwaysLoad
-      'cron list scheduled jobs',
+      'cron list show active scheduled tasks loop jobs wakeups',
     );
   }
 
