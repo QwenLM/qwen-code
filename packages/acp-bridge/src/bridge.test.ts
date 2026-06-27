@@ -2241,8 +2241,10 @@ describe('createAcpSessionBridge', () => {
       const decision = await bridge.continueSession(session.sessionId);
       expect(decision).toEqual({ accepted: false, interruption: 'none' });
 
-      // Let any erroneous fire-and-forget dispatch settle, then assert none ran.
-      await Promise.resolve();
+      // Give a (regression) fire-and-forget dispatch enough time to actually
+      // reach the agent — a single microtask flush would let one slip through —
+      // then assert nothing ran.
+      await new Promise((r) => setTimeout(r, 20));
       expect(handle.agent.promptCalls).toHaveLength(0);
 
       await bridge.shutdown();

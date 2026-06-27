@@ -3890,15 +3890,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // (e.g. queue full, or the session reaped in the pre-check window) is
         // rare — the pre-check already rejects when a prompt is in flight — so
         // it is logged rather than reflected back through the already-sent ack.
-        const abort = new AbortController();
         try {
+          // No caller signal: a continuation is cancelled via the cancelSession
+          // route (entry.connection.cancel), not a per-dispatch AbortController.
           void bridgeApi
             .sendPrompt(
               sessionId,
               { sessionId, prompt: [] } as Parameters<
                 AcpSessionBridge['sendPrompt']
               >[1],
-              abort.signal,
+              undefined,
               {
                 ...(context?.clientId !== undefined
                   ? { clientId: context.clientId }
