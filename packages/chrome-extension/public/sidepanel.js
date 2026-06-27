@@ -24,6 +24,7 @@ import {
 const STORAGE_KEY = 'qwen.daemon';
 const POLL_MS = 2000;
 const PROBE_TIMEOUT_MS = 2000;
+const FRAMED_MISS_LIMIT = 2;
 
 const els = {
   iframe: document.getElementById('ui'),
@@ -82,6 +83,8 @@ async function probeState(baseUrl, token) {
 
 /** Render the welcome screen for a non-ready state. */
 function showWelcome(state, command) {
+  framedUrl = null;
+  els.iframe.removeAttribute('src');
   els.iframe.classList.add('hidden');
   els.welcome.classList.remove('hidden');
   els.cmd.textContent = command;
@@ -100,8 +103,10 @@ function showWelcome(state, command) {
 }
 
 let framedUrl = null;
+let framedMisses = 0;
 /** Swap to the Web Shell iframe; only (re)assigns src when the URL changes. */
 function showShell(baseUrl) {
+  framedMisses = 0;
   els.welcome.classList.add('hidden');
   if (framedUrl !== baseUrl) {
     framedUrl = baseUrl;
@@ -112,17 +117,20 @@ function showShell(baseUrl) {
 
 let pollTimer = null;
 /**
- * One probe → render. Once framed we stop polling: the Web Shell owns its own
- * reconnect/SSE, so re-probing would only risk nuking a live chat on a blip.
+ * One probe → render. Keep probing after framing so a stopped daemon falls
+ * back to the welcome screen instead of exposing Chrome's localhost error page.
  */
 async function tick() {
   const { baseUrl, token } = await readConfig();
   const state = await probeState(baseUrl, token);
   if (state === 'ready') {
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = null;
     showShell(baseUrl);
   } else {
+    if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
+      framedMisses += 1;
+      return;
+    }
+    framedMisses = 0;
     showWelcome(state, allowOriginCommand(chrome.runtime.id));
   }
 }
