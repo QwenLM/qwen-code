@@ -23,7 +23,9 @@ import {
   useMessageSubmit,
 } from './hooks/useMessageSubmit.js';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
-import { stripZeroWidthSpaces } from '@qwen-code/webui';
+import { MarkdownRenderer, stripZeroWidthSpaces } from '@qwen-code/webui';
+import { ChatPanel, type StreamingRawInput } from '@qwen-code/chat-panel';
+import { acpToMessages } from '../adapters/acpToMessages.js';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
@@ -339,6 +341,9 @@ export const App: React.FC = () => {
   );
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
+  // Experimental: render the conversation flow via the shared <ChatPanel>.
+  // Driven by the `qwen-code.useChatPanel` setting, delivered as featureFlags.
+  const [useChatPanel, setUseChatPanel] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Maps DOM child position → allMessages index. Built during render by
   // MessageList, only includes items that actually produce DOM elements.
@@ -642,6 +647,18 @@ export const App: React.FC = () => {
     window.addEventListener('message', clearEditingOnRestoreOrFailure);
     return () =>
       window.removeEventListener('message', clearEditingOnRestoreOrFailure);
+  }, []);
+
+  // Receive experimental feature flags pushed by the extension host on ready.
+  useEffect(() => {
+    const handleFeatureFlags = (event: MessageEvent) => {
+      const message = event.data;
+      if (message?.type === 'featureFlags') {
+        setUseChatPanel(Boolean(message.data?.useChatPanel));
+      }
+    };
+    window.addEventListener('message', handleFeatureFlags);
+    return () => window.removeEventListener('message', handleFeatureFlags);
   }, []);
 
   const canSubmit = shouldSendMessage({
@@ -1313,6 +1330,63 @@ export const App: React.FC = () => {
     [vscode],
   );
 
+  // --- Shared <ChatPanel> wiring (experimental, behind useChatPanel) ---------
+  // Map the webview's ACP-derived state onto the shared Message[] contract.
+  // Mirrors `allMessages`: in-progress tools + completed tools that have output.
+  const chatPanelMessages = useMemo(() => {
+    const toolCallMap = new Map<string, ToolCallData>();
+    for (const tc of inProgressToolCalls) {
+      toolCallMap.set(tc.toolCallId, tc);
+    }
+    for (const tc of completedToolCalls) {
+      if (hasToolCallOutput(tc)) {
+        toolCallMap.set(tc.toolCallId, tc);
+      }
+    }
+    return acpToMessages({
+      messages: messageHandling.messages,
+      toolCalls: toolCallMap,
+      planEntries,
+      insight: insightProgress,
+      insightReportPath,
+    });
+  }, [
+    messageHandling.messages,
+    inProgressToolCalls,
+    completedToolCalls,
+    planEntries,
+    insightProgress,
+    insightReportPath,
+  ]);
+
+  // Markdown seam: the panel has no engine; inject the webview's renderer, which
+  // turns file paths into links that open in the editor.
+  const chatPanelMarkdown = useMemo(
+    () => ({
+      renderMarkdown: ({ content }: { content: string }) => (
+        <MarkdownRenderer content={content} onFileClick={handleFileClick} />
+      ),
+      // The webview is sandboxed; defer image safety to the host (none for now).
+      isSafeImageSrc: () => false,
+    }),
+    [handleFileClick],
+  );
+
+  // Streaming seam: drive the elapsed/loading indicator from the agent state.
+  const chatPanelStreaming = useMemo<StreamingRawInput>(
+    () => ({
+      state: messageHandling.isWaitingForResponse
+        ? 'waiting'
+        : messageHandling.isStreaming
+          ? 'responding'
+          : 'idle',
+      chars: 0,
+      agentTokens: 0,
+      isReceiving: messageHandling.isStreaming,
+    }),
+    [messageHandling.isWaitingForResponse, messageHandling.isStreaming],
+  );
+
   // Build a markdown code fence that won't collide with content containing backticks
   const buildFence = useCallback((content: string): string => {
     const matches = (content ?? '').match(/`+/g);
@@ -1561,42 +1635,58 @@ export const App: React.FC = () => {
           )
         ) : (
           <>
-            {/* Render all messages and tool calls */}
-            <MessageList
-              allMessages={allMessages}
-              onFileClick={handleFileClick}
-              onEditUserMessage={handleEditUserMessage}
-              canEditMessages={
-                !messageHandling.isStreaming &&
-                !messageHandling.isWaitingForResponse
-              }
-              childIndexMap={childIndexMapRef}
-            />
-
-            {insightProgress && (
-              <InsightProgressCard
-                stage={insightProgress.stage}
-                progress={insightProgress.progress}
-                detail={insightProgress.detail}
+            {useChatPanel ? (
+              /* Experimental: shared conversation flow. Insight + plan rows are
+                 folded into `chatPanelMessages` by the adapter. */
+              <ChatPanel
+                messages={chatPanelMessages}
+                pendingApproval={null}
+                onConfirm={() => {}}
+                shellOutputMaxLines={50}
+                isResponding={messageHandling.isStreaming}
+                markdown={chatPanelMarkdown}
+                streaming={chatPanelStreaming}
               />
-            )}
+            ) : (
+              <>
+                {/* Render all messages and tool calls */}
+                <MessageList
+                  allMessages={allMessages}
+                  onFileClick={handleFileClick}
+                  onEditUserMessage={handleEditUserMessage}
+                  canEditMessages={
+                    !messageHandling.isStreaming &&
+                    !messageHandling.isWaitingForResponse
+                  }
+                  childIndexMap={childIndexMapRef}
+                />
 
-            {insightReportPath && (
-              <div className="px-[30px] py-2">
-                <div className="text-sm text-[var(--vscode-descriptionForeground)]">
-                  Insight report generated at:
-                </div>
-                <a
-                  href="#"
-                  className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    handleOpenInsightReport();
-                  }}
-                >
-                  {insightReportPath}
-                </a>
-              </div>
+                {insightProgress && (
+                  <InsightProgressCard
+                    stage={insightProgress.stage}
+                    progress={insightProgress.progress}
+                    detail={insightProgress.detail}
+                  />
+                )}
+
+                {insightReportPath && (
+                  <div className="px-[30px] py-2">
+                    <div className="text-sm text-[var(--vscode-descriptionForeground)]">
+                      Insight report generated at:
+                    </div>
+                    <a
+                      href="#"
+                      className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        handleOpenInsightReport();
+                      }}
+                    >
+                      {insightReportPath}
+                    </a>
+                  </div>
+                )}
+              </>
             )}
 
             {/* Waiting message positioned fixed above the input form to avoid layout shifts */}

@@ -222,6 +222,12 @@
           "default": true,
           "description": "Show a colored dot on the tab icon when a task completes (orange) or needs your attention (blue) while the tab is hidden."
         },
+        "qwen-code.useChatPanel": {
+          "order": 99,
+          "type": "boolean",
+          "default": false,
+          "description": "Experimental: render the conversation flow with the shared @qwen-code/chat-panel component instead of the built-in renderer."
+        },
         "qwen-code.notifications": {
           "order": 4,
           "type": "boolean",

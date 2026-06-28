@@ -1740,6 +1740,18 @@ export class WebViewProvider {
    * Sync important initialization state when the webview signals readiness.
    */
   private handleWebviewReady(): void {
+    // Feature flags the webview reads before its first render (experimental
+    // opt-ins like the shared chat-panel renderer). Sent on every ready so a
+    // settings change picked up on reload reaches the webview.
+    this.sendMessageToWebView({
+      type: 'featureFlags',
+      data: {
+        useChatPanel: vscode.workspace
+          .getConfiguration('qwen-code')
+          .get<boolean>('useChatPanel', false),
+      },
+    });
+
     if (this.currentModeId) {
       this.sendMessageToWebView({
         type: 'modeChanged',
