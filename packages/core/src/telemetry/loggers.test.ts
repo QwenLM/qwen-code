@@ -1390,7 +1390,7 @@ describe('loggers', () => {
         body: 'Tool output truncated for test-tool.',
         attributes: {
           'session.id': 'test-session-id',
-          'event.name': 'tool_output_truncated',
+          'event.name': 'qwen-code.tool_output_truncated',
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           eventName: 'tool_output_truncated',
           prompt_id: 'prompt-id-1',
