@@ -250,9 +250,10 @@ export class LoopDetectionService {
 
   /**
    * Always-on safety checks that fire regardless of the `skipLoopDetection`
-   * config default. Enforces two guards: the consecutive-identical tool-call
-   * loop and the per-turn tool-call cap. Call this before the gated heuristic
-   * checks so neither guard can be bypassed by configuration.
+   * config default. Enforces three guards: the consecutive-identical tool-call
+   * loop, the shell inspection-command stagnation loop, and the per-turn
+   * tool-call cap. Call this before the gated heuristic checks so none of the
+   * guards can be bypassed by configuration.
    */
   checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
     if (this.loopDetected) {
