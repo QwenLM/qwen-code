@@ -250,9 +250,10 @@ export class LoopDetectionService {
 
   /**
    * Always-on safety checks that fire regardless of the `skipLoopDetection`
-   * config default. Enforces two guards: the consecutive-identical tool-call
-   * loop and the per-turn tool-call cap. Call this before the gated heuristic
-   * checks so neither guard can be bypassed by configuration.
+   * config default. Enforces three guards: the consecutive-identical tool-call
+   * loop, the shell inspection-command stagnation loop, and the per-turn
+   * tool-call cap. Call this before the gated heuristic checks so none of the
+   * guards can be bypassed by configuration.
    */
   checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
     if (this.loopDetected) {
@@ -383,17 +384,19 @@ export class LoopDetectionService {
   }
 
   private isGitOverviewInspectionCommand(command: string): boolean {
+    // Only classify a command as overview inspection when *every* segment of
+    // the shell chain is a git status/diff/ls-files overview. A chain that also
+    // stages, commits, runs another tool, or inspects file-specific diffs is
+    // making progress, so it must not share the stagnation bucket and trip a
+    // false halt. Failing open is the safe direction for an always-on guard.
     const segments = command
-      .split(/\s*(?:&&|\|\||[;|])\s*/)
+      .split(/&&|\|\||[;&|]/)
       .map((segment) => segment.trim())
       .filter(Boolean);
-    let hasGitInspection = false;
-
-    for (const segment of segments) {
-      if (/^echo\b/i.test(segment)) {
-        continue;
-      }
-
+    if (segments.length === 0) {
+      return false;
+    }
+    return segments.every((segment) => {
       const match =
         /^git(?:\s+(?:-C\s+\S+|--no-pager))*\s+(status|diff|ls-files)\b/i.exec(
           segment,
@@ -401,15 +404,8 @@ export class LoopDetectionService {
       if (!match) {
         return false;
       }
-
-      if (match[1]?.toLowerCase() === 'diff' && /\s--\s+\S/.test(segment)) {
-        return false;
-      }
-
-      hasGitInspection = true;
-    }
-
-    return hasGitInspection;
+      return match[1]?.toLowerCase() !== 'diff' || !/\s--\s+\S/.test(segment);
+    });
   }
 
   /**

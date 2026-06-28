@@ -29,6 +29,7 @@ const CONTENT_CHUNK_SIZE = 50;
 // self-describing and failures point to the constant that changed.
 const FILE_READ_WINDOW = 15;
 const GLOBAL_DUPLICATE_THRESHOLD = 6;
+const SHELL_COMMAND_STAGNATION_THRESHOLD = 8;
 const ALTERNATING_PATTERN_CYCLES = 3;
 const TURN_TOOL_CALL_CAP = 100;
 
@@ -259,6 +260,70 @@ describe('LoopDetectionService', () => {
         expect.objectContaining({
           loop_type: 'shell_command_stagnation',
         }),
+      );
+    });
+
+    it('resets the streak when a non-inspection tool call interrupts the run', () => {
+      // Vary the command text so the consecutive-identical guard (threshold 5)
+      // never fires and only the shell-stagnation bucket accumulates.
+      const variants = [
+        'git status --short',
+        'git diff --stat',
+        'git ls-files --modified',
+        'git status --porcelain=v1',
+        'git diff --name-only HEAD',
+        'git -C . status --short',
+        'git --no-pager diff --stat',
+      ];
+      const gitInspect = (i: number) =>
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('run_shell_command', {
+            command: variants[i % variants.length],
+            description: 'Inspect repository changes',
+          }),
+        );
+
+      // One short of the threshold, so the next inspection alone would trip.
+      for (let i = 0; i < SHELL_COMMAND_STAGNATION_THRESHOLD - 1; i++) {
+        expect(gitInspect(i)).toBe(false);
+      }
+
+      // A non-inspection tool call must reset the streak to zero.
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('read_file', {
+            absolute_path: '/repo/README.md',
+          }),
+        ),
+      ).toBe(false);
+
+      // Counting restarts from zero: a full threshold-minus-one run of git
+      // inspections still does not trip, proving the streak did not carry over.
+      for (let i = 0; i < SHELL_COMMAND_STAGNATION_THRESHOLD - 1; i++) {
+        expect(gitInspect(i)).toBe(false);
+      }
+      expect(service.getLastLoopType()).not.toBe(
+        LoopType.SHELL_COMMAND_STAGNATION,
+      );
+    });
+
+    it('does not bucket compound commands that also write to the repository', () => {
+      // Each chain stages and commits real work; the embedded `git status` must
+      // not classify the whole command as stagnant read-only inspection. Vary
+      // the path so the consecutive-identical guard never fires, isolating the
+      // shell-stagnation guard under test.
+      for (let i = 0; i < SHELL_COMMAND_STAGNATION_THRESHOLD; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command: `git add file-${i}.txt && git status --short && git commit -m progress-${i}`,
+              description: 'Stage, inspect, and commit progress',
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(service.getLastLoopType()).not.toBe(
+        LoopType.SHELL_COMMAND_STAGNATION,
       );
     });
 
