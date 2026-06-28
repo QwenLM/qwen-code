@@ -1041,6 +1041,7 @@ const EN: Messages = {
   'todo.moreAbove': (v) => `... ${v?.count ?? 0} earlier`,
   'todo.showLess': 'Show less',
   'todo.stepProgress': (v) => `Step ${v?.current ?? 0} / ${v?.total ?? 0}`,
+  'todo.stepFraction': (v) => `${v?.current ?? 0} / ${v?.total ?? 0}`,
   'todo.title': 'Current tasks',
   'chat.scrollToBottom': 'Scroll to bottom',
   'userMessage.showMore': 'Show more',
@@ -1062,6 +1063,7 @@ const EN: Messages = {
     const n = v?.count ?? 0;
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
+  'message.renderError': 'This message could not be displayed.',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
   'tasks.refreshStale': 'Task status may be stale; reconnecting...',
@@ -2197,6 +2199,7 @@ const ZH: Messages = {
   'todo.moreAbove': (v) => `... 前面还有 ${v?.count ?? 0} 项`,
   'todo.showLess': '收起',
   'todo.stepProgress': (v) => `第 ${v?.current ?? 0} / ${v?.total ?? 0} 步`,
+  'todo.stepFraction': (v) => `${v?.current ?? 0} / ${v?.total ?? 0}`,
   'todo.title': '当前任务',
   'chat.scrollToBottom': '回到底部',
   'userMessage.showMore': '显示更多',
@@ -2209,6 +2212,7 @@ const ZH: Messages = {
   'turn.executionSteps': (v) => `${v?.count ?? 0} 步`,
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
+  'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
   'tasks.refreshStale': '任务状态可能已过期，正在重连...',

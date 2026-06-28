@@ -1404,7 +1404,8 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
   };
 
-  const cliVersion = await getCliVersion();
+  const cliVersionPromise = getCliVersion();
+  let cliVersion: string | undefined;
 
   const diagnosticSink = (line: string, level?: 'info' | 'warn' | 'error') =>
     daemonLog.raw(line, level);
@@ -1477,11 +1478,14 @@ export async function runQwenServe(
     app: Application;
     bridge: AcpSessionBridge;
   }> => {
-    const [runtime, core, settingsRuntime] = await Promise.all([
-      loadServeRuntimeModules(),
-      loadCoreRuntime(),
-      loadSettingsRuntimeModules(),
-    ]);
+    const [runtime, core, settingsRuntime, resolvedCliVersion] =
+      await Promise.all([
+        loadServeRuntimeModules(),
+        loadCoreRuntime(),
+        loadSettingsRuntimeModules(),
+        cliVersionPromise,
+      ]);
+    cliVersion = resolvedCliVersion;
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -1530,7 +1534,7 @@ export async function runQwenServe(
     core.initializeTelemetry(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
-        cliVersion,
+        resolvedCliVersion,
         `daemon:${daemonWorkspaceHash}:${process.pid}`,
         {
           otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
@@ -1755,7 +1759,7 @@ export async function runQwenServe(
       bridge,
       webShellDir,
       boundWorkspace,
-      qwenCodeVersion: cliVersion,
+      qwenCodeVersion: resolvedCliVersion,
       startup,
       fsFactory,
       daemonLog,
@@ -1777,26 +1781,32 @@ export async function runQwenServe(
             });
             const plan = core.buildInstallPlan(provider, inputs);
             const fresh = settingsRuntime.settings.loadSettings(boundWorkspace);
+            const adapter =
+              settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
+                fresh,
+              );
             await core.applyProviderInstallPlan(plan, {
-              settings:
-                settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
-                  fresh,
-                ),
+              settings: adapter,
               doRefreshAuth: false,
             });
             core.emitDaemonLog('Auth provider installed.', {
               'qwen-code.daemon.auth.provider_id': provider.id,
               'qwen-code.daemon.auth.auth_type': plan.authType,
             });
+            const effectiveModelId =
+              (adapter.getValue('model.name') as string | undefined) ??
+              plan.modelSelection?.modelId;
+            const effectiveBaseUrl =
+              (adapter.getValue('model.baseUrl') as string | undefined) ??
+              plan.modelSelection?.baseUrl ??
+              inputs.baseUrl;
             return {
               v: 1,
               providerId: provider.id,
               providerLabel: provider.label,
               authType: plan.authType,
-              ...(plan.modelSelection?.modelId
-                ? { modelId: plan.modelSelection.modelId }
-                : {}),
-              ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
+              ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
+              ...(effectiveBaseUrl ? { baseUrl: effectiveBaseUrl } : {}),
               message: `Successfully configured ${provider.label}. Use /model to switch models.`,
             };
           },
@@ -1813,6 +1823,8 @@ export async function runQwenServe(
     runtimeStartupSettled = true;
     markRuntimeReady();
   }
+
+  cliVersion ??= await cliVersionPromise;
 
   const bootstrapApp = createBootstrapServeApp({
     opts,

@@ -300,6 +300,7 @@ function writeDistPackageJson(
   console.log('Creating package.json for distribution...');
 
   const cliEntryContent = `#!/usr/bin/env node
+import module from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -312,6 +313,7 @@ function isServeCommand() {
 }
 
 if (isServeCommand()) {
+  module.enableCompileCache?.();
   process.argv[1] = cliPath;
   await import(pathToFileURL(cliPath).href);
 } else {

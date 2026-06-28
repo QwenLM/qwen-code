@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateAllPermissions, validateSource, validateSourcePermissions } from '../validators.ts';
+import { validateAllPermissions, validateAllSources, validateSource, validateSourcePermissions } from '../validators.ts';
 
 describe('source slug validation in config validators', () => {
   it('returns a validation error instead of joining invalid source slugs', () => {
@@ -29,6 +29,37 @@ describe('source slug validation in config validators', () => {
       result.warnings.some(
         warning =>
           warning.file === 'sources/legacy-source-/permissions.json' &&
+          warning.message.includes('invalid slug format')
+      )
+    ).toBe(true);
+  });
+
+  it('skips legacy invalid source directories during all source validation', () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'all-sources-validator-'));
+    const sourcesDir = join(workspaceRoot, 'sources');
+    mkdirSync(join(sourcesDir, 'legacy-source-'), { recursive: true });
+    mkdirSync(join(sourcesDir, 'valid-source'), { recursive: true });
+    writeFileSync(
+      join(sourcesDir, 'valid-source', 'config.json'),
+      JSON.stringify({
+        id: 'valid-source',
+        name: 'Valid Source',
+        slug: 'valid-source',
+        enabled: true,
+        provider: 'test',
+        type: 'local',
+        local: { path: workspaceRoot },
+      })
+    );
+
+    const result = validateAllSources(workspaceRoot);
+
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(
+      result.warnings.some(
+        warning =>
+          warning.file === 'sources/legacy-source-/config.json' &&
           warning.message.includes('invalid slug format')
       )
     ).toBe(true);
