@@ -6674,7 +6674,9 @@ Other open files:
             historyRef.push(orphanedPrompt);
             pushCount++;
             yield* [] as ServerGeminiStreamEvent[];
-            throw new Error('failed after compression+push, before first event');
+            throw new Error(
+              'failed after compression+push, before first event',
+            );
           })(),
         );
 

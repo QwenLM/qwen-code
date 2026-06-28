@@ -271,14 +271,17 @@ describe('Session.pendingWorktreeNotice', () => {
   // the two insert-after-functionResponses phases can't silently reorder.
   it('VP5: continuation keeps functionResponses first, then worktree notice, then reminders', async () => {
     // Plan mode makes #buildInitialSystemReminders emit a reminder part.
-    (
-      mockConfig.getApprovalMode as ReturnType<typeof vi.fn>
-    ).mockReturnValue(ApprovalMode.PLAN);
+    (mockConfig.getApprovalMode as ReturnType<typeof vi.fn>).mockReturnValue(
+      ApprovalMode.PLAN,
+    );
     // History ends on a model turn with a dangling tool call → an
     // `interrupted_turn` continuation whose parts lead with functionResponses.
     (mockChat.getHistory as ReturnType<typeof vi.fn>).mockReturnValue([
       { role: 'user', parts: [{ text: 'run a command' }] },
-      { role: 'model', parts: [{ functionCall: { id: 'call-1', name: 'shell' } }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+      },
     ]);
 
     const session = new Session(

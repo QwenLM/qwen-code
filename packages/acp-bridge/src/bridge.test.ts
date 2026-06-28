@@ -2220,9 +2220,7 @@ describe('createAcpSessionBridge', () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
 
-      await expect(
-        bridge.continueSession('no-such-session'),
-      ).rejects.toThrow();
+      await expect(bridge.continueSession('no-such-session')).rejects.toThrow();
 
       await bridge.shutdown();
     });
