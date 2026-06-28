@@ -757,7 +757,7 @@ Metrics are numerical measurements of behavior over time. Metric names use the `
 - `qwen-code.memory.recall.duration` (Histogram, ms): Recall duration.
   - **Attributes**: `strategy`
 
-#### Phase 4c Metric
+#### API Request Breakdown
 
 - `qwen-code.api.request.breakdown` (Histogram, ms): API request time breakdown by phase.
   - **Attributes**: `model`, `phase` ("request_preparation"/"network_latency"/"response_processing"/"token_processing")
