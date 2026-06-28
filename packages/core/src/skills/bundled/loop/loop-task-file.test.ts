@@ -854,6 +854,41 @@ describe('readLoopTaskFile', () => {
     }
   });
 
+  it('drops an ORPHAN lead followed by an ASCII byte and stray continuations (no U+FFFD)', async () => {
+    // The continuation back-off walks `lead` to the LAST non-continuation byte,
+    // so a `> end` width check alone stops at the ASCII `0x41` (a complete 1-byte
+    // char) and keeps the orphan `0xc3` before it plus the three stray `0x80`
+    // continuations after it — all of which decode to trailing U+FFFD. Re-checking
+    // the boundary against the EXACT char width (and re-running after each trim)
+    // is what strips the whole malformed tail. The trailing `0x61` defeats the
+    // initial continuation back-off, so the stray `0x80` bytes are not at the very
+    // end and only the boundary loop removes them.
+    const N = LOOP_TASK_FILE_MAX_BYTES;
+    const head = Buffer.alloc(N - 5, 0x61); // 'a' * (N-5)
+    const tail = Buffer.from([0xc3, 0x41, 0x80, 0x80, 0x80, 0x61]); // orphan lead, 'A', 3 conts, 'a'
+    const raw = Buffer.concat([head, tail]); // N + 1 bytes → truncated
+    await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
+    await fs.writeFile(path.join(projectRoot, '.qwen', 'loop.md'), raw);
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result.status).toBe('found');
+    if (result.status === 'found') {
+      expect(result.truncated).toBe(true);
+      expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThanOrEqual(
+        LOOP_TASK_FILE_MAX_BYTES,
+      );
+      // The whole malformed tail is gone: no replacement char, and the body ends
+      // on the last complete ('a') char — a clean UTF-8 boundary.
+      expect(result.content).not.toContain('�');
+      expect(result.content).toBe('a'.repeat(N - 5));
+    }
+  });
+
   it('skips a candidate that raises ENAMETOOLONG and falls through instead of throwing', async () => {
     // The over-long-path code is in the skip whitelist but otherwise untested; a
     // typo'd entry would start throwing on a real ENAMETOOLONG instead of falling

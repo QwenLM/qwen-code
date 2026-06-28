@@ -5104,6 +5104,98 @@ describe('Session', () => {
         }
       });
 
+      it('omits the project candidate from the sanitized resolve error in an untrusted folder', async () => {
+        // An untrusted folder never reads `.qwen/loop.md` (the resolver gets
+        // allowProjectFile=false), so the sanitized error must NOT claim the
+        // project candidate was checked — it would be a lie. It still names the
+        // QWEN_HOME-aware home candidate (the only one actually probed) and the
+        // errno code, and stays leak-safe. Mutation guard: hardcoding
+        // `.qwen/loop.md (project)` back into the throw re-introduces the false
+        // claim and fails this test.
+        debugLoggerWarnSpy.mockClear();
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-untrusted-err-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-untrusted-home-'),
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        mockConfig.isTrustedFolder = vi.fn().mockReturnValue(false);
+        const restoreHome = setFakeHome(fakeHome);
+
+        const absoluteLoopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        const eacces = Object.assign(
+          new Error(`EACCES: permission denied, open '${absoluteLoopMdPath}'`),
+          { code: 'EACCES' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const sessionUpdateMock = mockClient.sessionUpdate as ReturnType<
+            typeof vi.fn
+          >;
+          const cronErrorTexts = () =>
+            sessionUpdateMock.mock.calls
+              .map(
+                (call) =>
+                  (
+                    call[0] as {
+                      update?: {
+                        sessionUpdate?: string;
+                        content?: { text?: string };
+                      };
+                    }
+                  ).update,
+              )
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of cronErrorTexts()) {
+            // The home candidate and errno code are named...
+            expect(text).toContain('EACCES');
+            expect(text).toContain('(home)');
+            // ...but the never-read project candidate is omitted entirely.
+            expect(text).not.toContain('(project)');
+            // ...and the absolute path is still never leaked to the client/API.
+            expect(text).not.toContain(absoluteLoopMdPath);
+          }
+        } finally {
+          resolveSpy.mockRestore();
+          restoreHome();
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+        }
+      });
+
       it('echoes the absent label when a sentinel fires with no loop.md present', async () => {
         // The `loopTick && !loopTick.sourceLabel` branch: a sentinel fires but no
         // project or home loop.md exists, so the tick is a labelled no-op.

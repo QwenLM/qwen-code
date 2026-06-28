@@ -123,20 +123,11 @@ const ABSENT_TAIL: Record<LoopMode, string> = {
 
 // Body of the absent reminder — the H1 is supplied by tickHeading() so the
 // absent tick shares the same heading style as the full block and reminder.
-// `homeLabel` is the resolver's REAL home loop.md location (so a $QWEN_HOME-
-// relocated home is reported accurately instead of a hardcoded, wrong `~/.qwen`);
-// its OS-home prefix is tilde-abbreviated so the common case still reads
-// `~/.qwen/loop.md`. When `projectChecked` is false (untrusted folder), the
-// project candidate is never read, so it is omitted rather than claimed checked.
-function absentBody(
-  mode: LoopMode,
-  homeLabel: string,
-  projectChecked: boolean,
-): string {
-  const where = projectChecked
-    ? `.qwen/loop.md (project) or ${homeLabel} (home)`
-    : `${homeLabel} (home)`;
-  return `loop.md is not currently present at ${where}. ${ABSENT_TAIL[mode]}`;
+// `locations` is LoopTickResolver.absentLocations(): the candidate path(s)
+// ACTUALLY checked this tick (the project candidate is omitted on an untrusted
+// folder), with a QWEN_HOME-aware home label that is never a raw absolute path.
+function absentBody(mode: LoopMode, locations: string): string {
+  return `loop.md is not currently present at ${locations}. ${ABSENT_TAIL[mode]}`;
 }
 
 /** Detect whether a scheduled prompt is a loop.md sentinel, and which mode. */
@@ -225,6 +216,19 @@ export class LoopTickResolver {
     return 'the configured global loop.md';
   }
 
+  /** The checked-candidate "where" string shared by the absent reminder and the
+   * caller's sanitized resolve-error. Names the project candidate ONLY when it
+   * was actually read (`projectChecked` — a trusted folder), so neither path can
+   * claim `.qwen/loop.md (project)` for an untrusted folder where the project
+   * file is skipped. The home label is the QWEN_HOME-aware, never-absolute
+   * homeLoopLabel(). Single source of truth so the two messages can't drift. */
+  absentLocations(projectChecked: boolean): string {
+    const homeLabel = this.homeLoopLabel();
+    return projectChecked
+      ? `.qwen/loop.md (project) or ${homeLabel} (home)`
+      : `${homeLabel} (home)`;
+  }
+
   async resolve(mode: LoopMode): Promise<LoopTickResult> {
     // Re-read trust per tick (see LoopTickResolverDeps.allowProjectFile): a
     // resolver built while trusted must skip the project file once trust flips.
@@ -246,7 +250,7 @@ export class LoopTickResolver {
       this.#pendingContent = null;
       this.#lastContent = null;
       return {
-        modelText: `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.homeLoopLabel(), allowProjectFile)}`,
+        modelText: `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.absentLocations(allowProjectFile))}`,
         full: false,
       };
     }

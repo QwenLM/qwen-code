@@ -311,17 +311,25 @@ export async function readLoopTaskFile({
       while (end > 0 && (buffer[end] & 0xc0) === 0x80) {
         end--;
       }
-      // ...then drop a still-INCOMPLETE trailing char: walk to the last lead byte
-      // and, if its declared width runs past `end` (a 4-byte `f0` with too few
-      // continuations, from a mid-sequence cut or malformed input), cut before it.
-      // The continuation walk alone leaves such an orphan lead, which decodes to a
-      // trailing U+FFFD the byte-length re-clamp below can keep — so this boundary
-      // fix is load-bearing and the re-clamp is a pure safety net.
-      let lead = end - 1;
-      while (lead >= 0 && (buffer[lead] & 0xc0) === 0x80) {
-        lead--;
-      }
-      if (lead >= 0) {
+      // ...then drop any malformed trailing unit. `lead` is the last
+      // non-continuation byte, and the back-off skipped exactly the continuation
+      // bytes after it, so the trailing character is well-formed iff its declared
+      // width reaches `end` exactly. A mismatch is either an INCOMPLETE lead (too
+      // few continuations, `lead + width > end`) or an ORPHAN lead whose stray
+      // continuations belong to nothing (`lead + width < end`) — e.g. a width
+      // check that only tests `> end` keeps `c3 41 80 80 80` (orphan `c3` plus
+      // stray continuations after the `41`). Drop the unit and re-check, since
+      // several malformed units can stack. Each surviving orphan decodes to a
+      // trailing U+FFFD the byte-length re-clamp below cannot remove, so this loop
+      // is load-bearing and the re-clamp is a pure safety net.
+      while (end > 0) {
+        let lead = end - 1;
+        while (lead >= 0 && (buffer[lead] & 0xc0) === 0x80) {
+          lead--;
+        }
+        if (lead < 0) {
+          break;
+        }
         const b = buffer[lead];
         const width =
           (b & 0x80) === 0x00
@@ -333,9 +341,10 @@ export async function readLoopTaskFile({
                 : (b & 0xf8) === 0xf0
                   ? 4
                   : 1; // invalid lead (0xC0/0xC1/0xF8–0xFF): treat as a 1-byte unit
-        if (lead + width > end) {
-          end = lead;
+        if (lead + width === end) {
+          break; // a complete, well-formed trailing character
         }
+        end = lead;
       }
       content = buffer.subarray(0, end).toString('utf8');
       while (Buffer.byteLength(content, 'utf8') > LOOP_TASK_FILE_MAX_BYTES) {

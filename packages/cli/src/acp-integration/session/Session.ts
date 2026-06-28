@@ -2553,11 +2553,16 @@ export class Session implements SessionContext {
                   // Re-throw a SANITIZED error: the outer cron catch forwards
                   // error.message verbatim to the client via emitAgentMessage, so
                   // re-throwing the raw fs error would leak that absolute path.
-                  // Surface only the relative candidate labels + errno code. The
-                  // home label reuses the resolver's QWEN_HOME-aware tilde label
-                  // (the real checked path), not a hardcoded `~/.qwen`.
+                  // Surface only the candidate labels + errno code via the shared
+                  // absentLocations() — so the QWEN_HOME-aware home label (never a
+                  // hardcoded `~/.qwen`) is reused AND the project candidate is
+                  // named only for a trusted folder, where it was actually read
+                  // (an untrusted folder skips it, so claiming `(project)` would be
+                  // a lie). Trust is re-evaluated here to match the resolve() tick.
                   throw new Error(
-                    `loop.md resolution failed (${code}) for .qwen/loop.md (project) or ${resolver.homeLoopLabel()} (home)`,
+                    `loop.md resolution failed (${code}) for ${resolver.absentLocations(
+                      this.config.isTrustedFolder(),
+                    )}`,
                   );
                 }
               }
