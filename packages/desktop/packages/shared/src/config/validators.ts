@@ -672,6 +672,18 @@ export function validateAllSources(workspaceId: string): ValidationResult {
   }
 
   for (const folder of sourceFolders) {
+    try {
+      assertValidSourceSlug(folder);
+    } catch {
+      warnings.push({
+        file: `sources/${folder}/config.json`,
+        path: '',
+        message: `Source '${folder}' has invalid slug format, skipping source validation`,
+        severity: 'warning',
+      });
+      continue;
+    }
+
     const result = validateSource(workspaceId, folder);
     errors.push(...result.errors);
     warnings.push(...result.warnings);
