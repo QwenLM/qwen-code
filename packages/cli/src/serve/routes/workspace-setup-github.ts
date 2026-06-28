@@ -8,7 +8,7 @@ import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import type { BridgeEvent } from '../event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { isFsError, type WorkspaceFileSystemFactory } from '../fs/index.js';
 import {
   SetupGithubError,

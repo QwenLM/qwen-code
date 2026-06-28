@@ -82,7 +82,10 @@ import {
   type AcpSessionBridge,
   type SessionMetadataUpdate,
 } from './acp-session-bridge.js';
-import type { BridgeEvent, SubscribeOptions } from './event-bus.js';
+import type {
+  BridgeEvent,
+  SubscribeOptions,
+} from '@qwen-code/acp-bridge/eventBus';
 import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
@@ -101,10 +104,11 @@ import type {
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
+import { getRateLimiter } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
@@ -7381,6 +7385,141 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /workspace/reload', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('requires strict mutation auth before calling the workspace service', async () => {
+      const reload = vi.fn();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        workspace: {
+          reload,
+        } as unknown as DaemonWorkspaceService,
+      });
+
+      const res = await request(app)
+        .post('/workspace/reload')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(reload).not.toHaveBeenCalled();
+    });
+
+    it('passes validated client identity and refreshes cached serve features', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-reload-capabilities-'),
+      );
+      const reload = vi.fn(async () => {
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            modelProviders: {
+              openai: [
+                {
+                  id: 'qwen3-asr-flash',
+                  baseUrl: 'http://127.0.0.1:65535/v1',
+                },
+              ],
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+        return {
+          env: {
+            reloaded: true,
+            changedKeys: [],
+            providerRefresh: {
+              refreshed: 0,
+              failed: 0,
+            },
+          },
+          changedKeys: [],
+          childReloaded: true,
+        };
+      });
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        resetHomeEnvBootstrapForTesting();
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(tokenOpts, undefined, {
+          bridge,
+          boundWorkspace: WS_BOUND,
+          workspace: {
+            reload,
+          } as unknown as DaemonWorkspaceService,
+        });
+
+        const before = await auth(request(app).get('/capabilities'));
+        expect(before.status).toBe(200);
+        expect(before.body.features).not.toContain(
+          'workspace_voice_transcription',
+        );
+
+        const res = await auth(request(app).post('/workspace/reload'))
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+        expect(res.status).toBe(200);
+        expect(reload).toHaveBeenCalledWith(
+          expect.objectContaining({
+            route: 'POST /workspace/reload',
+            originatorClientId: 'client-1',
+            workspaceCwd: WS_BOUND,
+          }),
+        );
+
+        const after = await auth(request(app).get('/capabilities'));
+        expect(after.status).toBe(200);
+        expect(after.body.features).toContain('workspace_voice_transcription');
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('maps workspace service reload failures through sendBridgeError', async () => {
+      const daemonLog = fakeDaemonLog();
+      const reload = vi.fn(async () => {
+        throw new Error('reload failed');
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        daemonLog,
+        boundWorkspace: WS_BOUND,
+        workspace: {
+          reload,
+        } as unknown as DaemonWorkspaceService,
+      });
+
+      const res = await auth(request(app).post('/workspace/reload')).send({});
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'reload failed' });
+      expect(reload).toHaveBeenCalledWith(
+        expect.objectContaining({
+          route: 'POST /workspace/reload',
+          workspaceCwd: WS_BOUND,
+        }),
+      );
+      expect(daemonLog.error).toHaveBeenCalledWith(
+        'reload failed',
+        expect.any(Error),
+        expect.objectContaining({
+          route: 'POST /workspace/reload',
+        }),
+      );
+    });
+  });
+
   describe('workspace trust routes', () => {
     const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
     const auth = (req: request.Test): request.Test =>
@@ -9155,6 +9294,61 @@ describe('createServeApp', () => {
         .set('Authorization', 'Bearer secret');
       expect(withAuth.status).toBe(200);
       expect(withAuth.body).toEqual({ status: 'ok' });
+    });
+  });
+
+  describe('assembled middleware boundaries', () => {
+    it('mounts rate limiting after auth and exposes the limiter on app locals', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        token: 'secret',
+        rateLimit: true,
+        rateLimitRead: 1,
+        rateLimitWindowMs: 60_000,
+      });
+
+      expect(getRateLimiter(app)).toBeDefined();
+
+      const first = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(first.status).toBe(200);
+
+      const limited = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(limited.status).toBe(429);
+      expect(limited.headers['retry-after']).toBeDefined();
+      expect(limited.body).toMatchObject({ tier: 'read' });
+    });
+
+    it('logs auth rejections while keeping health probes excluded', async () => {
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        daemonLog,
+      });
+
+      const health = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(health.status).toBe(200);
+      expect(daemonLog.info).not.toHaveBeenCalled();
+      expect(daemonLog.warn).not.toHaveBeenCalled();
+
+      const rejected = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_BOUND });
+      expect(rejected.status).toBe(401);
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({
+          route: 'POST /session',
+          status: 401,
+        }),
+      );
     });
   });
 
