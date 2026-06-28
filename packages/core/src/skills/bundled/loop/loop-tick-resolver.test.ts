@@ -331,18 +331,23 @@ describe('LoopTickResolver', () => {
 
   it('buildTransientErrorTick mirrors the absent tick with a re-arm and errno note', () => {
     // FIX 4: a transient, non-whitelisted read error must NOT kill a dynamic
-    // loop. The degraded tick mirrors the absent path — same heading + the
-    // dynamic re-arm sentinel — plus a note that the file was unreadable this
-    // tick, so the model still re-arms LoopWakeup and the loop survives.
+    // loop. The degraded tick mirrors the absent path's re-arm + cache-clear, plus
+    // a note that the file was unreadable this tick, so the model still re-arms
+    // LoopWakeup and the loop survives.
     const tick = resolver.buildTransientErrorTick('dynamic', true, 'EIO');
 
     expect(tick.full).toBe(false);
     // Flagged transient (file present, unreadable this tick) so the caller's echo
     // can say "temporarily unavailable" rather than the genuinely-absent label.
     expect(tick.transientError).toBe(true);
+    // The heading says "unavailable", NOT "absent"/"not present": the file exists,
+    // it just couldn't be read this tick, so the heading must mirror the body.
+    // Mutation guard: revert the heading to { absent: true } and these fail.
     expect(tick.modelText).toContain(
-      '# /loop tick — loop.md absent (dynamic pacing)\n',
+      '# /loop tick — loop.md unavailable (dynamic pacing)\n',
     );
+    expect(tick.modelText).not.toContain('absent');
+    expect(tick.modelText).not.toContain('not present');
     expect(tick.modelText).toContain('could not be read this tick (EIO)');
     // The dynamic re-arm instruction (the literal sentinel) keeps the loop alive.
     expect(tick.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
@@ -357,6 +362,10 @@ describe('LoopTickResolver', () => {
     // (untrusted) the never-probed project candidate must NOT be named.
     const tick = resolver.buildTransientErrorTick('cron', false, 'EACCES');
 
+    // Heading conveys "unavailable" (file exists, unreadable this tick), never
+    // the misleading "absent".
+    expect(tick.modelText).toContain('# /loop tick — loop.md unavailable');
+    expect(tick.modelText).not.toContain('absent');
     expect(tick.modelText).toContain('could not be read this tick (EACCES)');
     expect(tick.modelText).toContain('the recurring cron fires the next tick');
     expect(tick.modelText).not.toContain(LOOP_SENTINEL_DYNAMIC);
@@ -520,6 +529,32 @@ describe('LoopTickResolver', () => {
       `~/.qwen-loop-trailing-${process.pid}/loop.md`,
     );
     expect(underHome.homeLoopLabel()).not.toContain(os.homedir());
+  });
+
+  it('homeLoopLabel keeps the separator when $QWEN_HOME is the filesystem root', async () => {
+    // `QWEN_HOME=/` makes homeQwenDir the root, so homeLoopPath is
+    // path.join('/', 'loop.md') = '/loop.md', whose path.dirname is '/' (length 1).
+    // Slicing the joined path past that length drops the leading separator,
+    // garbling the label into the separator-less `$QWEN_HOMEloop.md`. Mutation
+    // guard: revert homeLoopLabel to the slice-by-dirname-length approach and the
+    // first assertion below fails with `$QWEN_HOMEloop.md`.
+    const root = path.sep; // the filesystem root ('/' on POSIX)
+    const prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = root;
+    try {
+      const atRoot = new LoopTickResolver({
+        projectRoot,
+        homeDir: root,
+        homeQwenDir: root,
+        allowProjectFile: () => true,
+      });
+      expect(atRoot.homeLoopLabel()).toBe(`$QWEN_HOME${path.sep}loop.md`);
+      // The garbled, separator-less form must never appear.
+      expect(atRoot.homeLoopLabel()).not.toContain('$QWEN_HOMEloop.md');
+    } finally {
+      if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = prevQwenHome;
+    }
   });
 
   it('re-expands after delete→recreate even when the recreated content is identical', async () => {

@@ -98,13 +98,17 @@ const SHORT_REMINDER_PREAMBLE =
  */
 function tickHeading(
   mode: LoopMode,
-  opts: { sourceLabel?: string; absent?: boolean } = {},
+  opts: { sourceLabel?: string; absent?: boolean; unavailable?: boolean } = {},
 ): string {
-  const subject = opts.absent
-    ? 'loop.md absent'
-    : opts.sourceLabel
-      ? `loop.md tasks from ${opts.sourceLabel}`
-      : 'loop.md tasks';
+  // `unavailable` (transient read failure) is distinct from `absent`: the file
+  // exists but couldn't be read THIS tick, so the heading must not claim it's gone.
+  const subject = opts.unavailable
+    ? 'loop.md unavailable'
+    : opts.absent
+      ? 'loop.md absent'
+      : opts.sourceLabel
+        ? `loop.md tasks from ${opts.sourceLabel}`
+        : 'loop.md tasks';
   const base = `# /loop tick — ${subject}`;
   return mode === 'dynamic' ? `${base} (dynamic pacing)` : base;
 }
@@ -213,13 +217,15 @@ export class LoopTickResolver {
     }
     // Outside $HOME: tildeifyPath was a no-op. When $QWEN_HOME relocated the
     // global dir (homeQwenDir is its resolved value), report the literal env-var
-    // name by swapping the resolved prefix — never the absolute path. Slice past
-    // path.dirname(homeLoopPath), not homeQwenDir.length: Storage.getGlobalQwenDir()
-    // doesn't strip a trailing slash, so `$QWEN_HOME=/x/.qwen/` reaches here as
-    // `/x/.qwen/` and its length over-counts the separator, garbling the tail into
-    // `$QWEN_HOMEloop.md`. dirname of the joined path is always trailing-slash-free.
+    // name — never the absolute path. The home candidate is always
+    // `<homeQwenDir>/loop.md`, so swap the whole resolved dir for `$QWEN_HOME` and
+    // re-attach the separator + basename directly. Deriving the tail from the
+    // resolved path's length instead mishandles edge dirs: a trailing slash
+    // (`$QWEN_HOME=/x/.qwen/`) over-counts the separator, and a filesystem-root
+    // homeQwenDir (`$QWEN_HOME=/` → homeLoopPath `/loop.md`, dirname `/`) drops the
+    // leading separator — both garbling the tail into `$QWEN_HOMEloop.md`.
     if (process.env['QWEN_HOME']) {
-      return `$QWEN_HOME${homeLoopPath.slice(path.dirname(homeLoopPath).length)}`;
+      return `$QWEN_HOME${path.sep}loop.md`;
     }
     return 'the configured global loop.md';
   }
@@ -266,7 +272,9 @@ export class LoopTickResolver {
     code: string,
   ): LoopTickResult {
     return this.#noOpTick(
-      `${tickHeading(mode, { absent: true })}\nloop.md at ${this.absentLocations(
+      // `unavailable`, not `absent`: the file exists but was unreadable this tick,
+      // so the heading mirrors the body instead of contradicting it.
+      `${tickHeading(mode, { unavailable: true })}\nloop.md at ${this.absentLocations(
         projectChecked,
       )} could not be read this tick (${code}). ${ABSENT_TAIL[mode]}`,
       // Flag the tick as a transient read failure (file exists, unreadable this

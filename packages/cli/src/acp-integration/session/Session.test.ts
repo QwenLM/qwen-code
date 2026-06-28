@@ -5393,7 +5393,7 @@ describe('Session', () => {
           // The degraded no-op tick reached the model (the turn ran → no throw).
           await vi.waitFor(() => {
             expect(sentToModel()).toContain(
-              '# /loop tick — loop.md absent (dynamic pacing)',
+              '# /loop tick — loop.md unavailable (dynamic pacing)',
             );
           });
           // It carries the dynamic re-arm instruction (the literal sentinel) and
@@ -5544,7 +5544,7 @@ describe('Session', () => {
           // carrying the dynamic re-arm sentinel and the EACCES errno note.
           await vi.waitFor(() => {
             expect(sentToModel()).toContain(
-              '# /loop tick — loop.md absent (dynamic pacing)',
+              '# /loop tick — loop.md unavailable (dynamic pacing)',
             );
           });
           expect(sentToModel()).toContain('<<loop.md-dynamic>>');
@@ -5618,7 +5618,7 @@ describe('Session', () => {
           // carrying the dynamic re-arm sentinel and the EISDIR errno note.
           await vi.waitFor(() => {
             expect(sentToModel()).toContain(
-              '# /loop tick — loop.md absent (dynamic pacing)',
+              '# /loop tick — loop.md unavailable (dynamic pacing)',
             );
           });
           expect(sentToModel()).toContain('<<loop.md-dynamic>>');
@@ -5688,7 +5688,7 @@ describe('Session', () => {
 
           await vi.waitFor(() => {
             expect(sentToModel()).toContain(
-              '# /loop tick — loop.md absent (dynamic pacing)',
+              '# /loop tick — loop.md unavailable (dynamic pacing)',
             );
           });
           expect(sentToModel()).toContain('<<loop.md-dynamic>>');
