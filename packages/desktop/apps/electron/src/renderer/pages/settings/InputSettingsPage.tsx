@@ -96,14 +96,28 @@ export default function InputSettingsPage() {
   }, [])
 
   const handleVoiceEnabledChange = useCallback(async (enabled: boolean) => {
+    // Optimistic update; revert if the IPC write fails so the UI never lies
+    // about the persisted value.
+    const prev = voiceEnabled
     setVoiceEnabled(enabled)
-    await window.electronAPI.setVoiceEnabled(enabled)
-  }, [])
+    try {
+      await window.electronAPI.setVoiceEnabled(enabled)
+    } catch (error) {
+      setVoiceEnabled(prev)
+      console.error('Failed to update voice enabled:', error)
+    }
+  }, [voiceEnabled])
 
   const handleVoiceModelChange = useCallback(async (value: string) => {
+    const prev = voiceModel
     setVoiceModel(value)
-    await window.electronAPI.setVoiceModel(value)
-  }, [])
+    try {
+      await window.electronAPI.setVoiceModel(value)
+    } catch (error) {
+      setVoiceModel(prev)
+      console.error('Failed to update voice model:', error)
+    }
+  }, [voiceModel])
 
   return (
     <div className="h-full flex flex-col">
@@ -167,10 +181,7 @@ export default function InputSettingsPage() {
                       options={VOICE_MODELS.map((vm) => ({
                         value: vm.id,
                         label: vm.label,
-                        description:
-                          vm.kind === 'realtime'
-                            ? 'Realtime — live transcript'
-                            : 'Batch — transcribe on stop',
+                        description: vm.description,
                       }))}
                     />
                   )}

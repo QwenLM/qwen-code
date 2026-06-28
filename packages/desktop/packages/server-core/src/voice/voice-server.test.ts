@@ -76,6 +76,33 @@ describe('closeVoiceServerResources', () => {
     expect(wssClosed).toBe(true)
     expect(clientTerminated).toBe(true)
   })
+
+  it('gracefully closes clients before force-terminating them', async () => {
+    const events: string[] = []
+    const client = {
+      close: () => events.push('close'),
+      terminate: () => events.push('terminate'),
+    }
+
+    await closeVoiceServerResources(
+      {
+        close: (cb?: () => void) => cb?.(),
+        closeAllConnections: () => undefined,
+      },
+      {
+        clients: new Set([client]),
+        close: () => undefined,
+      },
+      100, // timeoutMs ceiling
+      5, // short grace before terminate
+    )
+
+    // The graceful WS close must precede the brutal terminate so an in-flight
+    // transcript can flush instead of being dropped by a TCP reset.
+    expect(events[0]).toBe('close')
+    expect(events).toContain('terminate')
+    expect(events.indexOf('close')).toBeLessThan(events.indexOf('terminate'))
+  })
 })
 
 describe('terminateVoiceClients', () => {

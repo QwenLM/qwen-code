@@ -1,11 +1,14 @@
 import { describe, expect, it, mock } from 'bun:test'
 import type { SocketLike } from './voice-stream-session'
 
+const warnCalls: string[] = []
 mock.module('../runtime/platform', () => ({
   CONSOLE_LOGGER: {},
   createScopedLogger: () => ({
     debug: () => {},
-    warn: () => {},
+    warn: (...args: unknown[]) => {
+      warnCalls.push(args.map(String).join(' '))
+    },
   }),
 }))
 
@@ -128,6 +131,47 @@ describe('openVoiceStream', () => {
     // committed transcript ('hel' would leak through if it were not reset).
     await expect(finishPromise).resolves.toBe('hello world')
     expect(interims).toEqual(['hel', 'hello', 'hello world'])
+  })
+
+  it('counts and logs dropped audio frames under upstream backpressure', async () => {
+    warnCalls.length = 0
+    const socket = new FakeSocket()
+    const streamPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('open')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+    )
+    const stream = await streamPromise
+
+    // Ignore the run-task control frame buffered on open.
+    socket.sent.length = 0
+    // Upstream socket is backed up past the 1 MiB ceiling: frames must be dropped.
+    socket.bufferedAmount = 2 * 1024 * 1024
+    stream.pushAudio(new Uint8Array(4096))
+    stream.pushAudio(new Uint8Array(4096))
+
+    // Dropped, not forwarded, and surfaced with a cumulative count (not silent).
+    expect(socket.sent).toHaveLength(0)
+    const dropWarn = warnCalls.find((m) => m.includes('backpressure'))
+    expect(dropWarn).toContain('dropping DashScope audio')
+    expect(dropWarn).toContain('frame(s)')
+
+    // When the buffer drains, audio flows again and the episode total is reported.
+    socket.bufferedAmount = 0
+    stream.pushAudio(new Uint8Array(4096))
+    expect(socket.sent).toHaveLength(1)
+    const recoverWarn = warnCalls.find((m) => m.includes('recovered'))
+    expect(recoverWarn).toContain('dropped 2 frame(s)')
+    expect(recoverWarn).toContain('8192 bytes')
   })
 
   it('redacts credentials from stream server errors', async () => {

@@ -100,9 +100,12 @@ export function useVoiceDictation(options: {
       return;
     }
     startedAtRef.current = performance.now();
+    // Tick once per second: the bar floors elapsed to whole seconds, and each
+    // tick lands on a second boundary (anchored to startedAtRef), so a finer
+    // interval would only trigger ~10x redundant re-renders.
     const id = setInterval(
       () => setElapsedMs(performance.now() - startedAtRef.current),
-      100,
+      1000,
     );
     return () => clearInterval(id);
   }, [isRecording]);

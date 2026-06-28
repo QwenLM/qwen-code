@@ -2736,9 +2736,7 @@ export function FreeFormInput({
                                   {vm.label}
                                 </div>
                                 <div className="text-xs text-muted-foreground">
-                                  {vm.kind === 'realtime'
-                                    ? 'Realtime — live transcript'
-                                    : 'Batch — transcribe on stop'}
+                                  {vm.description}
                                 </div>
                               </div>
                               {isSelected && (

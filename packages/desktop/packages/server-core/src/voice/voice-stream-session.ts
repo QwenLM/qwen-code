@@ -110,7 +110,9 @@ export function openVoiceStream(
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let terminalError: Error | null = null;
     let finishedTranscript: string | null = null;
-    let backpressureWarned = false;
+    let droppedFrames = 0;
+    let droppedBytes = 0;
+    let backpressureActive = false;
 
     const clearFinishTimer = () => {
       if (finishTimer) {
@@ -208,17 +210,33 @@ export function openVoiceStream(
         clearConnectTimer();
         resolve({
           pushAudio: (pcm) => {
+            if (pcm.length === 0) return;
             if (
               ws.readyState === ws.OPEN &&
-              pcm.length > 0 &&
               (ws.bufferedAmount ?? 0) <= MAX_BUFFERED_AUDIO_BYTES
             ) {
-              backpressureWarned = false;
+              if (backpressureActive) {
+                // Recovered: report the episode total so the gap is quantified.
+                backpressureActive = false;
+                debugLogger.warn(
+                  `[voice] DashScope socket recovered from backpressure ` +
+                    `(dropped ${droppedFrames} frame(s) / ${droppedBytes} bytes total)`,
+                );
+              }
               ws.send(pcm);
-            } else if (pcm.length > 0 && !backpressureWarned) {
-              backpressureWarned = true;
+              return;
+            }
+            // Upstream send buffer is over the ceiling (or the socket is no longer
+            // OPEN): drop this frame so the buffer can't grow without bound. Count
+            // every drop — silent gaps are otherwise invisible to the user — and
+            // warn once on entering backpressure (throttled) with the running total.
+            droppedFrames += 1;
+            droppedBytes += pcm.length;
+            if (!backpressureActive) {
+              backpressureActive = true;
               debugLogger.warn(
-                '[voice] dropping DashScope audio due to socket backpressure',
+                `[voice] dropping DashScope audio due to socket backpressure ` +
+                  `(dropped ${droppedFrames} frame(s) / ${droppedBytes} bytes so far)`,
               );
             }
           },

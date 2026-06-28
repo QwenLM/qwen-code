@@ -19,6 +19,9 @@ import {
 const VOICE_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024;
 const CLOSE_TIMEOUT_MS = 3000;
 const DISABLED_CLOSE_GRACE_MS = 500;
+// On shutdown, give clients this long to honor the graceful WS close (flushing
+// any buffered `final` transcript) before force-terminating stragglers.
+const SHUTDOWN_GRACE_MS = 500;
 
 export interface VoiceServerOptions extends VoiceHandlerDeps {
   /** Voice-scoped token validated per upgrade. */
@@ -154,22 +157,43 @@ export function closeVoiceServerResources(
   httpServer: ClosableHttpServer,
   wss: ClosableWebSocketServer,
   timeoutMs = CLOSE_TIMEOUT_MS,
+  graceMs = SHUTDOWN_GRACE_MS,
 ): Promise<void> {
   return new Promise<void>((resolve) => {
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(graceTimer);
+      clearTimeout(deadline);
       resolve();
     };
-    const timer = setTimeout(finish, timeoutMs);
-    timer.unref?.();
 
-    terminateVoiceClients(wss);
-    httpServer.closeAllConnections?.();
-    wss.close();
-    httpServer.close(finish);
+    let tornDown = false;
+    const teardown = () => {
+      if (tornDown) return;
+      tornDown = true;
+      // RST any client that ignored the graceful close, then drop the servers.
+      // closeAllConnections lets httpServer.close actually complete.
+      terminateVoiceClients(wss);
+      httpServer.closeAllConnections?.();
+      wss.close();
+      httpServer.close(finish);
+    };
+
+    // Graceful first: a WS close frame flushes any buffered `final` transcript
+    // and lets the renderer observe a clean close instead of a TCP reset (a bare
+    // terminate would drop an in-flight transcript on quit).
+    closeVoiceClients(wss, 1001, 'server shutting down');
+    // After a short grace period, force-terminate stragglers and tear down.
+    const graceTimer = setTimeout(teardown, Math.min(graceMs, timeoutMs));
+    graceTimer.unref?.();
+    // Absolute ceiling so app quit can never hang on a wedged close.
+    const deadline = setTimeout(() => {
+      teardown();
+      finish();
+    }, timeoutMs);
+    deadline.unref?.();
   });
 }
 

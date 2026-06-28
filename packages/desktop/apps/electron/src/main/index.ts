@@ -209,6 +209,22 @@ function getRendererDevOrigin(): string | undefined {
   }
 }
 
+// The app's own renderer is loaded from `file://` (packaged, via loadFile) or
+// the Vite dev server (development). Anything else — an injected/cross-origin
+// frame or a stray webview — is untrusted. Mirrors the will-navigate origin
+// trust check in window-manager.
+function isTrustedRendererFrameUrl(url: string | undefined): boolean {
+  if (!url) return false
+  if (url.startsWith('file://')) return true
+  const devOrigin = getRendererDevOrigin()
+  if (!devOrigin) return false
+  try {
+    return new URL(url).origin === devOrigin
+  } catch {
+    return false
+  }
+}
+
 // Messaging gateway: the bootstrap handle is created once sessionManager is
 // available (inside createHandlerDeps) and populated with the WS publisher
 // after bootstrapServer resolves. Both hosts (Electron + standalone) wire
@@ -1019,6 +1035,19 @@ app.whenReady().then(async () => {
         e.returnValue = instance.token
       })
       ipcMain.on('__get-voice-stream-url', (e) => {
+        // The voice WS URL embeds the loopback auth token, so only hand it to
+        // the app's own top-level renderer frame. Reject sub-frames (injected /
+        // cross-origin iframes) and any frame not loaded from our renderer
+        // origin so the token can't be exfiltrated.
+        const frame = e.senderFrame
+        if (
+          !frame ||
+          frame !== e.sender.mainFrame ||
+          !isTrustedRendererFrameUrl(frame.url)
+        ) {
+          e.returnValue = null
+          return
+        }
         e.returnValue = getVoiceEnabled() ? voiceStreamUrl : null
       })
       ipcMain.on('__get-workspace-remote-config', (e) => {
