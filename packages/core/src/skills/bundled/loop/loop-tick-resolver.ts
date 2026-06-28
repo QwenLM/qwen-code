@@ -196,15 +196,33 @@ export class LoopTickResolver {
     }
   }
 
-  /** The real home loop.md path for user-facing messages, OS-home tilde-
-   * abbreviated. Mirrors readLoopTaskFile's home-candidate path exactly so the
-   * absent reminder — and the caller's sanitized resolve-error — names the
-   * location actually checked (QWEN_HOME-aware). Public so the Session error
-   * message reuses the same label instead of hardcoding a wrong `~/.qwen`. */
+  /** MODEL-FACING label for the home loop.md location. Mirrors
+   * readLoopTaskFile's home candidate (`<homeQwenDir>/loop.md`) so the absent
+   * reminder — and the caller's sanitized resolve-error — names the location
+   * actually checked (QWEN_HOME-aware), but must NEVER surface a raw absolute
+   * path: it flows into model/API text, leaking the host's filesystem layout.
+   *   - under $HOME             → tilde-abbreviated `~/.qwen/loop.md`;
+   *   - relocated via $QWEN_HOME → the literal `$QWEN_HOME/loop.md`, not the
+   *     resolved dir (`tildeifyPath` only abbreviates $HOME, so it's a no-op for
+   *     a $QWEN_HOME outside $HOME and would otherwise pass the path through);
+   *   - any other out-of-$HOME dir → a generic placeholder, never the path.
+   * The real absolute path stays in LOCAL debug logs only. */
   homeLoopLabel(): string {
     const homeQwenDir =
       this.deps.homeQwenDir ?? path.join(this.deps.homeDir, '.qwen');
-    return tildeifyPath(path.join(homeQwenDir, 'loop.md'));
+    const homeLoopPath = path.join(homeQwenDir, 'loop.md');
+
+    const tildeified = tildeifyPath(homeLoopPath);
+    if (tildeified !== homeLoopPath) {
+      return tildeified;
+    }
+    // Outside $HOME: tildeifyPath was a no-op. When $QWEN_HOME relocated the
+    // global dir (homeQwenDir is its resolved value), report the literal env-var
+    // name by swapping the resolved prefix — never the absolute path.
+    if (process.env['QWEN_HOME']) {
+      return `$QWEN_HOME${homeLoopPath.slice(homeQwenDir.length)}`;
+    }
+    return 'the configured global loop.md';
   }
 
   async resolve(mode: LoopMode): Promise<LoopTickResult> {

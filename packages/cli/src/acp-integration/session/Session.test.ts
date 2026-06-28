@@ -5003,9 +5003,9 @@ describe('Session', () => {
       it('names the QWEN_HOME-aware home path in the sanitized resolve error, not a hardcoded ~/.qwen', async () => {
         // Regression: the sanitized resolve-error hardcoded `~/.qwen/loop.md
         // (home)`, but the resolver's home candidate is QWEN_HOME-aware. With
-        // QWEN_HOME relocated, the error must name the REAL checked path
-        // (<QWEN_HOME>/loop.md) — reusing the resolver's homeLoopLabel() — while
-        // staying leak-safe (no absolute project path).
+        // QWEN_HOME relocated OUTSIDE $HOME, the error reuses homeLoopLabel(),
+        // which names it via the literal `$QWEN_HOME/loop.md` — leak-safe (never
+        // the resolved absolute global dir, nor the absolute project path).
         debugLoggerWarnSpy.mockClear();
         const tmpDir = await fs.mkdtemp(
           path.join(os.tmpdir(), 'loop-md-err-proj-'),
@@ -5020,9 +5020,10 @@ describe('Session', () => {
         const restoreHome = setFakeHome(fakeHome);
         const prevQwenHome = process.env['QWEN_HOME'];
         process.env['QWEN_HOME'] = qwenHome;
-        // qwenHome is under os.tmpdir() (not the OS home), so it is not tilde-
-        // abbreviated — the label is the relocated path verbatim.
-        const expectedHomeLabel = `${path.join(qwenHome, 'loop.md')} (home)`;
+        // qwenHome is under os.tmpdir() (not the OS home), so tildeifyPath is a
+        // no-op there. The label is MODEL/client-facing, so it must read as the
+        // literal `$QWEN_HOME/loop.md`, never the resolved absolute path.
+        const expectedHomeLabel = `$QWEN_HOME/loop.md (home)`;
 
         const eacces = Object.assign(
           new Error(
@@ -5087,8 +5088,10 @@ describe('Session', () => {
             expect(text).toContain('.qwen/loop.md (project)');
             // ...and the old hardcoded label is gone.
             expect(text).not.toContain('~/.qwen/loop.md');
-            // Still leak-safe: no absolute project path.
+            // Still leak-safe: neither the absolute project path nor the
+            // resolved $QWEN_HOME global dir reaches the client/API.
             expect(text).not.toContain(path.join(tmpDir, '.qwen', 'loop.md'));
+            expect(text).not.toContain(path.join(qwenHome, 'loop.md'));
           }
         } finally {
           resolveSpy.mockRestore();

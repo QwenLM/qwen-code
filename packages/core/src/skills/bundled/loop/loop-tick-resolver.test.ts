@@ -15,7 +15,6 @@ import {
   detectLoopSentinel,
 } from './loop-tick-resolver.js';
 import { LOOP_TASK_FILE_MAX_BYTES } from './loop-task-file.js';
-import { tildeifyPath } from '../../../utils/paths.js';
 
 // Make only realpath observable; every other fs call stays real so the temp-dir
 // fixtures keep working. The default impl calls through, so behavior is unchanged
@@ -108,9 +107,12 @@ describe('LoopTickResolver', () => {
     expect(tick.sourceLabel).toBeUndefined();
     expect(tick.modelText).toContain('loop.md is not currently present');
     // The project candidate was never read (untrusted), so the absent message
-    // must not claim it was checked — only the home path was.
+    // must not claim it was checked — only the home candidate is named, via a
+    // leak-safe label (this fixture's homeDir is a temp dir outside the real
+    // $HOME, so the absolute path must never reach the model text).
     expect(tick.modelText).not.toContain('(project)');
-    expect(tick.modelText).toContain(`${tildeifyPath(homeFile())} (home)`);
+    expect(tick.modelText).toContain('(home)');
+    expect(tick.modelText).not.toContain(homeFile());
   });
 
   it('re-reads folder trust per tick: a trusted→untrusted flip stops reading the project file', async () => {
@@ -302,26 +304,35 @@ describe('LoopTickResolver', () => {
 
   it('names the real home loop.md in the absent reminder (QWEN_HOME-aware, not a hardcoded ~/.qwen)', async () => {
     // Regression: the absent body hardcoded `~/.qwen/loop.md (home)`, which is
-    // wrong once the global dir is relocated (QWEN_HOME) — the resolver actually
-    // checks `<homeQwenDir>/loop.md`, so the message must name THAT path.
+    // wrong once the global dir is relocated (QWEN_HOME). The resolver checks
+    // `<homeQwenDir>/loop.md`, but the label is MODEL-FACING, so a $QWEN_HOME
+    // outside $HOME (tildeifyPath no-op there) must read as the literal
+    // `$QWEN_HOME/loop.md`, never the raw absolute path it would otherwise leak.
     const relocated = path.join(tempDir, 'relocated-qwen');
-    const relocatedTick = await new LoopTickResolver({
-      projectRoot,
-      homeDir: relocated,
-      homeQwenDir: relocated,
-      allowProjectFile: () => true,
-    }).resolve('cron');
+    const prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = relocated;
+    try {
+      const relocatedTick = await new LoopTickResolver({
+        projectRoot,
+        homeDir: relocated,
+        homeQwenDir: relocated,
+        allowProjectFile: () => true,
+      }).resolve('cron');
 
-    expect(relocatedTick.full).toBe(false);
-    expect(relocatedTick.modelText).toContain(
-      'loop.md is not currently present',
-    );
-    expect(relocatedTick.modelText).toContain(
-      `${tildeifyPath(path.join(relocated, 'loop.md'))} (home)`,
-    );
-    // The old hardcoded home location is gone; the project label stays relative.
-    expect(relocatedTick.modelText).not.toContain('~/.qwen/loop.md');
-    expect(relocatedTick.modelText).toContain('.qwen/loop.md (project)');
+      expect(relocatedTick.full).toBe(false);
+      expect(relocatedTick.modelText).toContain(
+        'loop.md is not currently present',
+      );
+      expect(relocatedTick.modelText).toContain('$QWEN_HOME/loop.md (home)');
+      // The old hardcoded home location is gone; the project label stays relative.
+      expect(relocatedTick.modelText).not.toContain('~/.qwen/loop.md');
+      expect(relocatedTick.modelText).toContain('.qwen/loop.md (project)');
+      // Privacy: the raw absolute global dir never reaches the model text.
+      expect(relocatedTick.modelText).not.toContain(relocated);
+    } finally {
+      if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = prevQwenHome;
+    }
 
     // Under the real OS home (the QWEN_HOME-unset case) the home prefix tilde-
     // abbreviates, so the message reads `~/…/loop.md`, never the absolute $HOME.
@@ -340,6 +351,45 @@ describe('LoopTickResolver', () => {
       `~/${path.basename(underHome)}/loop.md (home)`,
     );
     expect(homeTick.modelText).not.toContain(os.homedir());
+  });
+
+  it('homeLoopLabel never leaks an absolute $QWEN_HOME path outside $HOME (privacy)', async () => {
+    // The label is sent to the model/API. $QWEN_HOME may point OUTSIDE $HOME
+    // (supported relocation; common in containers/CI), where tildeifyPath is a
+    // no-op — so the resolved absolute dir must be swapped for the literal
+    // `$QWEN_HOME`. Mutation guard: revert homeLoopLabel to
+    // `tildeifyPath(join(homeQwenDir,'loop.md'))` and `outside` (the absolute
+    // path) reappears in BOTH assertions below, failing this test.
+    const outside = path.join(tempDir, 'srv-qwen-home');
+    const prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = outside;
+    try {
+      const relocated = new LoopTickResolver({
+        projectRoot,
+        homeDir: outside,
+        homeQwenDir: outside,
+        allowProjectFile: () => true,
+      });
+      expect(relocated.homeLoopLabel()).toBe('$QWEN_HOME/loop.md');
+      const tick = await relocated.resolve('cron');
+      expect(tick.modelText).toContain('$QWEN_HOME/loop.md (home)');
+      expect(tick.modelText).not.toContain(outside);
+
+      // Defensive case: an out-of-$HOME global dir with $QWEN_HOME UNSET still
+      // never surfaces the absolute path — a generic placeholder is used.
+      delete process.env['QWEN_HOME'];
+      const generic = new LoopTickResolver({
+        projectRoot,
+        homeDir: outside,
+        homeQwenDir: outside,
+        allowProjectFile: () => true,
+      });
+      expect(generic.homeLoopLabel()).toBe('the configured global loop.md');
+      expect(generic.homeLoopLabel()).not.toContain(outside);
+    } finally {
+      if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = prevQwenHome;
+    }
   });
 
   it('re-expands after delete→recreate even when the recreated content is identical', async () => {
