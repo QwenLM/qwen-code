@@ -269,9 +269,10 @@ describe('readLoopTaskFile', () => {
       content: 'user tasks',
       truncated: false,
     });
-    if (result.status === 'found') {
-      expect(result.content).not.toContain('SECRET');
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(result.content).not.toContain('SECRET');
   });
 
   it('does not read a HARD-LINKED home loop.md (exfiltration guard)', async () => {
@@ -760,12 +761,13 @@ describe('readLoopTaskFile', () => {
     });
 
     expect(result.status).toBe('found');
-    if (result.status === 'found') {
-      expect(Buffer.byteLength(result.content, 'utf8')).toBe(
-        LOOP_TASK_FILE_MAX_BYTES,
-      );
-      expect(result.truncated).toBe(true);
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(Buffer.byteLength(result.content, 'utf8')).toBe(
+      LOOP_TASK_FILE_MAX_BYTES,
+    );
+    expect(result.truncated).toBe(true);
   });
 
   it('bounds the read for a very large file (never reads past the cap)', async () => {
@@ -786,12 +788,13 @@ describe('readLoopTaskFile', () => {
     });
 
     expect(result.status).toBe('found');
-    if (result.status === 'found') {
-      expect(result.truncated).toBe(true);
-      expect(Buffer.byteLength(result.content, 'utf8')).toBe(
-        LOOP_TASK_FILE_MAX_BYTES,
-      );
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.content, 'utf8')).toBe(
+      LOOP_TASK_FILE_MAX_BYTES,
+    );
     // A single bounded fs.open handle, not fs.readFile of the whole.
     expect(openSpy).toHaveBeenCalledTimes(1);
     // Load-bearing: every read, and the total bytes requested, stay within cap.
@@ -841,12 +844,13 @@ describe('readLoopTaskFile', () => {
     });
 
     expect(result.status).toBe('found');
-    if (result.status === 'found') {
-      expect(Buffer.byteLength(result.content, 'utf8')).toBe(
-        LOOP_TASK_FILE_MAX_BYTES,
-      );
-      expect(result.truncated).toBe(false);
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(Buffer.byteLength(result.content, 'utf8')).toBe(
+      LOOP_TASK_FILE_MAX_BYTES,
+    );
+    expect(result.truncated).toBe(false);
   });
 
   it('truncates on a UTF-8 boundary without exceeding the cap or inserting a replacement char', async () => {
@@ -860,13 +864,14 @@ describe('readLoopTaskFile', () => {
     });
 
     expect(result.status).toBe('found');
-    if (result.status === 'found') {
-      expect(result.truncated).toBe(true);
-      expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThanOrEqual(
-        LOOP_TASK_FILE_MAX_BYTES,
-      );
-      expect(result.content).not.toContain('�');
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThanOrEqual(
+      LOOP_TASK_FILE_MAX_BYTES,
+    );
+    expect(result.content).not.toContain('�');
   });
 
   it('drops an INCOMPLETE trailing multi-byte sequence at the cap (no orphan lead / U+FFFD)', async () => {
@@ -889,16 +894,17 @@ describe('readLoopTaskFile', () => {
     });
 
     expect(result.status).toBe('found');
-    if (result.status === 'found') {
-      expect(result.truncated).toBe(true);
-      expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThanOrEqual(
-        LOOP_TASK_FILE_MAX_BYTES,
-      );
-      // The incomplete sequence is gone entirely — no replacement char, and the
-      // body ends on the last complete ('a') char.
-      expect(result.content).not.toContain('�');
-      expect(result.content.endsWith('a')).toBe(true);
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThanOrEqual(
+      LOOP_TASK_FILE_MAX_BYTES,
+    );
+    // The incomplete sequence is gone entirely — no replacement char, and the
+    // body ends on the last complete ('a') char.
+    expect(result.content).not.toContain('�');
+    expect(result.content.endsWith('a')).toBe(true);
   });
 
   it('drops an INCOMPLETE trailing 2-byte lead at the cap (covers the 2-byte width branch)', async () => {
@@ -922,11 +928,12 @@ describe('readLoopTaskFile', () => {
     });
 
     expect(result.status).toBe('found');
-    if (result.status === 'found') {
-      expect(result.truncated).toBe(true);
-      expect(result.content).not.toContain('�');
-      expect(result.content).toBe('a'.repeat(N - 3));
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(result.truncated).toBe(true);
+    expect(result.content).not.toContain('�');
+    expect(result.content).toBe('a'.repeat(N - 3));
   });
 
   it('drops an INCOMPLETE trailing 3-byte lead at the cap (covers the 3-byte width branch)', async () => {
@@ -949,11 +956,12 @@ describe('readLoopTaskFile', () => {
     });
 
     expect(result.status).toBe('found');
-    if (result.status === 'found') {
-      expect(result.truncated).toBe(true);
-      expect(result.content).not.toContain('�');
-      expect(result.content).toBe('a'.repeat(N - 4));
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(result.truncated).toBe(true);
+    expect(result.content).not.toContain('�');
+    expect(result.content).toBe('a'.repeat(N - 4));
   });
 
   it('drops an ORPHAN lead followed by an ASCII byte and stray continuations (no U+FFFD)', async () => {
@@ -979,16 +987,17 @@ describe('readLoopTaskFile', () => {
     });
 
     expect(result.status).toBe('found');
-    if (result.status === 'found') {
-      expect(result.truncated).toBe(true);
-      expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThanOrEqual(
-        LOOP_TASK_FILE_MAX_BYTES,
-      );
-      // The whole malformed tail is gone: no replacement char, and the body ends
-      // on the last complete ('a') char — a clean UTF-8 boundary.
-      expect(result.content).not.toContain('�');
-      expect(result.content).toBe('a'.repeat(N - 5));
+    if (result.status !== 'found') {
+      throw new Error('expected loop.md to be found');
     }
+    expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThanOrEqual(
+      LOOP_TASK_FILE_MAX_BYTES,
+    );
+    // The whole malformed tail is gone: no replacement char, and the body ends
+    // on the last complete ('a') char — a clean UTF-8 boundary.
+    expect(result.content).not.toContain('�');
+    expect(result.content).toBe('a'.repeat(N - 5));
   });
 
   it('skips a candidate that raises ENAMETOOLONG and falls through instead of throwing', async () => {

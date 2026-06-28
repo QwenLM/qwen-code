@@ -4510,13 +4510,13 @@ describe('Session', () => {
             });
           });
           // The absolute loop.md path must not appear in any client echo.
-          for (const call of (
+          const echoedTexts = (
             mockClient.sessionUpdate as ReturnType<typeof vi.fn>
-          ).mock.calls) {
-            const text = call[0]?.update?.content?.text;
-            if (typeof text === 'string') {
-              expect(text).not.toContain(loopMdPath);
-            }
+          ).mock.calls
+            .map((call) => call[0]?.update?.content?.text)
+            .filter((text): text is string => typeof text === 'string');
+          for (const text of echoedTexts) {
+            expect(text).not.toContain(loopMdPath);
           }
 
           // The model receives the expanded full task block, not the sentinel.
