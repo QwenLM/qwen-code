@@ -39,6 +39,16 @@
  (daemon)    (ACP)            (ACP + 双向同步)
 ```
 
+### 为什么是「切片」，不是直接复用整个 web-shell
+
+很自然会问：web-shell 最全，干脆让大家直接用它不就行了？精神上对——但「复用整个 web-shell app」行不通，原因有三：
+
+1. **web-shell 焊死在 daemon 传输上**：它的 `App` / `useMessages` / `useConnection` 都假设有 daemon 后端，而 VSCode 和桌面都走 ACP、没有 daemon。直接复用就得在它们里面再起 daemon 或写 ACP→daemon 转接层——这层我们**明确不做**（复用的是「展示面板」，不是数据层）。
+2. **web-shell 装的远不止面板**：还带 session 管理、导航、连接、dialog、状态栏整套壳；各端只想要会话流那块，壳各有各的。
+3. **桌面同步红线**：桌面和上游 openwork 双向同步，把 `@qwen-code/web-shell`（带 daemon 依赖的重包）拉进同步树会直接污染 openwork。
+
+所以 `@qwen-code/chat-panel` = **「web-shell 的面板，去掉 daemon 耦合后的可复用切片」**。「大家复用 web-shell」落地成：web-shell 原地用组件（它就是源头），VSCode/桌面把这个切片拉过去 + 各写薄 adapter 把自己的数据映射成 web-shell 同款的 `Message[]`。契约就是 web-shell 现有形状，没另起炉灶。
+
 ## 包里现在有啥（WS1 之后）
 
 `packages/chat-panel/src/`：
