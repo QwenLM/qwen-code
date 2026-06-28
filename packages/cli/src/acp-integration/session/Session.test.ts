@@ -5400,6 +5400,21 @@ describe('Session', () => {
           // the errno note, so the loop continues.
           expect(sentToModel()).toContain('<<loop.md-dynamic>>');
           expect(sentToModel()).toContain('could not be read this tick (EIO)');
+          // The CLIENT echo distinguishes a transient read failure (file present,
+          // unreadable this tick) from a genuinely-absent file: it must say
+          // "temporarily unavailable", never the misleading "not present".
+          // Mutation guard: drop the transientError flag/echo branch and the echo
+          // regresses to "not present", failing both assertions below.
+          const loopEchoes = (
+            mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+          ).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'user_message_chunk')
+            .map((u) => u?.content?.text ?? '');
+          expect(loopEchoes).toContain(
+            'Loop tick — loop.md temporarily unavailable',
+          );
+          expect(loopEchoes).not.toContain('Loop tick — loop.md not present');
           // It did NOT surface as a loop/cron error (the loop did not die).
           expect(errorEchoes()).toHaveLength(0);
           // The real errno is still recorded in the LOCAL debug warn.

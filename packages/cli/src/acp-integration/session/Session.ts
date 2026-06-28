@@ -2615,7 +2615,13 @@ export class Session implements SessionContext {
               const echoText = loopTick
                 ? loopTick.sourceLabel
                   ? `Loop tick — tasks from ${loopTick.sourceLabel}`
-                  : 'Loop tick — loop.md not present'
+                  : // A transient-error tick (buildTransientErrorTick) resolved a
+                    // file but couldn't read it this tick; it deliberately omits
+                    // sourceLabel, so don't conflate it with a genuinely-absent
+                    // loop.md. No errno/path here — those stay in the model text.
+                    loopTick.transientError
+                    ? 'Loop tick — loop.md temporarily unavailable'
+                    : 'Loop tick — loop.md not present'
                 : prompt;
 
               // Echo the cron prompt as a user message so the client sees it

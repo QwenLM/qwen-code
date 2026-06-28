@@ -61,6 +61,12 @@ export interface LoopTickResult {
    * when present — safe for logs/UI that must not leak the absolute path, and
    * doubles as the "a loop.md was found" flag for callers. */
   sourceLabel?: string;
+  /** True ONLY for buildTransientErrorTick: a loop.md exists but could not be
+   * read THIS tick (a transient EACCES/EIO or editor/AV lock), as distinct from
+   * the genuinely-absent no-op (where this stays false). Lets the caller's echo
+   * say "temporarily unavailable" instead of "not present". Carries no errno or
+   * path — those stay in the modelText note and LOCAL debug logs only. */
+  transientError?: boolean;
 }
 
 const TRUNCATION_WARNING = `> WARNING: loop.md was truncated to ${LOOP_TASK_FILE_MAX_BYTES} bytes. Keep the task list concise.`;
@@ -207,9 +213,13 @@ export class LoopTickResolver {
     }
     // Outside $HOME: tildeifyPath was a no-op. When $QWEN_HOME relocated the
     // global dir (homeQwenDir is its resolved value), report the literal env-var
-    // name by swapping the resolved prefix — never the absolute path.
+    // name by swapping the resolved prefix — never the absolute path. Slice past
+    // path.dirname(homeLoopPath), not homeQwenDir.length: Storage.getGlobalQwenDir()
+    // doesn't strip a trailing slash, so `$QWEN_HOME=/x/.qwen/` reaches here as
+    // `/x/.qwen/` and its length over-counts the separator, garbling the tail into
+    // `$QWEN_HOMEloop.md`. dirname of the joined path is always trailing-slash-free.
     if (process.env['QWEN_HOME']) {
-      return `$QWEN_HOME${homeLoopPath.slice(homeQwenDir.length)}`;
+      return `$QWEN_HOME${homeLoopPath.slice(path.dirname(homeLoopPath).length)}`;
     }
     return 'the configured global loop.md';
   }
@@ -232,10 +242,10 @@ export class LoopTickResolver {
    * block instead of a dangling short reminder pointing at a block no longer
    * guaranteed to be in context — absence (and a failed read) is itself a state
    * change. */
-  #noOpTick(modelText: string): LoopTickResult {
+  #noOpTick(modelText: string, transientError = false): LoopTickResult {
     this.#pendingContent = null;
     this.#lastContent = null;
-    return { modelText, full: false };
+    return { modelText, full: false, transientError };
   }
 
   /**
@@ -259,6 +269,9 @@ export class LoopTickResolver {
       `${tickHeading(mode, { absent: true })}\nloop.md at ${this.absentLocations(
         projectChecked,
       )} could not be read this tick (${code}). ${ABSENT_TAIL[mode]}`,
+      // Flag the tick as a transient read failure (file exists, unreadable this
+      // tick) so the caller's echo distinguishes it from a genuinely-absent file.
+      true,
     );
   }
 

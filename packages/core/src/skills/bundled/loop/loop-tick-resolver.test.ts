@@ -105,6 +105,9 @@ describe('LoopTickResolver', () => {
 
     expect(tick.full).toBe(false);
     expect(tick.sourceLabel).toBeUndefined();
+    // A genuinely-absent tick is NOT flagged transient, so the echo says "not
+    // present" rather than "temporarily unavailable".
+    expect(tick.transientError).toBe(false);
     expect(tick.modelText).toContain('loop.md is not currently present');
     // The project candidate was never read (untrusted), so the absent message
     // must not claim it was checked — only the home candidate is named, via a
@@ -334,6 +337,9 @@ describe('LoopTickResolver', () => {
     const tick = resolver.buildTransientErrorTick('dynamic', true, 'EIO');
 
     expect(tick.full).toBe(false);
+    // Flagged transient (file present, unreadable this tick) so the caller's echo
+    // can say "temporarily unavailable" rather than the genuinely-absent label.
+    expect(tick.transientError).toBe(true);
     expect(tick.modelText).toContain(
       '# /loop tick — loop.md absent (dynamic pacing)\n',
     );
@@ -463,6 +469,57 @@ describe('LoopTickResolver', () => {
       if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
       else process.env['QWEN_HOME'] = prevQwenHome;
     }
+  });
+
+  it('homeLoopLabel keeps the separator when $QWEN_HOME has a trailing slash', async () => {
+    // Storage.getGlobalQwenDir() does NOT strip a trailing slash, so a
+    // `QWEN_HOME=/srv/qwen/` reaches homeQwenDir as `/srv/qwen/`. Slicing the
+    // joined loop.md path by the raw homeQwenDir length over-counts the trailing
+    // separator and garbles the label into `$QWEN_HOMEloop.md`. Mutation guard:
+    // revert the slice base to `homeQwenDir.length` and the first assertion below
+    // fails with the separator-less `$QWEN_HOMEloop.md`.
+    const outsideTrailing = path.join(tempDir, 'srv-qwen-home') + path.sep;
+    const prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = outsideTrailing;
+    try {
+      const trailing = new LoopTickResolver({
+        projectRoot,
+        homeDir: outsideTrailing,
+        homeQwenDir: outsideTrailing,
+        allowProjectFile: () => true,
+      });
+      expect(trailing.homeLoopLabel()).toBe('$QWEN_HOME/loop.md');
+      // Never the raw absolute dir, and never the garbled separator-less form.
+      expect(trailing.homeLoopLabel()).not.toContain(outsideTrailing);
+      expect(trailing.homeLoopLabel()).not.toContain('$QWEN_HOMEloop.md');
+
+      // out-of-$HOME branch still behaves with QWEN_HOME UNSET: generic placeholder.
+      delete process.env['QWEN_HOME'];
+      const generic = new LoopTickResolver({
+        projectRoot,
+        homeDir: outsideTrailing,
+        homeQwenDir: outsideTrailing,
+        allowProjectFile: () => true,
+      });
+      expect(generic.homeLoopLabel()).toBe('the configured global loop.md');
+    } finally {
+      if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = prevQwenHome;
+    }
+
+    // under-$HOME branch still behaves with a trailing slash: tilde-abbreviated.
+    const underHomeTrailing =
+      path.join(os.homedir(), `.qwen-loop-trailing-${process.pid}`) + path.sep;
+    const underHome = new LoopTickResolver({
+      projectRoot,
+      homeDir: os.homedir(),
+      homeQwenDir: underHomeTrailing,
+      allowProjectFile: () => true,
+    });
+    expect(underHome.homeLoopLabel()).toBe(
+      `~/.qwen-loop-trailing-${process.pid}/loop.md`,
+    );
+    expect(underHome.homeLoopLabel()).not.toContain(os.homedir());
   });
 
   it('re-expands after delete→recreate even when the recreated content is identical', async () => {
