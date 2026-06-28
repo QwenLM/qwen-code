@@ -82,7 +82,10 @@ import {
   type AcpSessionBridge,
   type SessionMetadataUpdate,
 } from './acp-session-bridge.js';
-import type { BridgeEvent, SubscribeOptions } from './event-bus.js';
+import type {
+  BridgeEvent,
+  SubscribeOptions,
+} from '@qwen-code/acp-bridge/eventBus';
 import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
@@ -101,7 +104,7 @@ import type {
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';

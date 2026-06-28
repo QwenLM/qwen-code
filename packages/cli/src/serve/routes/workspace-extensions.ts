@@ -33,7 +33,7 @@ import {
   type ServeExtensionCapabilities,
   type ServeExtensionEntry,
   type ServeWorkspaceExtensionsStatus,
-} from '../status.js';
+} from '@qwen-code/acp-bridge/status';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 
 type SafeBody = typeof safeBodyType;

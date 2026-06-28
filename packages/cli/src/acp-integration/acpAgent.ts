@@ -224,7 +224,7 @@ import {
   type ServeExtensionCapabilities,
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
-} from '../serve/status.js';
+} from '@qwen-code/acp-bridge/status';
 import {
   collectContextData,
   formatContextUsageText,
@@ -3927,7 +3927,8 @@ class QwenAgent implements Agent {
     config: Config,
   ): Promise<{ cells: ServePreflightCell[]; errors?: ServeStatusCell[] }> {
     // Drive emission order from the shared `ACP_PREFLIGHT_KINDS` constant
-    // (also consumed by `createIdleAcpPreflightCells` in `serve/status.ts`)
+    // (also consumed by `createIdleAcpPreflightCells` from
+    // `@qwen-code/acp-bridge/status`)
     // so the idle-placeholder list and the live builder cannot drift —
     // adding a new ACP kind in the constant flags any builder dispatch
     // gap as a TS exhaustiveness error in the switch below, instead of
