@@ -17,6 +17,9 @@ const PROMPT_UNSAFE_INVISIBLES = /[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
  * self-prefix (e.g. QQ), so the rules stay identical everywhere.
  */
 export function sanitizeSenderName(name: string): string {
+  // A name made entirely of strippable chars collapses to all-spaces; trim()-ing
+  // it to '' lets the `|| 'unknown'` fallback fire so the [name] tag is never an
+  // anonymous `[]`. Both callers embed the result with no fallback of their own.
   return (
     name
       .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
@@ -24,6 +27,7 @@ export function sanitizeSenderName(name: string): string {
       .replace(/[\u0000-\u001f\u007f]/g, ' ')
       .replace(/[[\]\r\n]/g, ' ')
       .slice(0, 64)
+      .trim() || 'unknown'
   );
 }
 
@@ -42,5 +46,27 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
       .replace(/[\u0000-\u001f\u007f]/g, ' ')
       .replace(/["[\]]/g, ' ')
       .slice(0, maxLen)
+  );
+}
+
+/**
+ * Neutralize an attacker-influenced filesystem path before rendering it on
+ * its own line in a prompt (`... saved to: <path>`). Unlike
+ * sanitizeQuotedText, this PRESERVES `[`, `]`, `"`, and spaces: those are
+ * valid, common path characters (e.g. Next.js `app/[slug]/page.tsx`, a
+ * quoted segment, a space in a folder name), and a path rendered alone on a
+ * line cannot use them to break out of that line, so stripping them would
+ * only corrupt the path and make the agent's read-file tool miss a file that
+ * exists on disk. We strip ONLY what can break or reorder the line: C0/DEL
+ * controls (incl. CR/LF -> prompt-line injection) and the Unicode line/para
+ * separators + bidi overrides (trojan-source). Length is intentionally NOT
+ * capped: real paths can be long.
+ */
+export function sanitizePromptPath(path: string): string {
+  return (
+    path
+      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
   );
 }

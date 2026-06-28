@@ -5,7 +5,11 @@ import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
-import { sanitizeSenderName, sanitizeQuotedText } from './sanitize.js';
+import {
+  sanitizeSenderName,
+  sanitizeQuotedText,
+  sanitizePromptPath,
+} from './sanitize.js';
 import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
 /**
@@ -610,16 +614,20 @@ export abstract class ChannelBase {
           imageMimeType = att.mimeType;
         } else if (att.filePath) {
           const label = att.type === 'file' ? 'file' : att.type;
-          // The filename is attacker-supplied (e.g. DingTalk) and adapters build
-          // the on-disk path by basename()-ing it, so the path's last segment
-          // carries the same chars — neutralize both as they enter the prompt,
-          // like a reply quote. Benign names render unchanged so the agent's
-          // read-file tool still resolves them; only injection-laden names are
-          // altered, which is the safe default.
+          // The filename is attacker-supplied (e.g. DingTalk), so neutralize both
+          // the human-readable label and the on-disk path as they enter the
+          // prompt. They need DIFFERENT rules: the quoted fileName label is just
+          // prose, so sanitizeQuotedText (which also strips `"[]`) is fine — but
+          // the rendered filePath must stay byte-resolvable. Brackets, quotes and
+          // spaces are VALID, common path chars (e.g. `app/[slug]/page.tsx`), so
+          // stripping them would advertise a path that doesn't exist on disk and
+          // break the agent's read-file tool. sanitizePromptPath preserves them
+          // and removes ONLY what could break/reorder the `saved to:` line
+          // (CR/LF, C0/DEL, Unicode line/para separators, bidi overrides).
           const name = att.fileName
             ? ` "${sanitizeQuotedText(att.fileName, 128)}"`
             : '';
-          const renderedPath = sanitizeQuotedText(att.filePath, 1024);
+          const renderedPath = sanitizePromptPath(att.filePath);
           filePaths.push(
             `User sent a ${label}${name}. It has been saved to: ${renderedPath}`,
           );
@@ -649,6 +657,12 @@ export abstract class ChannelBase {
     // will never resolve, so this turn must start a FRESH chain instead of
     // chaining behind the dead promise (see the queue setup below).
     let steerWedged = false;
+    // Captured BEFORE the steer wind-down await below (set only on the steer
+    // path). A concurrent /clear that bumps the generation DURING that bounded
+    // wait must reach the dequeue guard, but reading the generation AFTER the
+    // wait would absorb the bump (post-clear value == captured), so the equality
+    // guard would pass and this turn would run against the just-cleared session.
+    let preSteerGeneration: number | undefined;
 
     if (active) {
       // A prompt is already running for this session
@@ -676,6 +690,11 @@ export abstract class ChannelBase {
           // if the timeout won the wedged turn never wound down, so its queue tail
           // (current.catch below) will never resolve either — chaining this turn
           // behind it would silently re-hang the session (and every later turn).
+          // Snapshot the generation BEFORE the bounded wait: a /clear that bumps
+          // it DURING the wait (e.g. another sender's `/clear confirm` on a
+          // shared session) is otherwise invisible to the dequeue guard, which
+          // would let this turn run against the just-cleared session.
+          preSteerGeneration = this.sessionGenerations.get(sessionId) ?? 0;
           let steerTimer: ReturnType<typeof setTimeout> | undefined;
           const woundDown = await Promise.race([
             active.done.then(() => true),
@@ -722,10 +741,14 @@ export abstract class ChannelBase {
     const prev = steerWedged
       ? Promise.resolve()
       : (this.sessionQueues.get(sessionId) ?? Promise.resolve());
-    // Snapshot the session generation now (at enqueue time). If /clear bumps it
+    // Snapshot the session generation to guard against a /clear racing this turn.
+    // On the steer path we captured it BEFORE the bounded wind-down wait
+    // (preSteerGeneration) so a /clear DURING that wait is detected; otherwise we
+    // snapshot here at enqueue time. Either way, if /clear bumps the generation
     // before this turn dequeues, the session we captured is gone — bail rather
     // than resurrect it.
-    const generation = this.sessionGenerations.get(sessionId) ?? 0;
+    const generation =
+      preSteerGeneration ?? this.sessionGenerations.get(sessionId) ?? 0;
     const useBlockStreaming = this.config.blockStreaming === 'on';
     const current = prev.then(async () => {
       // A /clear (or reset/new) while we were queued bumps the generation; the

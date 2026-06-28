@@ -103,15 +103,16 @@ vi.mock('@qwen-code/channel-base', () => ({
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
   // Mirror the real sanitizeSenderName faithfully (invisibles -> C0/DEL ->
-  // bracket/CRLF delimiters -> cap at 64) so a trojan-source or control-char
-  // regression in the real helper is caught here too.
+  // bracket/CRLF delimiters -> cap at 64 -> trim -> 'unknown' fallback) so a
+  // trojan-source or control-char regression in the real helper is caught here.
   sanitizeSenderName: (name: string) =>
     name
       .replace(/[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ')
       // eslint-disable-next-line no-control-regex
       .replace(/[\u0000-\u001f\u007f]/g, ' ')
       .replace(/[[\]\r\n]/g, ' ')
-      .slice(0, 64),
+      .slice(0, 64)
+      .trim() || 'unknown',
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
