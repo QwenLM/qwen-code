@@ -3211,6 +3211,42 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('installs a skipDurableFire predicate that classifies loop.md sentinels in headless mode', async () => {
+    // Locks the wiring at the scheduler-enable site: runNonInteractive must
+    // hand the scheduler a predicate that skips durable loop.md sentinels
+    // (which a headless run can't expand), while still letting non-sentinel
+    // durable jobs fire. Both halves are covered alone — detectLoopSentinel via
+    // skipHeadlessLoopSentinel above, the filter via cronScheduler tests — but
+    // nothing pins that runNonInteractive actually connects them. A refactor
+    // dropping or rewriting this call would otherwise silently fire raw
+    // `<<loop.md>>` sentinels at the model (or skip real durable jobs), uncaught.
+    setupMetricsMock();
+    // Real scheduler with no projectRoot: enableDurable() short-circuits (no
+    // filesystem/lock work) and, with no jobs, the headless cron hold-open
+    // resolves immediately, so runNonInteractive returns without hanging.
+    const scheduler = new CronScheduler();
+    const skipSpy = vi.spyOn(scheduler, 'setSkipDurableFire');
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'ok' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p-cron-wiring');
+
+    expect(skipSpy).toHaveBeenCalledOnce();
+    const predicate = skipSpy.mock.calls[0][0];
+    expect(predicate({ prompt: LOOP_SENTINEL_CRON } as CronJob)).toBe(true);
+    expect(predicate({ prompt: LOOP_SENTINEL_DYNAMIC } as CronJob)).toBe(true);
+    expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
+  });
+
   describe('--json-schema structured output', () => {
     // Helper: walk an emitted event and extract the first tool_use_id when
     // it represents a tool_result block. Returns undefined for any other
