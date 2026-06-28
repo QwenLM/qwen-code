@@ -212,6 +212,113 @@ describe('openVoiceStream', () => {
     expect(endReports[0]).toContain('8192 bytes total')
   })
 
+  it('reports the cumulative dropped total once when a dropping session fails', async () => {
+    warnCalls.length = 0
+    const socket = new FakeSocket()
+    const streamPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('open')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+    )
+    const stream = await streamPromise
+
+    // Force two frames to be dropped under upstream backpressure.
+    socket.bufferedAmount = 2 * 1024 * 1024
+    stream.pushAudio(new Uint8Array(4096))
+    stream.pushAudio(new Uint8Array(4096))
+
+    // An upstream socket error drives fail() (which sets `settled` before
+    // reporting); the cumulative loss must still surface once.
+    socket.emit('error', new Error('upstream socket exploded'))
+
+    const endReports = warnCalls.filter((m) => m.includes('session ended with'))
+    expect(endReports).toHaveLength(1)
+    expect(endReports[0]).toContain('2 dropped frame(s)')
+    expect(endReports[0]).toContain('8192 bytes total')
+  })
+
+  it('reports the cumulative dropped total once when a dropping session closes', async () => {
+    warnCalls.length = 0
+    const socket = new FakeSocket()
+    const streamPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('open')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+    )
+    const stream = await streamPromise
+
+    // Force two frames to be dropped under upstream backpressure.
+    socket.bufferedAmount = 2 * 1024 * 1024
+    stream.pushAudio(new Uint8Array(4096))
+    stream.pushAudio(new Uint8Array(4096))
+
+    // The socket closes mid-session (no finish()); the close path reports the
+    // loss before it sets `settled` (the inverse order of fail()).
+    socket.emit('close')
+
+    const endReports = warnCalls.filter((m) => m.includes('session ended with'))
+    expect(endReports).toHaveLength(1)
+    expect(endReports[0]).toContain('2 dropped frame(s)')
+    expect(endReports[0]).toContain('8192 bytes total')
+  })
+
+  it('reports the cumulative dropped total exactly once across multiple terminal paths', async () => {
+    warnCalls.length = 0
+    const socket = new FakeSocket()
+    const streamPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('open')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+    )
+    const stream = await streamPromise
+
+    // Force two frames to be dropped under upstream backpressure.
+    socket.bufferedAmount = 2 * 1024 * 1024
+    stream.pushAudio(new Uint8Array(4096))
+    stream.pushAudio(new Uint8Array(4096))
+
+    // Two terminal paths fire: a close, then a late task-finished. task-finished
+    // is not short-circuited by `settled`, so the report runs again — only the
+    // droppedTotalsReported guard keeps the totals line to a single entry.
+    socket.emit('close')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-finished' } }),
+    )
+
+    const endReports = warnCalls.filter((m) => m.includes('session ended with'))
+    expect(endReports).toHaveLength(1)
+    expect(endReports[0]).toContain('2 dropped frame(s)')
+    expect(endReports[0]).toContain('8192 bytes total')
+  })
+
   it('does not report a dropped total when no frames were dropped', async () => {
     warnCalls.length = 0
     const socket = new FakeSocket()

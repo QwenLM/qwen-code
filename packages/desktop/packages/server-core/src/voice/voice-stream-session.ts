@@ -233,7 +233,9 @@ export function openVoiceStream(
               (ws.bufferedAmount ?? 0) <= MAX_BUFFERED_AUDIO_BYTES
             ) {
               if (backpressureActive) {
-                // Recovered: report the episode total so the gap is quantified.
+                // Recovered: report the running totals so the cumulative gap is
+                // quantified (droppedFrames/droppedBytes are session-wide, never
+                // reset between drop episodes).
                 backpressureActive = false;
                 debugLogger.warn(
                   `[voice] DashScope socket recovered from backpressure ` +
