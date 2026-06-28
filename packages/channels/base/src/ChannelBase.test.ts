@@ -871,6 +871,67 @@ describe('ChannelBase', () => {
     });
   });
 
+  describe('bang (!) shell command gating', () => {
+    function withShellCommand() {
+      const shellCommand = vi.fn().mockResolvedValue({
+        exitCode: 0,
+        output: 'root',
+        aborted: false,
+      });
+      (bridge as unknown as Record<string, unknown>)['shellCommand'] =
+        shellCommand;
+      return shellCommand;
+    }
+
+    it('refuses ! shell commands in a shared group session (no host shell exposure)', async () => {
+      // Phase 0 has no per-sender trust model, so a shared (thread-scope group)
+      // session must NOT let any participant run host shell commands — a group
+      // member could otherwise `!rm -rf /`. Mutation check: dropping the
+      // isSharedSession gate makes shellCommand run here.
+      const shellCommand = withShellCommand();
+      const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          text: '!whoami',
+        }),
+      );
+      expect(shellCommand).not.toHaveBeenCalled();
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('disabled in shared group sessions');
+      // Not forwarded to the agent either — it is fully refused.
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('refuses ! shell commands in a single-scope DM (shared channel-wide)', async () => {
+      // `single` collapses every sender — even a DM — to one channel-wide
+      // session, so it is shared too: the host-shell gate must fire here.
+      const shellCommand = withShellCommand();
+      const ch = createChannel({ sessionScope: 'single' });
+      await ch.handleInbound(envelope({ text: '!whoami' }));
+      expect(shellCommand).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain('disabled in shared group sessions');
+    });
+
+    it('executes ! shell commands in a 1:1 (non-shared) session', async () => {
+      // A per-user 1:1 session has a single operator, so direct shell execution
+      // stays allowed — the gate must NOT fire here.
+      const shellCommand = withShellCommand();
+      const ch = createChannel(); // sessionScope: 'user', DM
+      await ch.handleInbound(envelope({ text: '!whoami' }));
+      expect(shellCommand).toHaveBeenCalledTimes(1);
+      expect(shellCommand.mock.calls[0][1]).toBe('whoami');
+      expect(
+        ch.sent.some((m) =>
+          m.text.includes('disabled in shared group sessions'),
+        ),
+      ).toBe(false);
+      expect(ch.sent.some((m) => m.text.includes('whoami'))).toBe(true);
+    });
+  });
+
   describe('custom commands', () => {
     it('subclass can register custom commands', async () => {
       const ch = createChannel();

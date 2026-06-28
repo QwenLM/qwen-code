@@ -75,45 +75,43 @@ vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
 }));
 
-vi.mock('@qwen-code/channel-base', () => ({
-  ChannelBase: class {
-    protected config: Record<string, unknown> = {};
-    protected bridge: Record<string, unknown> = {};
-    protected router: Record<string, unknown> = {};
-    protected name: string = '';
-    constructor(
-      name: string,
-      config: Record<string, unknown>,
-      bridge: Record<string, unknown>,
-      options?: Record<string, unknown>,
-    ) {
-      this.name = name;
-      this.config = config;
-      this.bridge = bridge;
-      this.router = options?.router ?? {};
-    }
-    protected handleInbound(_env: unknown): Promise<void> {
-      return Promise.resolve();
-    }
-  },
-  SessionRouter: class {
-    restoreSessions(): Promise<void> {
-      return Promise.resolve();
-    }
-  },
-  getGlobalQwenDir: () => '/tmp/test-qwen',
-  // Mirror the real sanitizeSenderName faithfully (invisibles -> C0/DEL ->
-  // bracket/CRLF delimiters -> cap at 64 -> trim -> 'unknown' fallback) so a
-  // trojan-source or control-char regression in the real helper is caught here.
-  sanitizeSenderName: (name: string) =>
-    name
-      .replace(/[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ')
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
-      .replace(/[[\]\r\n]/g, ' ')
-      .slice(0, 64)
-      .trim() || 'unknown',
-}));
+vi.mock('@qwen-code/channel-base', async () => {
+  // Pull the REAL sanitizeSenderName from the built package so a trojan-source
+  // or control-char regression in the shared helper is caught here, instead of
+  // silently drifting from an inline re-implementation.
+  const real = await vi.importActual<typeof import('@qwen-code/channel-base')>(
+    '@qwen-code/channel-base',
+  );
+  return {
+    ChannelBase: class {
+      protected config: Record<string, unknown> = {};
+      protected bridge: Record<string, unknown> = {};
+      protected router: Record<string, unknown> = {};
+      protected name: string = '';
+      constructor(
+        name: string,
+        config: Record<string, unknown>,
+        bridge: Record<string, unknown>,
+        options?: Record<string, unknown>,
+      ) {
+        this.name = name;
+        this.config = config;
+        this.bridge = bridge;
+        this.router = options?.router ?? {};
+      }
+      protected handleInbound(_env: unknown): Promise<void> {
+        return Promise.resolve();
+      }
+    },
+    SessionRouter: class {
+      restoreSessions(): Promise<void> {
+        return Promise.resolve();
+      }
+    },
+    getGlobalQwenDir: () => '/tmp/test-qwen',
+    sanitizeSenderName: real.sanitizeSenderName,
+  };
+});
 
 const { QQChannel } = await import('./QQChannel.js');
 type QQChannelOptions = ConstructorParameters<typeof QQChannel>[3];

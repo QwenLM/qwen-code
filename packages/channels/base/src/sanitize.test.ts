@@ -87,9 +87,14 @@ describe('sanitizePromptPath', () => {
     expect(out).toContain('[id]');
   });
 
-  it('does not cap length (real paths can be long)', () => {
+  it('caps length at 1024 (defense-in-depth; generous for real paths)', () => {
+    // A pathological, oversized path is truncated to the cap (mutation check:
+    // dropping .slice(0, 1024) leaves this >1024 chars and fails).
     const long = '/' + 'a'.repeat(2000) + '/[slug]/page.tsx';
-    expect(sanitizePromptPath(long)).toBe(long);
+    expect(sanitizePromptPath(long)).toHaveLength(1024);
+    // A realistic long path stays well under the cap and is byte-intact.
+    const real = '/' + 'a'.repeat(900) + '/[slug]/page.tsx';
+    expect(sanitizePromptPath(real)).toBe(real);
   });
 });
 

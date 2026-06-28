@@ -243,26 +243,8 @@ export abstract class ChannelBase {
           const active = this.activePrompts.get(id);
           this.collectBuffers.delete(id);
           if (active) {
-            active.cancelled = true;
-            // Stop the BlockStreamer too (mirror /cancel): cancelled alone only
-            // suppresses NEW chunks — text already buffered can still be flushed
-            // by the idle timer after the session is purged unless we stop it.
-            active.stopStreaming?.();
-            // Best-effort cancel: fire-and-forget. A wedged child or daemon
-            // transport can leave the cancelSession REQUEST itself pending
-            // forever; awaiting it would hang /clear before the bounded wait
-            // below even starts, so don't await it.
-            void this.bridge.cancelSession(id).catch(() => {});
-            // Bound the wait: a wedged child may never resolve active.done, so
-            // race it against a timeout and purge anyway when the timeout wins.
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            await Promise.race([
-              active.done,
-              new Promise<void>((resolve) => {
-                timer = setTimeout(resolve, CLEAR_CANCEL_TIMEOUT_MS);
-              }),
-            ]);
-            clearTimeout(timer);
+            // Bounded cancel + wind-down wait; purge regardless of the result.
+            await this.cancelAndAwaitActive(active, id);
           }
           // Purge every per-session map (all keyed by sessionId) so a
           // long-running gateway doesn't leak dead entries after /clear.
@@ -304,23 +286,12 @@ export abstract class ChannelBase {
       }
     };
 
-    // Whether the resolved session is SHARED across senders, so a destructive
-    // /clear needs the confirm + allowedUsers gate. `single` collapses the whole
-    // channel to one `__single__` session for EVERY sender — group OR DM — so it
-    // is ALWAYS shared: SessionRouter maps even a DM to `__single__`, so without
-    // this a sender who can DM the bot would bare-/clear the channel-wide session
-    // ungated. `thread` is shared only in a group (a DM maps to the lone caller's
-    // own chat). `user` is per-sender, never shared.
-    const isSharedSession = (envelope: Envelope): boolean =>
-      this.config.sessionScope === 'single' ||
-      (envelope.isGroup && this.config.sessionScope === 'thread');
-
     // For a shared session, clearing it affects everyone who shares it: restrict
     // it to authorized senders (config.allowedUsers, when set) and require an
     // explicit "confirm". DMs on per-user/thread scope and per-user groups clear
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
-      if (isSharedSession(envelope)) {
+      if (this.isSharedSession(envelope)) {
         const authorized = this.config.allowedUsers;
         if (authorized.length > 0 && !authorized.includes(envelope.senderId)) {
           await this.sendMessage(
@@ -353,7 +324,7 @@ export abstract class ChannelBase {
         envelope.chatId,
         envelope.threadId,
       );
-      const scopeNote = isSharedSession(envelope)
+      const scopeNote = this.isSharedSession(envelope)
         ? envelope.isGroup
           ? ' (shared by this group)'
           : ' (shared channel-wide)'
@@ -376,7 +347,7 @@ export abstract class ChannelBase {
       const lines = [
         'Commands:',
         '/help — Show this help',
-        isSharedSession(envelope)
+        this.isSharedSession(envelope)
           ? '/clear confirm — Clear the shared session (aliases: /reset, /new)'
           : '/clear — Clear your session (aliases: /reset, /new)',
         '/who — Show current session & workspace',
@@ -448,6 +419,47 @@ export abstract class ChannelBase {
     return sessionId && this.activePrompts.has(sessionId)
       ? sessionId
       : undefined;
+  }
+
+  /**
+   * Whether the resolved session is SHARED across senders. `single` collapses
+   * the whole channel to one `__single__` session for EVERY sender — group OR
+   * DM — so it is ALWAYS shared (even a DM maps to `__single__`). `thread` is
+   * shared only in a group (a DM maps to the lone caller's own chat). `user` is
+   * per-sender, never shared. Drives both the destructive-/clear confirm gate
+   * and the host-shell (`!`) gate.
+   */
+  private isSharedSession(envelope: Envelope): boolean {
+    return (
+      this.config.sessionScope === 'single' ||
+      (envelope.isGroup && this.config.sessionScope === 'thread')
+    );
+  }
+
+  /**
+   * Cancel the active turn and wait (bounded) for it to wind down. Stops the
+   * BlockStreamer so buffered text can't leak via the idle timer, then fires a
+   * best-effort cancelSession (NOT awaited — a wedged child/daemon can leave the
+   * request pending forever). Returns true if active.done settled first, false
+   * if the CLEAR_CANCEL_TIMEOUT_MS bound won (the turn never wound down). Shared
+   * by /clear and the steer path so the sequence can't drift between them.
+   */
+  private async cancelAndAwaitActive(
+    active: ActivePrompt,
+    sessionId: string,
+  ): Promise<boolean> {
+    active.cancelled = true;
+    active.stopStreaming?.();
+    void this.bridge.cancelSession(sessionId).catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settled = await Promise.race([
+      active.done.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), CLEAR_CANCEL_TIMEOUT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    return settled;
   }
 
   /**
@@ -535,6 +547,17 @@ export abstract class ChannelBase {
 
     // 3.5. Bang (!) shell command — direct execution, no LLM
     if (envelope.text.startsWith('!')) {
+      // Phase 0 has no per-sender trust model (the [sender] marker is NOT a
+      // trust boundary), so a shared session must not expose the host shell:
+      // any participant could run `!rm -rf /`. Refuse in shared sessions; a 1:1
+      // session is the lone operator's own, so direct execution stays allowed.
+      if (this.isSharedSession(envelope)) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Shell commands (`!`) are disabled in shared group sessions.',
+        );
+        return;
+      }
       const cmd = envelope.text.slice(1).trim();
       const bridgeShellCommand = (
         this.bridge as unknown as Record<string, unknown>
@@ -683,57 +706,24 @@ export abstract class ChannelBase {
           return;
         }
         case 'steer': {
-          // Cancel the running prompt, then fall through to send a new one.
-          active.cancelled = true;
-          // Stop the BlockStreamer too (mirror doClear): cancelled alone only
-          // suppresses NEW chunks — text already buffered can still be flushed by
-          // the idle timer (which fires before the steer wind-down bound) and leak
-          // into the chat after the replacement turn starts unless we stop it.
-          active.stopStreaming?.();
-          // Best-effort cancel (fire-and-forget): a wedged child/daemon can leave
-          // the cancelSession request pending forever — don't await it.
-          void this.bridge.cancelSession(sessionId).catch(() => {});
-          // NOTE (network-bridge limitation): cancelSession is keyed only by
-          // sessionId and the replacement prompt below reuses the SAME sessionId.
-          // The shipping AcpBridge sends cancel + prompt over one in-order stdin
-          // stream and cancel is enqueued HERE, before the bounded wait and the new
-          // prompt, so the child always processes it first — the replacement turn
-          // is safe. A FUTURE network/daemon bridge with cancel latency could
-          // instead process this cancel AFTER the new prompt and cancel the
-          // replacement turn. The proper fix is turn-scoped cancellation (a cancel
-          // token threaded through the Bridge contract); deferred here to avoid an
-          // API-breaking change to every adapter in this phase.
-          // Bound the wind-down wait the same way /clear does: a wedged child may
-          // never resolve active.done, and an UNBOUNDED await here would pin the
-          // session queue forever (steer is the default mode), so race it against
-          // a timeout and proceed when the timeout wins. Track WHICH branch won:
-          // if the timeout won the wedged turn never wound down, so its queue tail
-          // (current.catch below) will never resolve either — chaining this turn
-          // behind it would silently re-hang the session (and every later turn).
-          // Snapshot the generation BEFORE the bounded wait: a /clear that bumps
-          // it DURING the wait (e.g. another sender's `/clear confirm` on a
-          // shared session) is otherwise invisible to the dequeue guard, which
-          // would let this turn run against the just-cleared session.
+          // Snapshot the generation BEFORE the bounded wind-down wait: a /clear
+          // that bumps it DURING the wait (e.g. another sender's `/clear confirm`
+          // on a shared session) must reach the dequeue guard; reading it after
+          // would absorb the bump and run this turn against the cleared session.
           preSteerGeneration = this.sessionGenerations.get(sessionId) ?? 0;
-          let steerTimer: ReturnType<typeof setTimeout> | undefined;
-          const woundDown = await Promise.race([
-            active.done.then(() => true),
-            new Promise<boolean>((resolve) => {
-              steerTimer = setTimeout(
-                () => resolve(false),
-                CLEAR_CANCEL_TIMEOUT_MS,
-              );
-            }),
-          ]);
-          clearTimeout(steerTimer);
-          // The wedged turn stays cancelled (set above), so a late settle still
-          // can't deliver a stale response or resurrect the session — it just
-          // must not block this turn's queue. Re-seed the chain below.
+          // NOTE (network-bridge limitation): cancel and the replacement prompt
+          // (below) reuse the SAME sessionId. The shipping AcpBridge sends both
+          // over one in-order stdin stream, cancel first, so the child cancels
+          // before re-prompting. A future bridge with cancel latency could
+          // reorder them; the real fix is turn-scoped cancellation, deferred to
+          // avoid an API-breaking change to every adapter this phase.
+          const woundDown = await this.cancelAndAwaitActive(active, sessionId);
+          // Timeout won → the wedged turn never wound down, so its queue tail
+          // never resolves either; re-seed a fresh chain below instead of
+          // chaining behind it (which would re-hang the session). It stays
+          // cancelled, so a late settle still can't deliver a stale response.
           steerWedged = !woundDown;
           if (steerWedged) {
-            // The wedged turn never wound down within the bound and is being
-            // abandoned — surface it like the queue-drop path below, so an
-            // abandoned turn isn't invisible.
             process.stderr.write(
               `[${this.name}] steer abandoned a wedged turn for session ${sessionId}: it did not wind down within ${CLEAR_CANCEL_TIMEOUT_MS}ms\n`,
             );

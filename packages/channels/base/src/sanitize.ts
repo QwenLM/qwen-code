@@ -59,8 +59,9 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
  * only corrupt the path and make the agent's read-file tool miss a file that
  * exists on disk. We strip ONLY what can break or reorder the line: C0/DEL
  * controls (incl. CR/LF -> prompt-line injection) and the Unicode line/para
- * separators + bidi overrides (trojan-source). Length is intentionally NOT
- * capped: real paths can be long.
+ * separators + bidi overrides (trojan-source). Length is capped generously
+ * (1024) as defense-in-depth: well beyond any real path, but enough to stop a
+ * pathological attacker filename from ballooning the prompt unboundedly.
  */
 export function sanitizePromptPath(path: string): string {
   return (
@@ -68,5 +69,6 @@ export function sanitizePromptPath(path: string): string {
       .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
       // eslint-disable-next-line no-control-regex
       .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .slice(0, 1024)
   );
 }
