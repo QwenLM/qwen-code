@@ -4,7 +4,7 @@ on:
   issues:
     types: ['opened']
   pull_request_target:
-    types: ['opened', 'ready_for_review']
+    types: ['opened', 'ready_for_review', 'synchronize']
   issue_comment:
     types: ['created']
   workflow_dispatch:
@@ -13,6 +13,15 @@ on:
         description: 'Issue or PR number to triage'
         required: false
         type: 'number'
+      pipeline_pr:
+        description: 'PR number to run the full triage pipeline on (for validating pre-merge via dispatch)'
+        required: false
+        type: 'number'
+      force_rereview:
+        description: 'With pipeline_pr: re-run review/tmux even if their labels are already set (simulates a push)'
+        required: false
+        default: false
+        type: 'boolean'
       tmux_pr:
         description: 'PR number to run tmux real-user testing on (instead of triage)'
         required: false
@@ -124,33 +133,386 @@ jobs:
               ;;
           esac
 
+  # Reads pipeline state (labels) + resolves the PR number via the gh API, so it
+  # works identically under real PR events AND workflow_dispatch (the dispatch
+  # payload has no PR object, so payload-based label reads would be blind). Every
+  # downstream stage gates on these outputs — that is what makes the whole
+  # pipeline dispatch-testable before merge.
+  state:
+    needs: ['authorize']
+    if: >-
+      always() &&
+      github.repository == 'QwenLM/qwen-code' && (
+        github.event_name == 'pull_request_target' ||
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request &&
+         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
+          startsWith(github.event.comment.body, '@qwen-code /tmux'))) ||
+        (github.event_name == 'workflow_dispatch' &&
+         (github.event.inputs.pipeline_pr != '' || github.event.inputs.tmux_pr != ''))
+      )
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+      pull-requests: 'write'
+    outputs:
+      number: '${{ steps.s.outputs.number }}'
+      is_fork: '${{ steps.s.outputs.is_fork }}'
+      has_product_ok: '${{ steps.s.outputs.has_product_ok }}'
+      has_reviewed: '${{ steps.s.outputs.has_reviewed }}'
+      has_tmux_ok: '${{ steps.s.outputs.has_tmux_ok }}'
+    steps:
+      - name: 'Read PR state'
+        id: 's'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          EVENT: '${{ github.event_name }}'
+          ACTION: '${{ github.event.action }}'
+          PR_NUM: '${{ github.event.pull_request.number }}'
+          ISSUE_NUM: '${{ github.event.issue.number }}'
+          DISPATCH_PR: '${{ github.event.inputs.pipeline_pr }}'
+          DISPATCH_FORCE: '${{ github.event.inputs.force_rereview }}'
+        run: |-
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request_target) NUM="$PR_NUM" ;;
+            issue_comment)       NUM="$ISSUE_NUM" ;;
+            workflow_dispatch)   NUM="$DISPATCH_PR" ;;
+            *)                   NUM="" ;;
+          esac
+          # A push (synchronize) or a force dispatch invalidates prior review +
+          # tmux results: remove those labels BEFORE reading, so the pipeline
+          # re-runs them fresh and a stale label can never let approval through on
+          # code that a new review would block. product-ok persists (direction).
+          if { [ "$EVENT" = "pull_request_target" ] && [ "$ACTION" = "synchronize" ]; } \
+             || [ "$DISPATCH_FORCE" = "true" ]; then
+            gh pr edit "$NUM" --repo "$REPO" --remove-label 'triage:reviewed' 2>/dev/null || true
+            gh pr edit "$NUM" --repo "$REPO" --remove-label 'triage:tmux-ok' 2>/dev/null || true
+          fi
+          # One API read (post-invalidation) drives every downstream gate.
+          DATA="$(gh api "repos/$REPO/pulls/$NUM" --jq '{labels: [.labels[].name], fork: .head.repo.fork}')"
+          have() { echo "$DATA" | jq -e --arg l "$1" '.labels | index($l)' >/dev/null 2>&1 && echo true || echo false; }
+          {
+            echo "number=$NUM"
+            echo "is_fork=$(echo "$DATA" | jq -r '.fork')"
+            echo "has_product_ok=$(have 'triage:product-ok')"
+            echo "has_reviewed=$(have 'triage:reviewed')"
+            echo "has_tmux_ok=$(have 'triage:tmux-ok')"
+          } >> "$GITHUB_OUTPUT"
+
+  # PR-only product-direction gate — Stage 1 of the pipeline, pulled out of the
+  # monolithic `triage` job so the Actions DAG shows where a PR is gated and so
+  # the gate runs least-privilege (no agent/worktree tools). Runs /product-decision,
+  # which checks the PR template + product direction and writes a verdict JSON.
+  # On `pass` it adds the `triage:product-ok` label; the downstream `triage`
+  # (code review) runs only for PRs that carry it (or that just passed this run).
+  # The label persists across pushes, so a code push re-reviews but never
+  # re-litigates direction. Issues / dispatch-by-number skip this gate entirely.
+  product-decision:
+    needs: ['authorize', 'state']
+    timeout-minutes: 15
+    concurrency:
+      # Keyed on the PR number (from `state`): a new push cancels the prior gate
+      # run for the same PR. ponytail: a PR converted to draft mid-run is a
+      # negligible edge; not worth the per-run-id fallback dance.
+      group: '${{ github.workflow }}-product-${{ needs.state.outputs.number }}'
+      cancel-in-progress: true
+    # Same read-only ECS profile as `triage`: checks out the trusted base repo,
+    # never executes PR code, reaches the PR only via the API.
+    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    permissions:
+      contents: 'read'
+      issues: 'write'
+      pull-requests: 'write'
+    # Runs once per PR: only while the gate is unsettled (`product-ok` absent).
+    # Auto on a non-draft PR / `/triage` on a PR (authorized), or a `pipeline_pr`
+    # dispatch (write-gated to invoke, read-only here). Once it passes and labels
+    # the PR, later pushes skip straight to review. Re-evaluate direction by
+    # removing the label.
+    if: >-
+      always() &&
+      github.repository == 'QwenLM/qwen-code' &&
+      needs.state.outputs.number != '' &&
+      needs.state.outputs.has_product_ok != 'true' && (
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.pipeline_pr != '') ||
+        (needs.authorize.outputs.should_run == 'true' && (
+          (github.event_name == 'pull_request_target' &&
+           github.event.pull_request.draft == false) ||
+          (github.event_name == 'issue_comment' &&
+           github.event.issue.pull_request &&
+           startsWith(github.event.comment.body, '@qwen-code /triage'))
+        ))
+      )
+    outputs:
+      verdict: '${{ steps.verdict.outputs.verdict }}'
+    steps:
+      # See the identical step on `triage` for why ECS runners need this reset.
+      - name: 'Clean stale agent state'
+        run: |-
+          set -uo pipefail
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
+          rm -rf "$QWEN_HOME" 2>/dev/null || true
+          mkdir -p "$QWEN_HOME"
+          rm -f /tmp/stage-*.md 2>/dev/null || true
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to clean"
+            exit 0
+          fi
+          rm -rf .qwen/tmp/* 2>/dev/null || true
+          git worktree prune -v || true
+          echo "stale agent state cleaned"
+
+      - name: 'Checkout repo'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          token: '${{ secrets.GITHUB_TOKEN }}'
+
+      - name: 'Run product-decision gate'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPOSITORY: '${{ github.repository }}'
+          QWEN_HOME: '${{ runner.temp }}/qwen-home'
+          # The skill writes its verdict JSON + comment file here; the next step reads it.
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+          # Optional local Claude Code checkout for the direction signal; the skill
+          # falls back to the remote CHANGELOG when this is unset.
+          CLAUDE_CODE_SRC: '${{ vars.CLAUDE_CODE_SRC_PATH }}'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          # Least privilege: gate reads the PR + repo and posts one comment; it
+          # needs no subagents or worktrees, unlike the full `triage` review.
+          settings_json: |-
+            {
+              "coreTools": [
+                "run_shell_command",
+                "write_file",
+                "read_file",
+                "grep_search",
+                "glob"
+              ],
+              "sandbox": false
+            }
+          prompt: '/product-decision ${{ needs.state.outputs.number }} --repo ${{ github.repository }}'
+
+      - name: 'Read gate verdict'
+        id: 'verdict'
+        run: |-
+          set -euo pipefail
+          # Look in the dir we set AND the skill's documented fallback (/tmp/triage-results):
+          # if the action doesn't propagate TRIAGE_RESULTS_DIR to the agent shell, the
+          # skill writes to the fallback, and reading only the configured dir would miss it.
+          VERDICT=''
+          for d in "${RUNNER_TEMP}/triage-results" /tmp/triage-results; do
+            if [ -f "$d/product-decision.json" ]; then
+              VERDICT="$(jq -r '.verdict // empty' "$d/product-decision.json" 2>/dev/null || true)"
+              [ -n "$VERDICT" ] && break
+            fi
+          done
+          # Fail closed: a missing/empty verdict must not be read as a pass.
+          if [ -z "$VERDICT" ]; then
+            echo "::error::product-decision produced no verdict JSON; failing the gate closed."
+            exit 1
+          fi
+          echo "Gate verdict: $VERDICT"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+      # State marker: product direction settled. Persists across pushes — the
+      # gate skips PRs that already carry it, so a code push re-runs review but
+      # never re-litigates direction. Only `pass` earns the label.
+      - name: 'Mark product direction settled'
+        if: "steps.verdict.outputs.verdict == 'pass'"
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPO: '${{ github.repository }}'
+          NUM: '${{ needs.state.outputs.number }}'
+        run: |-
+          set -euo pipefail
+          # ponytail: create-if-missing so the label need not be pre-seeded; no-op once it exists.
+          gh label create 'triage:product-ok' --repo "$REPO" \
+            --color ededed --description 'Qwen triage: product direction approved' 2>/dev/null || true
+          # Non-fatal: a transient label-API blip must not red a gate that already
+          # passed and posted its comment. Missing label just re-runs the gate next push.
+          gh pr edit "$NUM" --repo "$REPO" --add-label 'triage:product-ok' \
+            || echo "::warning::could not add triage:product-ok label; gate will re-run on next push"
+
+  # Stage 2 — code review. Converged onto the canonical /review skill (the same
+  # 9-agent review `@qwen-code /review` uses); triage no longer does its own.
+  # Gated on product-ok: a PR is reviewed only after direction is settled. A push
+  # (force_rereview) re-reviews; a settled `reviewed` label skips re-review on
+  # non-push triggers. The verdict is read from the bot's submitted PR review, so
+  # the bundled /review skill needs no change (avoids the preinstalled-qwen deploy
+  # dependency that bit #4866).
+  review:
+    needs: ['authorize', 'state', 'product-decision']
+    timeout-minutes: 90
+    concurrency:
+      group: '${{ github.workflow }}-review-${{ needs.state.outputs.number }}'
+      cancel-in-progress: true
+    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    permissions:
+      contents: 'read'
+      pull-requests: 'write'
+      issues: 'write'
+    outputs:
+      verdict: '${{ steps.verdict.outputs.verdict }}'
+    # Runs once direction is settled (product-ok present, or product-decision just
+    # passed this run) and review isn't already done (or a push forces re-review).
+    if: >-
+      always() &&
+      github.repository == 'QwenLM/qwen-code' &&
+      needs.state.outputs.number != '' &&
+      (needs.state.outputs.has_product_ok == 'true' ||
+       needs.product-decision.outputs.verdict == 'pass') &&
+      needs.state.outputs.has_reviewed != 'true' && (
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.pipeline_pr != '') ||
+        (needs.authorize.outputs.should_run == 'true' && (
+          (github.event_name == 'pull_request_target' &&
+           github.event.pull_request.draft == false) ||
+          (github.event_name == 'issue_comment' &&
+           github.event.issue.pull_request &&
+           startsWith(github.event.comment.body, '@qwen-code /triage'))
+        ))
+      )
+    steps:
+      - name: 'Clean stale agent state'
+        run: |-
+          set -uo pipefail
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
+          rm -rf "$QWEN_HOME" 2>/dev/null || true
+          mkdir -p "$QWEN_HOME"
+          rm -f /tmp/stage-*.md 2>/dev/null || true
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to clean"
+            exit 0
+          fi
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          git worktree prune -v || true
+          git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+            | while read -r stale_ref; do
+                if [ -n "$stale_ref" ]; then git branch -D "$stale_ref" || true; fi
+              done
+          git worktree prune -v || true
+          echo "stale agent state cleaned"
+
+      # /review diffs against the base, so check out the trusted base with full
+      # history; the skill fetches the PR diff context itself.
+      - name: 'Checkout base branch'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+          token: '${{ secrets.GITHUB_TOKEN }}'
+
+      # Timestamp before the run so the verdict step can tell THIS run's review
+      # apart from any earlier bot review on the PR.
+      - name: 'Record review start'
+        id: 'start'
+        run: 'echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"'
+
+      - name: 'Run review'
+        id: 'run'
+        continue-on-error: true
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPOSITORY: '${{ github.repository }}'
+          QWEN_HOME: '${{ runner.temp }}/qwen-home'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          settings_json: |-
+            {
+              "coreTools": [
+                "run_shell_command",
+                "write_file",
+                "read_file",
+                "grep_search",
+                "glob",
+                "agent",
+                "enter_worktree",
+                "exit_worktree"
+              ],
+              "sandbox": false
+            }
+          prompt: '/review ${{ needs.state.outputs.number }} --comment --repo ${{ github.repository }}'
+
+      # Verdict from the bot's submitted review (Step 9 of /review submits
+      # APPROVE / CHANGES_REQUESTED / COMMENT). No fresh review = the run crashed
+      # or produced nothing → fail closed (no label; tmux/approval don't advance).
+      - name: 'Derive review verdict'
+        id: 'verdict'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPO: '${{ github.repository }}'
+          NUM: '${{ needs.state.outputs.number }}'
+          START: '${{ steps.start.outputs.ts }}'
+        run: |-
+          set -euo pipefail
+          BOT="$(gh api user --jq '.login' 2>/dev/null || true)"
+          LATEST="$(gh api "repos/$REPO/pulls/$NUM/reviews" --paginate \
+            --jq "[.[] | select(.user.login == \"$BOT\") | select(.submitted_at > \"$START\")] | last | .state // empty" 2>/dev/null || true)"
+          case "$LATEST" in
+            APPROVED|COMMENTED)
+              echo "Review passed (state: $LATEST); marking reviewed."
+              echo "verdict=pass" >> "$GITHUB_OUTPUT"
+              gh label create 'triage:reviewed' --repo "$REPO" \
+                --color ededed --description 'Qwen triage: code review passed' 2>/dev/null || true
+              gh pr edit "$NUM" --repo "$REPO" --add-label 'triage:reviewed' \
+                || echo "::warning::could not add triage:reviewed label; review will re-run next push"
+              ;;
+            CHANGES_REQUESTED)
+              echo "Review requested changes; not advancing (no label)."
+              echo "verdict=blockers" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "verdict=unavailable" >> "$GITHUB_OUTPUT"
+              # No fresh bot review → review did not complete. Fail closed and
+              # leave a marker comment so the stall is visible, not silent.
+              echo "::warning::review produced no fresh verdict; treating as review-unavailable."
+              BODY="$(printf '%s\n' '<!-- qwen-triage:review-unavailable -->' \
+                'Automated code review did not complete this run, so testing and approval are paused. Push again or comment `@qwen-code /triage` to retry.')"
+              EXISTING="$(gh api "repos/$REPO/issues/$NUM/comments" --paginate \
+                --jq '[.[] | select(.body | contains("<!-- qwen-triage:review-unavailable -->"))] | last | .id // empty' 2>/dev/null || true)"
+              if [ -n "$EXISTING" ]; then
+                gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -f body="$BODY" >/dev/null || true
+              else
+                gh api -X POST "repos/$REPO/issues/$NUM/comments" -f body="$BODY" >/dev/null || true
+              fi
+              ;;
+          esac
+
+  # Issue triage only. PR handling moved to the staged pipeline above
+  # (product-decision -> review -> tmux-testing -> approval-decision); this job no
+  # longer reviews PRs, so there is no double review.
   triage:
     needs: ['authorize']
     timeout-minutes: 30
     concurrency:
       # GitHub evaluates concurrency before the job `if`, but after `needs`.
-      # Keep non-runnable PR/comment triggers out of the shared per-number
-      # group so they cannot cancel or replace an authorized run.
+      # Keep non-runnable (unauthorized) issue comments out of the shared
+      # per-issue group so they cannot cancel an authorized run.
       group: >-
         ${{
-          (
-            (github.event_name == 'pull_request_target' &&
-             (github.event.pull_request.draft == true ||
-              needs.authorize.outputs.should_run != 'true')) ||
-            (github.event_name == 'issue_comment' &&
-             needs.authorize.outputs.should_run != 'true')
-          ) &&
+          (github.event_name == 'issue_comment' &&
+           needs.authorize.outputs.should_run != 'true') &&
           format('{0}-run-{1}', github.workflow, github.run_id) ||
-          format('{0}-{1}', github.workflow, github.event.issue.number || github.event.pull_request.number || github.event.inputs.number)
+          format('{0}-issue-{1}', github.workflow, github.event.issue.number || github.event.inputs.number)
         }}
       cancel-in-progress: >-
         ${{
           github.event_name == 'issues' ||
           github.event_name == 'workflow_dispatch' ||
-          (((github.event_name == 'pull_request_target' &&
-             github.event.pull_request.draft == false) ||
-            (github.event_name == 'issue_comment' &&
-             startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
+          (github.event_name == 'issue_comment' &&
+           startsWith(github.event.comment.body, '@qwen-code /triage') &&
            needs.authorize.outputs.should_run == 'true')
         }}
     # Triage is the read-only analysis agent (same security profile as
@@ -167,20 +529,20 @@ jobs:
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
     # skipped (issues / workflow_dispatch paths, which need no permission gate).
+    # Issue-only: issues event, `/triage` on an issue, or dispatch-by-number.
+    # (A `/triage` comment on a PR drives the pipeline above, not this job.)
     if: >-
       always() &&
       github.repository == 'QwenLM/qwen-code' && (
         github.event_name == 'issues' ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.number != '' &&
-         github.event.inputs.tmux_pr == '') ||
-        (
-          ((github.event_name == 'pull_request_target' &&
-            github.event.pull_request.draft == false) ||
-           (github.event_name == 'issue_comment' &&
-            startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
-          needs.authorize.outputs.should_run == 'true'
-        )
+         github.event.inputs.tmux_pr == '' &&
+         github.event.inputs.pipeline_pr == '') ||
+        (github.event_name == 'issue_comment' &&
+         !github.event.issue.pull_request &&
+         startsWith(github.event.comment.body, '@qwen-code /triage') &&
+         needs.authorize.outputs.should_run == 'true')
       )
     steps:
       - name: 'Acknowledge triage request'
@@ -272,7 +634,11 @@ jobs:
   # AUTHOR (whose code runs) having write via the authorize job, runs read-only
   # with NO GitHub token in the agent env, and keeps credentials out of .git.
   tmux-testing:
-    needs: ['authorize']
+    needs: ['authorize', 'state', 'review']
+    # Two ways in: (1) manual `@qwen-code /tmux` or `tmux_pr` dispatch, as before;
+    # (2) auto-chain — Stage 3 of the pipeline, after review passed, internal PRs
+    # only (never auto-execute fork code), skipped once `tmux-ok` is set unless a
+    # push forces a re-test.
     if: >-
       always() &&
       github.repository == 'QwenLM/qwen-code' &&
@@ -284,7 +650,22 @@ jobs:
          needs.authorize.outputs.should_run == 'true') ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.tmux_pr != '' &&
-         needs.authorize.outputs.should_run == 'true')
+         needs.authorize.outputs.should_run == 'true') ||
+        (needs.state.outputs.number != '' &&
+         needs.state.outputs.is_fork == 'false' &&
+         (needs.state.outputs.has_reviewed == 'true' ||
+          needs.review.outputs.verdict == 'pass') &&
+         needs.state.outputs.has_tmux_ok != 'true' && (
+           (github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.pipeline_pr != '') ||
+           (needs.authorize.outputs.should_run == 'true' && (
+             (github.event_name == 'pull_request_target' &&
+              github.event.pull_request.draft == false) ||
+             (github.event_name == 'issue_comment' &&
+              github.event.issue.pull_request &&
+              startsWith(github.event.comment.body, '@qwen-code /triage'))
+           ))
+         ))
       )
     # One real-user test per PR at a time. GitHub evaluates concurrency before
     # the job `if`, but after `needs`, so keep non-runnable triggers out of the
@@ -292,20 +673,10 @@ jobs:
     # self-hosted runner workspace and git worktrees and clobber each other, so
     # serialize them (cancel-in-progress: false lets the in-flight test finish).
     concurrency:
-      group: >-
-        ${{
-          (
-            ((github.event_name == 'issue_comment' &&
-              github.event.issue.pull_request &&
-              (github.event.comment.body == '@qwen-code /tmux' ||
-               startsWith(github.event.comment.body, '@qwen-code /tmux '))) ||
-             (github.event_name == 'workflow_dispatch' &&
-              github.event.inputs.tmux_pr != '')) &&
-            needs.authorize.outputs.should_run == 'true'
-          ) &&
-          format('{0}-tmux-{1}', github.workflow, github.event.issue.number || github.event.inputs.tmux_pr) ||
-          format('{0}-tmux-run-{1}', github.workflow, github.run_id)
-        }}
+      # Serialize real-user tests per PR (manual or auto-chain): they share the
+      # self-hosted workspace + git worktrees and would clobber each other.
+      # cancel-in-progress: false lets an in-flight test finish.
+      group: '${{ github.workflow }}-tmux-${{ github.event.issue.number || github.event.inputs.tmux_pr || needs.state.outputs.number || github.run_id }}'
       cancel-in-progress: false
     timeout-minutes: 45
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
@@ -317,7 +688,7 @@ jobs:
     permissions:
       contents: 'read'
     outputs:
-      pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number || github.event.inputs.tmux_pr }}'
+      pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number || github.event.inputs.tmux_pr || needs.state.outputs.number }}'
       # steps.run sets the verdict for an actual test; steps.pr sets 'n/a' when
       # the PR has no TUI surface. Both empty -> stayed silent (skip case).
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
@@ -344,7 +715,7 @@ jobs:
         id: 'pr'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.tmux_pr }}'
+          PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.tmux_pr || needs.state.outputs.number }}'
         run: |-
           set -euo pipefail
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -757,6 +1128,21 @@ jobs:
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
           echo "tmux verdict: $VERDICT (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
+      # Mark tmux passed so approval-decision can advance. 'n/a' (no TUI surface
+      # to exercise) advances too — nothing to test is not a failure.
+      - name: 'Mark tmux passed'
+        if: "steps.run.outputs.verdict == 'pass' || steps.pr.outputs.verdict == 'n/a'"
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPO: '${{ github.repository }}'
+          NUM: '${{ steps.pr.outputs.pr_number || needs.state.outputs.number }}'
+        run: |-
+          set -euo pipefail
+          gh label create 'triage:tmux-ok' --repo "$REPO" \
+            --color ededed --description 'Qwen triage: real-user testing passed' 2>/dev/null || true
+          gh pr edit "$NUM" --repo "$REPO" --add-label 'triage:tmux-ok' \
+            || echo "::warning::could not add triage:tmux-ok label"
+
       - name: 'Upload tmux results'
         if: "always() && steps.pr.outputs.decision == 'run'"
         # Don't let a missing/empty results dir (qwen crashed before writing any)
@@ -784,6 +1170,79 @@ jobs:
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
   # with the write PAT and never checks out PR code, so the write credential is
   # isolated from the untrusted-code execution in tmux-testing above.
+  # Stage 4 — final verdict. Reads the product / review / tmux signals (via their
+  # marker comments + the bot's review decision + TMUX_VERDICT) and issues one
+  # approve / request-changes / escalate. Runs only after review passed AND tmux
+  # produced a real verdict — both labels present, or both just passed this run.
+  approval-decision:
+    needs: ['authorize', 'state', 'review', 'tmux-testing']
+    timeout-minutes: 15
+    concurrency:
+      group: '${{ github.workflow }}-approval-${{ needs.state.outputs.number }}'
+      cancel-in-progress: true
+    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    permissions:
+      contents: 'read'
+      pull-requests: 'write'
+      issues: 'write'
+    if: >-
+      always() &&
+      github.repository == 'QwenLM/qwen-code' &&
+      needs.state.outputs.number != '' &&
+      (needs.state.outputs.has_reviewed == 'true' ||
+       needs.review.outputs.verdict == 'pass') &&
+      (needs.state.outputs.has_tmux_ok == 'true' ||
+       needs.tmux-testing.outputs.verdict == 'pass') && (
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.pipeline_pr != '') ||
+        (needs.authorize.outputs.should_run == 'true' && (
+          (github.event_name == 'pull_request_target' &&
+           github.event.pull_request.draft == false) ||
+          (github.event_name == 'issue_comment' &&
+           github.event.issue.pull_request &&
+           startsWith(github.event.comment.body, '@qwen-code /triage'))
+        ))
+      )
+    steps:
+      - name: 'Clean stale agent state'
+        run: |-
+          set -uo pipefail
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
+          rm -rf "$QWEN_HOME" 2>/dev/null || true
+          mkdir -p "$QWEN_HOME"
+
+      - name: 'Checkout repo'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          token: '${{ secrets.GITHUB_TOKEN }}'
+
+      - name: 'Run approval-decision'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPOSITORY: '${{ github.repository }}'
+          QWEN_HOME: '${{ runner.temp }}/qwen-home'
+          # Real tmux verdict from the upstream job (empty if tmux was skipped,
+          # e.g. a fork PR — the skill treats that as "no tmux result").
+          TMUX_VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          # Reads comments + posts the verdict; no subagents/worktrees needed.
+          settings_json: |-
+            {
+              "coreTools": [
+                "run_shell_command",
+                "read_file",
+                "grep_search",
+                "glob"
+              ],
+              "sandbox": false
+            }
+          prompt: '/approval-decision ${{ needs.state.outputs.number }} --repo ${{ github.repository }}'
+
   publish-tmux:
     needs: ['tmux-testing']
     # Post when there is a real test verdict to report (not the no-TUI 'n/a'),

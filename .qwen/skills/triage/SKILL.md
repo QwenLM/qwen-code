@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Gatekeep and review GitHub issues and pull requests for Qwen Code maintainers. Use for GitHub Action issue triage, PR admission checks, product-direction review, KISS-focused PR review, and staged bilingual GitHub comments.
+description: Triage and gatekeep GitHub issues for Qwen Code maintainers. Use for GitHub Action issue triage and staged bilingual issue comments. PR triage is handled by the staged pipeline (/product-decision, /review, /approval-decision), not this skill.
 argument-hint: '<number> [--repo owner/repo]'
 allowedTools:
   - run_shell_command
@@ -38,11 +38,6 @@ gh label list --repo "$REPO" --limit 200
   or `gh api -F body=@FILE` when the response ID is needed. Never `--body @FILE`
   or `gh api -f body=@FILE` — those post the path literally.
 - Drafts: skip
-- **Approval guardrail**: never auto-approve a cross-repository (fork) PR whose
-  title is a `refactor` type (starts with `refactor` — `refactor:`,
-  `refactor(scope):`, `refactor(scope)!:`, case-insensitive). Review it as usual,
-  but escalate to the maintainer in place of approval. See `references/pr-workflow.md`
-  Stage 3 for the deterministic check.
 
 ## Duplicate Guard
 
@@ -87,5 +82,10 @@ Stage 2 comment **must contain the actual tmux capture-pane output** pasted inli
 
 ## Workflow
 
-- Issue → read `references/issue-workflow.md`
-- PR → read `references/pr-workflow.md`
+This skill triages **issues only**. Pull requests are handled by the staged PR
+pipeline (`/product-decision` → `/review` → `/approval-decision`) in
+`qwen-triage.yml`, not here.
+
+- Pull request number → **stop**. Do not review or comment; PR triage runs via
+  the pipeline. (CI never routes PRs here; this guards against manual misuse.)
+- Issue → read `references/issue-workflow.md` and follow it.
