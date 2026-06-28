@@ -23,7 +23,9 @@ Learn how to enable and setup OpenTelemetry for Qwen Code.
 
 - `tool_output_truncated` was renamed to `qwen-code.tool_output_truncated` for namespace consistency — downstream consumers filtering on the old name should update their queries.
 
-- The `file.operation.count` metric documentation previously listed diff-stat attributes (`model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`) — these were never set on the metric. Diff-stat data is available via the `tool_call` log event's `metadata` attribute.
+- The `tool.call.latency` histogram documentation previously listed a `decision` attribute — this was never set on the histogram (only `function_name` is recorded). The `tool.call.count` counter continues to include `decision`.
+
+- The `qwen-code.file_operation` log event and `file.operation.count` metric documentation previously listed diff-stat attributes (`model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`) — these were never set on either. Diff-stat data is available via the `tool_call` log event's `metadata` attribute.
 
 ## Key Benefits
 
@@ -552,7 +554,7 @@ The following events are logged:
   - **Attributes**: `model` (string), `prompt_id` (string), `request_text` (string, optional), `subagent_name` (string, optional)
 
 - `qwen-code.api_response`: Response received from LLM API.
-  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, optional), `subagent_name` (string, optional)
+  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int/string, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, optional), `subagent_name` (string, optional)
 
 - `qwen-code.api_error`: API request failed.
   - **Attributes**: `model` (string), `prompt_id` (string), `duration_ms` (int), `error_message` (string), `response_id` (string, optional), `auth_type` (string, optional), `error_type` (string, optional), `status_code` (int/string, optional), `subagent_name` (string, optional)
@@ -561,7 +563,7 @@ The following events are logged:
   - **Attributes**: `model` (string), `prompt_id` (string), `auth_type` (string, optional), `loop_wakeups_cancelled` (int, optional)
 
 - `qwen-code.api_retry`: HTTP-status retry (429/5xx) at an LLM call site. Distinct from `chat.content_retry` which handles `InvalidStreamError` retries on a separate budget.
-  - **Attributes**: `model` (string), `prompt_id` (string, optional), `attempt_number` (int), `error_type` (string, optional), `error_message` (string), `status_code` (int/string, optional), `retry_delay_ms` (int), `duration_ms` (int), `subagent_name` (string, optional)
+  - **Attributes**: `model` (string), `prompt_id` (string, optional), `attempt_number` (int), `error_type` (string, optional), `error_message` (string), `status_code` (int/string, optional), `retry_delay_ms` (int), `duration_ms` (int, equals retry_delay_ms — backoff sleep, not HTTP round-trip; for attempt duration see the qwen-code.llm_request span), `subagent_name` (string, optional)
 
 - `qwen-code.malformed_json_response`: `generateJson` response couldn't be parsed.
   - **Attributes**: `model` (string)
