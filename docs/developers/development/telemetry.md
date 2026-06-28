@@ -348,8 +348,8 @@ header is written on every outbound `fetch`:
 traceparent: 00-<32-hex traceId>-<16-hex parentSpanId>-<01-sampled | 00-not-sampled>
 ```
 
-Additionally, a `TRACEPARENT` environment variable is set in shell child
-processes (Bash tool, hooks, monitor) so that spawned commands can
+Additionally, `TRACEPARENT` and `TRACESTATE` environment variables are set in
+shell child processes (Bash tool, hooks, monitor) so that spawned commands can
 participate in the same distributed trace.
 
 Opt in only when the LLM provider also reports into your OTel collector
@@ -825,10 +825,10 @@ Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each in
   - **Attributes**: `session.id`, `hook_event` ("PreToolUse"/"PostToolUse"/"PostToolUseFailure"/"PostToolBatch"), `tool.name`, `tool.use_id` (optional), `is_interrupt` (boolean, optional), `duration_ms`, `success`, `should_proceed` (optional), `should_stop` (optional), `block_type` (optional), `error` (optional)
 
 - `qwen-code.subagent`: Wraps a single subagent invocation.
-  - **Attributes**: `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`, `qwen-code.subagent.id`, `qwen-code.subagent.name`, `qwen-code.subagent.invocation_kind` ("foreground"/"fork"/"background"), `qwen-code.subagent.is_built_in`, `qwen-code.subagent.depth`, `qwen-code.subagent.status`, `qwen-code.subagent.terminate_reason`, `qwen-code.subagent.duration_ms`
+  - **Attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`, `qwen-code.subagent.id`, `qwen-code.subagent.name`, `qwen-code.subagent.invocation_kind` ("foreground"/"fork"/"background"), `qwen-code.subagent.is_built_in`, `qwen-code.subagent.depth`, `qwen-code.subagent.status`, `qwen-code.subagent.terminate_reason`, `qwen-code.subagent.duration_ms`
 
 - `qwen-code.daemon.request`: Wraps a daemon HTTP request.
-  - **Attributes**: `http.request.method`, `http.route`, `session.id`, `http.response.status_code`
+  - **Attributes**: `http.request.method`, `http.route`, `qwen-code.daemon.operation`, `session.id`, `http.response.status_code`
 
 - `qwen-code.daemon.bridge`: Wraps daemon bridge operations.
   - **Attributes**: `qwen-code.daemon.operation`
