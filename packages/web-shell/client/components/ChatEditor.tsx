@@ -40,7 +40,8 @@ export type ComposerToolbarAction =
   | 'model'
   | 'commands'
   | 'files'
-  | 'widthMode';
+  | 'widthMode'
+  | 'voice';
 
 interface ChatEditorProps {
   onSubmit: (
@@ -1535,15 +1536,17 @@ export const ChatEditor = memo(
                       </span>
                     </button>
                   )}
-                <VoiceButton
-                  disabled={disabled}
-                  onInsert={(text) => {
-                    const existing = core.getText();
-                    const sep = existing && !/\s$/.test(existing) ? ' ' : '';
-                    core.insertText(`${sep}${text} `);
-                    core.focus();
-                  }}
-                />
+                {showToolbarAction('voice') && (
+                  <VoiceButton
+                    disabled={disabled}
+                    onInsert={(text) => {
+                      const existing = core.getText();
+                      const sep = existing && !/\s$/.test(existing) ? ' ' : '';
+                      core.insertText(`${sep}${text} `);
+                      core.focus();
+                    }}
+                  />
+                )}
                 <button
                   className={
                     isRunning

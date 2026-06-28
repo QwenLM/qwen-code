@@ -145,6 +145,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   // Wave 1: remaining workspace
   `${QWEN_METHOD_NS}workspace/tools`,
   `${QWEN_METHOD_NS}workspace/mcp/tools`,
+  `${QWEN_METHOD_NS}workspace/mcp/resources`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
   `${QWEN_METHOD_NS}sessions/delete`,
@@ -2274,6 +2275,21 @@ export class AcpDispatcher {
           }
           const result =
             await this.bridge.getWorkspaceMcpToolsStatus(serverName);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/mcp/resources`: {
+          const serverName = String(params['serverName'] ?? '');
+          if (!serverName) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`serverName` required'),
+              );
+            return;
+          }
+          const result =
+            await this.bridge.getWorkspaceMcpResourcesStatus(serverName);
           this.replyConn(conn, id, result as unknown);
           return;
         }

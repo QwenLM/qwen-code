@@ -6,7 +6,7 @@
 
 - **There is one protocol version: `v1`.** `SERVE_PROTOCOL_VERSION = 'v1'` and `SUPPORTED_SERVE_PROTOCOL_VERSIONS = ['v1']`. v1 is additive internally; breaking frame-shape changes are reserved for v2.
 - **Each tag has a `since` version.** Future v2 daemons can advertise both v1 and v2 tags.
-- **Some tags are conditional.** Ten tags (`require_auth`, `mcp_workspace_pool`, `mcp_pool_restart`, `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`, `workspace_settings`, `session_shell_command`, `rate_limit`, `workspace_reload`) are advertised only when the corresponding deployment toggle is enabled. Tag presence means the behavior exists.
+- **Some tags are conditional.** Thirteen tags (`require_auth`, `mcp_workspace_pool`, `mcp_pool_restart`, `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`, `workspace_settings`, `workspace_voice`, `workspace_voice_transcription`, `session_shell_command`, `rate_limit`, `workspace_reload`, `voice_transcribe`) are advertised only when the corresponding deployment toggle is enabled. Tag presence means the behavior exists.
 - **Capability tag = behavior contract.** Adding new behavior under an existing tag can silently break clients that preflighted the old tag. New behavior needs a new tag.
 
 The complete registry lives in `packages/cli/src/serve/capabilities.ts`.
@@ -46,10 +46,12 @@ interface ServeCapabilityDescriptor {
 }
 ```
 
-Two v1 tags use `modes`:
+Four v1 tags use `modes`:
 
 - `mcp_guardrails: { since: 'v1', modes: ['warn', 'enforce'] }` - clients should preflight `'enforce'` before relying on refusal behavior.
 - `permission_mediation: { since: 'v1', modes: ['first-responder', 'designated', 'consensus', 'local-only'] }` - this is the build-time supported set; the active policy is in `policy.permission`.
+- `workspace_voice_transcription: { since: 'v1', modes: ['batch'] }` - the transcription path the daemon offers.
+- `voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] }` - the two transcription paths available on the `/voice/stream` WebSocket.
 
 ### Conditional tags
 
@@ -72,9 +74,15 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       typeof t.writerIdleTimeoutMs === 'number' && t.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (t) => t.persistSettingAvailable === true],
+  ['workspace_voice', (t) => t.persistSettingAvailable === true],
+  [
+    'workspace_voice_transcription',
+    (t) => t.voiceTranscriptionAvailable === true,
+  ],
   ['session_shell_command', (t) => t.sessionShellCommandEnabled === true],
   ['rate_limit', (t) => t.rateLimit === true],
   ['workspace_reload', (t) => t.reloadAvailable === true],
+  ['voice_transcribe', (t) => t.voiceWsAvailable !== false],
 ]);
 ```
 
@@ -85,9 +93,9 @@ The `Map` stores membership and predicate together. Adding a new conditional tag
 
 Baseline tags are not present in the `Map` and are advertised unconditionally. This is intentionally represented by absence rather than by a separate Set.
 
-### 67 tags (v1, grouped by domain)
+### 75 tags (v1, grouped by domain)
 
-Foundation: `health`, `capabilities`.
+Foundation: `health`, `daemon_status`, `capabilities`.
 
 Sessions: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_prompt`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, `session_rewind`, `session_hooks`, `session_branch`.
 
@@ -99,13 +107,15 @@ Permissions: `session_permission_vote`, `permission_vote`, **`permission_mediati
 
 Workspace read-only snapshots: `workspace_mcp`, `workspace_skills`, `workspace_providers`, `workspace_env`, `workspace_preflight`, `workspace_hooks`, `workspace_extensions`.
 
-Workspace mutation (Wave 4+): `workspace_memory`, `workspace_agents`, `workspace_agent_generate`, `workspace_tool_toggle`, **`workspace_settings`** (conditional), `workspace_init`, `workspace_mcp_restart`, `workspace_mcp_manage`, `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write`, **`workspace_reload`** (conditional).
+Workspace mutation (Wave 4+): `workspace_memory`, `workspace_agents`, `workspace_agent_generate`, `workspace_tool_toggle`, **`workspace_settings`** (conditional), `workspace_permissions`, `workspace_init`, `workspace_github_setup`, `workspace_trust`, `workspace_mcp_restart`, `workspace_mcp_manage`, `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write`, **`workspace_reload`** (conditional).
 
 MCP guardrails: **`mcp_guardrails`** (`modes: ['warn', 'enforce']`), `mcp_guardrail_events`, `mcp_server_runtime_mutation`, **`mcp_workspace_pool`** (conditional), **`mcp_pool_restart`** (conditional).
 
 Prompt control: **`prompt_absolute_deadline`** (conditional), **`writer_idle_timeout`** (conditional), `non_blocking_prompt`.
 
 Auth: `auth_provider_install`, `auth_device_flow`, **`require_auth`** (conditional), **`allow_origin`** (conditional).
+
+Voice: **`workspace_voice`** (conditional), **`workspace_voice_transcription`** (conditional, `modes: ['batch']`), **`voice_transcribe`** (conditional, `modes: ['streaming', 'batch']`).
 
 Rate limiting: **`rate_limit`** (conditional).
 
@@ -167,9 +177,11 @@ sequenceDiagram
 | Env                        | `QWEN_SERVE_NO_MCP_POOL=1`                                      | Stops advertising `mcp_workspace_pool` and `mcp_pool_restart`; MCP events no longer stamp `scope: 'workspace'`.               |
 | CLI flag                   | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}` | Does not change the tag set (`mcp_guardrails` is always advertised), but changes per-server reservation and refusal behavior. |
 | CLI flag / env             | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1`                      | Advertises `rate_limit`.                                                                                                      |
-| Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings`.                                                                                              |
+| Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings` and `workspace_voice`.                                                                        |
+| Embedded option            | `voiceTranscriptionAvailable`                                   | Advertises `workspace_voice_transcription`.                                                                                   |
 | CLI flag / embedded option | `--enable-session-shell` / `sessionShellCommandEnabled`         | Advertises `session_shell_command`.                                                                                           |
 | Embedded option            | `reloadAvailable`                                               | Advertises `workspace_reload`.                                                                                                |
+| Embedded option            | `voiceWsAvailable`                                              | Advertises `voice_transcribe`.                                                                                                |
 | `settings.json`            | `policy.permissionStrategy`                                     | Sets envelope `policy.permission`.                                                                                            |
 
 ## Caveats and known limits

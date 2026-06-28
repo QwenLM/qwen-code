@@ -1766,7 +1766,10 @@ export class GeminiChat {
       const contextLimit =
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      const { hard } = computeThresholds(contextLimit);
+      const { hard } = computeThresholds(
+        contextLimit,
+        this.config.getAutoCompactThreshold(),
+      );
       const imageTokenEstimate = resolveSlimmingConfig(
         this.config.getChatCompression(),
       ).imageTokenEstimate;
@@ -1973,9 +1976,8 @@ export class GeminiChat {
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
 
-        // Max output tokens escalation: when no user/env override is set,
-        // the capped default (8K) is used. If the model hits MAX_TOKENS,
-        // retry once with escalated limit (64K).
+        // Max output tokens escalation: when no user/env override is set and
+        // the model hits MAX_TOKENS, retry once with the escalated limit.
         let maxTokensEscalated = false;
         const hasUserMaxTokensOverride =
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
@@ -2361,12 +2363,11 @@ export class GeminiChat {
           }
         }
 
-        // Max output tokens escalation: if the retry loop succeeded with
-        // the capped default (8K) but hit MAX_TOKENS, retry once at the
-        // model's full output limit. This ensures models with large output
-        // limits (e.g., 128K for Claude Opus, GPT-5) are fully utilized,
-        // while using ESCALATED_MAX_TOKENS (64K) as a floor for unknown
-        // models.
+        // Max output tokens escalation: if the retry loop succeeded but hit
+        // MAX_TOKENS, retry once at the model's full output limit. This ensures
+        // models with large output limits (e.g., 128K for Claude Opus, GPT-5)
+        // are fully utilized, while using ESCALATED_MAX_TOKENS (64K) as a floor
+        // for unknown models.
         // Placed outside the retry loop so that any errors from the
         // escalated stream propagate directly (not caught by retry logic).
         const requestedMaxOutputTokens = params.config?.maxOutputTokens;
@@ -2388,7 +2389,7 @@ export class GeminiChat {
           maxTokensEscalated = true;
           const startingLimitLabel =
             requestedMaxOutputTokens === undefined
-              ? 'capped default'
+              ? 'default max_tokens'
               : `${requestedMaxOutputTokens} tokens`;
           debugLogger.info(
             `Output truncated at ${startingLimitLabel}. Escalating to ${escalatedLimit} tokens.`,

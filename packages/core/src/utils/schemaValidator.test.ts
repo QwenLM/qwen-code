@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SchemaValidator } from './schemaValidator.js';
 
 describe('SchemaValidator', () => {
@@ -65,6 +65,7 @@ describe('SchemaValidator', () => {
   });
 
   it('allows custom format values', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const schema = {
       type: 'object',
       properties: {
@@ -88,7 +89,12 @@ describe('SchemaValidator', () => {
       mask: 'foo.bar,biz.baz',
       foo: 'some value',
     };
-    expect(SchemaValidator.validate(schema, params)).toBeNull();
+    try {
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('allows valid values for known formats', () => {

@@ -26,6 +26,7 @@ import {
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
+  validateSettingValue,
 } from '../../utils/settingsUtils.js';
 import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
 import {
@@ -325,6 +326,16 @@ export function SettingsDialog({
       }
     }
 
+    if (definition) {
+      const validationError = validateSettingValue(definition, parsed);
+      if (validationError) {
+        setEditingKey(null);
+        setEditBuffer('');
+        setEditCursorPos(0);
+        return;
+      }
+    }
+
     // Update pending
     setPendingSettings((prev) =>
       parsed === undefined
@@ -601,6 +612,12 @@ export function SettingsDialog({
             }
             return;
           }
+          if (currentItem?.value === 'visionModel') {
+            if (name === 'return') {
+              onSelect('visionModel', selectedScope);
+            }
+            return;
+          }
           if (
             currentItem?.type === 'number' ||
             currentItem?.type === 'string'
@@ -615,7 +632,8 @@ export function SettingsDialog({
           if (
             currentItem?.value === 'ui.theme' ||
             currentItem?.value === 'general.preferredEditor' ||
-            currentItem?.value === 'fastModel'
+            currentItem?.value === 'fastModel' ||
+            currentItem?.value === 'visionModel'
           ) {
             onSelect(currentItem.value, selectedScope);
           }
@@ -834,7 +852,8 @@ export function SettingsDialog({
               const isSubDialogSetting =
                 item.value === 'ui.theme' ||
                 item.value === 'general.preferredEditor' ||
-                item.value === 'fastModel';
+                item.value === 'fastModel' ||
+                item.value === 'visionModel';
 
               // For numbers/strings, get the actual current value from pending settings
               const path = item.value.split('.');

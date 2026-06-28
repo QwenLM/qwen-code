@@ -3276,6 +3276,67 @@ describe('AppContainer State Management', () => {
       expect(reason).toEqual({ kind: 'background' });
     });
 
+    it('Ctrl+B does NOT promote when multiple foreground shell tool calls are executing', () => {
+      const promoteAc1 = new AbortController();
+      const promoteAc2 = new AbortController();
+      const abortSpy1 = vi.spyOn(promoteAc1, 'abort');
+      const abortSpy2 = vi.spyOn(promoteAc2, 'abort');
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [
+          {
+            status: 'executing',
+            request: { callId: 'call-shell-1', name: 'run_shell_command' },
+            promoteAbortController: promoteAc1,
+          },
+          {
+            status: 'executing',
+            request: { callId: 'call-shell-2', name: 'run_shell_command' },
+            promoteAbortController: promoteAc2,
+          },
+        ],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('PROMOTE_SHELL_TO_BACKGROUND'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      handleKeypress!({
+        name: 'b',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x02',
+      });
+
+      expect(abortSpy1).not.toHaveBeenCalled();
+      expect(abortSpy2).not.toHaveBeenCalled();
+    });
+
     it('Ctrl+B is a no-op when no foreground shell is currently executing', () => {
       // Pin the safety contract: pressing Ctrl+B mid-prompt with no
       // pending tool calls must NOT throw — falls through to the input

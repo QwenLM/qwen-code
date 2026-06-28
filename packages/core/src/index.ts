@@ -510,6 +510,7 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
+export { buildContextUsage } from './hooks/context-usage.js';
 
 // ============================================================================
 // Goals (/goal command runtime)

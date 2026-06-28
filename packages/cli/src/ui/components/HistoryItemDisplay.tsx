@@ -28,6 +28,7 @@ import {
   WarningMessage,
   ErrorMessage,
   RetryCountdownMessage,
+  VisionNoticeMessage,
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
@@ -174,6 +175,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
     case 'goal_status':
+    case 'vision_notice':
       return 0;
     default:
       return 1;
@@ -302,6 +304,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'retry_countdown' && (
         <RetryCountdownMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'vision_notice' && (
+        <VisionNoticeMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />

@@ -112,7 +112,7 @@ export async function handleSourceTest(
 
   // 5. Completeness check
   lines.push('\n## Completeness Check');
-  const completenessResult = checkCompleteness(ctx, sourcePath, source);
+  const completenessResult = checkCompleteness(ctx, sourceSlug, source);
   lines.push(...completenessResult.lines);
   if (completenessResult.hasWarning) hasWarnings = true;
 
@@ -307,14 +307,14 @@ function isEmoji(str: string): boolean {
 
 function checkCompleteness(
   ctx: SessionToolContext,
-  sourcePath: string,
+  sourceSlug: string,
   source: SourceConfig
 ): { lines: string[]; hasWarning: boolean } {
   const lines: string[] = [];
   let hasWarning = false;
 
   // Check guide.md
-  const guidePath = getSourceGuidePath(ctx.workspacePath, source.slug);
+  const guidePath = getSourceGuidePath(ctx.workspacePath, sourceSlug);
   if (!ctx.fs.exists(guidePath)) {
     hasWarning = true;
     lines.push('⚠ No guide.md file');

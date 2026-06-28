@@ -81,6 +81,7 @@ export type {
 
 export {
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
   InvalidSessionScopeError,

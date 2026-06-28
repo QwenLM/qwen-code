@@ -146,18 +146,25 @@ export interface CompactionThresholds {
  * Compute the three-tier threshold ladder for a given context window.
  *
  * Each tier is `max(proportional, absolute)`:
- *   auto = max(DEFAULT_PCT * window,                       effectiveWindow - AUTOCOMPACT_BUFFER)
- *   warn = max((DEFAULT_PCT - WARN_PCT_OFFSET) * window,   auto - WARN_BUFFER)
+ *   auto = max(pct * window,                               effectiveWindow - AUTOCOMPACT_BUFFER)
+ *   warn = max(0, max((pct - WARN_PCT_OFFSET) * window,    auto - WARN_BUFFER))
  *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
  *
- * Small windows (where the absolute branch goes negative) automatically
- * fall back to the proportional branch. Large windows are dominated by
- * the absolute branch, capping wasted reservation to ~33K instead of 30%
- * of the window.
+ * `pct` defaults to DEFAULT_PCT when not provided. Small windows (where
+ * the absolute branch goes negative) automatically fall back to the
+ * proportional branch. Large windows are dominated by the absolute branch,
+ * capping wasted reservation to ~33K instead of 30% of the window.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
-export function computeThresholds(window: number): CompactionThresholds {
+export function computeThresholds(
+  window: number,
+  pct?: number,
+): CompactionThresholds {
+  const effectivePct = Math.min(
+    1,
+    Math.max(0, pct !== undefined && Number.isFinite(pct) ? pct : DEFAULT_PCT),
+  );
   // Clamp to 0 for tiny windows (window < SUMMARY_RESERVE) so the surfaced
   // value in `/context` stays meaningful. The Math.max guards on auto/warn/hard
   // below absorb the floor — clamping does not shift those outputs because
@@ -166,13 +173,18 @@ export function computeThresholds(window: number): CompactionThresholds {
   const effectiveWindow = Math.max(0, window - SUMMARY_RESERVE);
 
   const absAuto = effectiveWindow - AUTOCOMPACT_BUFFER;
-  const auto = Math.max(DEFAULT_PCT * window, absAuto);
+  const auto = Math.max(effectivePct * window, absAuto);
 
   const absWarn = auto - WARN_BUFFER;
-  const warn = Math.max((DEFAULT_PCT - WARN_PCT_OFFSET) * window, absWarn);
+  const warn = Math.max(
+    0,
+    Math.max((effectivePct - WARN_PCT_OFFSET) * window, absWarn),
+  );
 
   const rawHard = effectiveWindow - HARD_BUFFER;
-  // Guarantee hard > auto so compaction doesn't wait until the last moment.
+  // Guarantee hard >= auto so compaction doesn't wait until the last moment.
+  // When pct=1, auto equals the full window and hard collapses to auto
+  // (degenerate case: both thresholds trigger simultaneously).
   // For tiny/zero windows where auto is already at the proportional floor,
   // clamp hard to the window itself so it never exceeds the actual limit.
   const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
@@ -340,7 +352,10 @@ export class ChatCompressionService {
       const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      const { auto } = computeThresholds(contextLimit);
+      const { auto } = computeThresholds(
+        contextLimit,
+        config.getAutoCompactThreshold(),
+      );
       // Order of preference for the effective-token estimate:
       //   1. Caller already computed it (sendMessageStream hard-tier rescue)
       //   2. Compute it here from history + pending user message
