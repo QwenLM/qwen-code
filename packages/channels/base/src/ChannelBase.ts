@@ -1,11 +1,16 @@
 import { basename } from 'node:path';
-import type { ChannelConfig, DispatchMode, Envelope } from './types.js';
+import type {
+  ChannelConfig,
+  DispatchMode,
+  Envelope,
+  SessionScope,
+} from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
-import { sanitizeSenderName } from './sanitize.js';
+import { sanitizeSenderName, sanitizeQuotedText } from './sanitize.js';
 import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
 /**
@@ -17,6 +22,15 @@ import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
  * later is already invalidated.
  */
 export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
+
+/**
+ * Session scopes whose group sessions are SHARED across senders, so destructive
+ * commands (/clear) must be confirm/authorization-gated: `thread` maps every
+ * sender in a thread to one key, and `single` collapses the whole channel to
+ * `__single__` — the most shared scope of all. `user` scope is per-sender and
+ * therefore NOT shared.
+ */
+const SHARED_SCOPES: ReadonlySet<SessionScope> = new Set(['thread', 'single']);
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -240,7 +254,11 @@ export abstract class ChannelBase {
           this.collectBuffers.delete(id);
           if (active) {
             active.cancelled = true;
-            await this.bridge.cancelSession(id).catch(() => {});
+            // Best-effort cancel: fire-and-forget. A wedged child or daemon
+            // transport can leave the cancelSession REQUEST itself pending
+            // forever; awaiting it would hang /clear before the bounded wait
+            // below even starts, so don't await it.
+            void this.bridge.cancelSession(id).catch(() => {});
             // Bound the wait: a wedged child may never resolve active.done, so
             // race it against a timeout and purge anyway when the timeout wins.
             let timer: ReturnType<typeof setTimeout> | undefined;
@@ -293,11 +311,11 @@ export abstract class ChannelBase {
     };
 
     const isSharedGroupSession = (envelope: Envelope): boolean =>
-      envelope.isGroup && this.config.sessionScope === 'thread';
+      envelope.isGroup && SHARED_SCOPES.has(this.config.sessionScope);
 
-    // In a thread-scoped group the session is shared, so clearing it affects
-    // everyone: restrict it to authorized senders (config.allowedUsers, when
-    // set) and require an explicit "confirm". DMs and per-user groups clear
+    // In a thread- or single-scoped group the session is shared, so clearing it
+    // affects everyone: restrict it to authorized senders (config.allowedUsers,
+    // when set) and require an explicit "confirm". DMs and per-user groups clear
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
       if (isSharedGroupSession(envelope)) {
@@ -444,13 +462,19 @@ export abstract class ChannelBase {
 
   /**
    * Whether `text` is a real slash command rather than prose that merely starts
-   * with `/`. Mirrors the CLI's classifier (cli `ui/utils/commandUtils.ts`
-   * `isSlashCommand`): a command is `/<name>[ args]` whose first whitespace-
-   * delimited token is non-empty and free of path separators, and is not a `//`
-   * line comment or `/*` block comment. The CLI sends slash-prefixed paths
-   * (`/tmp/foo`), comments and a bare `/` to the model as prose, so a group must
-   * still attribute them. Purely lexical — never consults the async command
-   * list, so it can't race a fresh session.
+   * with `/`. Closely follows the CLI's classifier (cli
+   * `ui/utils/commandUtils.ts` `isSlashCommand`): a command is `/<name>[ args]`
+   * whose first whitespace-delimited token is non-empty and free of path
+   * separators, and is not a `//` line comment or `/*` block comment. The CLI
+   * sends slash-prefixed paths (`/tmp/foo`) and comments to the model as prose,
+   * so a group must still attribute them.
+   *
+   * INTENTIONAL divergence: a bare `/` is a command to the CLI (empty first
+   * token has no path separator) but prose here (non-empty first token
+   * required), so a lone `/` keeps its `[sender]` attribution — there is no
+   * command named `''` to forward, and attributing it is the safe default.
+   * Purely lexical — never consults the async command list, so it can't race a
+   * fresh session.
    */
   private isSlashCommand(text: string): boolean {
     const trimmed = text.trim();
@@ -566,16 +590,12 @@ export abstract class ChannelBase {
     }
 
     if (envelope.referencedText) {
-      // Quoted text is attacker-controlled: strip control chars and cap length so
-      // it can't inject newlines/instructions or balloon the prompt.
-      const quoted = envelope.referencedText
-        // eslint-disable-next-line no-control-regex
-        .replace(/[\u0000-\u001f\u007f]/g, ' ')
-        // Also strip the wrapper's own delimiters so a crafted quote (e.g.
-        // `"] [SYSTEM] ...`) can't close [Replying to: "..."] and inject its
-        // own top-level instructions.
-        .replace(/["[\]]/g, ' ')
-        .slice(0, 500);
+      // Quoted text is attacker-controlled. sanitizeQuotedText strips C0/DEL
+      // controls, Unicode line/paragraph separators (U+2028/U+2029) and bidi
+      // overrides, and the wrapper's own `"[]` delimiters, then caps length -
+      // so a crafted quote can't inject newlines/instructions, close the
+      // [Replying to: "..."] wrapper, flip text direction, or balloon the prompt.
+      const quoted = sanitizeQuotedText(envelope.referencedText, 500);
       promptText = `[Replying to: "${quoted}"]\n\n${promptText}`;
     }
 
@@ -590,7 +610,12 @@ export abstract class ChannelBase {
           imageMimeType = att.mimeType;
         } else if (att.filePath) {
           const label = att.type === 'file' ? 'file' : att.type;
-          const name = att.fileName ? ` "${att.fileName}"` : '';
+          // Filenames can be attacker-supplied (e.g. DingTalk passes the user's
+          // filename), so neutralize them the same way as a reply quote before
+          // embedding into the `"..."` wrapper.
+          const name = att.fileName
+            ? ` "${sanitizeQuotedText(att.fileName, 128)}"`
+            : '';
           filePaths.push(
             `User sent a ${label}${name}. It has been saved to: ${att.filePath}`,
           );
@@ -630,11 +655,23 @@ export abstract class ChannelBase {
           return;
         }
         case 'steer': {
-          // Cancel the running prompt, then fall through to send a new one
+          // Cancel the running prompt, then fall through to send a new one.
           active.cancelled = true;
-          await this.bridge.cancelSession(sessionId).catch(() => {});
-          // Wait for the active prompt to finish winding down
-          await active.done;
+          // Best-effort cancel (fire-and-forget): a wedged child/daemon can leave
+          // the cancelSession request pending forever — don't await it.
+          void this.bridge.cancelSession(sessionId).catch(() => {});
+          // Bound the wind-down wait the same way /clear does: a wedged child may
+          // never resolve active.done, and an UNBOUNDED await here would pin the
+          // session queue forever (steer is the default mode), so race it against
+          // a timeout and proceed when the timeout wins.
+          let steerTimer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            active.done,
+            new Promise<void>((resolve) => {
+              steerTimer = setTimeout(resolve, CLEAR_CANCEL_TIMEOUT_MS);
+            }),
+          ]);
+          clearTimeout(steerTimer);
           // Prepend a cancellation note so the agent understands context
           promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
           break;
@@ -665,7 +702,7 @@ export abstract class ChannelBase {
         // Surface the drop — otherwise an unanswered queued message vanishes
         // silently, making "my message was never answered" undiagnosable.
         process.stderr.write(
-          `[${this.name}] dropped queued turn for session ${sessionId}: session was cleared before it ran\n`,
+          `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran\n`,
         );
         return;
       }

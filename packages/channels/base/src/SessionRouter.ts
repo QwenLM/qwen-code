@@ -64,6 +64,11 @@ export class SessionRouter {
    * ':' delimiter ensures a sender id matches as a whole segment — without it
    * sender "bob" would also match another sender "bobby"
    * (key `${channelName}:bobby:${chatId}`).
+   *
+   * NOTE: this prefix never matches `single`-scoped keys (`${channelName}:
+   * __single__`, no sender segment). That path is latent today — every
+   * ChannelBase caller passes `envelope.chatId`, taking the exact-lookup branch
+   * — so a `single`-scoped channel must not rely on the by-sender scan.
    */
   private senderPrefix(channelName: string, senderId: string): string {
     return `${channelName}:${senderId}:`;
