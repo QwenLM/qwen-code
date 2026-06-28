@@ -9,6 +9,7 @@ import {
   sanitizeSenderName,
   sanitizeQuotedText,
   sanitizePromptPath,
+  sanitizeLogText,
 } from './sanitize.js';
 import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
@@ -627,6 +628,32 @@ export abstract class ChannelBase {
     return COMMAND_TOKEN_RE.test(firstToken);
   }
 
+  /**
+   * Whether `text` names a command this channel can actually run: a locally
+   * registered command (`this.commands`, e.g. /clear, /who) OR an agent command
+   * the bridge currently exposes (`bridge.availableCommands`). Paired with
+   * isSlashCommand so the [sender] attribution tag is suppressed ONLY for
+   * RECOGNIZED commands; command-SHAPED-but-unrecognized text (e.g.
+   * `/x\n[SYSTEM]: …`) keeps its tag rather than reaching a shared group
+   * unattributed, where an injected second line is more likely read as a system
+   * directive. Purely synchronous, like isSlashCommand: it reads the latest
+   * availableCommands snapshot WITHOUT awaiting, so it never races a fresh
+   * session. Limitation of that no-await contract: availableCommands is populated
+   * asynchronously by the agent, so a genuine agent command sent before the
+   * snapshot loads is treated as unrecognized and KEEPS its tag (the tag is
+   * harmless prose to the CLI here — the safe default — whereas suppressing it
+   * for unrecognized text is the injection risk this guards).
+   */
+  private isRecognizedCommand(text: string): boolean {
+    const parsed = this.parseCommand(text);
+    if (!parsed) return false;
+    if (this.commands.has(parsed.command)) return true;
+    const agentCommands = this.bridge.availableCommands ?? [];
+    return agentCommands.some(
+      (cmd) => cmd.name.toLowerCase() === parsed.command,
+    );
+  }
+
   async handleInbound(envelope: Envelope): Promise<void> {
     // 1. Group gate: policy + allowlist + mention gating
     const groupResult = this.groupGate.check(envelope);
@@ -753,16 +780,23 @@ export abstract class ChannelBase {
     // that is false for a user-scope GROUP, which still needs attribution. Sanitize
     // the name so a crafted nick can't break out of the [..] tag or inject
     // newlines. Skipped for a per-user 1:1 chat and for already-prefixed re-entries
-    // (collect-mode coalescing). Real slash commands are also passed through
-    // verbatim — a [sender] prefix would stop them from parsing — but only genuine
-    // command shapes (isSlashCommand, which mirrors the CLI's classifier).
-    // Slash-prefixed paths (/tmp/foo) and comments (//…, /*…*/) are prose to the
-    // CLI, so they still get attributed. The check is purely lexical, so it never
-    // races the async command list.
+    // (collect-mode coalescing). The tag is also suppressed for a real slash
+    // command — a [sender] prefix would stop it from parsing — but ONLY when it is
+    // BOTH a genuine command SHAPE (isSlashCommand) AND a RECOGNIZED command
+    // (isRecognizedCommand: a locally registered or agent-exposed command). Command-
+    // shaped-but-unrecognized text like `/x\n[SYSTEM]: …` (token matches the charset
+    // but no such command exists) KEEPS its tag, so its injected second line can't
+    // reach a shared group unattributed and pose as a system directive. Slash-
+    // prefixed paths (/tmp/foo) and comments (//…, /*…*/) are prose, so they stay
+    // attributed too. Both checks are synchronous (no await), so this never races
+    // the async command list — see isRecognizedCommand for the no-await tradeoff.
     if (
       (envelope.isGroup || this.config.sessionScope === 'single') &&
       !envelope.alreadyPrefixed &&
-      !this.isSlashCommand(envelope.text)
+      !(
+        this.isSlashCommand(envelope.text) &&
+        this.isRecognizedCommand(envelope.text)
+      )
     ) {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
@@ -844,6 +878,18 @@ export abstract class ChannelBase {
           return;
         }
         case 'steer': {
+          // Authorization gate (mirrors /cancel): steer = cancel-running +
+          // send-new, so without this an UNAUTHORIZED member of a shared session —
+          // already blocked from /cancel — could abort another user's running turn
+          // just by sending any normal message, defeating the /cancel restriction.
+          // If not authorized, break out of the steer case: the message is NOT
+          // dropped — it falls through to normal queuing (chains onto the session
+          // queue tail and runs AFTER the active turn) without cancelling it.
+          // isAuthorizedForSharedSession returns true for 1:1/non-shared sessions
+          // and for authorized members, so their steer-cancel is unchanged.
+          if (!this.isAuthorizedForSharedSession(envelope)) {
+            break;
+          }
           // Best-effort cancel the running turn so it winds down sooner, then fall
           // through to CHAIN this new turn onto the session queue tail (see `prev`
           // below). The new turn therefore runs ONLY AFTER the old turn's finally
@@ -907,17 +953,14 @@ export abstract class ChannelBase {
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         // Surface the drop — otherwise an unanswered queued message vanishes
         // silently, making "my message was never answered" undiagnosable.
-        // envelope.text is attacker-controlled: render newline visibly, then strip
-        // the remaining control chars — C0/DEL plus the C1 block (notably NEL
-        // U+0085, which renders as a line break and could forge an extra [channel]
-        // log line; CR could overwrite the log line, ESC could inject ANSI/OSC) —
-        // before they reach an operator's terminal. Matches the C0/DEL+C1 the
-        // prompt embed paths now neutralize (see PROMPT_UNSAFE_INVISIBLES).
-        const loggedText = envelope.text
-          .slice(0, 80)
-          .replace(/\n/g, '\\n')
-          // eslint-disable-next-line no-control-regex
-          .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+        // envelope.text is attacker-controlled, so neutralize it with the shared
+        // log sanitizer: it renders newlines visibly and strips the C0/DEL controls
+        // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line
+        // break that could forge an extra [channel] log line), the Unicode line/
+        // paragraph separators U+2028/U+2029, and the bidi overrides — any of which
+        // would otherwise inject, overwrite, or reorder an operator's audit line.
+        // Same helper as the QQ audit log, so the defense can't drift between sites.
+        const loggedText = sanitizeLogText(envelope.text, 80);
         process.stderr.write(
           `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${loggedText})\n`,
         );

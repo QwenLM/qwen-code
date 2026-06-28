@@ -27,7 +27,7 @@ export type { GroupCheckResult } from './GroupGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
-export { sanitizeSenderName } from './sanitize.js';
+export { sanitizeSenderName, sanitizeLogText } from './sanitize.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,

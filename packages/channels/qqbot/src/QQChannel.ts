@@ -17,6 +17,7 @@ import {
   SessionRouter,
   getGlobalQwenDir,
   sanitizeSenderName,
+  sanitizeLogText,
 } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
@@ -975,17 +976,14 @@ export class QQChannel extends ChannelBase {
     // CR/LF/ANSI escapes could otherwise forge or corrupt the operator audit log.
     const safeName = sanitizeSenderName(senderName);
     // Log slash commands for an audit trail. cleanText is attacker-controlled, so
-    // render newlines visibly then strip the remaining control chars — C0/DEL plus
-    // the C1 block (notably NEL U+0085, which renders as a line break and could
-    // forge an extra log line; ESC could inject ANSI/OSC) — before they reach an
-    // operator's terminal. Mirrors ChannelBase's dropped-turn log and the C0/DEL+C1
-    // the prompt embed paths now neutralize.
+    // neutralize it with the shared log sanitizer (same helper as ChannelBase's
+    // dropped-turn log): it renders newlines visibly and strips the C0/DEL controls
+    // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line break
+    // that could forge an extra log line), the Unicode line/paragraph separators
+    // U+2028/U+2029, and the bidi overrides — any of which would otherwise inject,
+    // overwrite, or reorder an operator's audit line.
     if (isSlash) {
-      const loggedCmd = cleanText
-        .slice(0, 80)
-        .replace(/\n/g, '\\n')
-        // eslint-disable-next-line no-control-regex
-        .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+      const loggedCmd = sanitizeLogText(cleanText, 80);
       process.stderr.write(
         `[QQ:${this.name}] Slash cmd from ${safeName} (${chatId}): ${loggedCmd}\n`,
       );

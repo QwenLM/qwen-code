@@ -8,7 +8,7 @@
  * U+2066-U+2069 -> trojan-source, where the visual order differs from the
  * logical byte order). ASCII C0/DEL (incl. CR/LF) are stripped by each caller.
  */
-const PROMPT_UNSAFE_INVISIBLES =
+export const PROMPT_UNSAFE_INVISIBLES =
   /[\u0080-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
 /**
@@ -87,4 +87,27 @@ export function sanitizePromptPath(path: string): string {
     .replace(/[\u0000-\u001f\u007f]/g, ' ');
   // Cap by code point so a path ending in an emoji can't be split mid-pair.
   return truncateCodePoints(cleaned, 1024);
+}
+
+/**
+ * Neutralize attacker-controlled text before it is written to a single-line
+ * stderr audit/diagnostic log. Caps to `maxLen` code points, renders ASCII
+ * newlines as a visible `\n` escape (so a multi-line payload stays one readable
+ * log line instead of collapsing to a space), then strips everything that could
+ * forge or corrupt a log line: PROMPT_UNSAFE_INVISIBLES (the C1 block incl. NEL
+ * U+0085, the Unicode line/paragraph separators U+2028/U+2029, and the bidi
+ * override/isolate controls — all of which render as a line break or reorder
+ * text) AND the C0/DEL controls (CR could overwrite the line, ESC could inject
+ * ANSI/OSC). Shared by every audit-log site so the strip set can't drift apart.
+ */
+export function sanitizeLogText(text: string, maxLen: number): string {
+  return (
+    truncateCodePoints(text, maxLen)
+      // Render real newlines visibly BEFORE the control strip, so the common
+      // ASCII-newline case shows as `\n` rather than collapsing to a space.
+      .replace(/\n/g, '\\n')
+      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+  );
 }

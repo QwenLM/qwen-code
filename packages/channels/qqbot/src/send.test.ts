@@ -111,6 +111,9 @@ vi.mock('@qwen-code/channel-base', async () => {
     },
     getGlobalQwenDir: () => '/tmp/test-qwen',
     sanitizeSenderName: real.sanitizeSenderName,
+    // Use the REAL log sanitizer so the audit-log hygiene test exercises the
+    // shared strip set (C0/DEL + PROMPT_UNSAFE_INVISIBLES), not a stub.
+    sanitizeLogText: real.sanitizeLogText,
   };
 });
 
@@ -432,13 +435,17 @@ describe('group sender-name sanitization', () => {
     const ESC = String.fromCharCode(0x1b);
     // NEL (U+0085) is a Unicode line break and U+009B a C1 CSI introducer: both are
     // attacker-controlled C1 chars that must be neutralized like ESC/CR, or a raw
-    // NEL would render as a line break and forge a second audit entry.
+    // NEL would render as a line break and forge a second audit entry. U+2028 (line
+    // separator) likewise renders as a break and U+202E (bidi RTL override) reorders
+    // the line (trojan-source) — both covered by the shared log sanitizer.
     const NEL = String.fromCharCode(0x85);
     const C1 = String.fromCharCode(0x9b);
+    const LS = String.fromCharCode(0x2028);
+    const RLO = String.fromCharCode(0x202e);
     (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
       id: 'evt-audit',
       group_openid: 'grp-1',
-      content: `/deploy ${ESC}[31m${NEL}halt${C1}go\nrm -rf prod`,
+      content: `/deploy ${ESC}[31m${NEL}halt${C1}go${LS}sep${RLO}rev\nrm -rf prod`,
       author: { username: `Ev${ESC}[2J\nil`, id: 'uid', user_openid: 'uo' },
     });
 
@@ -459,6 +466,12 @@ describe('group sender-name sanitization', () => {
     // Mutation check: reverting the strip to C0/DEL only lets NEL/C1 through here.
     expect(audit!.includes(NEL)).toBe(false);
     expect(audit!.includes(C1)).toBe(false);
+    // The Unicode line separator U+2028 (renders as a break) and the bidi RTL
+    // override U+202E (reorders the line) are neutralized via the shared sanitizer's
+    // PROMPT_UNSAFE_INVISIBLES half. Mutation check: dropping PROMPT_UNSAFE_INVISIBLES
+    // from sanitizeLogText lets U+2028/U+202E through here.
+    expect(audit!.includes(LS)).toBe(false);
+    expect(audit!.includes(RLO)).toBe(false);
     // The command's embedded newline is rendered visibly (\n), not as a real break.
     expect(audit).toContain('\\n');
     expect(audit).toContain('Slash cmd from');

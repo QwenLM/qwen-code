@@ -3,6 +3,7 @@ import {
   sanitizeSenderName,
   sanitizeQuotedText,
   sanitizePromptPath,
+  sanitizeLogText,
 } from './sanitize.js';
 
 // Unicode line/paragraph separators and bidi override/isolate controls, built
@@ -189,5 +190,47 @@ describe('sanitizeQuotedText', () => {
     // The unit just before the ellipsis is a whole emoji's low surrogate, not a
     // dangling high surrogate.
     expect(isHighSurrogate(out.charCodeAt(out.length - 2))).toBe(false);
+  });
+});
+
+describe('sanitizeLogText', () => {
+  const CR = String.fromCharCode(0x0d);
+  const ESC = String.fromCharCode(0x1b);
+  const DEL = String.fromCharCode(0x7f);
+
+  it('passes through plain text unchanged', () => {
+    expect(sanitizeLogText('hello world', 80)).toBe('hello world');
+  });
+
+  it('renders ASCII newlines visibly so a payload stays one log line', () => {
+    expect(sanitizeLogText('a\nb', 80)).toBe('a\\nb');
+  });
+
+  it('strips C0/DEL controls that could overwrite the line or inject ANSI', () => {
+    const out = sanitizeLogText(`a${CR}${ESC}[2Kb${DEL}c`, 80);
+    expect(out).not.toContain(CR);
+    expect(out).not.toContain(ESC);
+    expect(out).not.toContain(DEL);
+  });
+
+  it('neutralizes PROMPT_UNSAFE_INVISIBLES: C1 (NEL/CSI), U+2028/U+2029, and bidi', () => {
+    // Mutation check: dropping PROMPT_UNSAFE_INVISIBLES from the helper lets the
+    // line/para separators (render as breaks) and the bidi controls through.
+    const out = sanitizeLogText(`a${NEL}${CSI}${LS}${PS}${RLO}${PDI}b`, 80);
+    expect(out).not.toContain(NEL);
+    expect(out).not.toContain(CSI);
+    expect(out).not.toContain(LS);
+    expect(out).not.toContain(PS);
+    expect(out).not.toContain(RLO);
+    expect(out).not.toContain(PDI);
+  });
+
+  it('caps to maxLen code points without splitting a surrogate pair', () => {
+    // Cap by code point so an emoji at the boundary is never cut mid-pair.
+    const out = sanitizeLogText(EMOJI.repeat(100), 5);
+    expect(Array.from(out)).toHaveLength(5);
+    expect(out).toBe(EMOJI.repeat(5));
+    // No dangling high surrogate at the end.
+    expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
   });
 });
