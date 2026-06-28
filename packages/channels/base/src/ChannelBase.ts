@@ -784,13 +784,28 @@ export abstract class ChannelBase {
         this.bridge.off('textChunk', onChunk);
         streamer?.stop();
         this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
-        this.activePrompts.delete(sessionId);
-        // Signal any steer waiter that we're done
+        // Identity guard: a turn that wedged past the steer/clear bounded wait
+        // gets replaced — the steer (or /clear) gives up on active.done and a
+        // fresh turn re-seeds activePrompts (and owns the collect buffer) for
+        // this session. When the wedged bridge.prompt finally settles and runs
+        // this finally, an unconditional delete/drain would clobber that live
+        // replacement turn's state — stripping its steer protection so a later
+        // turn sees no active prompt. So only touch the per-session maps when
+        // the entry is still ours.
+        const stillCurrent = this.activePrompts.get(sessionId) === promptState;
+        if (stillCurrent) {
+          this.activePrompts.delete(sessionId);
+        }
+        // Signal any steer/clear waiter racing our done that we're done — even
+        // a replaced wedged turn must release them (they already timed out).
         promptState.resolve();
 
-        // Drain collect buffer if any messages accumulated
+        // Drain collect buffer if any messages accumulated — but only while
+        // we're still the active turn, so a replaced wedged turn can't drain the
+        // buffer the live replacement turn now owns (mixed-mode single-scope can
+        // pair a steer turn with collect follow-ups on the same session).
         const buffer = this.collectBuffers.get(sessionId);
-        if (buffer && buffer.length > 0) {
+        if (stillCurrent && buffer && buffer.length > 0) {
           this.collectBuffers.delete(sessionId);
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');

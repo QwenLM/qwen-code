@@ -1734,6 +1734,76 @@ describe('ChannelBase', () => {
       expect(ch.sent.some((m) => m.text === 'second response')).toBe(true);
     });
 
+    it('steer: a wedged turn settling late does not clobber the replacement turn (keeps steer protection for the next turn)', async () => {
+      // Reproduces the activePrompts-clobber race: turn A wedges (its bridge.prompt
+      // never settles), the steer bounded wait times out and turn B starts a fresh
+      // chain + registers ITS OWN activePrompt. When A's prompt finally settles and
+      // runs its finally, an UNCONDITIONAL activePrompts.delete would remove B's
+      // entry — so a later turn C would see no active prompt and silently lose steer
+      // protection. The identity guard must keep B's entry intact.
+      let resolveA!: (v: string) => void;
+      const wedgedA = new Promise<string>((r) => {
+        resolveA = r;
+      });
+      const pendingB = new Promise<string>(() => {}); // never resolves: B stays active
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return wedgedA;
+        if (callCount === 2) return pendingB;
+        return Promise.resolve('third response');
+      });
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const ch = createChannel({ dispatchMode: 'steer' });
+      const maps = ch as unknown as { activePrompts: Map<string, unknown> };
+
+      // Turn A starts and wedges — it owns the active-prompt slot. Keep the promise
+      // (we settle it manually later); don't await it (it can't settle on its own).
+      const pA = ch.handleInbound(envelope({ text: 'A' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+
+      vi.useFakeTimers();
+      try {
+        // Turn B steers in. A.done never resolves, so the bounded wait times out
+        // (steerWedged) and B starts a fresh chain, registering its own activePrompt.
+        const pB = ch.handleInbound(envelope({ text: 'B' }));
+        void pB; // floating by design: B's prompt never settles
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        const bEntry = maps.activePrompts.get(sid);
+        expect(bEntry).toBeDefined();
+
+        // A's wedged prompt finally settles and runs A's finally. `await pA` is the
+        // deterministic sync point — it resolves only after A's finally completes.
+        resolveA('late response from A');
+        await pA;
+
+        // The guard kept B's entry: an unconditional delete would have removed it.
+        expect(maps.activePrompts.get(sid)).toBe(bEntry);
+
+        // Turn C steers in: it must still SEE the active prompt (B) and engage steer
+        // protection — cancel B and re-prompt with the cancellation note. Without the
+        // guard, C would see no active prompt and forward 'C' verbatim instead.
+        const pC = ch.handleInbound(envelope({ text: 'C' }));
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        await pC;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(3);
+      const cText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[2][1] as string;
+      expect(cText).toContain('previous request has been cancelled');
+      expect(cText).toContain('C');
+      expect(ch.sent.some((m) => m.text === 'third response')).toBe(true);
+    });
+
     it('/clear cancels an in-flight prompt and suppresses its stale response', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
