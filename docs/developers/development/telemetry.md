@@ -23,6 +23,8 @@ Learn how to enable and setup OpenTelemetry for Qwen Code.
 
 - `tool_output_truncated` was renamed to `qwen-code.tool_output_truncated` for namespace consistency — downstream consumers filtering on the old name should update their queries.
 
+- The `file.operation.count` metric documentation previously listed diff-stat attributes (`model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`) — these were never set on the metric. Diff-stat data is available via the `tool_call` log event's `metadata` attribute.
+
 ## Key Benefits
 
 - **🔍 Usage Analytics**: Understand interaction patterns and feature adoption
@@ -662,6 +664,12 @@ The following events are logged:
 
 - `qwen-code.next_speaker_check`: Next speaker determination.
   - **Attributes**: `prompt_id` (string), `finish_reason` (string), `result` (string)
+
+- `loop_detected`: Loop detected during agent execution. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
+  - **Attributes**: `loop_type` (string), `prompt_id` (string)
+
+- `kitty_sequence_overflow`: Kitty graphics protocol sequence exceeded buffer size. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
+  - **Attributes**: `sequence_length` (int), `truncated_sequence` (string, first 20 chars)
 
 ### Metrics
 
