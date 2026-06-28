@@ -691,6 +691,14 @@ export abstract class ChannelBase {
           // can't deliver a stale response or resurrect the session — it just
           // must not block this turn's queue. Re-seed the chain below.
           steerWedged = !woundDown;
+          if (steerWedged) {
+            // The wedged turn never wound down within the bound and is being
+            // abandoned — surface it like the queue-drop path below, so an
+            // abandoned turn isn't invisible.
+            process.stderr.write(
+              `[${this.name}] steer abandoned a wedged turn for session ${sessionId}: it did not wind down within ${CLEAR_CANCEL_TIMEOUT_MS}ms\n`,
+            );
+          }
           // Prepend a cancellation note so the agent understands context
           promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
           break;
@@ -783,17 +791,20 @@ export abstract class ChannelBase {
       } finally {
         this.bridge.off('textChunk', onChunk);
         streamer?.stop();
-        this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
         // Identity guard: a turn that wedged past the steer/clear bounded wait
         // gets replaced — the steer (or /clear) gives up on active.done and a
         // fresh turn re-seeds activePrompts (and owns the collect buffer) for
         // this session. When the wedged bridge.prompt finally settles and runs
-        // this finally, an unconditional delete/drain would clobber that live
-        // replacement turn's state — stripping its steer protection so a later
-        // turn sees no active prompt. So only touch the per-session maps when
-        // the entry is still ours.
+        // this finally, touching session-visible state would clobber that live
+        // replacement turn — stripping its steer protection (a later turn sees
+        // no active prompt) or ending the working indicator it re-seeded. So
+        // only touch the session-scoped state when the entry is still ours.
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         if (stillCurrent) {
+          // onPromptEnd hides a session/chat-scoped indicator (e.g. the typing
+          // indicator keyed by chatId): a superseded turn must NOT end it, or it
+          // would stop the successor turn's indicator while it is still working.
+          this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
           this.activePrompts.delete(sessionId);
         }
         // Signal any steer/clear waiter racing our done that we're done — even

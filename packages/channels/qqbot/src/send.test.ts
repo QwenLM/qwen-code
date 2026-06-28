@@ -102,9 +102,16 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
-  // Mirror the real helper so the self-prefix sanitization is still exercised.
+  // Mirror the real sanitizeSenderName faithfully (invisibles -> C0/DEL ->
+  // bracket/CRLF delimiters -> cap at 64) so a trojan-source or control-char
+  // regression in the real helper is caught here too.
   sanitizeSenderName: (name: string) =>
-    name.replace(/[[\]\r\n]/g, ' ').slice(0, 64),
+    name
+      .replace(/[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/[[\]\r\n]/g, ' ')
+      .slice(0, 64),
 }));
 
 const { QQChannel } = await import('./QQChannel.js');

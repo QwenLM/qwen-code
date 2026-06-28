@@ -33,6 +33,16 @@ describe('sanitizeSenderName', () => {
     expect(out).not.toContain(PDI);
   });
 
+  it('strips C0/DEL control chars (e.g. BEL/ESC) before they reach the [name] tag', () => {
+    const BEL = String.fromCharCode(0x07);
+    const ESC = String.fromCharCode(0x1b); // would start a terminal escape sequence
+    const DEL = String.fromCharCode(0x7f);
+    const out = sanitizeSenderName(`a${BEL}b${ESC}c${DEL}d`);
+    expect(out).not.toContain(BEL);
+    expect(out).not.toContain(ESC);
+    expect(out).not.toContain(DEL);
+  });
+
   it('caps the name at 64 chars', () => {
     expect(sanitizeSenderName('a'.repeat(200))).toHaveLength(64);
   });

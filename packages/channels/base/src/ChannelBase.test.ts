@@ -1804,6 +1804,70 @@ describe('ChannelBase', () => {
       expect(ch.sent.some((m) => m.text === 'third response')).toBe(true);
     });
 
+    it('steer: a wedged turn settling late does not end the replacement turn working indicator', async () => {
+      // FIX (onPromptEnd indicator-clobber): turn A wedges, the steer bounded wait
+      // times out, and turn B starts a fresh chain — re-seeding the session's
+      // working indicator via onPromptStart. onPromptEnd hides a SESSION/CHAT-scoped
+      // indicator (e.g. Telegram's typing interval keyed by chatId), so when A's
+      // wedged prompt finally settles and runs its finally, an UNCONDITIONAL
+      // onPromptEnd would end the indicator B re-seeded — stopping B's typing while
+      // B is still working. The identity guard must skip onPromptEnd once A is no
+      // longer the active turn. (messageId distinguishes A's hook calls from B's.)
+      let resolveA!: (v: string) => void;
+      const wedgedA = new Promise<string>((r) => {
+        resolveA = r;
+      });
+      const pendingB = new Promise<string>(() => {}); // never resolves: B stays active
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        return callCount === 1 ? wedgedA : pendingB;
+      });
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const ch = createChannel({ dispatchMode: 'steer' });
+      const maps = ch as unknown as { activePrompts: Map<string, unknown> };
+
+      // Turn A starts and wedges; don't await it (it can't settle on its own).
+      const pA = ch.handleInbound(envelope({ text: 'A', messageId: 'mA' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+
+      vi.useFakeTimers();
+      try {
+        // Turn B steers in: A.done never resolves, the bounded wait times out, and
+        // B starts a fresh chain — onPromptStart re-seeds the indicator for this
+        // session and B becomes the active turn (its prompt never settles).
+        const pB = ch.handleInbound(envelope({ text: 'B', messageId: 'mB' }));
+        void pB; // floating by design: B's prompt never settles
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        expect(maps.activePrompts.get(sid)).toBeDefined();
+        expect(ch.promptStarts.some((e) => e.messageId === 'mB')).toBe(true);
+        // Only onPromptStart has fired so far — no turn has ended its indicator
+        // (A is wedged, B is pending).
+        expect(ch.promptEnds).toHaveLength(0);
+
+        // A's wedged prompt finally settles and runs A's finally. `await pA` is the
+        // deterministic sync point — it resolves only after A's finally completes.
+        resolveA('late response from A');
+        await pA;
+
+        // The guard skipped A's onPromptEnd: A is superseded (not stillCurrent), so
+        // it must NOT end the indicator B re-seeded. Reverting the guard makes A's
+        // onPromptEnd fire here (promptEnds gains an 'mA' entry) and fails this.
+        expect(ch.promptEnds.some((e) => e.messageId === 'mA')).toBe(false);
+        expect(ch.promptEnds).toHaveLength(0);
+        // B remains the active turn with its indicator intact.
+        expect(maps.activePrompts.get(sid)).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('/clear cancels an in-flight prompt and suppresses its stale response', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {

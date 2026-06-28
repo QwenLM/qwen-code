@@ -10,16 +10,21 @@ const PROMPT_UNSAFE_INVISIBLES = /[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
 /**
  * Neutralize a platform display name before embedding it in a `[name]` prompt
- * tag: strip the bracket/newline delimiters (and the Unicode line/bidi controls
- * above) that would let a crafted nickname break out of the tag or inject extra
- * lines, then cap the length. Shared by ChannelBase group attribution and
- * adapters that self-prefix (e.g. QQ), so the rules stay identical everywhere.
+ * tag: strip the bracket/newline delimiters, C0/DEL control chars, and the
+ * Unicode line/bidi controls above that would let a crafted nickname break out
+ * of the tag, inject extra lines, or smuggle terminal escape sequences, then
+ * cap the length. Shared by ChannelBase group attribution and adapters that
+ * self-prefix (e.g. QQ), so the rules stay identical everywhere.
  */
 export function sanitizeSenderName(name: string): string {
-  return name
-    .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
-    .replace(/[[\]\r\n]/g, ' ')
-    .slice(0, 64);
+  return (
+    name
+      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/[[\]\r\n]/g, ' ')
+      .slice(0, 64)
+  );
 }
 
 /**
