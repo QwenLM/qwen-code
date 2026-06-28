@@ -139,6 +139,23 @@ export function terminateVoiceClients(
   return terminated;
 }
 
+/**
+ * Force-terminate clients that ignored the disabled-grace close, logging how
+ * many stragglers were dropped — observability parity with the shutdown path.
+ */
+export function terminateDisabledVoiceClients(
+  wss: Pick<ClosableWebSocketServer, 'clients'>,
+  log?: Logger,
+): number {
+  const terminated = terminateVoiceClients(wss);
+  if (terminated > 0) {
+    log?.warn(
+      `voice: force-terminated ${terminated} straggling client(s) after disable-grace period`,
+    );
+  }
+  return terminated;
+}
+
 export function closeVoiceClients(
   wss: Pick<ClosableWebSocketServer, 'clients'>,
   code = 1000,
@@ -241,7 +258,7 @@ export async function startVoiceServer(
           disabledCloseTimer = setTimeout(() => {
             disabledCloseTimer = undefined;
             if (!options.isEnabled?.()) {
-              terminateVoiceClients(wss);
+              terminateDisabledVoiceClients(wss, log);
             }
           }, DISABLED_CLOSE_GRACE_MS);
           disabledCloseTimer.unref?.();
@@ -328,11 +345,14 @@ export async function startVoiceServer(
       if (!closePromise) {
         if (enabledTimer) clearInterval(enabledTimer);
         clearTimeout(disabledCloseTimer);
+        // Omit timeout/grace so the function's own defaults apply; only `log`
+        // needs forwarding (passing the constants would silently drift if the
+        // defaults ever changed).
         closePromise = closeVoiceServerResources(
           httpServer,
           wss,
-          CLOSE_TIMEOUT_MS,
-          SHUTDOWN_GRACE_MS,
+          undefined,
+          undefined,
           log,
         );
       }

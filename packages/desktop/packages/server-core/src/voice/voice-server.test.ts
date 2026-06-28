@@ -9,6 +9,7 @@ import {
   closeVoiceServerResources,
   isAllowedVoiceOrigin,
   startVoiceServer,
+  terminateDisabledVoiceClients,
   terminateVoiceClients,
   tokenMatches,
 } from './voice-server'
@@ -161,6 +162,47 @@ describe('terminateVoiceClients', () => {
 
     expect(firstTerminated).toBe(true)
     expect(secondTerminated).toBe(true)
+  })
+})
+
+describe('terminateDisabledVoiceClients', () => {
+  it('logs the straggler count when clients are force-terminated', () => {
+    const logger = createFakeLogger()
+    let firstTerminated = false
+    let secondTerminated = false
+
+    const terminated = terminateDisabledVoiceClients(
+      {
+        clients: new Set([
+          { terminate: () => (firstTerminated = true) },
+          { terminate: () => (secondTerminated = true) },
+        ]),
+      },
+      logger,
+    )
+
+    expect(terminated).toBe(2)
+    expect(firstTerminated).toBe(true)
+    expect(secondTerminated).toBe(true)
+    expect(
+      logger.warnings.some((m) =>
+        m.includes(
+          'force-terminated 2 straggling client(s) after disable-grace period',
+        ),
+      ),
+    ).toBe(true)
+  })
+
+  it('does not log when there are no straggling clients', () => {
+    const logger = createFakeLogger()
+
+    const terminated = terminateDisabledVoiceClients(
+      { clients: new Set() },
+      logger,
+    )
+
+    expect(terminated).toBe(0)
+    expect(logger.warnings).toEqual([])
   })
 })
 
