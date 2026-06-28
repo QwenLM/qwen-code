@@ -1,10 +1,5 @@
 import { basename } from 'node:path';
-import type {
-  ChannelConfig,
-  DispatchMode,
-  Envelope,
-  SessionScope,
-} from './types.js';
+import type { ChannelConfig, DispatchMode, Envelope } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
@@ -22,15 +17,6 @@ import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
  * later is already invalidated.
  */
 export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
-
-/**
- * Session scopes whose group sessions are SHARED across senders, so destructive
- * commands (/clear) must be confirm/authorization-gated: `thread` maps every
- * sender in a thread to one key, and `single` collapses the whole channel to
- * `__single__` — the most shared scope of all. `user` scope is per-sender and
- * therefore NOT shared.
- */
-const SHARED_SCOPES: ReadonlySet<SessionScope> = new Set(['thread', 'single']);
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -314,27 +300,35 @@ export abstract class ChannelBase {
       }
     };
 
-    const isSharedGroupSession = (envelope: Envelope): boolean =>
-      envelope.isGroup && SHARED_SCOPES.has(this.config.sessionScope);
+    // Whether the resolved session is SHARED across senders, so a destructive
+    // /clear needs the confirm + allowedUsers gate. `single` collapses the whole
+    // channel to one `__single__` session for EVERY sender — group OR DM — so it
+    // is ALWAYS shared: SessionRouter maps even a DM to `__single__`, so without
+    // this a sender who can DM the bot would bare-/clear the channel-wide session
+    // ungated. `thread` is shared only in a group (a DM maps to the lone caller's
+    // own chat). `user` is per-sender, never shared.
+    const isSharedSession = (envelope: Envelope): boolean =>
+      this.config.sessionScope === 'single' ||
+      (envelope.isGroup && this.config.sessionScope === 'thread');
 
-    // In a thread- or single-scoped group the session is shared, so clearing it
-    // affects everyone: restrict it to authorized senders (config.allowedUsers,
-    // when set) and require an explicit "confirm". DMs and per-user groups clear
+    // For a shared session, clearing it affects everyone who shares it: restrict
+    // it to authorized senders (config.allowedUsers, when set) and require an
+    // explicit "confirm". DMs on per-user/thread scope and per-user groups clear
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
-      if (isSharedGroupSession(envelope)) {
+      if (isSharedSession(envelope)) {
         const authorized = this.config.allowedUsers;
         if (authorized.length > 0 && !authorized.includes(envelope.senderId)) {
           await this.sendMessage(
             envelope.chatId,
-            'Only authorized members can clear this group session.',
+            'Only authorized members can clear this shared session.',
           );
           return true;
         }
         if (args.toLowerCase() !== 'confirm') {
           await this.sendMessage(
             envelope.chatId,
-            'This clears the shared session for everyone in this group. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
+            'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
           );
           return true;
         }
@@ -355,11 +349,13 @@ export abstract class ChannelBase {
         envelope.chatId,
         envelope.threadId,
       );
-      const scopeNote = envelope.isGroup
-        ? isSharedGroupSession(envelope)
+      const scopeNote = isSharedSession(envelope)
+        ? envelope.isGroup
           ? ' (shared by this group)'
-          : ' (private to you)'
-        : '';
+          : ' (shared channel-wide)'
+        : envelope.isGroup
+          ? ' (private to you)'
+          : '';
       await this.sendMessage(
         envelope.chatId,
         [
@@ -376,8 +372,8 @@ export abstract class ChannelBase {
       const lines = [
         'Commands:',
         '/help — Show this help',
-        isSharedGroupSession(envelope)
-          ? '/clear confirm — Clear the shared group session (aliases: /reset, /new)'
+        isSharedSession(envelope)
+          ? '/clear confirm — Clear the shared session (aliases: /reset, /new)'
           : '/clear — Clear your session (aliases: /reset, /new)',
         '/who — Show current session & workspace',
         '/status — Show session info',
@@ -645,6 +641,11 @@ export abstract class ChannelBase {
 
     const active = this.activePrompts.get(sessionId);
 
+    // Set when a steer abandons a wedged turn on timeout: that turn's queue tail
+    // will never resolve, so this turn must start a FRESH chain instead of
+    // chaining behind the dead promise (see the queue setup below).
+    let steerWedged = false;
+
     if (active) {
       // A prompt is already running for this session
       switch (mode) {
@@ -667,15 +668,25 @@ export abstract class ChannelBase {
           // Bound the wind-down wait the same way /clear does: a wedged child may
           // never resolve active.done, and an UNBOUNDED await here would pin the
           // session queue forever (steer is the default mode), so race it against
-          // a timeout and proceed when the timeout wins.
+          // a timeout and proceed when the timeout wins. Track WHICH branch won:
+          // if the timeout won the wedged turn never wound down, so its queue tail
+          // (current.catch below) will never resolve either — chaining this turn
+          // behind it would silently re-hang the session (and every later turn).
           let steerTimer: ReturnType<typeof setTimeout> | undefined;
-          await Promise.race([
-            active.done,
-            new Promise<void>((resolve) => {
-              steerTimer = setTimeout(resolve, CLEAR_CANCEL_TIMEOUT_MS);
+          const woundDown = await Promise.race([
+            active.done.then(() => true),
+            new Promise<boolean>((resolve) => {
+              steerTimer = setTimeout(
+                () => resolve(false),
+                CLEAR_CANCEL_TIMEOUT_MS,
+              );
             }),
           ]);
           clearTimeout(steerTimer);
+          // The wedged turn stays cancelled (set above), so a late settle still
+          // can't deliver a stale response or resurrect the session — it just
+          // must not block this turn's queue. Re-seed the chain below.
+          steerWedged = !woundDown;
           // Prepend a cancellation note so the agent understands context
           promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
           break;
@@ -692,8 +703,13 @@ export abstract class ChannelBase {
       }
     }
 
-    // Run the prompt (with followup-mode serialization for safety)
-    const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    // Run the prompt (with followup-mode serialization for safety). When a steer
+    // abandoned a wedged turn, that turn's tail never resolves — start a fresh
+    // chain instead of awaiting it (the set() below replaces the dead tail, so
+    // later turns chain onto this turn, not the wedged one).
+    const prev = steerWedged
+      ? Promise.resolve()
+      : (this.sessionQueues.get(sessionId) ?? Promise.resolve());
     // Snapshot the session generation now (at enqueue time). If /clear bumps it
     // before this turn dequeues, the session we captured is gone — bail rather
     // than resurrect it.

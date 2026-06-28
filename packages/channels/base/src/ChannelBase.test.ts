@@ -488,6 +488,63 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session cleared');
     });
 
+    it("treats a 'single'-scope DM as a SHARED session (confirm + auth gated)", async () => {
+      // `single` maps EVERY sender — group OR DM — to the one `__single__`
+      // session. The earlier fix only gated `isGroup` sessions, so a DM sender
+      // (isGroup:false) could bare-/clear the channel-wide session ungated. The
+      // gate must fire here even though no group is involved.
+      const ch = createChannel({
+        sessionScope: 'single',
+        senderPolicy: 'open',
+        allowedUsers: ['boss'],
+      });
+      // A DM (isGroup defaults to false) establishes the shared __single__ session.
+      await ch.handleInbound(
+        envelope({ senderId: 'boss', chatId: 'dm-boss', text: 'hello' }),
+      );
+
+      // An unauthorized DM sender can't wipe the channel-wide session, even with
+      // confirm — and `single` routes them to the SAME __single__ session.
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({
+          senderId: 'rando',
+          chatId: 'dm-rando',
+          text: '/clear confirm',
+        }),
+      );
+      expect(ch.sent[0]!.text).toContain('authorized');
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({ senderId: 'boss', chatId: 'dm-boss', text: '/status' }),
+      );
+      expect(ch.sent[0]!.text).toContain('Session: active');
+
+      // Even the authorized DM sender needs explicit confirm — a bare /clear is
+      // gated, NOT an instant wipe.
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({ senderId: 'boss', chatId: 'dm-boss', text: '/clear' }),
+      );
+      expect(ch.sent[0]!.text).toContain('/clear confirm');
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({ senderId: 'boss', chatId: 'dm-boss', text: '/status' }),
+      );
+      expect(ch.sent[0]!.text).toContain('Session: active');
+
+      // With confirm + authorization it clears.
+      ch.sent = [];
+      await ch.handleInbound(
+        envelope({
+          senderId: 'boss',
+          chatId: 'dm-boss',
+          text: '/clear confirm',
+        }),
+      );
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+    });
+
     it('/who reports workspace + shared scope without creating a session', async () => {
       const ch = createChannel({
         sessionScope: 'thread',
@@ -1568,6 +1625,52 @@ describe('ChannelBase', () => {
         .calls[0][1] as string;
       expect(steeredText).toContain('previous request has been cancelled');
       expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
+    });
+
+    it('steer: a wedged in-flight turn does not pin the follow-up behind its stuck queue tail', async () => {
+      // A genuinely in-flight turn — registered as BOTH the active prompt AND the
+      // sessionQueues tail — wedges: bridge.prompt never resolves. The bounded
+      // steer wait stops `await active.done` from hanging, but the follow-up was
+      // STILL chained behind the wedged turn's never-resolving queue tail. The
+      // fix re-seeds the chain on the timeout so the follow-up runs instead of
+      // hanging forever (and every later message behind it).
+      let callCount = 0;
+      const wedged = new Promise<string>(() => {}); // never resolves
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        return callCount === 1 ? wedged : Promise.resolve('second response');
+      });
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const ch = createChannel({ dispatchMode: 'steer' });
+
+      // First turn starts and wedges — do NOT await it (it never settles). It now
+      // owns the active-prompt slot AND the sessionQueues tail.
+      const pFirst = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      void pFirst; // floating by design: the wedged turn never resolves
+
+      ch.sent = [];
+      vi.useFakeTimers();
+      try {
+        const pSecond = ch.handleInbound(envelope({ text: 'second' }));
+        // Drive the bounded steer wait to its timeout. pSecond resolves ONLY
+        // because the wedged tail is reset rather than awaited; without the fix
+        // `await current` would chain behind the stuck tail and hang forever.
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        await pSecond;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // The follow-up was processed (not blocked behind the stuck tail).
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const secondText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(secondText).toContain('previous request has been cancelled');
+      expect(ch.sent.some((m) => m.text === 'second response')).toBe(true);
     });
 
     it('/clear cancels an in-flight prompt and suppresses its stale response', async () => {
