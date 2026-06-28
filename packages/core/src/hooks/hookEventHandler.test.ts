@@ -317,6 +317,70 @@ describe('HookEventHandler', () => {
       expect(input.last_assistant_message).toBe('last assistant message');
     });
 
+    it('should include context usage fields when provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      const contextUsage = {
+        context_usage: 0.75,
+        context_limit: 200000,
+        input_tokens: 150000,
+      };
+      await hookEventHandler.fireStopEvent(true, 'msg', contextUsage);
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        stop_hook_active: boolean;
+        last_assistant_message: string;
+        context_usage?: number;
+        context_limit?: number;
+        input_tokens?: number;
+      };
+      expect(input.stop_hook_active).toBe(true);
+      expect(input.context_usage).toBe(0.75);
+      expect(input.context_limit).toBe(200000);
+      expect(input.input_tokens).toBe(150000);
+    });
+
+    it('should omit context usage fields when not provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireStopEvent(true, 'msg');
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        context_usage?: number;
+        context_limit?: number;
+        input_tokens?: number;
+      };
+      expect(input.context_usage).toBeUndefined();
+      expect(input.context_limit).toBeUndefined();
+      expect(input.input_tokens).toBeUndefined();
+    });
+
     it('should handle continue=false in final output', async () => {
       const mockPlan = createMockExecutionPlan([]);
       vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
