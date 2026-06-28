@@ -25,7 +25,13 @@ import type {
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
 import type {
@@ -489,7 +495,8 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Start periodic cleanup of expired replyMsgId entries.
-   * Evicts entries older than 5 minutes every 60 seconds.
+   * Evicts entries older than 5 minutes every 60 seconds, and cascades
+   * to msgSeqMap / chatTypeMap / groupActiveMsgEnabled.
    */
   private startReplyMsgIdCleanup(): void {
     this.stopReplyMsgIdCleanup();
@@ -501,6 +508,14 @@ export class QQChannel extends ChannelBase {
           // grow without bound across weeks of uptime.
           this.msgSeqMap.delete(entry.msgId);
           this.replyMsgId.delete(chatId);
+        }
+      }
+      // Evict chatTypeMap / groupActiveMsgEnabled entries that have no
+      // corresponding replyMsgId — stale users/groups whose TTL expired.
+      for (const chatId of this.chatTypeMap.keys()) {
+        if (!this.replyMsgId.has(chatId)) {
+          this.chatTypeMap.delete(chatId);
+          this.groupActiveMsgEnabled.delete(chatId);
         }
       }
     }, 60_000);
@@ -516,13 +531,15 @@ export class QQChannel extends ChannelBase {
 
   // ── State Persistence (cross-server context continuation) ──────
 
-  /** Debounced state persistence to avoid blocking event loop. */
+  /** Debounced state persistence. Writes to a temp file then renames for
+   * crash-safety — a mid-write crash will not corrupt the real state file. */
   private saveQQState(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       try {
+        const tmpPath = this.qqStatePath + '.tmp';
         writeFileSync(
-          this.qqStatePath,
+          tmpPath,
           JSON.stringify({
             chatTypeMap: Array.from(this.chatTypeMap.entries()),
             replyMsgId: Array.from(this.replyMsgId.entries()),
@@ -533,6 +550,7 @@ export class QQChannel extends ChannelBase {
           }),
           { mode: 0o600 },
         );
+        renameSync(tmpPath, this.qqStatePath);
       } catch {
         /* best-effort */
       }
@@ -769,14 +787,24 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] Token refresh failed: ${e}, will retry\n`,
           );
-          // Keep retrying every 60s until success — never give up.
+          // Retry up to 10 times at 60s intervals, then give up.
+          // Token refresh failure after 10 attempts (10 min) indicates
+          // a persistent issue (revoked credentials, DNS, firewall) that
+          // won't resolve by retrying — emit FATAL and stop.
+          let retryCount = 0;
           const retry = () => {
             if (this.disposed) return;
+            if (++retryCount > 10) {
+              process.stderr.write(
+                `[QQ:${this.name}] FATAL: token refresh exhausted after ${retryCount} attempts\n`,
+              );
+              return;
+            }
             this.tokenRefreshTimer = setTimeout(() => {
               this.fetchToken().catch((e2) => {
                 if (this.disposed) return;
                 process.stderr.write(
-                  `[QQ:${this.name}] Token refresh retry failed: ${e2}\n`,
+                  `[QQ:${this.name}] Token refresh retry failed (attempt ${retryCount}): ${e2}\n`,
                 );
                 retry();
               });
@@ -1145,6 +1173,7 @@ export class QQChannel extends ChannelBase {
       }
       this.ws.send(JSON.stringify({ op: OpCode.HEARTBEAT, d: this.seq }));
     }, this.heartbeatInterval);
+    this.heartbeatTimer.unref();
   }
 
   private stopHeartbeat(): void {
@@ -1189,7 +1218,7 @@ export class QQChannel extends ChannelBase {
     const senderName = event.author.username || event.author.id || 'QQ User';
     // Sanitize: strip [ ] so a crafted display name cannot spoof the
     // [atMention=...] protocol marker.
-    const safeName = senderName.replace(/[[\]]/g, '');
+    const safeName = senderName.replace(/[[\]]/g, '').slice(0, 64);
     const cleanText = event.content.trim();
     const isSlash = cleanText.startsWith('/');
     const text = isSlash
@@ -1229,7 +1258,7 @@ export class QQChannel extends ChannelBase {
       'QQ User';
     // Sanitize: strip [ ] so a crafted display name cannot spoof the
     // [atMention=...] protocol marker.
-    const safeName = senderName.replace(/[[\]]/g, '');
+    const safeName = senderName.replace(/[[\]]/g, '').slice(0, 64);
     const cleanText = (event.content || '')
       .replace(/<@[^>]{1,64}>/g, '')
       .trim();
@@ -1372,7 +1401,7 @@ export class QQChannel extends ChannelBase {
       'QQ User';
     // Sanitize: strip [ ] so a crafted display name cannot spoof the
     // [atMention=...] protocol marker.
-    const safeName = senderName.replace(/[[\]]/g, '');
+    const safeName = senderName.replace(/[[\]]/g, '').slice(0, 64);
 
     // Strip <@OPENID> tags for empty check and slash detection, but keep
     // the raw content (with tags) in the text passed to the LLM — the model
@@ -1393,8 +1422,13 @@ export class QQChannel extends ChannelBase {
       ? cleanText
       : `[atMention=${isAtBot}] [${safeName}]: ${content}`;
 
-    this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
-    this.saveQQState();
+    // Only track replyMsgId for at-mention messages — non-@messages should
+    // not clobber a preceding @mention's replyMsgId, or the bot's response
+    // will be threaded to the wrong message.
+    if (isAtBot) {
+      this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
+      this.saveQQState();
+    }
 
     this.handleInbound({
       channelName: this.name,

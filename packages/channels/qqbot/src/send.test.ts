@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { isValidChatId } from './QQChannel.js';
+import type { QQChannel as QQChannelClass } from './QQChannel.js';
 
 const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
   mockSendQQMessage: vi.fn(),
@@ -45,7 +46,7 @@ vi.mock('@qwen-code/channel-base', () => ({
       this.name = name;
       this.config = config;
       this.bridge = bridge;
-      this.router = options?.router ?? {};
+      this.router = (options?.['router'] ?? {}) as Record<string, unknown>;
     }
     protected handleInbound(_env: unknown): Promise<void> {
       return Promise.resolve();
@@ -123,7 +124,7 @@ describe('sendMessage', () => {
     chatType?: 'c2c' | 'group';
     replyMsgId?: string;
     tokenExpiresAt?: number;
-  }): QQChannel {
+  }): QQChannelClass {
     const ch = new QQChannel(
       'test-bot',
       {
