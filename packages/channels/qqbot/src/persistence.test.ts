@@ -97,7 +97,10 @@ function makeChannel(): QQChannelClass {
 }
 
 const statePath = '/tmp/test-qwen/channels/test-bot-state.json';
-const sessionsPath = '/tmp/test-qwen/channels/sessions.json';
+// In standalone mode (no external router), globalSessionsPath uses the
+// per-channel path (see constructor fix for issue #81).
+const sessionsPath = '/tmp/test-qwen/channels/test-bot-sessions.json';
+const globalSessionsPath = '/tmp/test-qwen/channels/sessions.json';
 const sessionsBackupPath =
   '/tmp/test-qwen/channels/test-bot-sessions-backup.json';
 
@@ -423,7 +426,7 @@ describe('startReplyMsgIdCleanup', () => {
     expect(api.msgSeqMap.has('msg_new')).toBe(true);
   });
 
-  it('cascading cleanup evicts chatTypeMap/groupActiveMsgEnabled with no replyMsgId', () => {
+  it('cascading cleanup does NOT evict chatTypeMap/groupActiveMsgEnabled with no replyMsgId', () => {
     const ch = makeChannel();
     const api = accessCleanup(ch);
 
@@ -437,10 +440,13 @@ describe('startReplyMsgIdCleanup', () => {
     api.startReplyMsgIdCleanup();
     vi.advanceTimersByTime(60_000);
 
-    expect(api.chatTypeMap.has('u1')).toBe(true); // has replyMsgId, kept
-    expect(api.chatTypeMap.has('u2')).toBe(false); // no replyMsgId, evicted
+    // chatTypeMap and groupActiveMsgEnabled are NOT evicted when
+    // replyMsgId expires — their lifecycle is independent of reply TTL.
+    // groupActiveMsgEnabled is only cleared on GROUP_DEL_ROBOT.
+    expect(api.chatTypeMap.has('u1')).toBe(true);
+    expect(api.chatTypeMap.has('u2')).toBe(true); // kept — not evicted
     expect(api.groupActiveMsgEnabled.has('u1')).toBe(true);
-    expect(api.groupActiveMsgEnabled.has('u2')).toBe(false);
+    expect(api.groupActiveMsgEnabled.has('u2')).toBe(true); // kept — not evicted
   });
 
   it('runs every 60 seconds', () => {
@@ -559,7 +565,7 @@ describe('fixRestoredSessions', () => {
       target: { chatId: 'u1' },
       cwd: '/tmp/u1',
     };
-    fsStore[sessionsPath] = JSON.stringify(sessionsData);
+    fsStore[globalSessionsPath] = JSON.stringify(sessionsData);
 
     const ch = new QQChannel(
       'test-bot',
@@ -636,7 +642,7 @@ describe('fixRestoredSessions', () => {
     toSession.set('k1', 'already-valid');
     toTarget.set('already-valid', { chatId: 'existing' });
 
-    fsStore[sessionsPath] = JSON.stringify({
+    fsStore[globalSessionsPath] = JSON.stringify({
       k1: {
         sessionId: 'already-valid',
         target: { chatId: 'existing' },
