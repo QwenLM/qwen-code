@@ -177,6 +177,13 @@ export interface BridgeClientRequestContext {
    * pending HTTP 202 request.
    */
   promptId?: string;
+  /**
+   * Internal: set ONLY by `continueSession` to re-arm the continuation meta
+   * key that `sendPrompt` strips from untrusted callers. HTTP routes never
+   * populate this from request input, so an external caller cannot use it to
+   * smuggle a continuation through the prompt path.
+   */
+  continue?: boolean;
 }
 
 /**
@@ -558,6 +565,30 @@ export interface AcpSessionBridge {
   clearSessionGoal(
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
+
+  /**
+   * Resume a live session's unfinished previous turn — an interrupted prompt
+   * (model never answered) or a turn left with dangling tool calls — without
+   * injecting a synthetic "continue" user message. Idempotent no-op when the
+   * last turn ended cleanly. Mirrors the SDK's `continueLastTurn` and the core
+   * `detectTurnInterruption` classification.
+   */
+  continueSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    /**
+     * Replay cursor + correlation id for an accepted continuation, mirroring
+     * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —
+     * the continuation runs as a tracked async turn, so clients use `promptId`
+     * to correlate `turn_complete` / `turn_error` and `lastEventId` to replay
+     * events emitted before they (re)attach the SSE stream.
+     */
+    promptId?: string;
+    lastEventId?: number;
+  }>;
 
   /** Read structured session usage stats (tokens, tools, files). */
   getSessionStatsStatus(sessionId: string): Promise<ServeSessionStatsStatus>;

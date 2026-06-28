@@ -68,6 +68,10 @@ import {
   getArenaSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
+  detectTurnInterruption,
+  buildSyntheticToolResponseParts,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
@@ -131,7 +135,10 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
-import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import {
+  insertAfterFunctionResponses,
+  normalizePartList,
+} from '../../utils/nonInteractiveHelpers.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -173,6 +180,7 @@ import {
 const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
+const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -1154,6 +1162,56 @@ export class Session implements SessionContext {
   }
 
   /**
+   * Classify whether an unfinished previous turn can be resumed — an
+   * interrupted prompt (the model never answered) or a turn left with dangling
+   * tool calls — without injecting a synthetic "continue" user message.
+   * Classifies from persisted history. Idempotent no-op (accepted:false) when
+   * the last turn ended cleanly or a prompt is already in flight.
+   *
+   * This is the accept/reject pre-check only — it does NOT fire the turn. When
+   * accepted, the daemon bridge drives the continuation through the normal
+   * prompt-admission path (`sendPrompt` with the trusted continue meta) so it is
+   * tracked like any other prompt; `prompt()` then re-detects/strips
+   * authoritatively. Powers `qwen/control/session/continue`.
+   */
+  async continueLastTurn(): Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  }> {
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient || !geminiClient.isInitialized()) {
+      return { accepted: false, interruption: 'none' };
+    }
+
+    // Classify from a bounded, shallow tail — this accept/reject pre-check does
+    // not need to structuredClone the whole history. The authoritative
+    // re-detection inside the fired prompt() reads full history for the strip.
+    const chat = this.#getCurrentChat();
+    const detection = detectTurnInterruption(
+      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
+    );
+    if (detection.kind === 'none') {
+      return { accepted: false, interruption: 'none' };
+    }
+    // A prompt (or an earlier continuation) is still in flight: there is no
+    // settled turn to continue. Reject rather than abort the live turn.
+    if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) {
+      return { accepted: false, interruption: detection.kind };
+    }
+
+    // Accepted. This method only classifies — the daemon bridge drives the
+    // actual continuation through the normal prompt-admission path
+    // (`sendPrompt` with the trusted continue meta), so the turn is tracked
+    // like any other prompt and `prompt()` re-detects/strips authoritatively.
+    // Firing an internal `this.prompt()` here would bypass that tracking (the
+    // daemon would report the session idle and a racing prompt could abort the
+    // continuation), which is exactly what routing through the bridge fixes.
+
+    return { accepted: true, interruption: detection.kind };
+  }
+
+  /**
    * Generate a server-side follow-up suggestion for the just-completed
    * turn and push it to attached clients via the daemon's
    * `qwen/notify/session/prompt-suggestion` extNotification. Mirrors
@@ -1311,7 +1369,68 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RETRY_META_KEY
               ] === true;
-            if (isRetry) {
+
+            // Continue an interrupted previous turn without a synthetic user
+            // message. Classified from full history (the strip pass removes the
+            // entire trailing user run, so detection must see all of it):
+            // `interrupted_prompt` re-submits the orphaned user run after
+            // stripping it (history is neither duplicated nor lost),
+            // `interrupted_turn` closes dangling tool calls with synthesized
+            // error responses. Mirrors the stream-json path in
+            // nonInteractiveCli.ts so both surfaces behave identically.
+            const isContinue =
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_CONTINUE_META_KEY
+              ] === true;
+            let continuationParts: Part[] | null = null;
+            // For an `interrupted_prompt` continuation we strip the orphaned
+            // user run from history before re-sending it. If the send then
+            // throws before re-pushing it, the orphan would be permanently lost
+            // — so hold it (and a push-count snapshot) to restore on that path.
+            let strippedOrphanEntries: Content[] | null = null;
+            let orphanPushCountSnapshot = 0;
+            if (isContinue) {
+              const detection = detectTurnInterruption(
+                this.#getCurrentChat().getHistory(),
+              );
+              if (detection.kind === 'none') {
+                // History moved between continueLastTurn()'s accept and this
+                // re-detection (e.g. a concurrent turn settled it). Nothing to
+                // continue; log so an abandoned continuation is diagnosable.
+                debugLogger.warn(
+                  `[Session] continue ${promptId}: no interrupted turn on re-detection, nothing to continue`,
+                );
+                // This early return sits before the send-loop try/finally that
+                // emits conversation_finished, so emit it here too — otherwise a
+                // no-op continuation silently drops turn-level telemetry.
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                return { stopReason: 'end_turn' };
+              }
+              if (detection.kind === 'interrupted_prompt') {
+                strippedOrphanEntries =
+                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
+                  null;
+                orphanPushCountSnapshot =
+                  this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+                continuationParts = detection.parts;
+              } else {
+                continuationParts = buildSyntheticToolResponseParts(
+                  detection.danglingCalls,
+                  ORPHAN_TOOL_USE_REPAIR_REASON,
+                );
+              }
+            }
+
+            if (isContinue) {
+              // The orphaned content is already persisted; recording a new user
+              // message would duplicate the turn in the transcript.
+            } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
@@ -1329,7 +1448,11 @@ export class Session implements SessionContext {
 
             let parts: Part[] | null;
 
-            if (isSlashCommand(inputText)) {
+            if (isContinue) {
+              // Non-null here: the `none` case returned early above, and both
+              // interruption branches assign a concrete part list.
+              parts = continuationParts!;
+            } else if (isSlashCommand(inputText)) {
               // Handle slash command in ACP mode using capability-based filtering
               const slashCommandResult = await handleSlashCommand(
                 inputText,
@@ -1360,6 +1483,7 @@ export class Session implements SessionContext {
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
             if (
+              !isContinue &&
               hooksEnabled &&
               messageBus &&
               this.config.hasHooksForEvent?.('UserPromptSubmit')
@@ -1430,20 +1554,41 @@ export class Session implements SessionContext {
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
             if (systemReminders.length > 0) {
-              parts = [...systemReminders, ...parts];
+              // On an `interrupted_prompt` continuation the replayed orphaned
+              // user run can already carry the reminders that were prepended on
+              // the original send. Re-inserting would show the model duplicate
+              // (and, if approval mode changed since, conflicting) reminders, so
+              // skip when one is already present — mirrors the
+              // `hasSystemReminderPart` guard in nonInteractiveCli.ts.
+              const alreadyHasReminder =
+                isContinue &&
+                parts.some((part) =>
+                  isSystemReminderContent({ role: 'user', parts: [part] }),
+                );
+              if (!alreadyHasReminder) {
+                // Insert after any leading functionResponse parts so a
+                // tool-result continuation (interrupted_turn) keeps tool_result
+                // blocks first, as Anthropic-compatible backends require. With
+                // no leading functionResponses this is equivalent to prepending.
+                parts = insertAfterFunctionResponses(parts, systemReminders);
+              }
             }
 
             // Phase C: one-shot worktree restore notice, set by acpAgent on
             // --resume / loadSession when the session's worktree is still alive.
-            // Prepended exactly once, then cleared so it doesn't repeat on
-            // subsequent turns.
+            // Inserted exactly once, then cleared so it doesn't repeat on
+            // subsequent turns. Uses the same insert-after-functionResponses
+            // helper as the reminders above (a continuation closing dangling
+            // tool calls leads with functionResponses, and text before them
+            // violates the tool_result-first ordering). Because the reminders
+            // are inserted first, the resulting order on such a continuation is
+            // `[...functionResponses, worktreeNotice, ...systemReminders, ...]`;
+            // Session.worktree.test.ts locks this ordering.
             if (this.pendingWorktreeNotice) {
-              parts = [
-                {
-                  text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
-                },
-                ...parts,
-              ];
+              const noticePart = {
+                text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+              };
+              parts = insertAfterFunctionResponses(parts, [noticePart]);
               this.pendingWorktreeNotice = null;
             }
 
@@ -1479,9 +1624,14 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                     );
                   if (!sendResult.responseStream) {
+                    // Preserve the full message (not just functionResponse
+                    // parts) for a continuation: its content was stripped from
+                    // history before the send, so dropping it here on a
+                    // non-cancelled failure would lose the orphaned turn the
+                    // user never got an answer to.
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
-                      sendResult.stopReason === 'cancelled',
+                      isContinue || sendResult.stopReason === 'cancelled',
                     );
                     return { stopReason: sendResult.stopReason };
                   }
@@ -1527,6 +1677,23 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
+                  // Restore the stripped orphan if the send threw before
+                  // re-pushing it (the null-stream path above already preserves;
+                  // an exception bypasses it). Gate on the push counter — like
+                  // the core Retry restore in client.ts — so we only restore
+                  // when the content never landed (a later tool-loop send
+                  // throwing leaves the counter advanced → no double-restore).
+                  if (
+                    strippedOrphanEntries &&
+                    (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
+                      orphanPushCountSnapshot
+                  ) {
+                    for (const entry of strippedOrphanEntries) {
+                      this.#getCurrentChat().addHistory(entry);
+                    }
+                    strippedOrphanEntries = null;
+                  }
+
                   // Only explicit user cancellation maps to a normal
                   // cancelled turn. Other aborts/errors should surface so
                   // infra failures are not hidden as successful cancels.
