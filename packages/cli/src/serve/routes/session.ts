@@ -482,20 +482,20 @@ export function registerSessionRoutes(
           .json({ error: '`sessionId` route parameter is required' });
         return;
       }
-      // Forward the originator so the bridge can attribute the continuation
-      // turn (it now runs through the prompt-admission path, same as
-      // POST /session/:id/prompt).
+      // Forward the originator and a generated promptId so the bridge can
+      // attribute and correlate the continuation turn (it now runs through the
+      // prompt-admission path, same as POST /session/:id/prompt). The accepted
+      // response echoes promptId + lastEventId as the replay/correlation anchor.
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
+      const promptId = crypto.randomUUID();
       try {
-        res
-          .status(200)
-          .json(
-            await bridge.continueSession(
-              sessionId,
-              clientId !== undefined ? { clientId } : undefined,
-            ),
-          );
+        res.status(200).json(
+          await bridge.continueSession(sessionId, {
+            ...(clientId !== undefined ? { clientId } : {}),
+            promptId,
+          }),
+        );
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'POST /session/:id/continue',

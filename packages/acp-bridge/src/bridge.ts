@@ -3876,55 +3876,56 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
       }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
 
-      if (decision.accepted) {
-        // Drive the actual continuation through the normal prompt-admission
-        // path so the bridge tracks pendingPromptCount / promptActive /
-        // activePromptOriginatorClientId and broadcasts turn-complete — the
-        // agent's Session.prompt() runs the continuation off the trusted
-        // continue meta key re-armed by `isContinue`. (Previously the agent
-        // fired an internal, untracked prompt, so the daemon reported the
-        // session idle for the whole continuation and a racing prompt could
-        // silently abort it.) Fire-and-forget like POST /prompt: the running
-        // turn's output and any in-turn error surface on the session event
-        // stream (turn_complete / turn_error). A late admission failure here
-        // (e.g. queue full, or the session reaped in the pre-check window) is
-        // rare — the pre-check already rejects when a prompt is in flight — so
-        // it is logged rather than reflected back through the already-sent ack.
-        try {
-          // No caller signal: a continuation is cancelled via the cancelSession
-          // route (entry.connection.cancel), not a per-dispatch AbortController.
-          void bridgeApi
-            .sendPrompt(
-              sessionId,
-              { sessionId, prompt: [] } as Parameters<
-                AcpSessionBridge['sendPrompt']
-              >[1],
-              undefined,
-              {
-                ...(context?.clientId !== undefined
-                  ? { clientId: context.clientId }
-                  : {}),
-                continue: true,
-              },
-            )
-            .catch((err) => {
-              writeServeDebugLine(
-                `continueSession: continuation turn failed for ${sessionId}: ` +
-                  `${err instanceof Error ? err.message : String(err)}`,
-              );
-            });
-        } catch (err) {
-          // sendPrompt can throw synchronously (queue full / pre-aborted /
-          // session gone). The pre-check already accepted, so report the
-          // dispatch failure rather than crash the control response.
-          writeServeDebugLine(
-            `continueSession: continuation dispatch failed for ${sessionId}: ` +
-              `${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+      if (!decision.accepted) {
+        return decision;
       }
 
-      return decision;
+      // Accepted → drive the real turn through the normal prompt-admission path
+      // (so pendingPromptCount / promptActive / originator are tracked and
+      // turn-complete is broadcast; the agent's Session.prompt() runs it off the
+      // trusted continue meta re-armed by `isContinue`). Capture a replay cursor
+      // + correlation id BEFORE dispatch — mirroring POST /session/:id/prompt —
+      // so a client attaching the SSE stream afterwards can replay missed events
+      // and correlate turn_complete / turn_error with this continuation.
+      const liveEntry = byId.get(sessionId);
+      if (!liveEntry) throw new SessionNotFoundError(sessionId);
+      const lastEventId = liveEntry.events.lastEventId;
+      const promptId = context?.promptId;
+
+      // Admit synchronously: `sendPrompt` throws synchronously for queue-full /
+      // pre-aborted, so an admission failure propagates out of here and the
+      // caller gets an error instead of a misleading accepted:true whose
+      // continuation was never queued. Only failures AFTER the turn is admitted
+      // (it then runs async) reach the `.catch` below — those are logged, since
+      // the ack already went out and the turn's terminal event covers clients.
+      // No caller signal: a continuation is cancelled via the cancelSession
+      // route (entry.connection.cancel), not a per-dispatch AbortController.
+      const promptPromise = bridgeApi.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [] } as Parameters<
+          AcpSessionBridge['sendPrompt']
+        >[1],
+        undefined,
+        {
+          ...(context?.clientId !== undefined
+            ? { clientId: context.clientId }
+            : {}),
+          ...(promptId !== undefined ? { promptId } : {}),
+          continue: true,
+        },
+      );
+      promptPromise.catch((err) => {
+        teeServeDebugLine(
+          `continueSession: continuation turn failed for ${sessionId}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+
+      return {
+        ...decision,
+        ...(promptId !== undefined ? { promptId } : {}),
+        lastEventId,
+      };
     },
 
     async getSessionStatsStatus(sessionId) {

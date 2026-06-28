@@ -4919,9 +4919,13 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'client-xyz');
 
       expect(res.status).toBe(200);
-      // The originator must reach the bridge so the continuation turn is
-      // attributed the same way POST /session/:id/prompt is.
-      expect(bridge.continueSessionContexts).toEqual([{ clientId: 'client-xyz' }]);
+      // The originator + a generated promptId must reach the bridge so the
+      // continuation turn is attributed and correlated like POST /prompt.
+      expect(bridge.continueSessionContexts).toHaveLength(1);
+      expect(bridge.continueSessionContexts[0]).toMatchObject({
+        clientId: 'client-xyz',
+      });
+      expect(typeof bridge.continueSessionContexts[0]?.promptId).toBe('string');
     });
 
     it('maps session continue bridge errors', async () => {

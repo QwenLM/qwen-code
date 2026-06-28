@@ -2193,6 +2193,67 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('strips both spoofed retry and continue meta keys from one prompt', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'spoof both' }],
+        _meta: {
+          'qwen.daemon.retry': true,
+          'qwen.daemon.continueLastTurn': true,
+        },
+      } as PromptRequest);
+
+      expect(handle.agent.promptCalls[0]?._meta?.['qwen.daemon.retry']).toBe(
+        undefined,
+      );
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
+      ).toBe(undefined);
+      await bridge.shutdown();
+    });
+
+    it('rejects continueSession for a nonexistent session', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+      await expect(
+        bridge.continueSession('no-such-session'),
+      ).rejects.toThrow();
+
+      await bridge.shutdown();
+    });
+
+    it('returns the accepted decision even if the dispatched continuation turn rejects', async () => {
+      const handle = makeChannel({
+        promptImpl: () => {
+          throw new Error('continuation turn blew up');
+        },
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/continue') {
+            return { accepted: true, interruption: 'interrupted_prompt' };
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // The turn is admitted, so the ack returns accepted; the async turn
+      // failure must be logged/swallowed, not surfaced as a rejection here.
+      const decision = await bridge.continueSession(session.sessionId, {
+        promptId: 'p-fail',
+      });
+      expect(decision.accepted).toBe(true);
+      // Let the rejected turn settle — it must not become an unhandled throw.
+      await new Promise((r) => setTimeout(r, 20));
+
+      await bridge.shutdown();
+    });
+
     it('routes an accepted continueSession through sendPrompt with the trusted continue meta', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
@@ -2206,11 +2267,17 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      const decision = await bridge.continueSession(session.sessionId);
-      expect(decision).toEqual({
+      // Accepted continuation echoes the correlation id and a replay cursor,
+      // mirroring the POST /prompt 202 contract.
+      const decision = await bridge.continueSession(session.sessionId, {
+        promptId: 'cont-1',
+      });
+      expect(decision).toMatchObject({
         accepted: true,
         interruption: 'interrupted_prompt',
+        promptId: 'cont-1',
       });
+      expect(typeof decision.lastEventId).toBe('number');
 
       // The continuation runs through the tracked prompt path (fire-and-forget),
       // so the agent receives a prompt() carrying the re-armed continue meta.

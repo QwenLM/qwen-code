@@ -528,6 +528,15 @@ export interface AcpSessionBridge {
   ): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    /**
+     * Replay cursor + correlation id for an accepted continuation, mirroring
+     * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —
+     * the continuation runs as a tracked async turn, so clients use `promptId`
+     * to correlate `turn_complete` / `turn_error` and `lastEventId` to replay
+     * events emitted before they (re)attach the SSE stream.
+     */
+    promptId?: string;
+    lastEventId?: number;
   }>;
 
   /** Read structured session usage stats (tokens, tools, files). */
