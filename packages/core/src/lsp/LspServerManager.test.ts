@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
@@ -37,6 +37,11 @@ type PathSafeManager = {
   isPathSafe(command: string, workspacePath: string, cwd?: string): boolean;
 };
 
+type ReconcilePrivateView = {
+  startServer(name: string, handle: unknown): Promise<void>;
+  stopServer(name: string, handle: unknown): Promise<void>;
+};
+
 function createManager(workspaceRoot: string): PathSafeManager {
   return new LspServerManager(
     {} as CoreConfig,
@@ -49,7 +54,127 @@ function createManager(workspaceRoot: string): PathSafeManager {
   ) as unknown as PathSafeManager;
 }
 
+function createReconcileManager(): {
+  manager: LspServerManager;
+  privateView: ReconcilePrivateView;
+} {
+  const manager = new LspServerManager(
+    {
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+    } as unknown as CoreConfig,
+    {} as WorkspaceContext,
+    {} as FileDiscoveryService,
+    {
+      requireTrustedWorkspace: false,
+      workspaceRoot: '/workspace',
+    },
+  );
+  const privateView = manager as unknown as ReconcilePrivateView;
+  vi.spyOn(privateView, 'startServer').mockImplementation(
+    async (_name, handle) => {
+      (handle as { status: string }).status = 'READY';
+    },
+  );
+  vi.spyOn(privateView, 'stopServer').mockImplementation(
+    async (_name, handle) => {
+      (handle as { status: string }).status = 'NOT_STARTED';
+    },
+  );
+  return { manager, privateView };
+}
+
 describe('LspServerManager', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe('reconcileServerConfigs', () => {
+    it('starts added servers', async () => {
+      const { manager, privateView } = createReconcileManager();
+
+      const result = await manager.reconcileServerConfigs([serverConfig]);
+
+      expect(result).toEqual({
+        added: ['clangd'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+      });
+      expect(privateView.startServer).toHaveBeenCalledOnce();
+      expect(manager.getHandles().get('clangd')?.status).toBe('READY');
+      expect(debugLoggerMock.info).toHaveBeenCalledWith(
+        'Reconciling LSP server configs: desired=clangd',
+      );
+      expect(debugLoggerMock.info).toHaveBeenCalledWith(
+        'LSP reconcile result: added=clangd, removed=<none>, restarted=<none>, unchanged=<none>',
+      );
+    });
+
+    it('removes missing servers', async () => {
+      const { manager, privateView } = createReconcileManager();
+      manager.setServerConfigs([serverConfig]);
+
+      const result = await manager.reconcileServerConfigs([]);
+
+      expect(result.removed).toEqual(['clangd']);
+      expect(privateView.stopServer).toHaveBeenCalledOnce();
+      expect(manager.getHandles().has('clangd')).toBe(false);
+      expect(debugLoggerMock.info).toHaveBeenCalledWith(
+        'LSP reconcile result: added=<none>, removed=clangd, restarted=<none>, unchanged=<none>',
+      );
+    });
+
+    it('restarts changed servers and preserves unchanged handles', async () => {
+      const { manager, privateView } = createReconcileManager();
+      const otherConfig = {
+        ...serverConfig,
+        name: 'pyright',
+        languages: ['python'],
+        command: 'pyright-langserver',
+      };
+      manager.setServerConfigs([serverConfig, otherConfig]);
+      const originalOtherHandle = manager.getHandles().get('pyright');
+
+      const result = await manager.reconcileServerConfigs([
+        { ...serverConfig, args: ['--log=verbose'] },
+        otherConfig,
+      ]);
+
+      expect(result.restarted).toEqual(['clangd']);
+      expect(result.unchanged).toEqual(['pyright']);
+      expect(privateView.stopServer).toHaveBeenCalledOnce();
+      expect(privateView.startServer).toHaveBeenCalledOnce();
+      expect(manager.getHandles().get('pyright')).toBe(originalOtherHandle);
+      expect(debugLoggerMock.info).toHaveBeenCalledWith(
+        'LSP reconcile result: added=<none>, removed=<none>, restarted=clangd, unchanged=pyright',
+      );
+    });
+
+    it('serializes concurrent reconcile calls', async () => {
+      const { manager, privateView } = createReconcileManager();
+      const order: string[] = [];
+      vi.mocked(privateView.startServer).mockImplementation(
+        async (name, handle) => {
+          order.push(`start:${name}`);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          (handle as { status: string }).status = 'READY';
+        },
+      );
+
+      await Promise.all([
+        manager.reconcileServerConfigs([serverConfig]),
+        manager.reconcileServerConfigs([
+          { ...serverConfig, command: 'clangd-next' },
+        ]),
+      ]);
+
+      expect(order).toEqual(['start:clangd', 'start:clangd']);
+      expect(manager.getHandles().get('clangd')?.config.command).toBe(
+        'clangd-next',
+      );
+    });
+  });
+
   describe('isPathSafe', () => {
     it('allows bare commands resolved through PATH', () => {
       const workspaceRoot = path.resolve('/workspace/project');

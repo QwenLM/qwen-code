@@ -254,6 +254,28 @@ export interface LspServerStatusInfo {
   error?: string;
 }
 
+export type LspServerSkipReason =
+  | 'not_allowed'
+  | 'workspace_untrusted'
+  | 'server_trust_required';
+
+export interface LspSkippedServer {
+  name: string;
+  reason: LspServerSkipReason;
+}
+
+export interface LspReconcileResult {
+  added: string[];
+  removed: string[];
+  restarted: string[];
+  unchanged: string[];
+}
+
+export interface LspServiceReinitializeResult {
+  reconcile: LspReconcileResult;
+  skipped: LspSkippedServer[];
+}
+
 export interface LspClient {
   /**
    * Get the status of all configured LSP servers.
@@ -376,6 +398,11 @@ export interface LspClient {
    * Get a point-in-time snapshot of LSP server connection status.
    */
   getStatusSnapshot?(): LspStatusSnapshot;
+
+  /**
+   * Re-read LSP configuration and reconcile live server connections.
+   */
+  reinitialize?(): Promise<LspServiceReinitializeResult>;
 }
 
 // ============================================================================
@@ -596,6 +623,8 @@ export interface NativeLspServiceOptions {
   requireTrustedWorkspace?: boolean;
   /** Override workspace root path */
   workspaceRoot?: string;
+  /** Optional startup upper bound for allowed LSP server names */
+  allowedServerNames?: readonly string[];
 }
 
 /**

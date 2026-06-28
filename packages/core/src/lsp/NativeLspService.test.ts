@@ -144,6 +144,102 @@ describe('NativeLspService', () => {
     expect(status).toBeDefined();
   });
 
+  test('reinitialize reconciles valid .lsp.json configs', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-reinit-'));
+    try {
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+            args: ['--stdio'],
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const reconcileServerConfigs = vi.fn(async () => ({
+        added: ['typescript-language-server'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+      }));
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+      };
+
+      const result = await service.reinitialize();
+
+      expect(reconcileServerConfigs).toHaveBeenCalledWith([
+        expect.objectContaining({
+          name: 'typescript-language-server',
+          languages: ['typescript'],
+        }),
+      ]);
+      expect(result.reconcile.added).toEqual(['typescript-language-server']);
+      expect(result.skipped).toEqual([]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('reinitialize preserves runtime state on invalid .lsp.json', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-invalid-'));
+    try {
+      fs.writeFileSync(path.join(tempDir, '.lsp.json'), '{');
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const reconcileServerConfigs = vi.fn();
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+      };
+
+      await expect(service.reinitialize()).rejects.toThrow();
+      expect(reconcileServerConfigs).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('reinitialize stops all servers when trusted workspace is required but unavailable', async () => {
+    const tempConfig = new MockConfig();
+    vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);
+    const service = new NativeLspService(
+      tempConfig as unknown as CoreConfig,
+      mockWorkspace as unknown as WorkspaceContext,
+      eventEmitter,
+      mockFileDiscovery as unknown as FileDiscoveryService,
+      mockIdeStore as unknown as IdeContextStore,
+      { requireTrustedWorkspace: true },
+    );
+    const stopAll = vi.fn(async () => {});
+    (service as unknown as { serverManager: unknown }).serverManager = {
+      getHandles: () => new Map([['tsserver', {}]]),
+      stopAll,
+    };
+
+    const result = await service.reinitialize();
+
+    expect(stopAll).toHaveBeenCalledOnce();
+    expect(result.reconcile.removed).toEqual(['tsserver']);
+  });
+
   test('should expose a detailed status snapshot for configured servers', () => {
     const serverManager = {
       getHandles: () =>

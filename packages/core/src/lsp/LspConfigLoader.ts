@@ -22,6 +22,10 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('LSP');
 const MAX_TCP_PORT = 65_535;
 
+export type LspUserConfigLoadResult =
+  | { ok: true; configs: LspServerConfig[] }
+  | { ok: false; error: Error };
+
 export class LspConfigLoader {
   constructor(private readonly workspaceRoot: string) {}
 
@@ -30,18 +34,29 @@ export class LspConfigLoader {
    * Supports basic format: { "language": { "command": "...", "extensionToLanguage": {...} } }
    */
   async loadUserConfigs(): Promise<LspServerConfig[]> {
+    const result = await this.loadUserConfigsStrict();
+    if (result.ok) {
+      return result.configs;
+    }
+    debugLogger.warn('Failed to load user .lsp.json config:', result.error);
+    return [];
+  }
+
+  async loadUserConfigsStrict(): Promise<LspUserConfigLoadResult> {
     const lspConfigPath = path.join(this.workspaceRoot, '.lsp.json');
     if (!fs.existsSync(lspConfigPath)) {
-      return [];
+      return { ok: true, configs: [] };
     }
 
     try {
       const configContent = fs.readFileSync(lspConfigPath, 'utf-8');
       const data = JSON.parse(configContent);
-      return this.parseConfigSource(data, lspConfigPath);
+      return { ok: true, configs: this.parseConfigSource(data, lspConfigPath) };
     } catch (error) {
-      debugLogger.warn('Failed to load user .lsp.json config:', error);
-      return [];
+      return {
+        ok: false,
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
     }
   }
 

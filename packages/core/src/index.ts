@@ -302,6 +302,7 @@ export * from './ide/types.js';
 // ============================================================================
 
 export * from './lsp/constants.js';
+export * from './lsp/configHash.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
 export * from './lsp/LspResponseNormalizer.js';

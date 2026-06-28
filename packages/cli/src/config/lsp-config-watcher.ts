@@ -1,0 +1,211 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { watch as watchFs, type FSWatcher } from 'chokidar';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('LSP_CONFIG_WATCHER');
+
+export interface LspConfigChangeEvent {
+  path: string;
+  changeType: 'modified' | 'created' | 'deleted';
+}
+
+export type LspConfigChangeListener = (
+  event: LspConfigChangeEvent,
+) => void | Promise<void>;
+
+interface LspConfigSnapshot {
+  exists: boolean;
+  canonical?: string;
+}
+
+export class LspConfigWatcher {
+  private watcher?: FSWatcher;
+  private listener?: LspConfigChangeListener;
+  private refreshTimer: NodeJS.Timeout | null = null;
+  private processing = false;
+  private pending = false;
+  private started = false;
+  private lastSnapshot: LspConfigSnapshot;
+  private readonly configPath: string;
+
+  static readonly DEBOUNCE_MS = 300;
+  static readonly LISTENER_TIMEOUT_MS = 30_000;
+
+  constructor(private readonly workspaceRoot: string) {
+    this.configPath = path.join(workspaceRoot, '.lsp.json');
+    this.lastSnapshot = this.readSnapshot();
+  }
+
+  startWatching(listener: LspConfigChangeListener): void {
+    if (this.started) return;
+    this.started = true;
+    this.listener = listener;
+    debugLogger.info(`Starting LSP config watcher for ${this.configPath}`);
+    try {
+      this.watcher = watchFs(this.workspaceRoot, {
+        ignoreInitial: true,
+        depth: 0,
+      })
+        .on('all', (_event: string, changedPath: string) => {
+          if (path.basename(changedPath) !== '.lsp.json') return;
+          this.scheduleRefresh();
+        })
+        .on('error', (error: unknown) => {
+          debugLogger.warn(
+            `LSP config watcher error for ${this.workspaceRoot}:`,
+            error,
+          );
+        });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to start LSP config watcher for ${this.workspaceRoot}:`,
+        error,
+      );
+    }
+  }
+
+  stopWatching(): void {
+    if (!this.started) return;
+    this.started = false;
+    debugLogger.info(`Stopping LSP config watcher for ${this.configPath}`);
+    this.listener = undefined;
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    this.pending = false;
+    this.watcher?.close().catch((error) => {
+      debugLogger.warn('LSP config watcher close error:', error);
+    });
+    this.watcher = undefined;
+  }
+
+  private scheduleRefresh(): void {
+    this.pending = true;
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      void this.drainPendingChange().catch((error) => {
+        debugLogger.warn('LSP config watcher refresh error:', error);
+      });
+    }, LspConfigWatcher.DEBOUNCE_MS);
+  }
+
+  private async drainPendingChange(): Promise<void> {
+    if (this.processing) return;
+    this.processing = true;
+    try {
+      while (this.pending) {
+        this.pending = false;
+        await this.handleChange();
+      }
+    } finally {
+      this.processing = false;
+    }
+  }
+
+  private async handleChange(): Promise<void> {
+    const before = this.lastSnapshot;
+    const after = this.readSnapshot();
+    if (after.exists && after.canonical === undefined) {
+      debugLogger.warn(
+        `Invalid .lsp.json; keeping existing LSP runtime state.`,
+      );
+      this.lastSnapshot = after;
+      return;
+    }
+
+    const changed =
+      before.exists !== after.exists || before.canonical !== after.canonical;
+    if (!changed) {
+      this.lastSnapshot = after;
+      return;
+    }
+
+    const event: LspConfigChangeEvent = {
+      path: this.configPath,
+      changeType:
+        !before.exists && after.exists
+          ? 'created'
+          : before.exists && !after.exists
+            ? 'deleted'
+            : 'modified',
+    };
+    debugLogger.info(`LSP config changed: ${event.changeType} ${event.path}`);
+    this.lastSnapshot = after;
+    await this.notifyListener(event);
+  }
+
+  private readSnapshot(): LspConfigSnapshot {
+    if (!fs.existsSync(this.configPath)) {
+      return { exists: false };
+    }
+    try {
+      const raw = fs.readFileSync(this.configPath, 'utf-8');
+      const parsed = JSON.parse(raw) as unknown;
+      return { exists: true, canonical: canonicalize(parsed) };
+    } catch (error) {
+      debugLogger.warn('Failed to parse .lsp.json:', error);
+      return { exists: true };
+    }
+  }
+
+  private async notifyListener(event: LspConfigChangeEvent): Promise<void> {
+    if (!this.listener) return;
+    const TIMEOUT_MS = LspConfigWatcher.LISTENER_TIMEOUT_MS;
+    let timerId: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timerId = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `LSP config change listener timeout after ${TIMEOUT_MS}ms`,
+            ),
+          ),
+        TIMEOUT_MS,
+      );
+      if (
+        typeof timerId === 'object' &&
+        timerId !== null &&
+        'unref' in timerId
+      ) {
+        (timerId as { unref: () => void }).unref();
+      }
+    });
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => this.listener?.(event)),
+        timeoutPromise,
+      ]);
+    } catch (error) {
+      debugLogger.warn('LSP config change listener error:', error);
+    } finally {
+      if (timerId !== undefined) clearTimeout(timerId);
+    }
+  }
+}
+
+function canonicalize(value: unknown): string {
+  return JSON.stringify(sortJsonValue(value));
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValue);
+  }
+  if (value && typeof value === 'object') {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = sortJsonValue((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}

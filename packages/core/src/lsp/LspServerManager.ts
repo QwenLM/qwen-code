@@ -23,12 +23,14 @@ import {
 } from './constants.js';
 import type {
   LspConnectionResult,
+  LspReconcileResult,
   LspServerConfig,
   LspServerHandle,
   LspServerStatus,
   LspSocketOptions,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { lspServerConfigHash } from './configHash.js';
 
 const debugLogger = createDebugLogger('LSP');
 
@@ -39,6 +41,8 @@ export interface LspServerManagerOptions {
 
 export class LspServerManager {
   private serverHandles: Map<string, LspServerHandle> = new Map();
+  private serverConfigHashes: Map<string, string> = new Map();
+  private reconcileQueue: Promise<unknown> = Promise.resolve();
   private requireTrustedWorkspace: boolean;
   private workspaceRoot: string;
 
@@ -54,16 +58,31 @@ export class LspServerManager {
 
   setServerConfigs(configs: LspServerConfig[]): void {
     this.serverHandles.clear();
+    this.serverConfigHashes.clear();
     for (const config of configs) {
       this.serverHandles.set(config.name, {
         config,
         status: 'NOT_STARTED',
       });
+      this.serverConfigHashes.set(config.name, lspServerConfigHash(config));
     }
+    debugLogger.info(
+      `Prepared ${configs.length} LSP server config(s): ${formatServerNames(
+        configs.map((config) => config.name),
+      )}`,
+    );
   }
 
   clearServerHandles(): void {
+    if (this.serverHandles.size > 0) {
+      debugLogger.info(
+        `Clearing ${this.serverHandles.size} LSP server handle(s): ${formatServerNames(
+          Array.from(this.serverHandles.keys()),
+        )}`,
+      );
+    }
     this.serverHandles.clear();
+    this.serverConfigHashes.clear();
   }
 
   getHandles(): ReadonlyMap<string, LspServerHandle> {
@@ -89,6 +108,101 @@ export class LspServerManager {
       await this.stopServer(name, handle);
     }
     this.serverHandles.clear();
+    this.serverConfigHashes.clear();
+  }
+
+  async reconcileServerConfigs(
+    configs: LspServerConfig[],
+  ): Promise<LspReconcileResult> {
+    const run = async () => this.doReconcileServerConfigs(configs);
+    const next = this.reconcileQueue.then(run, run);
+    this.reconcileQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async doReconcileServerConfigs(
+    configs: LspServerConfig[],
+  ): Promise<LspReconcileResult> {
+    debugLogger.info(
+      `Reconciling LSP server configs: desired=${formatServerNames(
+        configs.map((config) => config.name),
+      )}`,
+    );
+    const desiredConfigs = new Map<string, LspServerConfig>();
+    const desiredHashes = new Map<string, string>();
+    for (const config of configs) {
+      desiredConfigs.set(config.name, config);
+      desiredHashes.set(config.name, lspServerConfigHash(config));
+    }
+
+    const result: LspReconcileResult = {
+      added: [],
+      removed: [],
+      restarted: [],
+      unchanged: [],
+    };
+
+    for (const [name, handle] of Array.from(this.serverHandles)) {
+      const nextConfig = desiredConfigs.get(name);
+      if (!nextConfig) {
+        if (handle.startingPromise) {
+          await handle.startingPromise;
+        }
+        await this.stopServer(name, handle);
+        this.serverHandles.delete(name);
+        this.serverConfigHashes.delete(name);
+        result.removed.push(name);
+        continue;
+      }
+
+      const nextHash = desiredHashes.get(name);
+      if (this.serverConfigHashes.get(name) !== nextHash) {
+        if (handle.startingPromise) {
+          await handle.startingPromise;
+        }
+        await this.stopServer(name, handle);
+        const nextHandle: LspServerHandle = {
+          config: nextConfig,
+          status: 'NOT_STARTED',
+        };
+        this.serverHandles.set(name, nextHandle);
+        if (nextHash) {
+          this.serverConfigHashes.set(name, nextHash);
+        }
+        result.restarted.push(name);
+        await this.startServer(name, nextHandle);
+      } else {
+        result.unchanged.push(name);
+      }
+    }
+
+    for (const [name, config] of desiredConfigs) {
+      if (this.serverHandles.has(name)) {
+        continue;
+      }
+      const handle: LspServerHandle = {
+        config,
+        status: 'NOT_STARTED',
+      };
+      this.serverHandles.set(name, handle);
+      const hash = desiredHashes.get(name);
+      if (hash) {
+        this.serverConfigHashes.set(name, hash);
+      }
+      result.added.push(name);
+      await this.startServer(name, handle);
+    }
+
+    debugLogger.info(
+      `LSP reconcile result: added=${formatServerNames(
+        result.added,
+      )}, removed=${formatServerNames(
+        result.removed,
+      )}, restarted=${formatServerNames(
+        result.restarted,
+      )}, unchanged=${formatServerNames(result.unchanged)}`,
+    );
+    return result;
   }
 
   /**
@@ -220,9 +334,6 @@ export class LspServerManager {
       workspaceTrusted,
     );
     if (!trusted) {
-      debugLogger.info(
-        `Workspace trust check failed, not starting LSP server ${name}`,
-      );
       handle.status = 'FAILED';
       return;
     }
@@ -260,6 +371,13 @@ export class LspServerManager {
       handle.error = undefined;
       handle.warmedUp = false;
       handle.status = 'IN_PROGRESS';
+      debugLogger.info(
+        `Starting LSP server ${name}: command=${
+          handle.config.command ?? '<none>'
+        }, transport=${handle.config.transport}, languages=${formatServerNames(
+          handle.config.languages,
+        )}`,
+      );
 
       // Create LSP connection
       const connection = await this.createLspConnection(handle.config);
@@ -293,6 +411,7 @@ export class LspServerManager {
     name: string,
     handle: LspServerHandle,
   ): Promise<void> {
+    debugLogger.info(`Stopping LSP server ${name}`);
     handle.stopRequested = true;
 
     if (handle.connection) {
@@ -310,6 +429,7 @@ export class LspServerManager {
     handle.status = 'NOT_STARTED';
     handle.warmedUp = false;
     handle.restartAttempts = 0;
+    debugLogger.info(`LSP server ${name} stopped`);
   }
 
   private async shutdownConnection(handle: LspServerHandle): Promise<void> {
@@ -738,4 +858,8 @@ export class LspServerManager {
 
     return undefined;
   }
+}
+
+function formatServerNames(names: readonly string[]): string {
+  return names.length === 0 ? '<none>' : names.join(',');
 }

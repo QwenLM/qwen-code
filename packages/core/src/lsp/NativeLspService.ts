@@ -38,6 +38,9 @@ import { LspServerManager } from './LspServerManager.js';
 import type {
   LspConnectionInterface,
   LspServerHandle,
+  LspServerConfig,
+  LspServiceReinitializeResult,
+  LspSkippedServer,
   LspServerStatus,
   LspStatusSnapshot,
   NativeLspServiceOptions,
@@ -80,6 +83,7 @@ export class NativeLspService {
   private workspaceContext: WorkspaceContext;
   private fileDiscoveryService: FileDiscoveryService;
   private requireTrustedWorkspace: boolean;
+  private allowedServerNames?: Set<string>;
   private workspaceRoot: string;
   private configLoader: LspConfigLoader;
   private serverManager: LspServerManager;
@@ -99,6 +103,9 @@ export class NativeLspService {
     this.workspaceContext = workspaceContext;
     this.fileDiscoveryService = fileDiscoveryService;
     this.requireTrustedWorkspace = options.requireTrustedWorkspace ?? true;
+    this.allowedServerNames = options.allowedServerNames
+      ? new Set(options.allowedServerNames)
+      : undefined;
     this.workspaceRoot =
       options.workspaceRoot ??
       (config as { getProjectRoot: () => string }).getProjectRoot();
@@ -141,7 +148,110 @@ export class NativeLspService {
       extensionConfigs,
       userConfigs,
     );
+    debugLogger.info(
+      `Discovered ${serverConfigs.length} LSP server config(s): ${formatServerNames(
+        serverConfigs.map((config) => config.name),
+      )}`,
+    );
     this.serverManager.setServerConfigs(serverConfigs);
+  }
+
+  async reinitialize(): Promise<LspServiceReinitializeResult> {
+    const workspaceTrusted = this.config.isTrustedFolder();
+    debugLogger.info(
+      `Reinitializing LSP servers: workspaceRoot=${this.workspaceRoot}, trusted=${workspaceTrusted}`,
+    );
+    if (this.requireTrustedWorkspace && !workspaceTrusted) {
+      const removed = Array.from(this.serverManager.getHandles().keys());
+      await this.serverManager.stopAll();
+      this.clearDocumentTrackingForServers(removed);
+      const result = {
+        reconcile: {
+          added: [],
+          removed,
+          restarted: [],
+          unchanged: [],
+        },
+        skipped: [],
+      };
+      debugLogger.info(
+        `LSP reinitialize result: added=<none>, removed=${formatServerNames(
+          removed,
+        )}, restarted=<none>, unchanged=<none>, skipped=<none>`,
+      );
+      return result;
+    }
+
+    const userConfigs = await this.configLoader.loadUserConfigsStrict();
+    if (!userConfigs.ok) {
+      throw userConfigs.error;
+    }
+
+    const extensionConfigs = await this.configLoader.loadExtensionConfigs(
+      this.getActiveExtensions(),
+    );
+    const serverConfigs = this.configLoader.mergeConfigs(
+      [],
+      extensionConfigs,
+      userConfigs.configs,
+    );
+    const { admitted, skipped } = this.filterServerConfigs(
+      serverConfigs,
+      workspaceTrusted,
+    );
+    const reconcile = await this.serverManager.reconcileServerConfigs(admitted);
+    this.clearDocumentTrackingForServers([
+      ...reconcile.removed,
+      ...reconcile.restarted,
+    ]);
+    debugLogger.info(
+      `LSP reinitialize result: added=${formatServerNames(
+        reconcile.added,
+      )}, removed=${formatServerNames(
+        reconcile.removed,
+      )}, restarted=${formatServerNames(
+        reconcile.restarted,
+      )}, unchanged=${formatServerNames(
+        reconcile.unchanged,
+      )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
+    );
+    return { reconcile, skipped };
+  }
+
+  private filterServerConfigs(
+    configs: LspServerConfig[],
+    workspaceTrusted: boolean,
+  ): { admitted: LspServerConfig[]; skipped: LspSkippedServer[] } {
+    const admitted: LspServerConfig[] = [];
+    const skipped: LspSkippedServer[] = [];
+    for (const config of configs) {
+      if (
+        this.allowedServerNames &&
+        !this.allowedServerNames.has(config.name)
+      ) {
+        debugLogger.warn(
+          `LSP server ${config.name} is not allowed by the configured whitelist`,
+        );
+        skipped.push({ name: config.name, reason: 'not_allowed' });
+        continue;
+      }
+      if (!workspaceTrusted && config.trustRequired) {
+        debugLogger.warn(
+          `LSP server ${config.name} requires trusted workspace, skipping`,
+        );
+        skipped.push({ name: config.name, reason: 'server_trust_required' });
+        continue;
+      }
+      admitted.push(config);
+    }
+    return { admitted, skipped };
+  }
+
+  private clearDocumentTrackingForServers(serverNames: string[]): void {
+    for (const name of serverNames) {
+      this.openedDocuments.delete(name);
+      this.lastConnections.delete(name);
+    }
   }
 
   private getActiveExtensions(): Extension[] {
@@ -1407,4 +1517,8 @@ export class NativeLspService {
           : '';
     return message.includes('No Project');
   }
+}
+
+function formatServerNames(names: readonly string[]): string {
+  return names.length === 0 ? '<none>' : names.join(',');
 }
