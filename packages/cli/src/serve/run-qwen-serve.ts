@@ -1781,26 +1781,32 @@ export async function runQwenServe(
             });
             const plan = core.buildInstallPlan(provider, inputs);
             const fresh = settingsRuntime.settings.loadSettings(boundWorkspace);
+            const adapter =
+              settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
+                fresh,
+              );
             await core.applyProviderInstallPlan(plan, {
-              settings:
-                settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
-                  fresh,
-                ),
+              settings: adapter,
               doRefreshAuth: false,
             });
             core.emitDaemonLog('Auth provider installed.', {
               'qwen-code.daemon.auth.provider_id': provider.id,
               'qwen-code.daemon.auth.auth_type': plan.authType,
             });
+            const effectiveModelId =
+              (adapter.getValue('model.name') as string | undefined) ??
+              plan.modelSelection?.modelId;
+            const effectiveBaseUrl =
+              (adapter.getValue('model.baseUrl') as string | undefined) ??
+              plan.modelSelection?.baseUrl ??
+              inputs.baseUrl;
             return {
               v: 1,
               providerId: provider.id,
               providerLabel: provider.label,
               authType: plan.authType,
-              ...(plan.modelSelection?.modelId
-                ? { modelId: plan.modelSelection.modelId }
-                : {}),
-              ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
+              ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
+              ...(effectiveBaseUrl ? { baseUrl: effectiveBaseUrl } : {}),
               message: `Successfully configured ${provider.label}. Use /model to switch models.`,
             };
           },
