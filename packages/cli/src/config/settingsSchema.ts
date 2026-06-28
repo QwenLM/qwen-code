@@ -484,6 +484,7 @@ const SETTINGS_SCHEMA = {
         category: 'General',
         requiresRestart: false,
         default: 5,
+        minimum: 1,
         description:
           "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
         showInDialog: true,
@@ -1685,6 +1686,21 @@ const SETTINGS_SCHEMA = {
             description: 'Enable fuzzy search when searching for files.',
             showInDialog: true,
           },
+        },
+      },
+      autoCompactThreshold: {
+        type: 'number',
+        label: 'Auto-Compact Threshold',
+        category: 'Context',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Fraction of context window at which auto-compaction triggers (greater than 0, up to 1). Default is 0.7 (70%).',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'number',
+          minimum: 0.01,
+          maximum: 1,
         },
       },
     },

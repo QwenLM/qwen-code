@@ -173,6 +173,7 @@ describe('GeminiChat', async () => {
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi
         .fn()

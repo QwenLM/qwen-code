@@ -18,6 +18,7 @@ import type {
   UserPromptSubmitInput,
   UserPromptExpansionInput,
   StopInput,
+  ContextUsageData,
   SessionStartInput,
   SessionEndInput,
   SessionStartSource,
@@ -188,12 +189,14 @@ export class HookEventHandler {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
+    contextUsage?: ContextUsageData,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: StopInput = {
       ...this.createBaseInput(HookEventName.Stop),
       stop_hook_active: stopHookActive,
       last_assistant_message: lastAssistantMessage,
+      ...contextUsage,
     };
 
     return this.executeHooks(HookEventName.Stop, input, undefined, signal);

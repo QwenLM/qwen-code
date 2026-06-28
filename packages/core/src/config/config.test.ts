@@ -5701,4 +5701,43 @@ describe('Model Switching and Config Updates', () => {
       expect(config.getAutoSkillConfirmEnabled()).toBe(false);
     });
   });
+
+  describe('MCP Stop dispatch with context usage data', () => {
+    it('buildContextUsage handles MCP input patterns with runtime validation', async () => {
+      // Test the buildContextUsage function that's used in MCP Stop dispatch
+      // This validates the runtime type coercion and edge cases
+      const { buildContextUsage } = await import('../hooks/context-usage.js');
+
+      // Normal case: valid numbers
+      expect(buildContextUsage(128000, 64000)).toEqual({
+        context_usage: 0.5,
+        context_limit: 128000,
+        input_tokens: 64000,
+      });
+
+      // Missing context_limit: returns undefined
+      expect(buildContextUsage(undefined, 64000)).toBeUndefined();
+
+      // Missing input_tokens (defaults to 0): returns undefined
+      expect(buildContextUsage(128000, 0)).toBeUndefined();
+
+      // Both missing: returns undefined
+      expect(buildContextUsage(undefined, 0)).toBeUndefined();
+
+      // String values (MCP might send strings): Number.isFinite rejects strings
+      // @ts-expect-error - testing runtime validation
+      expect(buildContextUsage('128000', 64000)).toBeUndefined();
+
+      // Invalid string values: returns undefined
+      // @ts-expect-error - testing runtime validation
+      expect(buildContextUsage('invalid', 64000)).toBeUndefined();
+
+      // Negative values: returns undefined
+      expect(buildContextUsage(-128000, 64000)).toBeUndefined();
+      expect(buildContextUsage(128000, -64000)).toBeUndefined();
+
+      // Zero context_limit: returns undefined
+      expect(buildContextUsage(0, 64000)).toBeUndefined();
+    });
+  });
 });
