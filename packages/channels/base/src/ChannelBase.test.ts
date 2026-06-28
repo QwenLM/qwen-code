@@ -203,6 +203,35 @@ describe('ChannelBase', () => {
       expect(maps.collectBuffers.has(sid)).toBe(false);
     });
 
+    it('/clear stops streaming on the cancelled prompt (mirror /cancel), not just cancels it', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope({ text: 'hi' }));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+
+      // Seed an in-flight prompt whose BlockStreamer is exposed via stopStreaming.
+      const stopStreaming = vi.fn();
+      const active = {
+        cancelled: false,
+        done: Promise.resolve(),
+        resolve: () => {},
+        stopStreaming,
+      };
+      (
+        ch as unknown as { activePrompts: Map<string, typeof active> }
+      ).activePrompts.set(sid, active);
+
+      ch.sent = [];
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+
+      // Must do BOTH: flip cancelled AND stop streaming. Cancelled alone only
+      // suppresses new chunks — text already buffered in the BlockStreamer still
+      // leaks out via the idle timer after the session is cleared unless stopped.
+      expect(active.cancelled).toBe(true);
+      expect(stopStreaming).toHaveBeenCalledTimes(1);
+    });
+
     it('/clear completes (does not hang) when a wedged turn never resolves active.done', async () => {
       const ch = createChannel({ instructions: 'Be brief.' });
       await ch.handleInbound(envelope({ text: 'hi' }));

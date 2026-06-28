@@ -254,6 +254,10 @@ export abstract class ChannelBase {
           this.collectBuffers.delete(id);
           if (active) {
             active.cancelled = true;
+            // Stop the BlockStreamer too (mirror /cancel): cancelled alone only
+            // suppresses NEW chunks — text already buffered can still be flushed
+            // by the idle timer after the session is purged unless we stop it.
+            active.stopStreaming?.();
             // Best-effort cancel: fire-and-forget. A wedged child or daemon
             // transport can leave the cancelSession REQUEST itself pending
             // forever; awaiting it would hang /clear before the bounded wait
