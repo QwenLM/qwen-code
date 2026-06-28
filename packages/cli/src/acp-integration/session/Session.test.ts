@@ -5562,6 +5562,149 @@ describe('Session', () => {
         }
       });
 
+      it('keeps a dynamic loop alive on a transient EISDIR resolve error', async () => {
+        // EISDIR is in TRANSIENT_FS_CODES (the lstat→open TOCTOU race: the path is
+        // swapped to a directory between the pre-open lstat and fs.open). A
+        // `dynamic` loop must degrade to a no-op re-arm tick — same survival as the
+        // EACCES/EIO cases — instead of dying. Mutation guard: drop EISDIR from the
+        // set and this throw falls through to the sanitized `[loop error]` re-throw.
+        debugLoggerWarnSpy.mockClear();
+        const eisdir = Object.assign(
+          new Error('EISDIR: illegal operation on a directory, read'),
+          { code: 'EISDIR' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eisdir);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        const errorEchoes = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The degraded no-op tick reached the model (the turn ran → no throw),
+          // carrying the dynamic re-arm sentinel and the EISDIR errno note.
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain(
+              '# /loop tick — loop.md absent (dynamic pacing)',
+            );
+          });
+          expect(sentToModel()).toContain('<<loop.md-dynamic>>');
+          expect(sentToModel()).toContain(
+            'could not be read this tick (EISDIR)',
+          );
+          // The loop did NOT surface an error (it survived).
+          expect(errorEchoes()).toHaveLength(0);
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=EISDIR) — check .qwen/loop.md permissions/IO',
+            eisdir,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('keeps a dynamic loop alive on a transient ENOTDIR resolve error', async () => {
+        // ENOTDIR is the sibling TOCTOU code (a path component swapped to a
+        // non-directory between the lstat and fs.open). Like EISDIR it must degrade
+        // a `dynamic` loop to a no-op re-arm tick rather than killing it.
+        debugLoggerWarnSpy.mockClear();
+        const enotdir = Object.assign(
+          new Error('ENOTDIR: not a directory, open'),
+          { code: 'ENOTDIR' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(enotdir);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        const errorEchoes = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain(
+              '# /loop tick — loop.md absent (dynamic pacing)',
+            );
+          });
+          expect(sentToModel()).toContain('<<loop.md-dynamic>>');
+          expect(sentToModel()).toContain(
+            'could not be read this tick (ENOTDIR)',
+          );
+          expect(errorEchoes()).toHaveLength(0);
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=ENOTDIR) — check .qwen/loop.md permissions/IO',
+            enotdir,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
       it('re-throws (does NOT degrade) a dynamic loop on a NON-fs resolve error', async () => {
         // The gate's reason for existing: a non-transient error (a TypeError /
         // programming bug → code 'unknown') is NOT in TRANSIENT_FS_CODES, so the

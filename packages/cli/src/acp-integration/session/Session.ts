@@ -217,15 +217,22 @@ const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // conforming-but-busy client, while a client that never answers stops
 // costing a stall per tool batch after a few batches.
 const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
-// Known-transient fs error codes for loop.md sentinel resolution. A `dynamic`
-// (self-paced) loop degrades to a no-op re-arm tick ONLY on these; any other
-// (unexpected) error re-throws so a real bug surfaces instead of looping forever.
+// fs codes that let a `dynamic` (self-paced) loop treat a THROWN loop.md
+// sentinel-resolution as transient — degrade to a no-op re-arm tick so the loop
+// survives — instead of re-throwing (which ends it: the firing wakeup is already
+// consumed, so only an end-of-turn re-arm keeps it alive). readLoopTaskFile only
+// re-throws EACCES/EIO/EBUSY/EPERM (it skips ENOENT/EISDIR/ENOTDIR/ELOOP/… to its
+// own `missing` → no-op path); EISDIR/ENOTDIR stay here as defense-in-depth for
+// the lstat→open TOCTOU race (path swapped to a dir/non-dir mid-read) should that
+// internal skip ever narrow. ENOENT is omitted on purpose: "absent" is not a
+// transient read failure and can never reach this catch.
 const TRANSIENT_FS_CODES: readonly string[] = [
   'EACCES',
   'EIO',
   'EBUSY',
   'EPERM',
-  'ENOENT',
+  'EISDIR',
+  'ENOTDIR',
 ];
 
 type DrainedMidTurnMessage =
