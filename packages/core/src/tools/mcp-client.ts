@@ -1880,12 +1880,18 @@ export async function createTransport(
     // This provides a clear error message instead of a silent connection failure
     if (mcpServerConfig.args?.length) {
       const entryPath = mcpServerConfig.args[0];
-      // Check if it looks like a file path (contains path separators or starts with .)
-      if (
-        entryPath.includes('/') ||
-        entryPath.includes('\\') ||
-        entryPath.startsWith('.')
-      ) {
+      // Only treat the first arg as a local entry script when it's clearly a
+      // filesystem path. A bare `includes('/')` also matches scoped npm package
+      // names (e.g. `npx @modelcontextprotocol/server-filesystem`), which would
+      // wrongly resolve under the workspace and throw before the runner runs.
+      const looksLikePath =
+        entryPath.startsWith('./') ||
+        entryPath.startsWith('../') ||
+        entryPath.startsWith('.\\') ||
+        entryPath.startsWith('..\\') ||
+        isAbsolute(entryPath) ||
+        /^[A-Za-z]:[\\/]/.test(entryPath);
+      if (looksLikePath) {
         // Resolve relative paths against cwd before checking existence
         const resolvedPath = isAbsolute(entryPath)
           ? entryPath

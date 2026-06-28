@@ -2052,6 +2052,28 @@ describe('mcp-client', () => {
         expect(mockedTransport).toHaveBeenCalledTimes(1);
         expect(mockExistsSync).not.toHaveBeenCalled();
       });
+
+      it('skips validation when a scoped npm package is the first arg', async () => {
+        // Regression: `npx @modelcontextprotocol/server-filesystem` — the scoped
+        // name contains `/` but is NOT a filesystem path. It must pass through to
+        // the runner, not resolve under the workspace (which would throw).
+        const mockedTransport = vi
+          .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+          .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+        await expect(
+          createTransport(
+            'test-server',
+            {
+              command: 'npx',
+              args: ['@modelcontextprotocol/server-filesystem', '/tmp'],
+            },
+            false,
+          ),
+        ).resolves.toBeDefined();
+        expect(mockedTransport).toHaveBeenCalledTimes(1);
+        expect(mockExistsSync).not.toHaveBeenCalled();
+      });
     });
 
     describe('useGoogleCredentialProvider', () => {

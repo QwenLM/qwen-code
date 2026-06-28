@@ -191,6 +191,18 @@ export function createClientMcpServerProvider(
             `runtime MCP add skipped: ${(result as { reason?: string }).reason ?? 'unknown'}`,
           );
         }
+        // Refuse to let a browser-hosted client shadow a server the user
+        // configured in settings: the runtime overlay would otherwise reroute
+        // that server's discovery and tool calls back through this WS client.
+        // Roll back the child-side add (the catch below drops the sender route).
+        if ((result as { shadowedSettings?: boolean }).shadowedSettings) {
+          await bridge
+            .removeRuntimeMcpServer(serverName, originatorClientId)
+            .catch(() => {});
+          throw new Error(
+            `client MCP server '${serverName}' conflicts with a configured MCP server`,
+          );
+        }
         return { toolCount: (result as { toolCount: number }).toolCount };
       } catch (err) {
         // Roll back the sender on any failure so a half-registered name can't

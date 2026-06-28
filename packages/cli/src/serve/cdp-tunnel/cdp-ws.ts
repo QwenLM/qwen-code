@@ -200,8 +200,18 @@ export function attachCdpClient(
           err && typeof err === 'object' && 'message' in err
             ? String((err as { message?: unknown }).message)
             : String(err)
-        }`,
+        }; closing puppeteer socket so a reconnect can retry attach`,
       );
+      // `bridge.cdpBound` was set before attach. Without closing here, the
+      // single-client guard above rejects every reconnect while page-domain
+      // commands keep failing "not attached" — a stuck tunnel until daemon
+      // restart. Closing triggers ws.on('close') -> dispose(), which clears
+      // cdpBound and routeInbound so the next /cdp client re-attempts attach.
+      try {
+        ws.close(CLOSE_NO_BRIDGE, 'cdp_attach failed');
+      } catch {
+        // already closing
+      }
     });
 
   log('qwen serve: /cdp puppeteer client bound to extension bridge');
