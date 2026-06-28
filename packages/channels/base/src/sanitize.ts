@@ -36,17 +36,17 @@ export function sanitizeSenderName(name: string): string {
  * (reply quotes, attachment filenames): strip C0/DEL control chars, the
  * wrapper's own quote/bracket delimiters, and the Unicode line/bidi controls
  * above, then cap the length. Shared so the reply-quote and filename paths
- * can't drift apart.
+ * can't drift apart. On truncation a single-char ellipsis is appended (kept
+ * within maxLen) so the agent can tell a quote/filename was cut rather than
+ * silently ending mid-token.
  */
 export function sanitizeQuotedText(text: string, maxLen: number): string {
-  return (
-    text
-      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
-      .replace(/["[\]]/g, ' ')
-      .slice(0, maxLen)
-  );
+  const cleaned = text
+    .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/["[\]]/g, ' ');
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen - 1) + '…' : cleaned;
 }
 
 /**

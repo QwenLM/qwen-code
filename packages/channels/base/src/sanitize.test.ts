@@ -11,6 +11,7 @@ const LS = String.fromCharCode(0x2028); // LINE SEPARATOR
 const PS = String.fromCharCode(0x2029); // PARAGRAPH SEPARATOR
 const RLO = String.fromCharCode(0x202e); // RIGHT-TO-LEFT OVERRIDE (trojan-source)
 const PDI = String.fromCharCode(0x2069); // POP DIRECTIONAL ISOLATE
+const ELLIPSIS = String.fromCharCode(0x2026); // HORIZONTAL ELLIPSIS (truncation indicator)
 
 describe('sanitizeSenderName', () => {
   it('passes through a plain name unchanged', () => {
@@ -113,5 +114,21 @@ describe('sanitizeQuotedText', () => {
     expect(out).not.toContain(LS);
     expect(out).not.toContain(PS);
     expect(out).not.toContain(RLO);
+  });
+
+  it('appends a single-char ellipsis on truncation and stays within maxLen', () => {
+    // The indicator lets the agent tell a quote/filename was cut rather than
+    // silently ending mid-token. Mutation check: a plain .slice(0, maxLen) ends
+    // with 'A' here instead of the ellipsis.
+    const out = sanitizeQuotedText('A'.repeat(20), 10);
+    expect(out).toHaveLength(10);
+    expect(out).toBe('A'.repeat(9) + ELLIPSIS);
+  });
+
+  it('does not append an indicator when the cleaned text fits within maxLen', () => {
+    expect(sanitizeQuotedText('hello', 10)).toBe('hello');
+    // Exactly maxLen is not truncation, so no ellipsis is added.
+    expect(sanitizeQuotedText('A'.repeat(10), 10)).toBe('A'.repeat(10));
+    expect(sanitizeQuotedText('A'.repeat(10), 10)).not.toContain(ELLIPSIS);
   });
 });

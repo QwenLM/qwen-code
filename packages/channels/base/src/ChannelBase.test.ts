@@ -607,6 +607,33 @@ describe('ChannelBase', () => {
       expect(text).not.toContain('private to you');
     });
 
+    it('/who in a single-scope group reports the session as shared channel-wide', async () => {
+      // `single` routes every DM and group to one `__single__` session, so a group
+      // /who must report the channel-wide blast radius rather than understate it as
+      // "shared by this group". Mutation check: the pre-fix ternary printed the
+      // group note here.
+      const ch = createChannel({ sessionScope: 'single', groupPolicy: 'open' });
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          text: '/who',
+        }),
+      );
+      const text = ch.sent[0]!.text;
+      expect(text).toContain('shared channel-wide');
+      expect(text).not.toContain('shared by this group');
+    });
+
+    it('/who in a single-scope DM also reports shared channel-wide', async () => {
+      const ch = createChannel({ sessionScope: 'single' });
+      await ch.handleInbound(envelope({ text: '/who' }));
+      const text = ch.sent[0]!.text;
+      expect(text).toContain('shared channel-wide');
+      expect(text).not.toContain('private to you');
+    });
+
     it('/cancel reports when no request is running', async () => {
       const ch = createChannel();
       ch.enableCancelCommand();
@@ -2033,6 +2060,132 @@ describe('ChannelBase', () => {
         expect(ch.promptEnds).toHaveLength(0);
         // B remains the active turn with its indicator intact.
         expect(maps.activePrompts.get(sid)).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('/clear runs onPromptEnd when its cancelled turn settles late (no replacement) so platform cleanup is not leaked', async () => {
+      // REGRESSION (onPromptEnd cleanup-leak after /clear): a turn cancelled by
+      // /clear has NO replacement — on the wedged path /clear times out, deletes
+      // the turn's activePrompts entry, and confirms before the cancelled prompt
+      // settles. When it settles late and runs its finally, stillCurrent is false
+      // (its entry is gone) but it was NOT superseded, so onPromptEnd MUST still
+      // fire: adapters clear typing intervals / recall working reactions / finalize
+      // cards there, and skipping it leaks that platform cleanup past the cleared
+      // turn. Mutation check: a `stillCurrent`-only guard skips onPromptEnd here.
+      let resolveA!: (v: string) => void;
+      const wedgedA = new Promise<string>((r) => {
+        resolveA = r;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        () => wedgedA,
+      );
+      // cancelSession only REQUESTS cancellation; it does not resolve the wedged
+      // turn, so /clear's bounded wait times out and it completes WITHOUT replacing.
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const ch = createChannel();
+      const maps = ch as unknown as { activePrompts: Map<string, unknown> };
+
+      // Turn A starts and wedges; don't await it (it can't settle on its own).
+      const pA = ch.handleInbound(envelope({ text: 'A', messageId: 'mA' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+
+      vi.useFakeTimers();
+      try {
+        // /clear cancels A and (A wedged) times out, purges A's entry, confirms.
+        const pClear = ch.handleInbound(envelope({ text: '/clear' }));
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        await pClear;
+        expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
+          true,
+        );
+        // A's entry is gone and it was never superseded; its prompt hasn't settled.
+        expect(maps.activePrompts.has(sid)).toBe(false);
+        expect(ch.promptEnds.some((e) => e.messageId === 'mA')).toBe(false);
+
+        // A's wedged prompt finally settles and runs A's finally LATE. `await pA`
+        // is the deterministic sync point — it resolves after A's finally completes.
+        resolveA('late response from A');
+        await pA;
+
+        // onPromptEnd fired for the cancelled turn even though its entry was gone.
+        expect(ch.promptEnds.some((e) => e.messageId === 'mA')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('steer: a wedged turn settling late does not drain the collect buffer its replacement owns', async () => {
+      // FIX (collect-drain guard): turn A wedges, the steer bounded wait times
+      // out, and turn B starts a fresh chain and becomes the active turn — owning
+      // the session's collect buffer (mixed-mode single-scope can pair a steer
+      // turn with collect follow-ups). When A's wedged prompt settles late and
+      // runs its finally, draining the buffer would steal B's follow-ups and
+      // re-enter handleInbound with A-coalesced text. The `stillCurrent &&` guard
+      // must skip the drain once A is no longer the active turn.
+      let resolveA!: (v: string) => void;
+      const wedgedA = new Promise<string>((r) => {
+        resolveA = r;
+      });
+      const pendingB = new Promise<string>(() => {}); // never resolves: B stays active
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        return callCount === 1 ? wedgedA : pendingB;
+      });
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const ch = createChannel({ dispatchMode: 'steer' });
+      const maps = ch as unknown as {
+        activePrompts: Map<string, unknown>;
+        collectBuffers: Map<
+          string,
+          Array<{ text: string; envelope: Envelope }>
+        >;
+      };
+
+      // Turn A starts and wedges; don't await it (it can't settle on its own).
+      const pA = ch.handleInbound(envelope({ text: 'A' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+
+      vi.useFakeTimers();
+      try {
+        // Turn B steers in: A.done never resolves, the bounded wait times out, and
+        // B starts a fresh chain and becomes the active turn (its prompt never settles).
+        const pB = ch.handleInbound(envelope({ text: 'B' }));
+        void pB; // floating by design: B's prompt never settles
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        expect(maps.activePrompts.get(sid)).toBeDefined();
+
+        // Follow-ups accumulate into the collect buffer B now owns.
+        const buffered = [
+          {
+            text: 'buffered follow-up for B',
+            envelope: envelope({ text: 'buffered follow-up for B' }),
+          },
+        ];
+        maps.collectBuffers.set(sid, buffered);
+
+        // A's wedged prompt finally settles and runs A's finally LATE.
+        resolveA('late response from A');
+        await pA;
+
+        // The guard skipped A's drain: the buffer is the same object, untouched.
+        // Dropping the `stillCurrent &&` from the drain guard deletes it here (and
+        // re-enters handleInbound with the A-coalesced text), failing this.
+        expect(maps.collectBuffers.get(sid)).toBe(buffered);
+        expect(maps.collectBuffers.get(sid)).toHaveLength(1);
       } finally {
         vi.useRealTimers();
       }

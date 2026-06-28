@@ -35,7 +35,29 @@ type ActivePrompt = {
   done: Promise<void>;
   resolve: () => void;
   stopStreaming?: () => void;
+  /**
+   * Set when a steer abandons this (wedged) turn and a replacement takes over the
+   * session. Its late-settling finally then skips onPromptEnd so it can't clobber
+   * the replacement's working indicator. A /clear-cancelled turn is NOT superseded
+   * (it has no replacement), so its finally still runs platform cleanup.
+   */
+  superseded?: boolean;
 };
+
+/**
+ * Character class (sans the enclosing `[]`) for a slash-command token: alphanumerics
+ * plus `_`, `:` and `-`, so hyphenated and namespaced agent commands (e.g.
+ * `/compress-fast`, `/git:commit`) parse as commands. Shared by parseCommand and
+ * isSlashCommand below so the two classifiers can't drift apart.
+ */
+const COMMAND_TOKEN_CHARS = 'a-zA-Z0-9_:-';
+/** parseCommand: capture the leading `/command` token (+ optional `@botname`) and the rest as args. */
+const PARSE_COMMAND_RE = new RegExp(
+  `^\\/([${COMMAND_TOKEN_CHARS}]+)(?:@\\S+)?\\s*(.*)`,
+  's',
+);
+/** isSlashCommand: the first whitespace-delimited token alone must be a pure command token. */
+const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 
 export abstract class ChannelBase {
   protected config: ChannelConfig;
@@ -324,13 +346,20 @@ export abstract class ChannelBase {
         envelope.chatId,
         envelope.threadId,
       );
-      const scopeNote = this.isSharedSession(envelope)
-        ? envelope.isGroup
-          ? ' (shared by this group)'
-          : ' (shared channel-wide)'
-        : envelope.isGroup
-          ? ' (private to you)'
-          : '';
+      // `single` collapses EVERY DM and group to one `__single__` session, so it
+      // is shared channel-wide regardless of where the /who came from — report
+      // that explicitly (a group `single` session understates its blast radius as
+      // "shared by this group"). Other scopes keep their existing wording.
+      const scopeNote =
+        this.config.sessionScope === 'single'
+          ? ' (shared channel-wide)'
+          : this.isSharedSession(envelope)
+            ? envelope.isGroup
+              ? ' (shared by this group)'
+              : ''
+            : envelope.isGroup
+              ? ' (private to you)'
+              : '';
       await this.sendMessage(
         envelope.chatId,
         [
@@ -475,8 +504,9 @@ export abstract class ChannelBase {
     if (!trimmed.startsWith('/')) return null;
     // Handle /command@botname format (Telegram groups). The token allows `-` and
     // `:` so hyphenated and namespaced agent commands (e.g. /compress-fast,
-    // /git:commit) still parse as commands rather than being treated as text.
-    const match = trimmed.match(/^\/([a-zA-Z0-9_:-]+)(?:@\S+)?\s*(.*)/s);
+    // /git:commit) still parse as commands rather than being treated as text
+    // (charset shared with isSlashCommand via PARSE_COMMAND_RE).
+    const match = trimmed.match(PARSE_COMMAND_RE);
     if (!match) return null;
     return { command: match[1].toLowerCase(), args: match[2].trim() };
   }
@@ -507,7 +537,7 @@ export abstract class ChannelBase {
       return false;
     }
     const firstToken = trimmed.slice(1).trimStart().split(/\s+/u)[0] ?? '';
-    return /^[a-zA-Z0-9_:-]+(?:@\S+)?$/.test(firstToken);
+    return COMMAND_TOKEN_RE.test(firstToken);
   }
 
   async handleInbound(envelope: Envelope): Promise<void> {
@@ -767,7 +797,7 @@ export abstract class ChannelBase {
         // Surface the drop — otherwise an unanswered queued message vanishes
         // silently, making "my message was never answered" undiagnosable.
         process.stderr.write(
-          `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran\n`,
+          `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${envelope.text.slice(0, 80).replace(/\n/g, '\\n')})\n`,
         );
         return;
       }
@@ -781,6 +811,14 @@ export abstract class ChannelBase {
         done,
         resolve: doneResolve,
       };
+      // This turn is a steer replacement for a wedged predecessor: mark that
+      // predecessor superseded right before we take over its session slot, so its
+      // late-settling finally skips onPromptEnd (it must not end the indicator we
+      // re-seed below). Only on the steerWedged path — a /clear-cancelled turn has
+      // no replacement and must keep running its own cleanup.
+      if (steerWedged && active) {
+        active.superseded = true;
+      }
       this.activePrompts.set(sessionId, promptState);
 
       this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
@@ -833,11 +871,17 @@ export abstract class ChannelBase {
         // no active prompt) or ending the working indicator it re-seeded. So
         // only touch the session-scoped state when the entry is still ours.
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
-        if (stillCurrent) {
-          // onPromptEnd hides a session/chat-scoped indicator (e.g. the typing
-          // indicator keyed by chatId): a superseded turn must NOT end it, or it
-          // would stop the successor turn's indicator while it is still working.
+        // onPromptEnd runs platform cleanup (clear the typing interval, recall the
+        // working reaction, finalize the card). Run it UNLESS a steer replacement
+        // took this turn over (superseded): that replacement re-seeded the
+        // indicator, so ending it would stop the successor's indicator while it is
+        // still working. A /clear that cancelled this turn deletes its entry with
+        // NO replacement, so it is NOT superseded — its finally must still run the
+        // cleanup, or the platform indicator leaks on past the cleared turn.
+        if (stillCurrent || !promptState.superseded) {
           this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
+        }
+        if (stillCurrent) {
           this.activePrompts.delete(sessionId);
         }
         // Signal any steer/clear waiter racing our done that we're done — even
