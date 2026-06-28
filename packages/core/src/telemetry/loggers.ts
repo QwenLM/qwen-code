@@ -277,6 +277,8 @@ export function logToolOutputTruncated(
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    // event class's `eventName` (short, no prefix) leaks via spread — override with
+    // full namespaced constant for OTel compliance. Same pattern as other event loggers.
     'event.name': EVENT_TOOL_OUTPUT_TRUNCATED,
     'event.timestamp': new Date().toISOString(),
   };
