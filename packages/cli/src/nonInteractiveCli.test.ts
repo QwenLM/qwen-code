@@ -132,6 +132,19 @@ describe('skipHeadlessLoopSentinel', () => {
 
     expect(deleteSpy).not.toHaveBeenCalled();
   });
+
+  it('does not delete a non-recurring sentinel job (one-shot stays in the scheduler)', () => {
+    // The deletion branch requires BOTH `recurring && !durable`. A one-shot
+    // sentinel job is already removed by the scheduler before it fires, so this
+    // guard must NOT delete it — a `!durable`-only guard would wrongly evict it.
+    const scheduler = new CronScheduler();
+    const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_CRON, false);
+    const deleteSpy = vi.spyOn(scheduler, 'delete');
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe('runNonInteractive', () => {
