@@ -307,6 +307,82 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('resets the streak when a retry replays shell inspections', () => {
+      const variants = [
+        'git status --short',
+        'git diff --stat',
+        'git ls-files --modified',
+        'git status --porcelain=v1',
+        'git diff --name-only HEAD',
+        'git -C . status --short',
+        'git --no-pager diff --stat',
+      ];
+
+      for (const command of variants) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command,
+              description: 'Inspect repository changes',
+            }),
+          ),
+        ).toBe(false);
+      }
+
+      expect(
+        service.checkAlwaysOnSafeties({
+          type: GeminiEventType.Retry,
+          value: {},
+        }),
+      ).toBe(false);
+
+      for (const command of variants) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command,
+              description: 'Inspect repository changes',
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(service.getLastLoopType()).not.toBe(
+        LoopType.SHELL_COMMAND_STAGNATION,
+      );
+    });
+
+    it('honors an in-session disable for shell inspection stagnation', () => {
+      service.disableForSession();
+
+      const variants = [
+        'git status --short',
+        'git diff --stat',
+        'git ls-files --modified',
+        'git status --porcelain=v1',
+        'git diff --name-only HEAD',
+        'git -C . status --short',
+        'git --no-pager diff --stat',
+        'git ls-files --others',
+      ];
+
+      for (const command of variants) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command,
+              description: 'Inspect repository changes',
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'shell_command_stagnation',
+        }),
+      );
+    });
+
     it('does not bucket compound commands that also write to the repository', () => {
       // Each chain stages and commits real work; the embedded `git status` must
       // not classify the whole command as stagnant read-only inspection. Vary
@@ -318,6 +394,22 @@ describe('LoopDetectionService', () => {
             createToolCallRequestEvent('run_shell_command', {
               command: `git add file-${i}.txt && git status --short && git commit -m progress-${i}`,
               description: 'Stage, inspect, and commit progress',
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(service.getLastLoopType()).not.toBe(
+        LoopType.SHELL_COMMAND_STAGNATION,
+      );
+    });
+
+    it('does not bucket shell chains that include non-git commands', () => {
+      for (let i = 0; i < SHELL_COMMAND_STAGNATION_THRESHOLD; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command: `git status --short && npm test -- --runInBand=${i}`,
+              description: 'Inspect repository changes and run tests',
             }),
           ),
         ).toBe(false);
