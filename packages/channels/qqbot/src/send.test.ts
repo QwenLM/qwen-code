@@ -407,6 +407,53 @@ describe('group sender-name sanitization', () => {
     // sets alreadyPrefixed is caught here.
     expect(env.alreadyPrefixed).toBeUndefined();
   });
+
+  it('sanitizes the sender name AND command text in the slash-command audit log (no log forging)', () => {
+    // event.author.username and content are attacker-controlled. The slash-command
+    // audit log must use the sanitized name and a neutralized command string, so a
+    // crafted QQ nick/message with CR/LF or ANSI escapes can't forge or corrupt the
+    // operator audit trail. Mutation check: logging the RAW senderName/cleanText
+    // (the pre-fix code) lets the ESC and the injected newline through and fails the
+    // assertions below.
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    (ch as unknown as { handleInbound: () => Promise<void> }).handleInbound =
+      () => Promise.resolve();
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    const ESC = String.fromCharCode(0x1b);
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-audit',
+      group_openid: 'grp-1',
+      content: `/deploy ${ESC}[31m\nrm -rf prod`,
+      author: { username: `Ev${ESC}[2J\nil`, id: 'uid', user_openid: 'uo' },
+    });
+
+    spy.mockRestore();
+
+    const audit = writes.find((w) => w.includes('Slash cmd from'));
+    expect(audit).toBeDefined();
+    // No ANSI escape survives in the log line.
+    expect(audit!.includes(ESC)).toBe(false);
+    // The only newline is the log line's own trailing one — no injected break from
+    // the nick or command text (which would forge a second audit entry).
+    expect(audit!.split('\n')).toHaveLength(2);
+    expect(audit!.endsWith('\n')).toBe(true);
+    // The raw (unsanitized) nick fragment never appears verbatim.
+    expect(audit!.includes(`Ev${ESC}`)).toBe(false);
+    // The command's embedded newline is rendered visibly (\n), not as a real break.
+    expect(audit).toContain('\\n');
+    expect(audit).toContain('Slash cmd from');
+    expect(audit).toContain('grp-1');
+  });
 });
 
 describe('sendMessage', () => {

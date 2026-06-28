@@ -4,7 +4,6 @@ import type { ChannelConfig, Envelope } from './types.js';
 import type { AcpBridge } from './AcpBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
-import { BlockStreamer } from './BlockStreamer.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -1473,6 +1472,43 @@ describe('ChannelBase', () => {
       expect(promptText).toBe('hi');
     });
 
+    it('prefixes a single-scope DM (a multi-operator session) with the sender name', async () => {
+      // `single` collapses every sender's DM into one __single__ session, so it is
+      // multi-operator like a group — without a [sender] tag the agent would merge
+      // different people into one unattributed conversation (the RFC-R4 gap Phase 0
+      // closes; the !-gate, /clear confirm and /who already treat single as shared).
+      // Mutation check: gating attribution on `envelope.isGroup` alone drops this.
+      const ch = createChannel({ sessionScope: 'single' });
+      await ch.handleInbound(
+        envelope({ isGroup: false, senderName: 'Alice', text: 'ship it' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] ship it');
+    });
+
+    it('still prefixes a user-scope GROUP message (attribution NOT gated on isSharedSession)', async () => {
+      // isSharedSession is FALSE for a user-scope group, but a group is always
+      // multi-operator and must stay attributed. Guards against narrowing the gate
+      // to isSharedSession (which would silently drop a user-scope group's prefix).
+      const ch = createChannel({ groupPolicy: 'open', sessionScope: 'user' });
+      await ch.handleInbound(groupEnv({ senderName: 'Bob', text: 'deploy' }));
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Bob] deploy');
+    });
+
+    it('does not prefix a 1:1 user-scope DM (single operator, not shared)', async () => {
+      // A per-user DM has one operator and its own session — no attribution needed.
+      const ch = createChannel({ sessionScope: 'user' });
+      await ch.handleInbound(
+        envelope({ isGroup: false, senderName: 'Alice', text: 'hi there' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('hi there');
+    });
+
     it('places the sender prefix below the reply-quote context', async () => {
       const ch = createChannel({ groupPolicy: 'open' });
       await ch.handleInbound(
@@ -1863,297 +1899,150 @@ describe('ChannelBase', () => {
       );
     });
 
-    it('steer: stops the BlockStreamer so a wedged turn buffered text can not leak via the idle timer after the replacement turn begins', async () => {
-      // A wedged turn left sub-minChars text buffered in its BlockStreamer, sitting
-      // on the idle timer (idleMs < CLEAR_CANCEL_TIMEOUT_MS, so it fires DURING the
-      // steer wind-down). cancelled alone only suppresses NEW chunks, so without
-      // stopStreaming() the idle flush delivers that stale text into the chat after
-      // the steered replacement turn has already started. Mirrors the /clear test.
-      vi.useFakeTimers();
-      try {
-        const ch = createChannel({ dispatchMode: 'steer' });
-        await ch.handleInbound(envelope({ text: 'first' }));
-        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-          .calls[0][0] as string;
-
-        // Real BlockStreamer holding buffered text the idle timer would flush.
-        const idleMs = 1500;
-        expect(idleMs).toBeLessThan(CLEAR_CANCEL_TIMEOUT_MS);
-        const streamer = new BlockStreamer({
-          minChars: 5,
-          maxChars: 1000,
-          idleMs,
-          send: (text) => ch.sendMessage('chat1', text),
-        });
-        // >= minChars and no paragraph boundary → stays buffered, idle timer armed.
-        streamer.push('half-written stale answer');
-        const stopSpy = vi.fn(() => streamer.stop());
-        const maps = ch as unknown as { activePrompts: Map<string, unknown> };
-        maps.activePrompts.set(sid, {
-          cancelled: false,
-          // Wedged: never resolves, so the turn's own finally (which would also
-          // stop the streamer) never runs — only the steer's stopStreaming can.
-          done: new Promise<void>(() => {}),
-          resolve: () => {},
-          stopStreaming: stopSpy,
-        });
-
-        ch.sent = [];
-        (bridge.prompt as ReturnType<typeof vi.fn>).mockClear();
-        (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
-          'steered response',
-        );
-
-        // Steer: must cancel AND stop the streamer, then the bounded wait times out.
-        const p = ch.handleInbound(envelope({ text: 'second' }));
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        await p;
-
-        // Load-bearing: removing active.stopStreaming?.() drops this to 0 calls.
-        expect(stopSpy).toHaveBeenCalledTimes(1);
-        // The buffered stale text must NEVER reach the chat (streamer stopped).
-        expect(
-          ch.sent.some((m) => m.text === 'half-written stale answer'),
-        ).toBe(false);
-        // The replacement turn still ran and delivered.
-        expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('steer: bounded wait lets the next turn progress when active.done is wedged', async () => {
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
-        'steered response',
-      );
-      (bridge as unknown as Record<string, unknown>)['cancelSession'] = vi
-        .fn()
-        .mockResolvedValue(undefined);
-
-      const ch = createChannel({ dispatchMode: 'steer' });
-      await ch.handleInbound(envelope({ text: 'first' })); // completes; queue drains
-      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][0] as string;
-
-      // Inject a wedged in-flight turn whose active.done NEVER resolves (stuck ACP
-      // child). With an UNBOUNDED `await active.done`, the steer below would hang
-      // forever and pin the session queue; the bounded race must let it proceed.
-      const maps = ch as unknown as { activePrompts: Map<string, unknown> };
-      maps.activePrompts.set(sid, {
-        cancelled: false,
-        done: new Promise<void>(() => {}),
-        resolve: () => {},
-      });
-
-      ch.sent = [];
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockClear();
-      vi.useFakeTimers();
-      try {
-        const p = ch.handleInbound(envelope({ text: 'second' }));
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        await p;
-      } finally {
-        vi.useRealTimers();
-      }
-
-      // The steer proceeded within the timeout: it re-prompted and delivered.
-      expect(bridge.prompt).toHaveBeenCalledTimes(1);
-      const steeredText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][1] as string;
-      expect(steeredText).toContain('previous request has been cancelled');
-      expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
-    });
-
-    it('steer: a wedged in-flight turn does not pin the follow-up behind its stuck queue tail', async () => {
-      // A genuinely in-flight turn — registered as BOTH the active prompt AND the
-      // sessionQueues tail — wedges: bridge.prompt never resolves. The bounded
-      // steer wait stops `await active.done` from hanging, but the follow-up was
-      // STILL chained behind the wedged turn's never-resolving queue tail. The
-      // fix re-seeds the chain on the timeout so the follow-up runs instead of
-      // hanging forever (and every later message behind it).
-      let callCount = 0;
-      const wedged = new Promise<string>(() => {}); // never resolves
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? wedged : Promise.resolve('second response');
-      });
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
-        undefined,
-      );
-
-      const ch = createChannel({ dispatchMode: 'steer' });
-
-      // First turn starts and wedges — do NOT await it (it never settles). It now
-      // owns the active-prompt slot AND the sessionQueues tail.
-      const pFirst = ch.handleInbound(envelope({ text: 'first' }));
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      void pFirst; // floating by design: the wedged turn never resolves
-
-      ch.sent = [];
-      vi.useFakeTimers();
-      try {
-        const pSecond = ch.handleInbound(envelope({ text: 'second' }));
-        // Drive the bounded steer wait to its timeout. pSecond resolves ONLY
-        // because the wedged tail is reset rather than awaited; without the fix
-        // `await current` would chain behind the stuck tail and hang forever.
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        await pSecond;
-      } finally {
-        vi.useRealTimers();
-      }
-
-      // The follow-up was processed (not blocked behind the stuck tail).
-      expect(bridge.prompt).toHaveBeenCalledTimes(2);
-      const secondText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[1][1] as string;
-      expect(secondText).toContain('previous request has been cancelled');
-      expect(ch.sent.some((m) => m.text === 'second response')).toBe(true);
-    });
-
-    it('steer: a wedged turn settling late does not clobber the replacement turn (keeps steer protection for the next turn)', async () => {
-      // Reproduces the activePrompts-clobber race: turn A wedges (its bridge.prompt
-      // never settles), the steer bounded wait times out and turn B starts a fresh
-      // chain + registers ITS OWN activePrompt. When A's prompt finally settles and
-      // runs its finally, an UNCONDITIONAL activePrompts.delete would remove B's
-      // entry — so a later turn C would see no active prompt and silently lose steer
-      // protection. The identity guard must keep B's entry intact.
+    it('steer: waits for the running turn to finish before starting the new turn (no concurrent bridge.prompt)', async () => {
+      // Option (a) fix: steer best-effort cancels the running turn, then CHAINS the
+      // new turn onto the session queue tail so it runs only AFTER the old turn's
+      // finally has run. It must NOT start a concurrent replacement bridge.prompt
+      // on the same session (the bridge keys active-prompt tracking + streamed
+      // chunks by sessionId alone, so a concurrent replacement is rejected / mixes
+      // chunks). Mutation check: reverting the steer `prev` to Promise.resolve()
+      // lets the new turn run while turn A is still active — bridge.prompt fires a
+      // second time while A is pending and this test fails.
       let resolveA!: (v: string) => void;
-      const wedgedA = new Promise<string>((r) => {
+      const promiseA = new Promise<string>((r) => {
         resolveA = r;
       });
-      const pendingB = new Promise<string>(() => {}); // never resolves: B stays active
       let callCount = 0;
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
         callCount++;
-        if (callCount === 1) return wedgedA;
-        if (callCount === 2) return pendingB;
-        return Promise.resolve('third response');
+        return callCount === 1 ? promiseA : Promise.resolve('steered response');
       });
+      // cancelSession only REQUESTS cancellation; it does NOT resolve turn A, so A
+      // stays active until we resolve it manually — proving the new turn waits.
       (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
         undefined,
       );
 
       const ch = createChannel({ dispatchMode: 'steer' });
-      const maps = ch as unknown as { activePrompts: Map<string, unknown> };
 
-      // Turn A starts and wedges — it owns the active-prompt slot. Keep the promise
-      // (we settle it manually later); don't await it (it can't settle on its own).
+      // Turn A starts and stays in-flight (don't await it — it can't settle yet).
       const pA = ch.handleInbound(envelope({ text: 'A' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
       const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][0] as string;
 
-      vi.useFakeTimers();
-      try {
-        // Turn B steers in. A.done never resolves, so the bounded wait times out
-        // (steerWedged) and B starts a fresh chain, registering its own activePrompt.
-        const pB = ch.handleInbound(envelope({ text: 'B' }));
-        void pB; // floating by design: B's prompt never settles
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        expect(bridge.prompt).toHaveBeenCalledTimes(2);
-        const bEntry = maps.activePrompts.get(sid);
-        expect(bEntry).toBeDefined();
+      // Turn B steers in: it best-effort cancels A and chains behind A's tail.
+      const pB = ch.handleInbound(envelope({ text: 'B' }));
+      // Give a buggy immediate-chain ample room to (wrongly) start B's prompt.
+      for (let i = 0; i < 50; i++) await Promise.resolve();
 
-        // A's wedged prompt finally settles and runs A's finally. `await pA` is the
-        // deterministic sync point — it resolves only after A's finally completes.
-        resolveA('late response from A');
-        await pA;
+      // A best-effort cancel was requested...
+      expect(bridge.cancelSession).toHaveBeenCalledWith(sid);
+      // ...but B has NOT started: the only bridge.prompt so far is A's, and B's
+      // onPromptStart has not fired (A is still the sole started/unfinished turn).
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect(ch.promptStarts).toHaveLength(1);
+      expect(ch.promptEnds).toHaveLength(0);
 
-        // The guard kept B's entry: an unconditional delete would have removed it.
-        expect(maps.activePrompts.get(sid)).toBe(bEntry);
+      // Now A completes. Its finally detaches onChunk, clears activePrompts and
+      // releases the indicator — THEN B's chained turn dequeues and runs.
+      resolveA('A response (cancelled, never sent)');
+      await pA;
+      await pB;
 
-        // Turn C steers in: it must still SEE the active prompt (B) and engage steer
-        // protection — cancel B and re-prompt with the cancellation note. Without the
-        // guard, C would see no active prompt and forward 'C' verbatim instead.
-        const pC = ch.handleInbound(envelope({ text: 'C' }));
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        await pC;
-      } finally {
-        vi.useRealTimers();
-      }
-
-      expect(bridge.prompt).toHaveBeenCalledTimes(3);
-      const cText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[2][1] as string;
-      expect(cText).toContain('previous request has been cancelled');
-      expect(cText).toContain('C');
-      expect(ch.sent.some((m) => m.text === 'third response')).toBe(true);
+      // B ran only AFTER A finished, exactly once, with the cancellation note.
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const bText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(bText).toContain('previous request has been cancelled');
+      expect(bText).toContain('B');
+      // One start/end pair per turn — A then B, never overlapping.
+      expect(ch.promptStarts).toHaveLength(2);
+      expect(ch.promptEnds).toHaveLength(2);
+      // B delivered; A's cancelled response was never sent.
+      expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
+      expect(ch.sent.some((m) => m.text.includes('A response'))).toBe(false);
     });
 
-    it('steer: releases the abandoned wedged turn OWN onPromptEnd once at steer-time (messageId-scoped indicator), with no double-fire and the replacement untouched', async () => {
-      // FIX (steer messageId-scoped indicator leak): turn A wedges, the steer
-      // bounded wait times out, and turn B starts a fresh chain — re-seeding ITS OWN
-      // working indicator via onPromptStart (mB). doClear releases an evicted wedged
-      // turn's own indicator at eviction time; the steer path must mirror that. The
-      // replacement re-seeds a CHAT-scoped indicator (typing) for itself, but a
-      // MESSAGEID-scoped one (a per-message reaction/card keyed on A's messageId, mA)
-      // is NOT recalled by the replacement — its hooks fire on mB, never on mA. So
-      // the steer must run A's OWN onPromptEnd at steer-time (releasing mA exactly
-      // once), and mark A superseded so A's late-settling finally SKIPS onPromptEnd —
-      // no double-fire of mA, and B's re-seeded indicator (mB) is never ended.
-      // Mutation checks: dropping the steer-time onPromptEnd makes mA never fire
-      // (length 0 below); reverting the finally identity guard makes A's late finally
-      // fire mA a SECOND time (length 2).
+    it('steer: an abandoned turn late chunks cannot reach the new turn (new turn attaches onChunk only after old detaches)', async () => {
+      // The bridge keys textChunk by sessionId alone. Under option (a) the new turn
+      // does not attach its onChunk until it runs — which is AFTER the cancelled old
+      // turn's finally detached its own onChunk. So a late chunk from the abandoned
+      // turn is suppressed by the old turn (cancelled) and never seen by the new
+      // turn. Mutation check: reverting the steer `prev` to Promise.resolve() runs
+      // the new turn concurrently — it attaches its onChunk while the old turn is
+      // still active, so the stale chunk leaks into the new turn's stream.
       let resolveA!: (v: string) => void;
-      const wedgedA = new Promise<string>((r) => {
+      let resolveB!: (v: string) => void;
+      const promiseA = new Promise<string>((r) => {
         resolveA = r;
       });
-      const pendingB = new Promise<string>(() => {}); // never resolves: B stays active
+      const promiseB = new Promise<string>((r) => {
+        resolveB = r;
+      });
       let callCount = 0;
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
         callCount++;
-        return callCount === 1 ? wedgedA : pendingB;
+        return callCount === 1 ? promiseA : promiseB;
       });
       (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
         undefined,
       );
-      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
       const ch = createChannel({ dispatchMode: 'steer' });
-      const maps = ch as unknown as { activePrompts: Map<string, unknown> };
+      const chunks: string[] = [];
+      vi.spyOn(
+        ch as unknown as {
+          onResponseChunk: (a: string, b: string, c: string) => void;
+        },
+        'onResponseChunk',
+      ).mockImplementation((_chatId, chunk) => {
+        chunks.push(chunk);
+      });
 
-      // Turn A starts and wedges; don't await it (it can't settle on its own).
-      const pA = ch.handleInbound(envelope({ text: 'A', messageId: 'mA' }));
+      // Turn A starts and stays in-flight; same session is reused for B (no /clear).
+      const pA = ch.handleInbound(envelope({ text: 'A' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
       const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][0] as string;
 
-      vi.useFakeTimers();
-      try {
-        // Turn B steers in: A.done never resolves, the bounded wait times out, and
-        // B starts a fresh chain — onPromptStart re-seeds B's indicator (mB) and B
-        // becomes the active turn (its prompt never settles).
-        const pB = ch.handleInbound(envelope({ text: 'B', messageId: 'mB' }));
-        void pB; // floating by design: B's prompt never settles
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        expect(bridge.prompt).toHaveBeenCalledTimes(2);
-        expect(maps.activePrompts.get(sid)).toBeDefined();
-        expect(ch.promptStarts.some((e) => e.messageId === 'mB')).toBe(true);
-        // A's OWN indicator was released exactly once at steer-time (mirrors
-        // /clear's eviction-time onPromptEnd); B's re-seeded indicator (mB) is
-        // untouched.
-        expect(ch.promptEnds.filter((e) => e.messageId === 'mA')).toHaveLength(
-          1,
-        );
-        expect(ch.promptEnds.some((e) => e.messageId === 'mB')).toBe(false);
+      // Turn B steers in: cancels A, chains behind it (B has NOT started).
+      const pB = ch.handleInbound(envelope({ text: 'B' }));
+      void pB; // floating until we resolve B below
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1); // B is waiting behind A
 
-        // A's wedged prompt finally settles and runs A's finally. `await pA` is the
-        // deterministic sync point — it resolves only after A's finally completes.
-        resolveA('late response from A');
-        await pA;
+      // The abandoned turn emits a late chunk keyed by sessionId. A is cancelled, so
+      // A's onChunk suppresses it; B has not attached one yet — it must not be seen.
+      bridge.emit('textChunk', sid, 'STALE chunk from abandoned turn');
+      expect(chunks).not.toContain('STALE chunk from abandoned turn');
 
-        // A's late finally skipped onPromptEnd (superseded) — mA did NOT fire a
-        // second time, so A's release stays single and B's mB indicator is never
-        // ended.
-        expect(ch.promptEnds.filter((e) => e.messageId === 'mA')).toHaveLength(
-          1,
-        );
-        expect(ch.promptEnds.some((e) => e.messageId === 'mB')).toBe(false);
-        // B remains the active turn with its indicator intact.
-        expect(maps.activePrompts.get(sid)).toBeDefined();
-      } finally {
-        vi.useRealTimers();
+      // A finishes → B dequeues and becomes the active turn.
+      resolveA('A (cancelled, never sent)');
+      await pA;
+      for (
+        let i = 0;
+        i < 50 &&
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls.length < 2;
+        i++
+      ) {
+        await Promise.resolve();
       }
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const sidB = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][0] as string;
+      expect(sidB).toBe(sid); // same session reused — chunks key on the same id
+      // Still never delivered the stale chunk.
+      expect(chunks).not.toContain('STALE chunk from abandoned turn');
+
+      // B's OWN chunk is delivered — it attached its onChunk only now (after A's
+      // finally detached A's). Proves the new turn streams cleanly once it starts.
+      bridge.emit('textChunk', sid, 'fresh chunk for B');
+      expect(chunks).toContain('fresh chunk for B');
+
+      resolveB('steered response');
+      await pB;
+      expect(chunks).not.toContain('STALE chunk from abandoned turn');
     });
 
     it('/clear runs onPromptEnd at eviction time for a wedged turn (no replacement) so platform cleanup is not leaked', async () => {
@@ -2224,11 +2113,10 @@ describe('ChannelBase', () => {
       // cleaning A's OWN indicator at clear-time. The user then sends a new message
       // (turn B), whose onPromptStart re-seeds the chat-scoped working indicator.
       // When A's wedged prompt finally settles, its finally must SKIP onPromptEnd
-      // (A is clearEvicted) — otherwise it ends the indicator B re-seeded, stopping
-      // B's typing while B is still working (the same chat-scoped indicator the
-      // superseded guard protects on the steer path). Mutation check: without the
-      // clearEvicted handling, A's late finally fires onPromptEnd here and
-      // promptEnds gains a second entry.
+      // (A is clearEvicted) — otherwise it ends the chat-scoped working indicator B
+      // re-seeded, stopping B's typing while B is still working. Mutation check:
+      // without the clearEvicted handling, A's late finally fires onPromptEnd here
+      // and promptEnds gains a second entry.
       let resolveA!: (v: string) => void;
       const wedgedA = new Promise<string>((r) => {
         resolveA = r;
@@ -2289,76 +2177,6 @@ describe('ChannelBase', () => {
         expect(ch.promptEnds).toHaveLength(1);
         expect(ch.promptEnds.some((e) => e.messageId === 'mB')).toBe(false);
         expect(maps.activePrompts.get(sidB)).toBeDefined();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('steer: a wedged turn settling late does not drain the collect buffer its replacement owns', async () => {
-      // FIX (collect-drain guard): turn A wedges, the steer bounded wait times
-      // out, and turn B starts a fresh chain and becomes the active turn — owning
-      // the session's collect buffer (mixed-mode single-scope can pair a steer
-      // turn with collect follow-ups). When A's wedged prompt settles late and
-      // runs its finally, draining the buffer would steal B's follow-ups and
-      // re-enter handleInbound with A-coalesced text. The `stillCurrent &&` guard
-      // must skip the drain once A is no longer the active turn.
-      let resolveA!: (v: string) => void;
-      const wedgedA = new Promise<string>((r) => {
-        resolveA = r;
-      });
-      const pendingB = new Promise<string>(() => {}); // never resolves: B stays active
-      let callCount = 0;
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? wedgedA : pendingB;
-      });
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
-        undefined,
-      );
-
-      const ch = createChannel({ dispatchMode: 'steer' });
-      const maps = ch as unknown as {
-        activePrompts: Map<string, unknown>;
-        collectBuffers: Map<
-          string,
-          Array<{ text: string; envelope: Envelope }>
-        >;
-      };
-
-      // Turn A starts and wedges; don't await it (it can't settle on its own).
-      const pA = ch.handleInbound(envelope({ text: 'A' }));
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][0] as string;
-
-      vi.useFakeTimers();
-      try {
-        // Turn B steers in: A.done never resolves, the bounded wait times out, and
-        // B starts a fresh chain and becomes the active turn (its prompt never settles).
-        const pB = ch.handleInbound(envelope({ text: 'B' }));
-        void pB; // floating by design: B's prompt never settles
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        expect(bridge.prompt).toHaveBeenCalledTimes(2);
-        expect(maps.activePrompts.get(sid)).toBeDefined();
-
-        // Follow-ups accumulate into the collect buffer B now owns.
-        const buffered = [
-          {
-            text: 'buffered follow-up for B',
-            envelope: envelope({ text: 'buffered follow-up for B' }),
-          },
-        ];
-        maps.collectBuffers.set(sid, buffered);
-
-        // A's wedged prompt finally settles and runs A's finally LATE.
-        resolveA('late response from A');
-        await pA;
-
-        // The guard skipped A's drain: the buffer is the same object, untouched.
-        // Dropping the `stillCurrent &&` from the drain guard deletes it here (and
-        // re-enters handleInbound with the A-coalesced text), failing this.
-        expect(maps.collectBuffers.get(sid)).toBe(buffered);
-        expect(maps.collectBuffers.get(sid)).toHaveLength(1);
       } finally {
         vi.useRealTimers();
       }
@@ -2944,181 +2762,6 @@ describe('ChannelBase', () => {
         expect.objectContaining({ text: 'response-1' }),
         expect.objectContaining({ text: 'response-2' }),
       ]);
-    });
-
-    it('steer: a /clear bumping the generation DURING the bounded wait makes the steered turn bail', async () => {
-      // turn-0 wedges: bridge.prompt never resolves, so it owns the active-prompt
-      // slot and the steer below times out (steerWedged). While the steer is
-      // parked on the bounded wind-down wait, a concurrent /clear (here: another
-      // sender's clear, reproduced by bumping the shared session's generation the
-      // same way doClear() does BEFORE its own bounded wait) clears the session.
-      // The steered turn must observe the PRE-steer generation, see the bump, and
-      // bail — not run bridge.prompt against the just-cleared session. Capturing
-      // the generation AFTER the wait would read the post-clear value and miss the
-      // bump (mutation check: dropping preSteerGeneration runs a 2nd prompt).
-      const wedged = new Promise<string>(() => {}); // never resolves
-      let callCount = 0;
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? wedged : Promise.resolve('should not run');
-      });
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
-        undefined,
-      );
-
-      const ch = createChannel({ dispatchMode: 'steer' });
-      // turn-0 starts and wedges — owns activePrompt + queue tail. Don't await it.
-      const pZero = ch.handleInbound(envelope({ text: 'first work' }));
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      void pZero; // floating by design: the wedged turn never settles
-      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][0] as string;
-      const maps = ch as unknown as {
-        sessionGenerations: Map<string, number>;
-      };
-
-      vi.useFakeTimers();
-      try {
-        // A steers in: turn-0.done never resolves, so it parks on the bounded wait.
-        const pSteer = ch.handleInbound(envelope({ text: 'steered work' }));
-        void pSteer;
-        // Flush microtasks (no timer fires: 1ms << the bounded-wait timeout) so
-        // the steer reaches its park. cancelSession is called synchronously right
-        // BEFORE preSteerGeneration is captured and the bounded Promise.race is
-        // entered, so this assertion confirms the pre-steer snapshot is taken and
-        // the turn is now parked on the timer.
-        await vi.advanceTimersByTimeAsync(1);
-        expect(bridge.cancelSession).toHaveBeenCalledWith(sid);
-        // A concurrent /clear bumps the generation WHILE the steer is parked
-        // (this is exactly what doClear() does up-front, before its own wait).
-        maps.sessionGenerations.set(
-          sid,
-          (maps.sessionGenerations.get(sid) ?? 0) + 1,
-        );
-        // Drive the bounded steer wait to its timeout and let the turn dequeue.
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        await pSteer;
-      } finally {
-        vi.useRealTimers();
-      }
-
-      // The steered turn bailed: only turn-0 ever called bridge.prompt. Without
-      // the pre-steer capture it would have read the post-clear generation, the
-      // equality guard would pass, and a 2nd prompt would run on the cleared one.
-      expect(bridge.prompt).toHaveBeenCalledTimes(1);
-      expect(ch.sent.some((m) => m.text === 'should not run')).toBe(false);
-    });
-
-    it('steer: bumps the generation so a followup orphaned behind the wedged turn bails instead of clobbering the replacement', async () => {
-      // FIX (steer generation bump): with mixed dispatch modes collapsed onto one
-      // session (single scope here), a followup B queues behind wedged turn A. The
-      // steer replacement C abandons A, re-seeds a FRESH queue chain (overwriting the
-      // tail B's chain held), and takes over activePrompts. A's tail is now orphaned:
-      // when A late-settles, B's callback runs. /clear bumps the generation up-front
-      // so a queued followup bails on the dequeue guard; the steer path must do the
-      // same. Without the bump, B passes the (stale) generation guard, runs the
-      // unguarded activePrompts.set — clobbering live C — and both B and C call
-      // bridge.prompt on one session (duplicated responses + double tool execution).
-      // Mutation check: dropping the steer generation bump lets B proceed (a 3rd
-      // bridge.prompt) and overwrite C's activePrompts entry, failing the asserts.
-      let resolveA!: (v: string) => void;
-      const wedgedA = new Promise<string>((r) => {
-        resolveA = r;
-      });
-      const pendingC = new Promise<string>(() => {}); // C stays active
-      let callCount = 0;
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) return wedgedA; // A wedges
-        if (callCount === 2) return pendingC; // C (steer replacement) stays active
-        return Promise.resolve('B clobbered C'); // B must NOT run (mutation only)
-      });
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
-        undefined,
-      );
-      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-
-      // single scope collapses every chat to one __single__ session; per-group
-      // dispatchMode makes chat-follow followup and chat-steer steer on that one
-      // session — the mixed-mode case the collect-drain guard already handles.
-      const ch = createChannel({
-        sessionScope: 'single',
-        groupPolicy: 'open',
-        groups: {
-          'chat-follow': { dispatchMode: 'followup' },
-          'chat-steer': { dispatchMode: 'steer' },
-        },
-      });
-      const maps = ch as unknown as {
-        activePrompts: Map<string, unknown>;
-        sessionQueues: Map<string, Promise<void>>;
-      };
-      const groupEnv = (overrides: Partial<Envelope>): Envelope =>
-        envelope({ isGroup: true, isMentioned: true, ...overrides });
-
-      // Turn A starts and wedges — it owns the active-prompt slot and queue tail.
-      const pA = ch.handleInbound(
-        groupEnv({
-          chatId: 'chat-follow',
-          senderId: 'u1',
-          text: 'A',
-          messageId: 'mA',
-        }),
-      );
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0][0] as string;
-
-      // Followup B queues behind wedged A — it chains onto A's tail and parks (must
-      // not call bridge.prompt while A is wedged). Wait until B has replaced the tail
-      // so it is genuinely orphaned on A's chain BEFORE C re-seeds below.
-      const tailAfterA = maps.sessionQueues.get(sid);
-      const pB = ch.handleInbound(
-        groupEnv({
-          chatId: 'chat-follow',
-          senderId: 'u2',
-          text: 'B',
-          messageId: 'mB',
-        }),
-      );
-      void pB; // floating by design: B parks behind wedged A
-      await vi.waitFor(() =>
-        expect(maps.sessionQueues.get(sid)).not.toBe(tailAfterA),
-      );
-      expect(bridge.prompt).toHaveBeenCalledTimes(1); // B did not run
-
-      vi.useFakeTimers();
-      try {
-        // Turn C steers in: A.done never resolves, the bounded wait times out
-        // (steerWedged), C bumps the generation, re-seeds a fresh chain, and takes
-        // over activePrompts — B's chain is now orphaned on A's dead tail.
-        const pC = ch.handleInbound(
-          groupEnv({
-            chatId: 'chat-steer',
-            senderId: 'u3',
-            text: 'C',
-            messageId: 'mC',
-          }),
-        );
-        void pC; // floating by design: C's prompt never settles
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        expect(bridge.prompt).toHaveBeenCalledTimes(2);
-        const cEntry = maps.activePrompts.get(sid);
-        expect(cEntry).toBeDefined();
-
-        // A's wedged prompt finally settles, so B's orphaned callback runs.
-        resolveA('late response from A');
-        await pA;
-        await pB;
-
-        // B bailed on the bumped generation: it never called bridge.prompt and never
-        // overwrote C's activePrompts entry — C stays the sole active prompt.
-        expect(bridge.prompt).toHaveBeenCalledTimes(2);
-        expect(maps.activePrompts.get(sid)).toBe(cEntry);
-        expect(ch.sent.some((m) => m.text === 'B clobbered C')).toBe(false);
-      } finally {
-        vi.useRealTimers();
-      }
     });
   });
 

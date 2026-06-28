@@ -40,17 +40,11 @@ type ActivePrompt = {
   chatId: string;
   messageId?: string;
   /**
-   * Set when a steer abandons this (wedged) turn and a replacement takes over the
-   * session. Its late-settling finally then skips onPromptEnd so it can't clobber
-   * the replacement's working indicator. A /clear-cancelled turn is NOT superseded
-   * (it has no replacement), so its finally still runs platform cleanup.
-   */
-  superseded?: boolean;
-  /**
-   * Set when /clear's bounded wait times out and evicts this (wedged) turn. Unlike
-   * superseded, /clear has NO replacement turn — so /clear runs this turn's
-   * onPromptEnd at eviction time, and the late-settling finally then skips it so a
-   * turn the user started AFTER the clear can't have its indicator clobbered.
+   * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
+   * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
+   * and the late-settling finally then skips it (via the clearEvicted guard) so a
+   * turn the user started AFTER the clear can't have its working indicator
+   * clobbered.
    */
   clearEvicted?: boolean;
 };
@@ -508,8 +502,11 @@ export abstract class ChannelBase {
    * BlockStreamer so buffered text can't leak via the idle timer, then fires a
    * best-effort cancelSession (NOT awaited — a wedged child/daemon can leave the
    * request pending forever). Returns true if active.done settled first, false
-   * if the CLEAR_CANCEL_TIMEOUT_MS bound won (the turn never wound down). Shared
-   * by /clear and the steer path so the sequence can't drift between them.
+   * if the CLEAR_CANCEL_TIMEOUT_MS bound won (the turn never wound down). Used by
+   * /clear, which genuinely EVICTS the session and so must proceed even when the
+   * turn is wedged. Steer no longer uses this: it best-effort cancels then chains
+   * the new turn behind the old one (see handleInbound), so it never needs to
+   * proceed past a still-active turn.
    */
   private async cancelAndAwaitActive(
     active: ActivePrompt,
@@ -690,17 +687,23 @@ export abstract class ChannelBase {
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
 
-    // Multiplayer attribution: in a group, tag each turn with the speaker so a
-    // shared session can tell members apart. Sanitize the name so a crafted nick
-    // can't break out of the [..] tag or inject newlines. Skipped for 1:1 chats
-    // and for already-prefixed re-entries (collect-mode coalescing). Real slash
-    // commands are also passed through verbatim — a [sender] prefix would stop
-    // them from parsing — but only genuine command shapes (isSlashCommand, which
-    // mirrors the CLI's classifier). Slash-prefixed paths (/tmp/foo) and comments
-    // (//…, /*…*/) are prose to the CLI, so they still get attributed. The check
-    // is purely lexical, so it never races the async command list.
+    // Multiplayer attribution: when a session can carry multiple humans, tag each
+    // turn with the speaker so the agent can tell members apart. That is any group
+    // AND any single-scope DM — `single` collapses every sender's DM into one
+    // __single__ session (the same multi-operator case the !-gate, /clear confirm
+    // and /who already treat as shared), so without a tag it would merge different
+    // people into one unattributed conversation. NOT gated on isSharedSession:
+    // that is false for a user-scope GROUP, which still needs attribution. Sanitize
+    // the name so a crafted nick can't break out of the [..] tag or inject
+    // newlines. Skipped for a per-user 1:1 chat and for already-prefixed re-entries
+    // (collect-mode coalescing). Real slash commands are also passed through
+    // verbatim — a [sender] prefix would stop them from parsing — but only genuine
+    // command shapes (isSlashCommand, which mirrors the CLI's classifier).
+    // Slash-prefixed paths (/tmp/foo) and comments (//…, /*…*/) are prose to the
+    // CLI, so they still get attributed. The check is purely lexical, so it never
+    // races the async command list.
     if (
-      envelope.isGroup &&
+      (envelope.isGroup || this.config.sessionScope === 'single') &&
       !envelope.alreadyPrefixed &&
       !this.isSlashCommand(envelope.text)
     ) {
@@ -770,17 +773,6 @@ export abstract class ChannelBase {
 
     const active = this.activePrompts.get(sessionId);
 
-    // Set when a steer abandons a wedged turn on timeout: that turn's queue tail
-    // will never resolve, so this turn must start a FRESH chain instead of
-    // chaining behind the dead promise (see the queue setup below).
-    let steerWedged = false;
-    // Captured BEFORE the steer wind-down await below (set only on the steer
-    // path). A concurrent /clear that bumps the generation DURING that bounded
-    // wait must reach the dequeue guard, but reading the generation AFTER the
-    // wait would absorb the bump (post-clear value == captured), so the equality
-    // guard would pass and this turn would run against the just-cleared session.
-    let preSteerGeneration: number | undefined;
-
     if (active) {
       // A prompt is already running for this session
       switch (mode) {
@@ -795,66 +787,29 @@ export abstract class ChannelBase {
           return;
         }
         case 'steer': {
-          // Snapshot the generation BEFORE the bounded wind-down wait: a /clear
-          // that bumps it DURING the wait (e.g. another sender's `/clear confirm`
-          // on a shared session) must reach the dequeue guard; reading it after
-          // would absorb the bump and run this turn against the cleared session.
-          preSteerGeneration = this.sessionGenerations.get(sessionId) ?? 0;
-          // NOTE (network-bridge limitation): cancel and the replacement prompt
-          // (below) reuse the SAME sessionId. The shipping AcpBridge sends both
-          // over one in-order stdin stream, cancel first, so the child cancels
-          // before re-prompting. A future bridge with cancel latency could
-          // reorder them; the real fix is turn-scoped cancellation, deferred to
-          // avoid an API-breaking change to every adapter this phase.
-          const woundDown = await this.cancelAndAwaitActive(active, sessionId);
-          // Timeout won → the wedged turn never wound down, so its queue tail
-          // never resolves either; re-seed a fresh chain below instead of
-          // chaining behind it (which would re-hang the session). It stays
-          // cancelled, so a late settle still can't deliver a stale response.
-          steerWedged = !woundDown;
-          if (steerWedged) {
-            process.stderr.write(
-              `[${this.name}] steer abandoned a wedged turn for session ${sessionId}: it did not wind down within ${CLEAR_CANCEL_TIMEOUT_MS}ms\n`,
-            );
-            // Mirror the two wedged-turn protections doClear() runs but the steer
-            // path historically skipped. Both bite only when mixed dispatch modes
-            // collapse onto one session (single/user scope), the same case the
-            // collect-drain guard already accounts for.
-            //
-            // (1) Bump the generation up-front, exactly like doClear. We re-seed a
-            // fresh queue chain below, orphaning the wedged turn's queue tail; a
-            // followup already chained behind it would otherwise late-settle PAST the
-            // dequeue guard and overwrite this replacement's activePrompts slot — two
-            // concurrent bridge.prompts on one session (duplicated responses + double
-            // tool execution). Bumping invalidates that orphaned followup via the same
-            // guard /clear relies on. Skip if a /clear raced the wind-down wait
-            // (generation already moved off the pre-wait snapshot): that /clear must
-            // win, so this replacement keeps the snapshot and bails on the /clear's
-            // bump via the dequeue guard below.
-            if (
-              (this.sessionGenerations.get(sessionId) ?? 0) ===
-              preSteerGeneration
-            ) {
-              this.sessionGenerations.set(sessionId, preSteerGeneration + 1);
-              // This replacement must PROCEED on its own bump, not bail: advance the
-              // snapshot it captures (preSteerGeneration feeds `generation` below) so
-              // its dequeue guard matches the bumped value, while the orphaned
-              // followup — still on the pre-bump generation — bails.
-              preSteerGeneration += 1;
-            }
-            // (2) Release the abandoned turn's OWN platform indicator now, while no
-            // replacement exists yet — mirroring doClear's eviction-time onPromptEnd.
-            // The replacement re-seeds a CHAT-scoped indicator (typing) below, but a
-            // MESSAGEID-scoped one (a per-message reaction/card keyed on the inbound
-            // messageId) is keyed on THIS turn's messageId, so the replacement's
-            // onPromptStart/onPromptEnd never recall it — it would leak until
-            // disconnect. Mark superseded so the wedged turn's late finally still
-            // SKIPS onPromptEnd (released exactly once here, no double-fire, and the
-            // replacement's indicator untouched).
-            this.onPromptEnd(active.chatId, sessionId, active.messageId);
-            active.superseded = true;
-          }
-          // Prepend a cancellation note so the agent understands context
+          // Best-effort cancel the running turn so it winds down sooner, then fall
+          // through to CHAIN this new turn onto the session queue tail (see `prev`
+          // below). The new turn therefore runs ONLY AFTER the old turn's finally
+          // has actually run — onChunk detached, activePrompts cleared, indicator
+          // released — so it never executes concurrently with the turn it
+          // supersedes.
+          //
+          // We deliberately do NOT race a bounded wait and then proceed with a
+          // replacement bridge.prompt() while the old turn is still active: both
+          // bridges key active-prompt tracking AND streamed chunks by sessionId
+          // alone, so a concurrent replacement on one session is bridge-unsafe —
+          // DaemonChannelBridge.prompt() rejects while the prior prompt is still
+          // active (the replacement is silently dropped), and the abandoned turn's
+          // late chunks mix into the replacement's stream (duplicated/stale
+          // output). So a genuinely wedged turn makes its successor WAIT rather
+          // than be force-interrupted. Turn-scoped cancellation/routing (a new
+          // turn that runs without waiting for a wedged predecessor) is the
+          // deferred fix — it needs an API change across every adapter and is out
+          // of scope for this phase (wenshao option (b)).
+          active.cancelled = true;
+          active.stopStreaming?.();
+          void this.bridge.cancelSession(sessionId).catch(() => {});
+          // Prepend a cancellation note so the agent understands context.
           promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
           break;
         }
@@ -870,21 +825,18 @@ export abstract class ChannelBase {
       }
     }
 
-    // Run the prompt (with followup-mode serialization for safety). When a steer
-    // abandoned a wedged turn, that turn's tail never resolves — start a fresh
-    // chain instead of awaiting it (the set() below replaces the dead tail, so
-    // later turns chain onto this turn, not the wedged one).
-    const prev = steerWedged
-      ? Promise.resolve()
-      : (this.sessionQueues.get(sessionId) ?? Promise.resolve());
-    // Snapshot the session generation to guard against a /clear racing this turn.
-    // On the steer path we captured it BEFORE the bounded wind-down wait
-    // (preSteerGeneration) so a /clear DURING that wait is detected; otherwise we
-    // snapshot here at enqueue time. Either way, if /clear bumps the generation
-    // before this turn dequeues, the session we captured is gone — bail rather
-    // than resurrect it.
-    const generation =
-      preSteerGeneration ?? this.sessionGenerations.get(sessionId) ?? 0;
+    // Run the prompt with per-session serialization. followup AND steer both chain
+    // onto the existing queue tail; steer additionally best-effort cancelled the
+    // running turn above so the tail resolves sooner. Chaining (rather than seeding
+    // a fresh Promise.resolve()) is what guarantees this turn never runs while the
+    // turn it supersedes is still active — see the steer branch above.
+    const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    // Snapshot the session generation at enqueue time to guard against a /clear
+    // racing this turn. There is no await between reading `active` above and this
+    // snapshot, so the capture is atomic with the enqueue; if /clear bumps the
+    // generation before this turn dequeues, the session we captured is gone — bail
+    // (at the dequeue guard below) rather than resurrect it.
+    const generation = this.sessionGenerations.get(sessionId) ?? 0;
     const useBlockStreaming = this.config.blockStreaming === 'on';
     const current = prev.then(async () => {
       // A /clear (or reset/new) while we were queued bumps the generation; the
@@ -918,10 +870,9 @@ export abstract class ChannelBase {
         chatId: envelope.chatId,
         messageId: envelope.messageId,
       };
-      // The wedged predecessor (steerWedged path) was already marked superseded at
-      // steer time — alongside releasing its own indicator — so its late-settling
-      // finally skips onPromptEnd and can't clobber the indicator we re-seed below.
-      // A /clear-cancelled turn has no replacement and keeps running its own cleanup.
+      // This turn is now the single owner of the session's active-prompt slot.
+      // (Steer no longer hands a still-active session to a replacement; only
+      // /clear evicts, and it gives the next turn a fresh session.)
       this.activePrompts.set(sessionId, promptState);
 
       this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
@@ -965,39 +916,39 @@ export abstract class ChannelBase {
       } finally {
         this.bridge.off('textChunk', onChunk);
         streamer?.stop();
-        // Identity guard: a turn that wedged past the steer/clear bounded wait
-        // gets replaced — the steer (or /clear) gives up on active.done and a
-        // fresh turn re-seeds activePrompts (and owns the collect buffer) for
-        // this session. When the wedged bridge.prompt finally settles and runs
-        // this finally, touching session-visible state would clobber that live
-        // replacement turn — stripping its steer protection (a later turn sees
-        // no active prompt) or ending the working indicator it re-seeded. So
-        // only touch the session-scoped state when the entry is still ours.
+        // Identity guard: a turn that wedged past /clear's bounded wait gets
+        // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
+        // turn the user starts AFTER the clear can re-seed activePrompts (and own
+        // the collect buffer) for this session. When the wedged bridge.prompt
+        // finally settles and runs this finally, touching session-visible state
+        // would clobber that live later turn — ending the working indicator it
+        // re-seeded or draining a buffer it owns. So only touch session-scoped
+        // state when the entry is still ours. (Steer no longer evicts: it cancels
+        // and waits, so a steered turn is always stillCurrent when it completes.)
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         // onPromptEnd runs platform cleanup (clear the typing interval, recall the
-        // working reaction, finalize the card). Run it UNLESS this turn was taken
-        // over or already cleaned up: a steer replacement (superseded) re-seeded
-        // the indicator, and a /clear eviction (clearEvicted) already ran this
-        // turn's onPromptEnd at clear-time. In both cases a later turn may now own
-        // the chat-scoped indicator, so re-running cleanup here would clobber it.
-        // A still-current turn (normal completion) always cleans up.
-        if (
-          stillCurrent ||
-          (!promptState.superseded && !promptState.clearEvicted)
-        ) {
+        // working reaction, finalize the card). Run it UNLESS this turn was a
+        // /clear eviction (clearEvicted): /clear already ran this turn's onPromptEnd
+        // at clear-time, and a turn the user started after the clear may now own the
+        // chat-scoped indicator, so re-running cleanup here would clobber it. A
+        // still-current turn (normal completion — which now includes every steered
+        // turn) always cleans up.
+        if (stillCurrent || !promptState.clearEvicted) {
           this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
         }
         if (stillCurrent) {
           this.activePrompts.delete(sessionId);
         }
-        // Signal any steer/clear waiter racing our done that we're done — even
-        // a replaced wedged turn must release them (they already timed out).
+        // Signal any /clear waiter racing our done that we're done — even a
+        // /clear-evicted wedged turn must release it (its bounded wait already
+        // timed out). (Steer no longer waits on done; it chains on the queue tail.)
         promptState.resolve();
 
-        // Drain collect buffer if any messages accumulated — but only while
-        // we're still the active turn, so a replaced wedged turn can't drain the
-        // buffer the live replacement turn now owns (mixed-mode single-scope can
-        // pair a steer turn with collect follow-ups on the same session).
+        // Drain collect buffer if any messages accumulated — but only while we're
+        // still the active turn, so a /clear-evicted wedged turn whose bridge.prompt
+        // settles late can't drain a buffer a later turn now owns. (Belt-and-
+        // suspenders: /clear already deletes the buffer on eviction, so this guard
+        // is defensive — but it keeps the invariant "only the current turn drains".)
         const buffer = this.collectBuffers.get(sessionId);
         if (stillCurrent && buffer && buffer.length > 0) {
           this.collectBuffers.delete(sessionId);

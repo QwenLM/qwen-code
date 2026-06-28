@@ -967,16 +967,27 @@ export class QQChannel extends ChannelBase {
     // (pure @mention, image, or sticker messages).
     if (!cleanText) return;
     const isSlash = cleanText.startsWith('/');
-    // Log slash commands with senderName for audit trail
-    if (isSlash) {
-      process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText}\n`,
-      );
-    }
     // We self-prefix and set alreadyPrefixed below, which skips ChannelBase's
     // [..]/newline/length sanitization — so neutralize the nick here too (same
     // shared helper), or a crafted QQ nickname could inject brackets/newlines.
+    // Hoisted above the audit log so the log uses the sanitized name too:
+    // event.author.username is attacker-controlled, and a crafted nick bearing
+    // CR/LF/ANSI escapes could otherwise forge or corrupt the operator audit log.
     const safeName = sanitizeSenderName(senderName);
+    // Log slash commands for an audit trail. cleanText is attacker-controlled, so
+    // render newlines visibly then strip the remaining C0/DEL controls (CR could
+    // overwrite the log line, ESC could inject ANSI/OSC sequences) before they
+    // reach an operator's terminal — mirroring ChannelBase's dropped-turn log.
+    if (isSlash) {
+      const loggedCmd = cleanText
+        .slice(0, 80)
+        .replace(/\n/g, '\\n')
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\u0000-\u001f\u007f]/g, ' ');
+      process.stderr.write(
+        `[QQ:${this.name}] Slash cmd from ${safeName} (${chatId}): ${loggedCmd}\n`,
+      );
+    }
     // Don't prefix slash commands, keep [safeName] for normal messages
     const text = isSlash ? cleanText : `[${safeName}]: ${cleanText}`;
     this.handleInbound({
