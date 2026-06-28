@@ -1031,6 +1031,152 @@ pre {
   font-weight: 650;
 }
 
+.mcp-summary-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.mcp-summary-card,
+.mcp-issue,
+.mcp-tool-list,
+.mcp-tool-item {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--web-border);
+  border-radius: 14px;
+}
+
+.mcp-summary-card {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+}
+
+.mcp-summary-card span,
+.mcp-issue span,
+.mcp-tool-summary span,
+.mcp-muted {
+  color: var(--web-muted);
+  font-size: 11px;
+}
+
+.mcp-summary-card span,
+.mcp-issue span {
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.mcp-summary-card strong {
+  color: var(--web-text);
+  font-size: 22px;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-summary-card small,
+.mcp-issue small {
+  color: var(--web-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-issue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.mcp-issue-list > strong {
+  color: var(--web-text);
+  font-size: 12px;
+}
+
+.mcp-issue {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+}
+
+.mcp-issue p {
+  color: var(--web-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.mcp-issue-ok {
+  background: rgba(78, 141, 108, 0.1);
+  border-color: rgba(78, 141, 108, 0.2);
+}
+
+.mcp-issue-warning {
+  background: rgba(177, 111, 46, 0.12);
+  border-color: rgba(177, 111, 46, 0.24);
+}
+
+.mcp-issue-error {
+  background: rgba(180, 72, 72, 0.1);
+  border-color: rgba(180, 72, 72, 0.22);
+}
+
+.mcp-issue-muted {
+  background: rgba(31, 33, 29, 0.04);
+}
+
+.mcp-tool-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
+  padding: 10px;
+}
+
+.mcp-tool-summary {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mcp-tool-summary strong,
+.mcp-tool-item strong {
+  color: var(--web-text);
+  font-size: 12px;
+}
+
+.mcp-tool-item {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+}
+
+.mcp-tool-item p {
+  color: var(--web-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.mcp-tool-item small {
+  color: var(--web-danger);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-tool-invalid {
+  background: rgba(180, 72, 72, 0.08);
+  border-color: rgba(180, 72, 72, 0.2);
+}
+
+@media (max-width: 900px) {
+  .mcp-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .artifacts-layout {
   align-items: start;
   display: grid;
