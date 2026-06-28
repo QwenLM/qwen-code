@@ -308,6 +308,39 @@ export function registerSessionRoutes(
     }
   });
 
+  app.post('/session/:id/cd', mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const targetPath = body['path'];
+    if (
+      typeof targetPath !== 'string' ||
+      targetPath.length === 0 ||
+      !path.isAbsolute(targetPath)
+    ) {
+      res.status(400).json({
+        error: '`path` is required and must be an absolute path',
+        code: 'invalid_path',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.changeSessionCwd(
+        sessionId,
+        { path: targetPath },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/cd',
+        sessionId,
+      });
+    }
+  });
+
   app.get('/session/:id/status', (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;

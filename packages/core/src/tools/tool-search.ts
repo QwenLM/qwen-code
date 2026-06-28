@@ -50,6 +50,56 @@ const SCORE_HINT_BUILTIN = 4;
 const SCORE_DESC_BUILTIN = 2;
 const SCORE_NAME_EXACT_MCP = 12;
 const SCORE_NAME_SUBSTR_MCP = 6;
+const SCORE_ACTION_ALIAS_BUILTIN = 6;
+
+const TOOL_SEARCH_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'at',
+  'be',
+  'can',
+  'could',
+  'did',
+  'do',
+  'does',
+  'for',
+  'from',
+  'how',
+  'i',
+  'in',
+  'is',
+  'it',
+  'me',
+  'my',
+  'of',
+  'on',
+  'or',
+  'please',
+  'should',
+  'that',
+  'the',
+  'these',
+  'this',
+  'those',
+  'to',
+  'was',
+  'were',
+  'what',
+  'which',
+  'with',
+  'would',
+  'you',
+]);
+
+const ACTION_TERM_ALIASES = new Map<string, string[]>([
+  ['cancel', ['cancel', 'delete', 'remove', 'stop', 'clear']],
+  ['clear', ['clear', 'delete', 'remove', 'cancel', 'stop']],
+  ['delete', ['delete', 'remove', 'cancel', 'stop', 'clear']],
+  ['remove', ['remove', 'delete', 'cancel', 'stop', 'clear']],
+  ['stop', ['stop', 'cancel', 'delete', 'remove', 'clear']],
+]);
 
 interface ScoredTool {
   tool: AnyDeclarativeTool;
@@ -453,8 +503,23 @@ export function tokenize(query: string): string[] {
   return query
     .toLowerCase()
     .split(/\s+/g)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0);
+    .map(normalizeSearchTerm)
+    .filter((t): t is string => t !== null);
+}
+
+function normalizeSearchTerm(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const required = trimmed.startsWith('+');
+  const body = required ? trimmed.slice(1) : trimmed;
+  const normalized = body.replace(
+    /^[^\p{L}\p{N}_.+#-]+|[^\p{L}\p{N}_.+#-]+$/gu,
+    '',
+  );
+  if (normalized.length < 2 || TOOL_SEARCH_STOP_WORDS.has(normalized)) {
+    return null;
+  }
+  return required ? `+${normalized}` : normalized;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -485,7 +550,9 @@ function candidateMatchesRequired(
 ): boolean {
   if (requiredTerms.length === 0) return true;
   const nameLower = tool.name.toLowerCase();
-  return requiredTerms.every((t) => nameLower.includes(t));
+  return requiredTerms.every((t) =>
+    getSearchTermVariants(t).some((variant) => nameLower.includes(variant)),
+  );
 }
 
 /**
@@ -502,22 +569,48 @@ export function scoreTool(tool: AnyDeclarativeTool, terms: string[]): number {
   let total = 0;
   for (const term of terms) {
     if (term.length === 0) continue;
-    if (
-      nameLower === term ||
-      nameLower.endsWith('_' + term) ||
-      nameLower.endsWith('.' + term)
-    ) {
-      total += isMcp ? SCORE_NAME_EXACT_MCP : SCORE_NAME_EXACT_BUILTIN;
-    } else if (nameLower.includes(term)) {
-      total += isMcp ? SCORE_NAME_SUBSTR_MCP : SCORE_NAME_SUBSTR_BUILTIN;
+    const variants = getSearchTermVariants(term);
+    let nameScore = 0;
+    for (const variant of variants) {
+      if (
+        nameLower === variant ||
+        nameLower.endsWith('_' + variant) ||
+        nameLower.endsWith('.' + variant)
+      ) {
+        nameScore = Math.max(
+          nameScore,
+          isMcp ? SCORE_NAME_EXACT_MCP : SCORE_NAME_EXACT_BUILTIN,
+        );
+      } else if (nameLower.includes(variant)) {
+        nameScore = Math.max(
+          nameScore,
+          isMcp ? SCORE_NAME_SUBSTR_MCP : SCORE_NAME_SUBSTR_BUILTIN,
+        );
+      }
     }
+    total += nameScore;
     // Hint matches are per-word, mirroring Claude's "word boundary" rule.
-    if (hintParts.some((p) => p === term)) {
+    if (hintParts.some((p) => variants.includes(p))) {
       total += SCORE_HINT_BUILTIN;
     }
-    if (descLower.includes(term)) {
+    if (variants.some((variant) => descLower.includes(variant))) {
       total += SCORE_DESC_BUILTIN;
+    }
+    if (
+      ACTION_TERM_ALIASES.has(term) &&
+      variants
+        .filter((variant) => variant !== term)
+        .some(
+          (variant) =>
+            nameLower.includes(variant) || hintParts.some((p) => p === variant),
+        )
+    ) {
+      total += SCORE_ACTION_ALIAS_BUILTIN;
     }
   }
   return total;
+}
+
+function getSearchTermVariants(term: string): string[] {
+  return ACTION_TERM_ALIASES.get(term) ?? [term];
 }

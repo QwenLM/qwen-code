@@ -92,6 +92,15 @@ export interface GenerateTextOptions {
    * deltas are collected into the same `{ text, usage }` result.
    */
   stream?: boolean;
+  /**
+   * When true, throw instead of silently falling back to the main generator if
+   * a distinct generator for `model` can't be created (model not registered, or
+   * generator creation fails — e.g. a missing cross-provider credential). The
+   * vision bridge sets this so image payloads are never routed at the text-only
+   * primary while a notice names a different vision endpoint; it fails the
+   * conversion closed instead.
+   */
+  failClosed?: boolean;
 }
 
 /**
@@ -347,7 +356,7 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
-    } = await this.resolveForModel(model);
+    } = await this.resolveForModel(model, { failClosed: options.failClosed });
 
     try {
       const request = {
@@ -491,7 +500,10 @@ export class BaseLlmClient {
    * Falls back to the main generator when the target model is not registered
    * or generator creation fails (e.g. tests without full auth setup).
    */
-  async resolveForModel(model: string): Promise<ResolvedGeneratorForModel> {
+  async resolveForModel(
+    model: string,
+    opts?: { failClosed?: boolean },
+  ): Promise<ResolvedGeneratorForModel> {
     const selector = this.resolveModelSelector(model);
     const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
     const mainModel = this.config.getModel() ?? model;
@@ -514,6 +526,7 @@ export class BaseLlmClient {
     const contentGenerator = await this.createContentGeneratorForModel(
       model,
       selector,
+      opts?.failClosed ?? false,
     );
     const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
     const retryAuthType =
@@ -581,6 +594,7 @@ export class BaseLlmClient {
   private async createContentGeneratorForModel(
     model: string,
     selector: ResolvedModelId | undefined,
+    failClosed = false,
   ): Promise<ContentGenerator> {
     const cacheKey = selector
       ? `${selector.authType ?? ''}:${selector.modelId}`
@@ -591,6 +605,14 @@ export class BaseLlmClient {
     const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
 
     if (!resolvedModel) {
+      // failClosed callers (vision bridge) must NOT silently run on the main
+      // generator — that would send image payloads to the text-only primary.
+      if (failClosed) {
+        throw new Error(
+          `Model "${model}" is not registered across any auth type; ` +
+            `refusing to fall back to the main generator.`,
+        );
+      }
       debugLogger.warn(
         `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
       );
@@ -618,11 +640,20 @@ export class BaseLlmClient {
 
         return await createContentGenerator(targetConfig, this.config);
       } catch (err: unknown) {
+        this.perModelGeneratorCache.delete(cacheKey);
+        if (failClosed) {
+          // Surface the creation failure rather than routing image payloads at
+          // the main (text-only) generator. The caller fails the conversion.
+          throw err instanceof Error
+            ? err
+            : new Error(
+                `Failed to create content generator for model "${model}": ${String(err)}`,
+              );
+        }
         debugLogger.warn(
           `Failed to create content generator for model "${model}", falling back to main generator.`,
           err instanceof Error ? err.message : String(err),
         );
-        this.perModelGeneratorCache.delete(cacheKey);
         return this.getCurrentContentGenerator();
       }
     })();

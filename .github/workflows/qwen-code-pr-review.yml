@@ -144,9 +144,9 @@ jobs:
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft &&
       needs.authorize.outputs.should_review == 'true'
-    # Stays on hosted: the 30-minute environment wait timer would otherwise idle a self-hosted ECS slot for the whole wait (GitHub allocates the runner before evaluating the environment timer).
+    # Stays on hosted: the environment wait timer would otherwise idle a self-hosted ECS slot for the whole wait (GitHub allocates the runner before evaluating the environment timer).
     runs-on: 'ubuntu-latest'
-    # Configured in repo settings with a 30-minute wait timer.
+    # Wait timer is configured in repo settings (Settings → Environments → qwen-pr-review-delay), currently 10 minutes.
     environment:
       name: 'qwen-pr-review-delay'
       deployment: false

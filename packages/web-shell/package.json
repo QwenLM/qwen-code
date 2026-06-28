@@ -35,7 +35,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.0",
     "remark-math": "^6.0.0",
-    "shiki": "^1.0.0"
+    "shiki": "^1.29.2"
   },
   "peerDependencies": {
     "@qwen-code/sdk": ">=0.1.8",

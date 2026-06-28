@@ -95,6 +95,17 @@ export class SessionRouter {
     return this.toTarget.get(sessionId);
   }
 
+  getSession(
+    channelName: string,
+    senderId: string,
+    chatId: string,
+    threadId?: string,
+  ): string | undefined {
+    return this.toSession.get(
+      this.routingKey(channelName, senderId, chatId, threadId),
+    );
+  }
+
   hasSession(channelName: string, senderId: string, chatId?: string): boolean {
     // If chatId is provided, do an exact lookup; otherwise prefix-scan for any
     // session belonging to this sender on this channel.
