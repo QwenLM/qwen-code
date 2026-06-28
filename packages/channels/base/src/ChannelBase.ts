@@ -462,19 +462,19 @@ export abstract class ChannelBase {
 
   /**
    * Whether `text` is a real slash command rather than prose that merely starts
-   * with `/`. Closely follows the CLI's classifier (cli
-   * `ui/utils/commandUtils.ts` `isSlashCommand`): a command is `/<name>[ args]`
-   * whose first whitespace-delimited token is non-empty and free of path
-   * separators, and is not a `//` line comment or `/*` block comment. The CLI
-   * sends slash-prefixed paths (`/tmp/foo`) and comments to the model as prose,
-   * so a group must still attribute them.
+   * with `/`. A command's first whitespace-delimited token must match
+   * parseCommand()'s charset — `[a-zA-Z0-9_:-]+`, plus an optional `@botname`
+   * suffix — and not be a `//` line comment or `/*` block comment. Slash-prefixed
+   * paths (`/tmp/foo`), comments, and a bare `/` are prose and keep their
+   * `[sender]` tag.
    *
-   * INTENTIONAL divergence: a bare `/` is a command to the CLI (empty first
-   * token has no path separator) but prose here (non-empty first token
-   * required), so a lone `/` keeps its `[sender]` attribution — there is no
-   * command named `''` to forward, and attributing it is the safe default.
-   * Purely lexical — never consults the async command list, so it can't race a
-   * fresh session.
+   * Intentionally stricter than the CLI's looser classifier (cli
+   * `ui/utils/commandUtils.ts`), which forwards any non-comment, non-path
+   * `/<token>` (e.g. `/café`, a zero-width-laden token). Such inputs aren't
+   * runnable commands, and in a SHARED group session forwarding them unattributed
+   * is worse than a redundant tag — so anything off the command charset is
+   * treated as prose and keeps its `[sender]` tag. Purely lexical — never
+   * consults the async command list, so it can't race a fresh session.
    */
   private isSlashCommand(text: string): boolean {
     const trimmed = text.trim();
@@ -486,7 +486,7 @@ export abstract class ChannelBase {
       return false;
     }
     const firstToken = trimmed.slice(1).trimStart().split(/\s+/u)[0] ?? '';
-    return firstToken.length > 0 && !/[/\\]/.test(firstToken);
+    return /^[a-zA-Z0-9_:-]+(?:@\S+)?$/.test(firstToken);
   }
 
   async handleInbound(envelope: Envelope): Promise<void> {
@@ -610,14 +610,18 @@ export abstract class ChannelBase {
           imageMimeType = att.mimeType;
         } else if (att.filePath) {
           const label = att.type === 'file' ? 'file' : att.type;
-          // Filenames can be attacker-supplied (e.g. DingTalk passes the user's
-          // filename), so neutralize them the same way as a reply quote before
-          // embedding into the `"..."` wrapper.
+          // The filename is attacker-supplied (e.g. DingTalk) and adapters build
+          // the on-disk path by basename()-ing it, so the path's last segment
+          // carries the same chars — neutralize both as they enter the prompt,
+          // like a reply quote. Benign names render unchanged so the agent's
+          // read-file tool still resolves them; only injection-laden names are
+          // altered, which is the safe default.
           const name = att.fileName
             ? ` "${sanitizeQuotedText(att.fileName, 128)}"`
             : '';
+          const renderedPath = sanitizeQuotedText(att.filePath, 1024);
           filePaths.push(
-            `User sent a ${label}${name}. It has been saved to: ${att.filePath}`,
+            `User sent a ${label}${name}. It has been saved to: ${renderedPath}`,
           );
         }
       }
