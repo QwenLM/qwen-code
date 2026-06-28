@@ -349,6 +349,54 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session: active');
     });
 
+    it('/status in a shared group is restricted to authorized senders', async () => {
+      // /status reports session & access state for the shared session, so a
+      // non-member must be gated like /who. Mutation check: dropping the gate lets
+      // the rando read 'Session: active' / 'Access: open'.
+      const ch = createChannel({
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+        senderPolicy: 'open',
+        allowedUsers: ['boss'],
+      });
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+      await ch.handleInbound({ ...g, senderId: 'boss', text: 'hello' });
+
+      // An unauthorized member's /status is gated — no session/access state leaks.
+      ch.sent = [];
+      await ch.handleInbound({ ...g, senderId: 'rando', text: '/status' });
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('authorized');
+      expect(ch.sent[0]!.text).not.toContain('Session:');
+      expect(ch.sent[0]!.text).not.toContain('Access:');
+
+      // The authorized owner's /status still reports normally.
+      ch.sent = [];
+      await ch.handleInbound({ ...g, senderId: 'boss', text: '/status' });
+      expect(ch.sent[0]!.text).toContain('Session: active');
+      expect(ch.sent[0]!.text).toContain('Access: open');
+    });
+
+    it('/status in a per-user group is not auth-gated (session is private, not shared)', async () => {
+      const ch = createChannel({
+        sessionScope: 'user',
+        groupPolicy: 'open',
+        allowedUsers: ['boss'],
+      });
+      // A non-listed member's /status works: their group session is private to them.
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'rando',
+          chatId: 'g1',
+          text: '/status',
+        }),
+      );
+      expect(ch.sent[0]!.text).toContain('Session:');
+      expect(ch.sent[0]!.text).not.toContain('authorized');
+    });
+
     it('/clear in a group asks for confirmation and does not clear', async () => {
       const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
       const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
@@ -921,6 +969,137 @@ describe('ChannelBase', () => {
             chatId: 'chat-a',
             text: 'Cancelled current request.',
           }),
+        ]),
+      );
+    });
+
+    it('/cancel in a shared session is gated — an unauthorized member cannot abort a running turn', async () => {
+      // /cancel is destructive (aborts an in-flight turn). On a shared session with
+      // an allowlist, a non-member must NOT be able to kill another user's turn.
+      // Mutation check: dropping the auth gate makes rando's /cancel reach
+      // findActiveSessionId and call cancelSession (this expect then fails).
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+
+      const ch = createChannel({
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+        senderPolicy: 'open',
+        allowedUsers: ['boss'],
+      });
+      ch.enableCancelCommand();
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+
+      // boss starts a long-running turn on the shared session.
+      const prompt = ch.handleInbound({
+        ...g,
+        senderId: 'boss',
+        text: 'long task',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // An unauthorized member's /cancel is refused and does NOT abort the turn.
+      ch.sent = [];
+      await ch.handleInbound({ ...g, senderId: 'rando', text: '/cancel' });
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('authorized');
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+
+      // The turn completes normally and its response is still delivered.
+      resolvePrompt('agent response');
+      await prompt;
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'agent response' }),
+        ]),
+      );
+    });
+
+    it('/cancel in a shared session aborts the running turn for an authorized member', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          resolvePrompt('late response');
+        },
+      );
+
+      const ch = createChannel({
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+        senderPolicy: 'open',
+        allowedUsers: ['boss'],
+      });
+      ch.enableCancelCommand();
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+
+      const prompt = ch.handleInbound({
+        ...g,
+        senderId: 'boss',
+        text: 'long task',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      ch.sent = [];
+      await ch.handleInbound({ ...g, senderId: 'boss', text: '/cancel' });
+      await prompt;
+
+      expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+      expect(ch.sent).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'late response' }),
+        ]),
+      );
+    });
+
+    it('/cancel in a 1:1 DM still cancels even with an allowlist (not a shared session)', async () => {
+      // A per-user DM is private, not shared, so the gate must NOT apply: a
+      // non-listed DM sender can still cancel their own turn.
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          resolvePrompt('late response');
+        },
+      );
+
+      const ch = createChannel({
+        senderPolicy: 'open',
+        allowedUsers: ['boss'],
+      });
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(
+        envelope({ senderId: 'rando', text: 'long task' }),
+      );
+      await new Promise((r) => setTimeout(r, 10));
+
+      await ch.handleInbound(envelope({ senderId: 'rando', text: '/cancel' }));
+      await prompt;
+
+      expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
         ]),
       );
     });

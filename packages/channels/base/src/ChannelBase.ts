@@ -197,6 +197,17 @@ export abstract class ChannelBase {
 
   protected registerCancelCommand(name = 'cancel'): void {
     this.registerCommand(name, async (envelope) => {
+      // /cancel aborts an in-flight turn — destructive in a shared session, where
+      // it would otherwise let any member kill another user's running turn. Gate it
+      // to authorized senders like /clear (auth gate only — no confirm step). A
+      // non-shared (1:1) session is always authorized, so behavior is unchanged.
+      if (!this.isAuthorizedForSharedSession(envelope)) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Only authorized members can cancel requests in this shared session.',
+        );
+        return true;
+      }
       const activeSessionId = this.findActiveSessionId(envelope);
       if (!activeSessionId) {
         await this.sendMessage(
@@ -441,6 +452,15 @@ export abstract class ChannelBase {
     });
 
     this.registerCommand('status', async (envelope) => {
+      // For a shared session, gate it to authorized senders like /who — /status
+      // reports session & access state, so non-members shouldn't read it either.
+      if (!this.isAuthorizedForSharedSession(envelope)) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Only authorized members can view this shared session.',
+        );
+        return true;
+      }
       const hasSession = this.router.hasSession(
         this.name,
         envelope.senderId,

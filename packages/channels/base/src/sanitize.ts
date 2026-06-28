@@ -12,6 +12,17 @@ const PROMPT_UNSAFE_INVISIBLES =
   /[\u0080-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
 /**
+ * Truncate to at most `max` Unicode CODE POINTS (not UTF-16 code units). A cap
+ * applied with `.slice` counts code units, so one landing mid-surrogate-pair
+ * (e.g. an emoji \ud83c\udf89 = 2 units) leaves a lone surrogate that renders as `\ufffd`.
+ * `Array.from` iterates by code point, so slicing it never splits a pair.
+ */
+function truncateCodePoints(str: string, max: number): string {
+  const cp = Array.from(str);
+  return cp.length > max ? cp.slice(0, max).join('') : str;
+}
+
+/**
  * Neutralize a platform display name before embedding it in a `[name]` prompt
  * tag: strip the bracket/newline delimiters, C0/DEL control chars, and the
  * Unicode line/bidi controls above that would let a crafted nickname break out
@@ -23,15 +34,14 @@ export function sanitizeSenderName(name: string): string {
   // A name made entirely of strippable chars collapses to all-spaces; trim()-ing
   // it to '' lets the `|| 'unknown'` fallback fire so the [name] tag is never an
   // anonymous `[]`. Both callers embed the result with no fallback of their own.
-  return (
-    name
-      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
-      .replace(/[[\]\r\n]/g, ' ')
-      .slice(0, 64)
-      .trim() || 'unknown'
-  );
+  const cleaned = name
+    .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[[\]\r\n]/g, ' ');
+  // Truncate on code-point boundaries so an emoji nick capped mid-pair can't
+  // leave a lone surrogate (renders as `�`).
+  return truncateCodePoints(cleaned, 64).trim() || 'unknown';
 }
 
 /**
@@ -49,7 +59,11 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]/g, ' ')
     .replace(/["[\]]/g, ' ');
-  return cleaned.length > maxLen ? cleaned.slice(0, maxLen - 1) + '…' : cleaned;
+  // Count/slice by CODE POINT, not UTF-16 unit, so a cap landing mid-surrogate-
+  // pair can't leave a lone surrogate (`�`). On truncation keep maxLen-1 code
+  // points + the single-char ellipsis, so the result stays within maxLen.
+  const cp = Array.from(cleaned);
+  return cp.length > maxLen ? cp.slice(0, maxLen - 1).join('') + '…' : cleaned;
 }
 
 /**
@@ -67,11 +81,10 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
  * pathological attacker filename from ballooning the prompt unboundedly.
  */
 export function sanitizePromptPath(path: string): string {
-  return (
-    path
-      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
-      .slice(0, 1024)
-  );
+  const cleaned = path
+    .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, ' ');
+  // Cap by code point so a path ending in an emoji can't be split mid-pair.
+  return truncateCodePoints(cleaned, 1024);
 }

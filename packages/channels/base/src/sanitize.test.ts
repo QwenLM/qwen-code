@@ -14,6 +14,15 @@ const PDI = String.fromCharCode(0x2069); // POP DIRECTIONAL ISOLATE
 const ELLIPSIS = String.fromCharCode(0x2026); // HORIZONTAL ELLIPSIS (truncation indicator)
 const NEL = String.fromCharCode(0x0085); // NEXT LINE (C1; UAX#14 BK -> renders as a new line)
 const CSI = String.fromCharCode(0x009b); // CONTROL SEQUENCE INTRODUCER (another C1 control)
+// U+1F389 PARTY POPPER as its UTF-16 surrogate pair, kept ASCII in source. A
+// length cap landing between the two units yields a lone surrogate (-> `replace`
+// char downstream); the sanitizers truncate on code-point boundaries to avoid it.
+const EMOJI = String.fromCharCode(0xd83c, 0xdf89);
+
+/** True if `unit` is a high surrogate (0xD800-0xDBFF) — a lone one is malformed. */
+function isHighSurrogate(unit: number): boolean {
+  return unit >= 0xd800 && unit <= 0xdbff;
+}
 
 describe('sanitizeSenderName', () => {
   it('passes through a plain name unchanged', () => {
@@ -63,6 +72,15 @@ describe('sanitizeSenderName', () => {
     expect(sanitizeSenderName('a'.repeat(200))).toHaveLength(64);
   });
 
+  it('caps on code-point boundaries so an emoji nick is not split mid-surrogate', () => {
+    // A leading ASCII char makes the UTF-16 cap (64 units) land inside the 32nd
+    // emoji. Mutation check: pre-fix `.slice(0, 64)` ends in a lone high surrogate
+    // (33 code points, last unit 0xD83C); code-point truncation keeps 64 whole.
+    const out = sanitizeSenderName('a' + EMOJI.repeat(100));
+    expect(Array.from(out)).toHaveLength(64);
+    expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
+  });
+
   it('falls back to "unknown" when the name is entirely strippable', () => {
     const NL = String.fromCharCode(0x0a);
     // "]\n[" is all bracket/newline: it collapses to spaces, trims to '', and
@@ -108,6 +126,15 @@ describe('sanitizePromptPath', () => {
     const real = '/' + 'a'.repeat(900) + '/[slug]/page.tsx';
     expect(sanitizePromptPath(real)).toBe(real);
   });
+
+  it('caps on code-point boundaries so a path ending in emoji is not split mid-surrogate', () => {
+    // 2000 emoji code points exceed the 1024 cap. Mutation check: pre-fix
+    // `.slice(0, 1024)` on UTF-16 units splits the 512th emoji, ending in a lone
+    // high surrogate (513 code points); code-point truncation keeps 1024 whole.
+    const out = sanitizePromptPath('/' + EMOJI.repeat(2000));
+    expect(Array.from(out)).toHaveLength(1024);
+    expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
+  });
 });
 
 describe('sanitizeQuotedText', () => {
@@ -150,5 +177,17 @@ describe('sanitizeQuotedText', () => {
     // Exactly maxLen is not truncation, so no ellipsis is added.
     expect(sanitizeQuotedText('A'.repeat(10), 10)).toBe('A'.repeat(10));
     expect(sanitizeQuotedText('A'.repeat(10), 10)).not.toContain(ELLIPSIS);
+  });
+
+  it('truncates emoji on code-point boundaries without a lone surrogate before the ellipsis', () => {
+    // Mutation check: pre-fix `.slice(0, maxLen - 1)` cuts the 5th emoji mid-pair,
+    // so the result is `<4 emoji><lone high surrogate><ellipsis>`. Code-point
+    // truncation keeps 9 whole emoji + the ellipsis (10 code points, within cap).
+    const out = sanitizeQuotedText(EMOJI.repeat(100), 10);
+    expect(out).toBe(EMOJI.repeat(9) + ELLIPSIS);
+    expect(Array.from(out)).toHaveLength(10);
+    // The unit just before the ellipsis is a whole emoji's low surrogate, not a
+    // dangling high surrogate.
+    expect(isHighSurrogate(out.charCodeAt(out.length - 2))).toBe(false);
   });
 });
