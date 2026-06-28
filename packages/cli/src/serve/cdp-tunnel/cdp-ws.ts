@@ -30,6 +30,7 @@ import type { CdpTunnelRegistry } from './cdp-tunnel-registry.js';
 const CLOSE_NO_BRIDGE = 1011;
 /** WS close code for a normal teardown. */
 const CLOSE_NORMAL = 1000;
+const CDP_WS_HEARTBEAT_MS = 15_000;
 
 /**
  * Attach a single puppeteer `/cdp` WebSocket to the active extension bridge.
@@ -106,9 +107,42 @@ export function attachCdpClient(
   };
 
   let disposed = false;
+  let heartbeatAlive = true;
+  const heartbeat = setInterval(() => {
+    if (disposed) return;
+    if (!heartbeatAlive) {
+      log('qwen serve: /cdp heartbeat missed; closing puppeteer socket');
+      dispose('puppeteer /cdp heartbeat missed');
+      try {
+        ws.close(CLOSE_NORMAL, 'cdp heartbeat missed');
+      } catch {
+        // already closing
+      }
+      return;
+    }
+    heartbeatAlive = false;
+    try {
+      ws.ping();
+    } catch (err) {
+      log(
+        `qwen serve: /cdp heartbeat ping failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      dispose('puppeteer /cdp heartbeat ping failed');
+      try {
+        ws.close(CLOSE_NORMAL, 'cdp heartbeat failed');
+      } catch {
+        // already closing
+      }
+    }
+  }, CDP_WS_HEARTBEAT_MS);
+  heartbeat.unref?.();
+
   const dispose = (reason: string, notifyExtension = true): void => {
     if (disposed) return;
     disposed = true;
+    clearInterval(heartbeat);
     // The puppeteer `/cdp` client dropped while the extension is still bound:
     // tell the extension to release its `chrome.debugger` attachment, otherwise
     // the tab keeps Chrome's "started debugging this browser" banner until the
@@ -137,6 +171,10 @@ export function attachCdpClient(
       bridge.onExtensionGone = undefined;
     }
   };
+
+  ws.on('pong', () => {
+    heartbeatAlive = true;
+  });
 
   // Extension `/acp` socket dropped (bridge unregistered): the extension can no
   // longer answer page-domain commands, so close the puppeteer socket. Without

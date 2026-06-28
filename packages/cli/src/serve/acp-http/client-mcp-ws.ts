@@ -41,6 +41,7 @@ import {
   type ClientMcpFrame,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { isValidServerName } from '../validate-server-name.js';
 
 /** WS frame discriminators owned by this module. */
 export const CLIENT_MCP_FRAME_TYPES = {
@@ -110,23 +111,6 @@ export type ClientMcpHandleResult =
   | { kind: 'message_resolved'; id: string }
   | { kind: 'ignored'; reason: string }
   | { kind: 'error'; code: string; message: string };
-
-/**
- * Server-name validation mirroring the runtime-MCP-mutation guard in
- * `acpAgent.ts`: ≤256 chars, alphanumeric + underscore/hyphen, not a reserved
- * JS property name.
- */
-function isValidServerName(name: unknown): name is string {
-  return (
-    typeof name === 'string' &&
-    name.length > 0 &&
-    name.length <= 256 &&
-    /^[A-Za-z0-9_-]+$/.test(name) &&
-    name !== '__proto__' &&
-    name !== 'constructor' &&
-    name !== 'prototype'
-  );
-}
 
 /**
  * Per-WS-connection holder for client-hosted MCP servers. One instance per
@@ -261,6 +245,9 @@ export class ClientMcpWsConnection {
   private async handleUnregister(
     server: unknown,
   ): Promise<ClientMcpHandleResult> {
+    if (this.disposed) {
+      return { kind: 'unregistered', server: String(server) };
+    }
     if (!isValidServerName(server)) {
       return {
         kind: 'error',

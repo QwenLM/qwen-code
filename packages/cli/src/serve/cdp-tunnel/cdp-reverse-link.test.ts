@@ -121,6 +121,34 @@ describe('CdpReverseLink (Plan C #5626)', () => {
     }
   });
 
+  it('logs forwarded commands, midpoint waits, and timeout context', async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: CdpOutboundFrame[] = [];
+      const log = vi.fn();
+      const link = new CdpReverseLink((f) => sent.push(f), 50_000, log);
+      const p = link.forwardToTab('Page.navigate', { url: 'about:blank' });
+      p.catch(() => undefined);
+
+      expect(log).toHaveBeenCalledWith(
+        'qwen serve: /cdp forwarded command id=1 method=Page.navigate to extension',
+      );
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(log).toHaveBeenCalledWith(
+        'qwen serve: /cdp still waiting for command id=1 method=Page.navigate after 30000ms',
+      );
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await expect(p).rejects.toMatchObject({
+        message:
+          'CDP command id=1 method=Page.navigate timed out after 50000ms',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('forwardToTab waits for the attach gate before sending a command', async () => {
     const { link, sent } = setup();
     // Open the gate with an in-flight attach (no cdp_attached ack yet).

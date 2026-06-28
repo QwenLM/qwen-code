@@ -25,7 +25,7 @@ const STORAGE_KEY = 'qwen.daemon';
 /* global console */
 
 /** Whether a URL points at the local loopback interface. */
-function isLoopbackUrl(baseUrl: string): boolean {
+export function isLoopbackUrl(baseUrl: string): boolean {
   try {
     const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
     return host === '127.0.0.1' || host === 'localhost' || host === '::1';

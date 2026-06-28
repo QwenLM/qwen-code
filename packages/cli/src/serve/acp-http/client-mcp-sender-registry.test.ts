@@ -6,7 +6,11 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { ClientMcpSenderRegistry } from './client-mcp-sender-registry.js';
+import {
+  ClientMcpSenderRegistry,
+  createClientMcpServerProvider,
+  type ClientMcpBridge,
+} from './client-mcp-sender-registry.js';
 
 const msg = (id: number): JSONRPCMessage => ({
   jsonrpc: '2.0',
@@ -62,5 +66,85 @@ describe('ClientMcpSenderRegistry', () => {
     reg.delete('srv', 'connA'); // owned -> removed
     reg.delete('srv', 'connA'); // already gone -> no throw
     expect(reg.serverNames()).toEqual([]);
+  });
+});
+
+describe('createClientMcpServerProvider', () => {
+  function setupBridge(
+    addResult: Awaited<ReturnType<ClientMcpBridge['addRuntimeMcpServer']>>,
+  ) {
+    return {
+      addRuntimeMcpServer: vi.fn(async () => addResult),
+      removeRuntimeMcpServer: vi.fn(async () => ({})),
+    } satisfies ClientMcpBridge;
+  }
+
+  it('rolls back the sender when bridge add is skipped', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ skipped: true, reason: 'disabled' });
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await expect(
+      provider.registerClientMcpServer(
+        'srv',
+        vi.fn(async () => msg(1)),
+      ),
+    ).rejects.toThrow(/runtime MCP add skipped: disabled/);
+
+    expect(registry.serverNames()).toEqual([]);
+    expect(bridge.removeRuntimeMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('removes the runtime server and rolls back the sender when settings are shadowed', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1, shadowedSettings: true });
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await expect(
+      provider.registerClientMcpServer(
+        'srv',
+        vi.fn(async () => msg(1)),
+      ),
+    ).rejects.toThrow(/conflicts with a configured MCP server/);
+
+    expect(bridge.removeRuntimeMcpServer).toHaveBeenCalledWith('srv', 'connA');
+    expect(registry.serverNames()).toEqual([]);
+  });
+
+  it('rolls back the sender when bridge add throws', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = {
+      addRuntimeMcpServer: vi.fn(async () => {
+        throw new Error('boom');
+      }),
+      removeRuntimeMcpServer: vi.fn(async () => ({})),
+    } satisfies ClientMcpBridge;
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await expect(
+      provider.registerClientMcpServer(
+        'srv',
+        vi.fn(async () => msg(1)),
+      ),
+    ).rejects.toThrow('boom');
+
+    expect(registry.serverNames()).toEqual([]);
+    expect(bridge.removeRuntimeMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('does not unregister a server now owned by another connection', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    registry.set(
+      'srv',
+      vi.fn(async () => msg(2)),
+      'connB',
+    );
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await provider.unregisterClientMcpServer('srv');
+
+    expect(registry.serverNames()).toEqual(['srv']);
+    expect(bridge.removeRuntimeMcpServer).not.toHaveBeenCalled();
   });
 });

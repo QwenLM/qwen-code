@@ -136,6 +136,17 @@ const WS_READ_METHODS = new Set([
   '_qwen/file/glob',
 ]);
 
+function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
+  if (!localPort) return false;
+  const parsed = new URL(origin);
+  const allowed = new Set([
+    `http://localhost:${localPort}`,
+    `http://127.0.0.1:${localPort}`,
+    `http://[::1]:${localPort}`,
+  ]);
+  return allowed.has(parsed.origin.toLowerCase());
+}
+
 /**
  * Cap on concurrent fire-and-forget client-MCP register/unregister dispatches
  * per WS connection. `mcp_register`/`mcp_unregister` are dispatched off the
@@ -564,7 +575,8 @@ export function mountAcpHttp(
   // ── WebSocket upgrade (ACP RFD) ────────────────────────────────────
   let wss: WebSocketServer | undefined;
   let upgradeListener:
-    ((req: IncomingMessage, socket: Duplex, head: Buffer) => void) | undefined;
+    | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
+    | undefined;
   let upgradeServer: import('node:http').Server | undefined;
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
@@ -660,11 +672,8 @@ export function mountAcpHttp(
       const origin = req.headers['origin'];
       if (origin) {
         try {
-          const originHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
-          const isLoopbackOrigin =
-            originHost === '127.0.0.1' ||
-            originHost === 'localhost' ||
-            originHost === '::1';
+          const localPort = (socket as { localPort?: number }).localPort;
+          const isLoopbackOrigin = isSameLoopbackOrigin(origin, localPort);
           // `--allow-origin` allowlist (same match semantics as the REST
           // `allowOriginCors`): lets an explicitly permitted non-loopback
           // origin — e.g. a browser extension's `chrome-extension://<id>`
@@ -673,7 +682,7 @@ export function mountAcpHttp(
             opts.allowedOrigins !== undefined &&
             opts.allowedOrigins.origins.has(origin.toLowerCase());
           if (!isLoopbackOrigin && !isAllowlistedOrigin) {
-            logReject(`origin-not-allowed ${originHost}`);
+            logReject(`origin-not-allowed ${origin}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;

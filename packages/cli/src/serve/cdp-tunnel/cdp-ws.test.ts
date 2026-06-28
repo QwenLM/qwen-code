@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { WebSocket } from 'ws';
 import { attachCdpClient } from './cdp-ws.js';
 import type { CdpOutboundFrame } from './cdp-reverse-link.js';
@@ -18,6 +18,7 @@ class FakeWs {
   readyState = 1;
   readonly OPEN = 1;
   sent: string[] = [];
+  pings = 0;
   closed: { code: number; reason: string } | null = null;
   private handlers: Record<string, (arg?: unknown) => void> = {};
   on(event: string, cb: (arg?: unknown) => void): this {
@@ -27,7 +28,11 @@ class FakeWs {
   send(data: string): void {
     this.sent.push(data);
   }
+  ping(): void {
+    this.pings++;
+  }
   close(code: number, reason: string): void {
+    if (this.readyState === 3) return;
     this.closed = { code, reason };
     this.readyState = 3;
   }
@@ -133,5 +138,26 @@ describe('attachCdpClient (Plan C #5626)', () => {
     // dispose must not release or reset the now-active bridge `b`.
     expect(releases(aSent)).toHaveLength(0);
     expect(b.cdpBound).toBe(true);
+  });
+
+  it('pings the /cdp socket and tears down the binding when pong is missed', async () => {
+    vi.useFakeTimers();
+    try {
+      const { bridge, sent } = makeBridge();
+      const ws = new FakeWs();
+      bind(ws, makeRegistry(bridge).registry);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(ws.pings).toBe(1);
+      expect(bridge.cdpBound).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(ws.closed?.code).toBe(1000);
+      expect(ws.closed?.reason).toMatch(/heartbeat/i);
+      expect(bridge.cdpBound).toBe(false);
+      expect(releases(sent)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

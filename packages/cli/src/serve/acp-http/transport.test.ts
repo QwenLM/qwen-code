@@ -3732,11 +3732,12 @@ describe('ACP WebSocket transport security', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
       });
-      server = app.listen(0, '127.0.0.1', () => {
-        port = (server.address() as AddressInfo).port;
-        handle?.attachServer(server);
+      const listeningServer = app.listen(0, '127.0.0.1', () => {
+        port = (listeningServer.address() as AddressInfo).port;
+        handle?.attachServer(listeningServer);
         resolve();
       });
+      server = listeningServer;
     });
   }
 
@@ -3829,9 +3830,15 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(101);
   });
 
-  it('allows WS upgrade with loopback Origin header', async () => {
+  it('rejects WS upgrade with a loopback Origin header on a different port', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'http://localhost:3000');
+    expect(result.code).toBe(403);
+  });
+
+  it('allows WS upgrade with a loopback Origin header on the daemon port', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', `http://localhost:${port}`);
     expect(result.code).toBe(101);
   });
 

@@ -78,7 +78,10 @@ function toWebSocketUrl(baseUrl: string): string {
 
 /** Send any JSON message if the socket is open; swallow failures (close handles it). */
 function sendRaw(message: unknown): void {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    console.warn(LOG_PREFIX, 'sendRaw: socket not OPEN, dropping frame');
+    return;
+  }
   try {
     socket.send(JSON.stringify(message));
   } catch (error) {

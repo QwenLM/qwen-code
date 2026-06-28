@@ -115,6 +115,7 @@ export type CdpSendToExtension = (frame: CdpOutboundFrame) => void;
 
 /** Default per-command timeout (ms). Puppeteer's protocolTimeout is 180s. */
 const DEFAULT_COMMAND_TIMEOUT_MS = 170_000;
+const COMMAND_PROGRESS_LOG_MS = 30_000;
 
 /** Whether a frame's `type` is one the reverse link consumes (extension -> daemon). */
 export function isCdpInboundFrameType(type: unknown): boolean {
@@ -136,6 +137,7 @@ interface PendingCommand {
   resolve(result: unknown): void;
   reject(err: { code?: number; message?: string; data?: unknown }): void;
   timer: ReturnType<typeof setTimeout>;
+  progressTimer?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -193,9 +195,16 @@ export class CdpReverseLink {
         return;
       }
       const id = this.nextId++;
-      const timer = this.armTimeout(id, `${method} timed out`);
-      this.pending.set(id, { resolve, reject, timer });
+      const timer = this.armTimeout(
+        id,
+        `CDP command id=${id} method=${method} timed out after ${this.commandTimeoutMs}ms`,
+      );
+      const progressTimer = this.armProgressLog(id, method);
+      this.pending.set(id, { resolve, reject, timer, progressTimer });
       try {
+        this.log?.(
+          `qwen serve: /cdp forwarded command id=${id} method=${method} to extension`,
+        );
         this.sendToExtension({
           type: CDP_FRAME_TYPES.command,
           id,
@@ -343,10 +352,27 @@ export class CdpReverseLink {
     return timer;
   }
 
+  private armProgressLog(
+    id: number,
+    method: string,
+  ): ReturnType<typeof setTimeout> | undefined {
+    if (!this.log) return undefined;
+    const delay = Math.min(COMMAND_PROGRESS_LOG_MS, this.commandTimeoutMs);
+    if (delay >= this.commandTimeoutMs) return undefined;
+    const timer = setTimeout(() => {
+      this.log?.(
+        `qwen serve: /cdp still waiting for command id=${id} method=${method} after ${delay}ms`,
+      );
+    }, delay);
+    timer.unref?.();
+    return timer;
+  }
+
   private settleResolve(id: number, result: unknown): void {
     const p = this.pending.get(id);
     if (!p) return;
     clearTimeout(p.timer);
+    if (p.progressTimer) clearTimeout(p.progressTimer);
     this.pending.delete(id);
     p.resolve(result);
   }
@@ -358,6 +384,7 @@ export class CdpReverseLink {
     const p = this.pending.get(id);
     if (!p) return;
     clearTimeout(p.timer);
+    if (p.progressTimer) clearTimeout(p.progressTimer);
     this.pending.delete(id);
     p.reject(err);
   }
@@ -373,6 +400,7 @@ export class CdpReverseLink {
     this.disposed = true;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
+      if (p.progressTimer) clearTimeout(p.progressTimer);
       p.reject({ code: -32000, message: reason });
     }
     this.pending.clear();

@@ -232,6 +232,7 @@ import {
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   type ClientMcpOverWsRuntimeConfig,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import { isValidServerName } from '../serve/validate-server-name.js';
 import {
   collectContextData,
   formatContextUsageText,
@@ -6353,13 +6354,7 @@ class QwenAgent implements Agent {
             'Invalid or missing name',
           );
         }
-        if (
-          name.length > 256 ||
-          !/^[A-Za-z0-9_-]+$/.test(name) ||
-          name === '__proto__' ||
-          name === 'constructor' ||
-          name === 'prototype'
-        ) {
+        if (!isValidServerName(name)) {
           throw RequestError.invalidParams(
             undefined,
             'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
@@ -6500,13 +6495,7 @@ class QwenAgent implements Agent {
             'Invalid or missing name',
           );
         }
-        if (
-          name.length > 256 ||
-          !/^[A-Za-z0-9_-]+$/.test(name) ||
-          name === '__proto__' ||
-          name === 'constructor' ||
-          name === 'prototype'
-        ) {
+        if (!isValidServerName(name)) {
           throw RequestError.invalidParams(
             undefined,
             'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
