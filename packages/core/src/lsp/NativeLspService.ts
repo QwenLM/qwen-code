@@ -275,6 +275,8 @@ export class NativeLspService {
    */
   async stop(): Promise<void> {
     await this.serverManager.stopAll();
+    this.openedDocuments.clear();
+    this.lastConnections.clear();
   }
 
   /**

@@ -163,9 +163,24 @@ Failure behavior:
 
 - If a newly added or changed server fails to start, keep the handle and mark it
   as `FAILED` so `/lsp` can explain the failure.
+- If startup fails after a connection or process has been created, release that
+  connection/process before returning. Failed initialization must not leave a
+  language server process or socket connection alive behind a `FAILED` handle.
 - If a removed server logs an error during shutdown, still delete it from the
   handle map.
 - One server's startup failure must not block reconcile for other servers.
+
+Resource cleanup:
+
+- `stopServer()` must release both sides of an owned server: gracefully shut down
+  and end the LSP connection, then kill the spawned process if it is still
+  alive. This matters for `tcp`/`socket` transports that were launched with a
+  `command`; closing the socket alone is not enough.
+- Shutdown timeout timers must be cleared when shutdown completes or fails so a
+  large timeout does not retain the handle longer than necessary.
+- `NativeLspService.stop()` must clear `openedDocuments` and `lastConnections`
+  after `serverManager.stopAll()` so a stopped service does not retain old
+  document sets or connection objects.
 
 ### 3. Add `NativeLspService.reinitialize()`
 
@@ -379,6 +394,11 @@ environment-dependent, so they are not required.
 - removing a server shuts it down and deletes it from handles;
 - hash changes stop the old handle and start a new handle;
 - unchanged hash does not stop/start and preserves handle identity;
+- startup failure after connection creation releases the connection and owned
+  process;
+- stopping a `tcp`/`socket` server launched by `command` closes the connection
+  and kills the owned process;
+- shutdown timeout timers are cleared when shutdown completes first;
 - one server startup failure does not affect another server's reconcile;
 - concurrent reconciles run serially;
 - `stopAll()` and `clearServerHandles()` clear the hash map;
@@ -399,6 +419,7 @@ real language servers.
 - if a CLI allow-list is implemented, the upper bound filters admitted configs;
 - service-level return value aggregates admission skipped reasons;
 - restarted/removed servers only clear their own document tracking.
+- `stop()` clears document tracking caches after stopping all servers.
 
 `packages/core/src/config/config.test.ts`
 

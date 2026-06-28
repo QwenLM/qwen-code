@@ -5,12 +5,17 @@
  */
 
 import path from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChildProcess } from 'node:child_process';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { LspServerManager } from './LspServerManager.js';
-import type { LspConnectionResult, LspServerConfig } from './types.js';
+import type {
+  LspConnectionInterface,
+  LspConnectionResult,
+  LspServerConfig,
+} from './types.js';
 
 const debugLoggerMock = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -58,17 +63,7 @@ function createReconcileManager(): {
   manager: LspServerManager;
   privateView: ReconcilePrivateView;
 } {
-  const manager = new LspServerManager(
-    {
-      isTrustedFolder: vi.fn().mockReturnValue(true),
-    } as unknown as CoreConfig,
-    {} as WorkspaceContext,
-    {} as FileDiscoveryService,
-    {
-      requireTrustedWorkspace: false,
-      workspaceRoot: '/workspace',
-    },
-  );
+  const manager = createTrustedManager();
   const privateView = manager as unknown as ReconcilePrivateView;
   vi.spyOn(privateView, 'startServer').mockImplementation(
     async (_name, handle) => {
@@ -83,9 +78,27 @@ function createReconcileManager(): {
   return { manager, privateView };
 }
 
+function createTrustedManager(): LspServerManager {
+  return new LspServerManager(
+    {
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+    } as unknown as CoreConfig,
+    {} as WorkspaceContext,
+    {} as FileDiscoveryService,
+    {
+      requireTrustedWorkspace: false,
+      workspaceRoot: '/workspace',
+    },
+  );
+}
+
 describe('LspServerManager', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('reconcileServerConfigs', () => {
@@ -274,6 +287,8 @@ describe('LspServerManager', () => {
       },
       'isPathSafe',
     ).mockReturnValue(true);
+    const connection = createMockConnection();
+    const process = createMockProcess();
     vi.spyOn(
       manager as unknown as {
         createLspConnection: (
@@ -282,7 +297,8 @@ describe('LspServerManager', () => {
       },
       'createLspConnection',
     ).mockResolvedValue({
-      connection: {},
+      connection,
+      process,
       processDiagnostics,
     } as unknown as LspConnectionResult);
     vi.spyOn(
@@ -295,6 +311,10 @@ describe('LspServerManager', () => {
     manager.setServerConfigs([serverConfig]);
     await manager.startAll();
 
+    expect(connection.end).toHaveBeenCalledOnce();
+    expect(process.kill).toHaveBeenCalledOnce();
+    expect(manager.getHandles().get('clangd')?.connection).toBeUndefined();
+    expect(manager.getHandles().get('clangd')?.process).toBeUndefined();
     expect(debugLoggerMock.error).toHaveBeenCalledWith(
       'LSP server clangd process diagnostics:',
       processDiagnostics,
@@ -304,4 +324,69 @@ describe('LspServerManager', () => {
       expect.any(Error),
     );
   });
+
+  it('kills owned process after graceful shutdown for socket transports', async () => {
+    const manager = createTrustedManager();
+    const connection = createMockConnection();
+    const process = createMockProcess();
+    const socketConfig: LspServerConfig = {
+      ...serverConfig,
+      transport: 'tcp',
+      socket: { host: '127.0.0.1', port: 9876 },
+    };
+    manager.setServerConfigs([socketConfig]);
+    const handle = manager.getHandles().get('clangd');
+    expect(handle).toBeDefined();
+    handle!.connection = connection;
+    handle!.process = process as unknown as ChildProcess;
+    handle!.status = 'READY';
+
+    await manager.stopAll();
+
+    expect(connection.shutdown).toHaveBeenCalledOnce();
+    expect(connection.end).toHaveBeenCalledOnce();
+    expect(process.kill).toHaveBeenCalledOnce();
+  });
+
+  it('clears shutdown timeout when shutdown completes first', async () => {
+    vi.useFakeTimers();
+    const manager = createTrustedManager();
+    const connection = createMockConnection();
+    manager.setServerConfigs([{ ...serverConfig, shutdownTimeout: 30_000 }]);
+    const handle = manager.getHandles().get('clangd');
+    expect(handle).toBeDefined();
+    handle!.connection = connection;
+    handle!.status = 'READY';
+
+    await manager.stopAll();
+
+    expect(connection.shutdown).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
+
+function createMockConnection(
+  overrides: Partial<LspConnectionInterface> = {},
+): LspConnectionInterface {
+  return {
+    listen: vi.fn(),
+    send: vi.fn(),
+    onNotification: vi.fn(),
+    onRequest: vi.fn(),
+    request: vi.fn(),
+    initialize: vi.fn(),
+    shutdown: vi.fn(async () => {}),
+    end: vi.fn(),
+    ...overrides,
+  };
+}
+
+function createMockProcess(): {
+  exitCode: number | null;
+  kill: ReturnType<typeof vi.fn>;
+} {
+  return {
+    exitCode: null,
+    kill: vi.fn(),
+  };
+}

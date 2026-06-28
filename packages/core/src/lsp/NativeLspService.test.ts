@@ -240,6 +240,24 @@ describe('NativeLspService', () => {
     expect(result.reconcile.removed).toEqual(['tsserver']);
   });
 
+  test('stop clears document tracking caches', async () => {
+    const stopAll = vi.fn(async () => {});
+    const internals = lspService as unknown as {
+      serverManager: { stopAll: () => Promise<void> };
+      openedDocuments: Map<string, Set<string>>;
+      lastConnections: Map<string, unknown>;
+    };
+    internals.serverManager = { stopAll };
+    internals.openedDocuments.set('tsserver', new Set(['file:///a.ts']));
+    internals.lastConnections.set('tsserver', {});
+
+    await lspService.stop();
+
+    expect(stopAll).toHaveBeenCalledOnce();
+    expect(internals.openedDocuments.size).toBe(0);
+    expect(internals.lastConnections.size).toBe(0);
+  });
+
   test('should expose a detailed status snapshot for configured servers', () => {
     const serverManager = {
       getHandles: () =>

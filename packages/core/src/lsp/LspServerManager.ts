@@ -394,6 +394,9 @@ export class LspServerManager {
     } catch (error) {
       handle.status = 'FAILED';
       handle.error = error as Error;
+      await this.releaseServerResources(name, handle, false);
+      handle.connection = undefined;
+      handle.process = undefined;
       if (handle.processDiagnostics) {
         debugLogger.error(
           `LSP server ${name} process diagnostics:`,
@@ -414,15 +417,7 @@ export class LspServerManager {
     debugLogger.info(`Stopping LSP server ${name}`);
     handle.stopRequested = true;
 
-    if (handle.connection) {
-      try {
-        await this.shutdownConnection(handle);
-      } catch (error) {
-        debugLogger.error(`Error closing LSP server ${name}:`, error);
-      }
-    } else if (handle.process && handle.process.exitCode === null) {
-      handle.process.kill();
-    }
+    await this.releaseServerResources(name, handle, true);
     handle.connection = undefined;
     handle.process = undefined;
     handle.processDiagnostics = undefined;
@@ -432,6 +427,28 @@ export class LspServerManager {
     debugLogger.info(`LSP server ${name} stopped`);
   }
 
+  private async releaseServerResources(
+    name: string,
+    handle: LspServerHandle,
+    graceful: boolean,
+  ): Promise<void> {
+    if (handle.connection) {
+      try {
+        if (graceful) {
+          await this.shutdownConnection(handle);
+        } else {
+          handle.connection.end();
+        }
+      } catch (error) {
+        debugLogger.error(`Error closing LSP server ${name}:`, error);
+      }
+    }
+
+    if (handle.process && handle.process.exitCode === null) {
+      handle.process.kill();
+    }
+  }
+
   private async shutdownConnection(handle: LspServerHandle): Promise<void> {
     if (!handle.connection) {
       return;
@@ -439,12 +456,19 @@ export class LspServerManager {
     try {
       const shutdownPromise = handle.connection.shutdown();
       if (typeof handle.config.shutdownTimeout === 'number') {
-        await Promise.race([
-          shutdownPromise,
-          new Promise<void>((resolve) =>
-            setTimeout(resolve, handle.config.shutdownTimeout),
-          ),
-        ]);
+        let timerId: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            shutdownPromise,
+            new Promise<void>((resolve) => {
+              timerId = setTimeout(resolve, handle.config.shutdownTimeout);
+            }),
+          ]);
+        } finally {
+          if (timerId !== undefined) {
+            clearTimeout(timerId);
+          }
+        }
       } else {
         await shutdownPromise;
       }
