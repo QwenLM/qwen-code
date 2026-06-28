@@ -174,7 +174,11 @@ import {
   getCurrentLanguage,
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
-import { isWorkspaceTrusted } from '../config/trustedFolders.js';
+import {
+  isWorkspaceTrusted,
+  isFolderTrustEnabled,
+  loadTrustedFolders,
+} from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
@@ -295,6 +299,8 @@ type QwenMemorySettings = {
   enableManagedAutoDream: boolean;
   enableAutoSkill: boolean;
   autoSkillConfirm: boolean;
+  enableTeamMemory: boolean;
+  enableTeamMemorySync: boolean;
 };
 
 type QwenMemoryPaths = {
@@ -375,6 +381,8 @@ type QwenCoreSettingKey =
   | 'memory.enableManagedAutoDream'
   | 'memory.enableAutoSkill'
   | 'memory.autoSkillConfirm'
+  | 'memory.enableTeamMemory'
+  | 'memory.enableTeamMemorySync'
   | 'disableAllHooks';
 
 type QwenMcpServerConfig = {
@@ -443,6 +451,8 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'memory.enableManagedAutoDream': { type: 'boolean' },
   'memory.enableAutoSkill': { type: 'boolean' },
   'memory.autoSkillConfirm': { type: 'boolean' },
+  'memory.enableTeamMemory': { type: 'boolean' },
+  'memory.enableTeamMemorySync': { type: 'boolean' },
   disableAllHooks: { type: 'boolean' },
 } as const satisfies Record<
   QwenCoreSettingKey,
@@ -464,6 +474,8 @@ const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoDream: true,
   enableAutoSkill: true,
   autoSkillConfirm: true,
+  enableTeamMemory: false,
+  enableTeamMemorySync: false,
 };
 
 const QWEN_MEMORY_SETTING_KEYS = [
@@ -471,6 +483,8 @@ const QWEN_MEMORY_SETTING_KEYS = [
   'enableManagedAutoDream',
   'enableAutoSkill',
   'autoSkillConfirm',
+  'enableTeamMemory',
+  'enableTeamMemorySync',
 ] as const satisfies ReadonlyArray<keyof QwenMemorySettings>;
 
 function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
@@ -496,6 +510,14 @@ function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
       typeof record['autoSkillConfirm'] === 'boolean'
         ? record['autoSkillConfirm']
         : DEFAULT_QWEN_MEMORY_SETTINGS.autoSkillConfirm,
+    enableTeamMemory:
+      typeof record['enableTeamMemory'] === 'boolean'
+        ? record['enableTeamMemory']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableTeamMemory,
+    enableTeamMemorySync:
+      typeof record['enableTeamMemorySync'] === 'boolean'
+        ? record['enableTeamMemorySync']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableTeamMemorySync,
   };
 }
 
@@ -5679,6 +5701,109 @@ class QwenAgent implements Agent {
         await this.closeStoredSession(sessionId);
         return { sessionId, closed: true };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionCd: {
+        const sessionId = params['sessionId'];
+        const targetPath = params['path'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof targetPath !== 'string' ||
+          targetPath.length === 0 ||
+          !path.isAbsolute(targetPath) ||
+          targetPath.includes('\0')
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing path (must be an absolute path)',
+          );
+        }
+
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+
+        // Restrictive sandbox check
+        if (config.isRestrictiveSandbox()) {
+          throw new RequestError(-32003, 'Restrictive sandbox mode active', {
+            errorKind: 'restrictive_sandbox',
+          });
+        }
+
+        // Verify directory exists
+        let stats;
+        try {
+          stats = await fs.stat(targetPath);
+        } catch {
+          throw new RequestError(-32002, `Directory not found: ${targetPath}`, {
+            errorKind: 'directory_not_found',
+            path: targetPath,
+          });
+        }
+        if (!stats.isDirectory()) {
+          throw new RequestError(-32002, `Not a directory: ${targetPath}`, {
+            errorKind: 'directory_not_found',
+            path: targetPath,
+          });
+        }
+
+        // Canonicalize path
+        const canonicalPath = await fs.realpath(targetPath);
+
+        // Noop check
+        const previousCwd = config.getTargetDir();
+        if (canonicalPath === previousCwd) {
+          return { previousCwd, newCwd: canonicalPath, warnings: [] };
+        }
+
+        // Trust check
+        if (isFolderTrustEnabled(this.settings.merged)) {
+          const trustedFolders = loadTrustedFolders();
+          if (trustedFolders.isPathTrusted(canonicalPath) !== true) {
+            throw new RequestError(
+              -32001,
+              `Directory not trusted: ${canonicalPath}`,
+              { errorKind: 'directory_not_trusted', path: canonicalPath },
+            );
+          }
+        }
+
+        // Relocate working directory (skip process.chdir and artifact
+        // migration for ACP — storage stays at the bound workspace so
+        // branch/load/lifecycle paths remain consistent).
+        const warnings: string[] = [];
+        const relocation = await config.relocateWorkingDirectory(
+          canonicalPath,
+          canonicalPath,
+          { skipProcessChdir: true, skipArtifactMigration: true },
+        );
+        if (relocation.memoryRefreshError) {
+          warnings.push(
+            `Memory refresh failed: ${
+              relocation.memoryRefreshError instanceof Error
+                ? relocation.memoryRefreshError.message
+                : String(relocation.memoryRefreshError)
+            }`,
+          );
+        }
+
+        // Update model context
+        try {
+          await config
+            .getGeminiClient()
+            ?.addWorkingDirectoryChangedContext(previousCwd, canonicalPath);
+        } catch (error) {
+          warnings.push(
+            `Model context refresh failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+
+        return { previousCwd, newCwd: canonicalPath, warnings };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         const sessionId = params['sessionId'];
         const mode = params['mode'];
@@ -7316,6 +7441,12 @@ class QwenAgent implements Agent {
       config
         .getFileHistoryService()
         .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+    }
+
+    if (sessionData?.conversation.messages) {
+      config
+        .getChatRecordingService()
+        ?.rebuildTurnBoundaries(sessionData.conversation.messages);
     }
 
     if (options.replayHistory !== false && sessionData?.conversation.messages) {

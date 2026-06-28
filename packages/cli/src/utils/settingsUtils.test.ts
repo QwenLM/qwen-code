@@ -90,6 +90,16 @@ describe('SettingsUtils', () => {
         description: 'A number field with a minimum.',
         showInDialog: true,
       },
+      numberWithMaximum: {
+        type: 'number',
+        label: 'Number With Maximum',
+        category: 'Basic',
+        requiresRestart: false,
+        default: 10,
+        maximum: 10,
+        description: 'A number field with a maximum.',
+        showInDialog: true,
+      },
       advanced: {
         type: 'object',
         label: 'Advanced',
@@ -237,6 +247,15 @@ describe('SettingsUtils', () => {
 
         expect(validateSettingValue(definition!, -1)).toBe(
           'Value must be >= 0',
+        );
+      });
+
+      it('rejects numbers above the configured maximum', () => {
+        const definition = getSettingDefinition('numberWithMaximum');
+        expect(definition).toBeDefined();
+
+        expect(validateSettingValue(definition!, 11)).toBe(
+          'Value must be <= 10',
         );
       });
     });

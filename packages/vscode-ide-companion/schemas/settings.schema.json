@@ -539,6 +539,11 @@
       "type": "string",
       "default": ""
     },
+    "visionModel": {
+      "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
+      "type": "string",
+      "default": ""
+    },
     "voiceModel": {
       "description": "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
       "type": "string",
@@ -780,6 +785,16 @@
           "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
           "type": "boolean",
           "default": true
+        },
+        "enableTeamMemory": {
+          "description": "Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.",
+          "type": "boolean",
+          "default": false
+        },
+        "enableTeamMemorySync": {
+          "description": "When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -1047,9 +1062,16 @@
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.",
+              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.",
               "type": "boolean",
               "default": true
+            },
+            "idleTimeoutMs": {
+              "description": "Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.",
+              "type": "number",
+              "default": 300000,
+              "minimum": 0,
+              "maximum": 2147483647
             },
             "maxImageDimension": {
               "description": "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
