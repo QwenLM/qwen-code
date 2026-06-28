@@ -816,6 +816,43 @@ export abstract class ChannelBase {
             process.stderr.write(
               `[${this.name}] steer abandoned a wedged turn for session ${sessionId}: it did not wind down within ${CLEAR_CANCEL_TIMEOUT_MS}ms\n`,
             );
+            // Mirror the two wedged-turn protections doClear() runs but the steer
+            // path historically skipped. Both bite only when mixed dispatch modes
+            // collapse onto one session (single/user scope), the same case the
+            // collect-drain guard already accounts for.
+            //
+            // (1) Bump the generation up-front, exactly like doClear. We re-seed a
+            // fresh queue chain below, orphaning the wedged turn's queue tail; a
+            // followup already chained behind it would otherwise late-settle PAST the
+            // dequeue guard and overwrite this replacement's activePrompts slot — two
+            // concurrent bridge.prompts on one session (duplicated responses + double
+            // tool execution). Bumping invalidates that orphaned followup via the same
+            // guard /clear relies on. Skip if a /clear raced the wind-down wait
+            // (generation already moved off the pre-wait snapshot): that /clear must
+            // win, so this replacement keeps the snapshot and bails on the /clear's
+            // bump via the dequeue guard below.
+            if (
+              (this.sessionGenerations.get(sessionId) ?? 0) ===
+              preSteerGeneration
+            ) {
+              this.sessionGenerations.set(sessionId, preSteerGeneration + 1);
+              // This replacement must PROCEED on its own bump, not bail: advance the
+              // snapshot it captures (preSteerGeneration feeds `generation` below) so
+              // its dequeue guard matches the bumped value, while the orphaned
+              // followup — still on the pre-bump generation — bails.
+              preSteerGeneration += 1;
+            }
+            // (2) Release the abandoned turn's OWN platform indicator now, while no
+            // replacement exists yet — mirroring doClear's eviction-time onPromptEnd.
+            // The replacement re-seeds a CHAT-scoped indicator (typing) below, but a
+            // MESSAGEID-scoped one (a per-message reaction/card keyed on the inbound
+            // messageId) is keyed on THIS turn's messageId, so the replacement's
+            // onPromptStart/onPromptEnd never recall it — it would leak until
+            // disconnect. Mark superseded so the wedged turn's late finally still
+            // SKIPS onPromptEnd (released exactly once here, no double-fire, and the
+            // replacement's indicator untouched).
+            this.onPromptEnd(active.chatId, sessionId, active.messageId);
+            active.superseded = true;
           }
           // Prepend a cancellation note so the agent understands context
           promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
@@ -881,14 +918,10 @@ export abstract class ChannelBase {
         chatId: envelope.chatId,
         messageId: envelope.messageId,
       };
-      // This turn is a steer replacement for a wedged predecessor: mark that
-      // predecessor superseded right before we take over its session slot, so its
-      // late-settling finally skips onPromptEnd (it must not end the indicator we
-      // re-seed below). Only on the steerWedged path — a /clear-cancelled turn has
-      // no replacement and must keep running its own cleanup.
-      if (steerWedged && active) {
-        active.superseded = true;
-      }
+      // The wedged predecessor (steerWedged path) was already marked superseded at
+      // steer time — alongside releasing its own indicator — so its late-settling
+      // finally skips onPromptEnd and can't clobber the indicator we re-seed below.
+      // A /clear-cancelled turn has no replacement and keeps running its own cleanup.
       this.activePrompts.set(sessionId, promptState);
 
       this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
