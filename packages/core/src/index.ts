@@ -71,6 +71,7 @@ export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
+export * from './core/turn-interruption.js';
 
 // ============================================================================
 // Tools
@@ -510,6 +511,7 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
+export { buildContextUsage } from './hooks/context-usage.js';
 
 // ============================================================================
 // Goals (/goal command runtime)

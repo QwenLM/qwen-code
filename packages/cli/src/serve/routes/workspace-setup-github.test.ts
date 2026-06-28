@@ -16,7 +16,7 @@ import {
   createWorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import type { BridgeEvent } from '../event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
 import {
   resetHomeEnvBootstrapForTesting,
