@@ -1,20 +1,26 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../../i18n';
+import { getTranslator } from '../../../i18n';
 import type { ACPToolCall } from '../../../adapters/types';
-import { formatTimestamp } from '../../MessageTimestamp';
+import {
+  I18nContext,
+  MarkdownContext,
+  SubAgentPanel,
+  formatTimestamp,
+} from '@qwen-code/chat-panel';
+import { Markdown, isSafeImageSrc } from '../Markdown';
 
-// SubAgentPanel pulls in ToolGroup, which imports App only for
-// CompactModeContext; loading the real App module would drag the whole
-// application graph into this unit test.
-vi.mock('../../../App', async () => {
-  const { createContext } = await import('react');
-  return { CompactModeContext: createContext(false) };
-});
-
-const { SubAgentPanel } = await import('./SubAgentPanel');
+// The carved panel reads i18n + markdown from context; feed it web-shell's so
+// the rendered assistant markdown under test is exercised.
+const i18nValue = { language: 'en', t: getTranslator('en') };
+const markdownSeam = {
+  renderMarkdown: (props: Parameters<typeof Markdown>[0]) => (
+    <Markdown {...props} />
+  ),
+  isSafeImageSrc,
+};
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -35,9 +41,11 @@ function renderPanel(tool: ACPToolCall): HTMLElement {
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
-        <SubAgentPanel tool={tool} defaultExpanded inline hideHeader />
-      </I18nProvider>,
+      <I18nContext.Provider value={i18nValue}>
+        <MarkdownContext.Provider value={markdownSeam}>
+          <SubAgentPanel tool={tool} defaultExpanded inline hideHeader />
+        </MarkdownContext.Provider>
+      </I18nContext.Provider>,
     );
   });
   mounted.push({ root, container });

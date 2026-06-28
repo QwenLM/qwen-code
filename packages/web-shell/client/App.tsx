@@ -30,7 +30,6 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { removeInjectedFromQueue } from './midTurnDedup';
-import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -39,7 +38,6 @@ import {
 import type { EditorHandle } from './hooks/useComposerCore';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
-import { StreamingStatus } from './components/StreamingStatus';
 import {
   ToastHost,
   type ToastTone,
@@ -63,10 +61,8 @@ import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
-import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
+import { renderWebShellSystemMessage } from './components/messages/systemMessageRenderer';
 import { isAskUserQuestionToolName } from './components/messages/toolFormatting';
-import { ToolApproval } from './components/messages/ToolApproval';
-import { AskUserQuestion } from './components/messages/AskUserQuestion';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
@@ -86,6 +82,7 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from './i18n';
+import { Markdown, isSafeImageSrc } from './components/messages/Markdown';
 import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
@@ -122,7 +119,6 @@ import {
   parseGoalStatusMessage,
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
-import { BtwMessage } from './components/messages/BtwMessage';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
@@ -161,6 +157,13 @@ import {
   TodoTimelineContext,
   TodoDetailContext,
   ChatPanelProviders,
+  BtwMessage,
+  StreamingStatus,
+  ToolApproval,
+  AskUserQuestion,
+  resolveShellOutputMaxLines,
+  MessageList,
+  type MessageListHandle,
 } from '@qwen-code/chat-panel';
 import { useStreamingRawInput } from './hooks/useStreamingRawInput';
 
@@ -883,6 +886,30 @@ export function App({
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const streamingRawInput = useStreamingRawInput();
+  // Seams injected into the carved chat panel: its components read the host
+  // translator and markdown renderer from context rather than importing them.
+  const chatPanelI18n = useMemo(
+    () => ({ language: selectedLanguage, t }),
+    [selectedLanguage, t],
+  );
+  const chatPanelMarkdown = useMemo(
+    () => ({
+      renderMarkdown: (props: Parameters<typeof Markdown>[0]) => (
+        <Markdown {...props} />
+      ),
+      isSafeImageSrc,
+    }),
+    [],
+  );
+  const chatPanelCustomization = useMemo(
+    () => ({
+      renderToolHeaderExtra,
+      compactThinking,
+      collapseCompletedTurns,
+      renderSystemMessage: renderWebShellSystemMessage,
+    }),
+    [renderToolHeaderExtra, compactThinking, collapseCompletedTurns],
+  );
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
@@ -3636,6 +3663,9 @@ export function App({
               isAgentTool={isAgentTool}
               approvalModes={DAEMON_APPROVAL_MODES}
               streaming={streamingRawInput}
+              i18n={chatPanelI18n}
+              markdown={chatPanelMarkdown}
+              customization={chatPanelCustomization}
             >
               <CompactModeContext.Provider value={compactMode}>
                 <TodoContextsProvider

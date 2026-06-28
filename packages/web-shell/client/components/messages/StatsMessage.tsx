@@ -3,6 +3,7 @@ import type {
   DaemonSessionStatsModelMetrics,
   DaemonSessionStatsToolByName,
 } from '@qwen-code/webui/daemon-react-sdk';
+import { formatDuration } from '@qwen-code/chat-panel';
 import { useI18n } from '../../i18n';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './StatsMessage.module.css';
@@ -34,21 +35,6 @@ export function parseStatsMessage(content: string): ParsedStats | null {
   } catch {
     return null;
   }
-}
-
-export function formatDuration(ms: number): string {
-  if (ms <= 0) return '0s';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const totalSeconds = ms / 1000;
-  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = Math.floor(totalSeconds % 60);
-  const parts: string[] = [];
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
-  if (seconds > 0) parts.push(`${seconds}s`);
-  return parts.join(' ') || '0s';
 }
 
 // ── Shared layout components ──────────────────────────────────────

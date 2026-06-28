@@ -7,13 +7,13 @@ import {
   type ReactNode,
 } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
-import { useWebShellCustomization } from '../../../customization';
+import { useChatPanelCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
 // Circular import with ToolGroup (agents render tool rows; agent tool
 // rows render SubAgentPanel). Safe only while both modules dereference
 // each other's exports at render time — never in top-level code.
 import { ToolLine } from '../ToolGroup';
-import { Markdown } from '../Markdown';
+import { Markdown } from '../../../markdown';
 import { formatTimestamp } from '../../MessageTimestamp';
 import {
   formatDurationMs,
@@ -97,7 +97,7 @@ function SubToolTime({
   );
 }
 
-const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
+function SubToolLineComponent({ tool }: { tool: ACPToolCall }) {
   // Same row as the main transcript: one-line summary, expandable to
   // the full output / diff / file content where the tool has any.
   const body =
@@ -107,7 +107,9 @@ const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
       <ToolLine tool={tool} />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
-});
+}
+
+const SubToolLine = memo(SubToolLineComponent);
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
   const { t } = useI18n();
@@ -163,7 +165,7 @@ type SubAgentTab = 'result' | 'tools';
  * the newest content, with a toggle to the full scrollable view.
  */
 function SubAgentStream({ text }: { text: string }) {
-  const { compactThinking } = useWebShellCustomization();
+  const { compactThinking } = useChatPanelCustomization();
   const { t } = useI18n();
   const [streamExpanded, setStreamExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
@@ -222,7 +224,7 @@ function SubAgentStream({ text }: { text: string }) {
  * enabled, which keeps the opener within reach to collapse it again.
  */
 function SubAgentResult({ content }: { content: string }) {
-  const { compactThinking } = useWebShellCustomization();
+  const { compactThinking } = useChatPanelCustomization();
   return (
     <div className={compactThinking ? styles.scrollWindow : undefined}>
       <Markdown content={content} source="assistant" />
@@ -245,7 +247,7 @@ function SubAgentTools({
   itemCount: number;
   children: ReactNode;
 }) {
-  const { compactThinking } = useWebShellCustomization();
+  const { compactThinking } = useChatPanelCustomization();
   const windowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

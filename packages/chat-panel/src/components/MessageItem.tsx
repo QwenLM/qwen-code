@@ -6,15 +6,15 @@ import type {
   TodoItem,
 } from '../adapters/types';
 import { MessageTimestamp } from './MessageTimestamp';
-import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
-import { SystemMessage } from './messages/SystemMessage';
-import { ToolGroup } from './messages/ToolGroup';
-import { PlanMessage } from './messages/PlanMessage';
-import { BtwMessage } from './messages/BtwMessage';
-import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
+import { UserMessage } from './messages/UserMessage';
+import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
+import { BtwMessage } from './messages/BtwMessage';
+import { UserShellMessage } from './messages/UserShellMessage';
+import { PlanMessage } from './messages/PlanMessage';
+import { ToolGroup } from './messages/ToolGroup';
+import { SystemMessage } from './messages/SystemMessage';
 
 interface MessageItemProps {
   message: Message;
@@ -36,7 +36,7 @@ interface MessageItemProps {
   shellOutputMaxLines: number;
 }
 
-export const MessageItem = memo(function MessageItem({
+function MessageItemComponent({
   message,
   pendingApproval,
   onConfirm,
@@ -156,7 +156,9 @@ export const MessageItem = memo(function MessageItem({
       {body}
     </MessageTimestamp>
   );
-}, areMessageItemPropsEqual);
+}
+
+export const MessageItem = memo(MessageItemComponent, areMessageItemPropsEqual);
 
 function areMessageItemPropsEqual(
   prev: MessageItemProps,

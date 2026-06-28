@@ -1,14 +1,10 @@
 import { useContext, useState, type ReactNode } from 'react';
 import type { TodoItem } from '../../adapters/types';
-import {
-  getTodoStatusIcon,
-  todoStateKey,
-  type TodoDetail,
-  type TodoEvent,
-} from '../../utils/todos';
-import { TodoDetailContext } from '@qwen-code/chat-panel';
+import { getTodoStatusIcon, todoStateKey } from '../../utils/todos';
+import type { TodoDetail, TodoEvent } from '../../todos-types';
+import { TodoDetailContext } from '../../context';
 import { formatTimestamp } from '../MessageTimestamp';
-import { formatDuration } from './StatsMessage';
+import { formatDuration } from '../../utils/format';
 import { useI18n } from '../../i18n';
 import styles from './TodoView.module.css';
 
@@ -19,6 +15,8 @@ function statusClass(status: TodoItem['status']): string {
     case 'in_progress':
       return styles.inProgress;
     case 'pending':
+      return '';
+    default:
       return '';
   }
 }

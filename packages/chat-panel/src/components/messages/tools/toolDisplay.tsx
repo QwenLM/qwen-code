@@ -1,4 +1,9 @@
 import styles from './ToolChrome.module.css';
+
+// Re-exported so sibling modules can use the shared tool-chrome styles without
+// reaching into this subdirectory's CSS module directly.
+export { default as chromeStyles } from './ToolChrome.module.css';
+
 export {
   formatToolDisplayName,
   localizeToolDisplayName,

@@ -3,18 +3,25 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
+import {
+  AssistantMessage,
+  formatThinkingDuration,
+  getThinkingSummaryKey,
+  MarkdownContext,
+} from '@qwen-code/chat-panel';
+import { Markdown, isSafeImageSrc } from './Markdown';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-vi.mock('../../App', async () => {
-  const { createContext } = await import('react');
-  return {
-    CompactModeContext: createContext(false),
-  };
-});
-
-const { AssistantMessage, formatThinkingDuration, getThinkingSummaryKey } =
-  await import('./AssistantMessage');
+// The panel reads its markdown renderer from context; inject web-shell's so the
+// enhanced-table behaviour under test is exercised (EnhancedMarkdownTable reads
+// the web-shell I18nProvider below).
+const markdownSeam = {
+  renderMarkdown: (props: Parameters<typeof Markdown>[0]) => (
+    <Markdown {...props} />
+  ),
+  isSafeImageSrc,
+};
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
@@ -31,7 +38,13 @@ function render(node: ReactNode): HTMLElement {
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(<I18nProvider language="en">{node}</I18nProvider>);
+    root.render(
+      <I18nProvider language="en">
+        <MarkdownContext.Provider value={markdownSeam}>
+          {node}
+        </MarkdownContext.Provider>
+      </I18nProvider>,
+    );
   });
   mounted.push({ root, container });
   return container;

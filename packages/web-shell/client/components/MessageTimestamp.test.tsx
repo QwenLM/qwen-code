@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { MessageTimestamp, formatTimestamp } from './MessageTimestamp';
+import { MessageTimestamp, formatTimestamp } from '@qwen-code/chat-panel';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }

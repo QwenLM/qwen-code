@@ -4,10 +4,8 @@ import {
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
 import { useI18n } from '../i18n';
-import {
-  StreamingStateContext,
-  useStreamingLoadingMetrics,
-} from '@qwen-code/chat-panel';
+import { StreamingStateContext } from '../context';
+import { useStreamingLoadingMetrics } from '../useStreamingLoadingMetrics';
 import { formatTokenCount } from '../utils/formatTokenCount';
 import styles from './StreamingStatus.module.css';
 

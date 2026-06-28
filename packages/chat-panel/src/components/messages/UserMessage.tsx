@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { isSafeImageSrc } from './Markdown';
+import { useMarkdown } from '../../markdown';
 import { useI18n } from '../../i18n';
 import styles from './UserMessage.module.css';
 
@@ -20,11 +20,9 @@ interface UserMessageProps {
   images?: UserMessageImage[];
 }
 
-export const UserMessage = memo(function UserMessage({
-  content,
-  images,
-}: UserMessageProps) {
+function UserMessageComponent({ content, images }: UserMessageProps) {
   const { t } = useI18n();
+  const { isSafeImageSrc } = useMarkdown();
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
@@ -107,4 +105,6 @@ export const UserMessage = memo(function UserMessage({
       </div>
     </div>
   );
-});
+}
+
+export const UserMessage = memo(UserMessageComponent);

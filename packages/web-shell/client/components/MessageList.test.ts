@@ -9,7 +9,7 @@ import {
   shouldUseVirtualScroll,
   VIRTUAL_SCROLL_THRESHOLD,
   type DisplayItem,
-} from './MessageList';
+} from '@qwen-code/chat-panel';
 
 function messageRow(
   item: DisplayItem,

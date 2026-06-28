@@ -11,6 +11,7 @@ import {
   useState,
   type ReactNode,
   type MutableRefObject,
+  type ForwardedRef,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
@@ -19,12 +20,12 @@ import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
-import { CompactModeContext } from '@qwen-code/chat-panel';
-import { useWebShellCustomization } from '../customization';
-import { useI18n } from '../i18n';
-import { MessageItem } from './MessageItem';
+import { CompactModeContext } from '../context';
 import { MessageTimestamp } from './MessageTimestamp';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
+import { useChatPanelCustomization } from '../customization';
+import { useI18n } from '../i18n';
+import { MessageItem } from './MessageItem';
 import { useSharedNow } from '../hooks/useSharedNow';
 import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
@@ -379,7 +380,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       // assign to `never` here. At runtime (e.g. a newer daemon sending an
       // unknown role) it falls through as not-hideable — kept visible rather
       // than crashing the transcript or vanishing from a collapsed turn.
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
       const _exhaustive: never = item.message;
       return false;
     }
@@ -837,7 +838,7 @@ interface TurnCollapseRowProps {
   onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
-const TurnCollapseRow = memo(function TurnCollapseRow({
+function TurnCollapseRowComponent({
   turnCollapse,
   onToggleCollapse,
 }: TurnCollapseRowProps) {
@@ -954,7 +955,9 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
       )}
     </div>
   );
-});
+}
+
+const TurnCollapseRow = memo(TurnCollapseRowComponent);
 
 function getChatRowClassName(item: DisplayItem): string | undefined {
   if (item.type === 'turn_collapse') return styles.turnStatusRow;
@@ -966,7 +969,7 @@ function getChatRowClassName(item: DisplayItem): string | undefined {
   return undefined;
 }
 
-const TurnContent = memo(function TurnContent({
+function TurnContentComponent({
   collapsed,
   children,
 }: {
@@ -983,7 +986,9 @@ const TurnContent = memo(function TurnContent({
       <div className={styles.turnContentInner}>{children}</div>
     </div>
   );
-});
+}
+
+const TurnContent = memo(TurnContentComponent);
 
 function joinClassNames(
   ...classNames: Array<string | undefined>
@@ -992,689 +997,682 @@ function joinClassNames(
   return result || undefined;
 }
 
-export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
-  function MessageList(
-    {
-      messages,
+function MessageListRender(
+  {
+    messages,
+    pendingApproval,
+    onConfirm,
+    onShowContextDetail,
+    catchingUp,
+    isResponding = false,
+    activeTurnStartedAt,
+    welcomeHeader,
+    workspaceCwd,
+    tailContent,
+    tailKey = 'tail',
+    virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
+    shellOutputMaxLines,
+    autoScrollTailIntoView = false,
+    showRetryHint = false,
+    onRetryClick,
+    onBranchSession,
+    onFollowStateChange,
+  }: MessageListProps,
+  ref: ForwardedRef<MessageListHandle>,
+) {
+  const compactMode = useContext(CompactModeContext);
+  const mergedMessages = useMemo(
+    () =>
+      compactMode
+        ? mergeCompactToolGroups(messages, pendingApproval)
+        : messages,
+    [compactMode, messages, pendingApproval],
+  );
+  const displayItems = useMemo(
+    () => groupParallelAgents(mergedMessages),
+    [mergedMessages],
+  );
+  const lastCompletedAssistantId = useMemo(() => {
+    if (isResponding) return null;
+    for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
+      const message = mergedMessages[i];
+      if (
+        message &&
+        (message.role === 'tool_group' || message.role === 'plan')
+      ) {
+        return null;
+      }
+      if (
+        message?.role === 'assistant' &&
+        !message.isStreaming &&
+        message.content?.trim()
+      ) {
+        return message.id;
+      }
+    }
+    return null;
+  }, [isResponding, mergedMessages]);
+
+  // ── Per-turn collapse ────────────────────────────────────────────────
+  // Completed turns fold down to their prompt + final answer (toggle on the
+  // prompt row). `collapseOverrides` records explicit user toggles keyed by
+  // the turn's user-message id; turns absent from it follow the default
+  // (collapsed once complete). `displayItems` stays the full, pre-collapse
+  // list — used only to locate rows hidden inside a collapsed turn — while
+  // `visibleItems` is what actually renders.
+  const { collapseCompletedTurns } = useChatPanelCustomization();
+  const collapseEnabled = collapseCompletedTurns ?? true;
+  const [collapseOverrides, setCollapseOverrides] = useState<
+    ReadonlyMap<string, boolean>
+  >(() => new Map());
+  const shouldFollow = useRef(true);
+  const lastScrollTop = useRef(0);
+  const scrollCooldown = useRef(false);
+  const scrollCooldownCount = useRef(0);
+  const lastReportedFollow = useRef(true);
+  const prevLastUserMsgId = useRef<string | null>(null);
+  const prevCatchingUp: MutableRefObject<boolean | undefined> =
+    useRef(catchingUp);
+  const catchingUpRef = useRef(catchingUp);
+  const prevHasTailContent = useRef(false);
+  catchingUpRef.current = catchingUp;
+
+  const setShouldFollow = useCallback(
+    (value: boolean) => {
+      shouldFollow.current = value;
+      if (lastReportedFollow.current === value) return;
+      lastReportedFollow.current = value;
+      onFollowStateChange?.(value);
+    },
+    [onFollowStateChange],
+  );
+  const visibleItems = useMemo(
+    () =>
+      applyTurnCollapse(displayItems, {
+        overrides: collapseOverrides,
+        isResponding,
+        activeTurnStartedAt,
+        pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
+        enabled: collapseEnabled,
+      }),
+    [
+      displayItems,
+      collapseOverrides,
+      isResponding,
+      activeTurnStartedAt,
+      pendingApproval?.toolCallId,
+      collapseEnabled,
+    ],
+  );
+
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // ── Scroll-follow state ──────────────────────────────────────────────
+  //
+  // The scroll behavior follows 6 rules:
+  //
+  //   1. Default follow-bottom — while the user is looking at the bottom,
+  //      new content (streaming tokens, tool cards expanding, approval
+  //      cards appearing, any height change) keeps the viewport pinned
+  //      to the latest output.
+  //
+  //   2. Scroll-up pauses follow — if the user scrolls up, the page
+  //      assumes they want to read history and stops auto-scrolling.
+  //      Even if the model is still streaming, the viewport stays put.
+  //
+  //   3. Scroll-back-to-bottom resumes — when the user scrolls back
+  //      near the bottom (< 30px from edge), follow mode re-engages
+  //      and new content resumes sticking.
+  //
+  //   4. New message resets follow — after the user sends a message,
+  //      follow mode is forced on so the model's reply scrolls in
+  //      naturally.
+  //
+  //   5. Session restore / reconnect — during history replay
+  //      (`catchingUp === true`), all auto-scrolling is suppressed to
+  //      avoid fighting the rapidly replaying transcript. Once replay
+  //      finishes (`catchingUp` flips to falsy), a single scroll-to-
+  //      bottom fires so the user lands at the latest content.
+  //
+  //   6. Short content — if the content doesn't overflow the container
+  //      (no scrollbar), scrollToBottom is a no-op. This avoids a
+  //      visual flash when the model just started replying with a
+  //      short first chunk.
+  //
+  // Implementation: three refs, three effects, one scroll handler.
+  //
+  //   - `shouldFollow`      — whether auto-scroll is active
+  //   - `lastScrollTop`     — previous scrollTop for direction detection
+  //   - `prevLastUserMsgId` — tracks when a new user message appears
+  //   - `prevCatchingUp`    — tracks the catchingUp → ready transition
+  //
+  // The single auto-scroll driver is a `useLayoutEffect` on
+  // `totalVirtualSize` (the virtualizer's computed content height).
+  // Every height change — streaming text, card expand, approval
+  // appearance — flows through this one effect.
+  // ─────────────────────────────────────────────────────────────────────
+
+  const hasTailContent = tailContent !== undefined && tailContent !== null;
+  const hasHeader = !!welcomeHeader;
+  const headerOffset = hasHeader ? 1 : 0;
+  const tailContentIndex = headerOffset + visibleItems.length;
+  const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
+  const useVirtualScroll = shouldUseVirtualScroll(
+    totalCount,
+    virtualScrollThreshold,
+  );
+  const getScrollElement = useCallback(
+    (): HTMLElement | null => containerRef.current,
+    [],
+  );
+
+  const handleToggleCollapse = useCallback(
+    (turnId: string, nextExpanded: boolean) => {
+      const el = getScrollElement();
+      const distanceFromBottom = el
+        ? el.scrollHeight - el.scrollTop - el.clientHeight
+        : 0;
+      const isScrolledAwayFromBottom =
+        !!el && el.scrollHeight > el.clientHeight && distanceFromBottom >= 30;
+
+      // Only pause follow when the user is actually reading away from the
+      // tail. Short, non-overflowing chats should not surface the
+      // scroll-to-bottom affordance just because a turn was expanded.
+      setShouldFollow(!isScrolledAwayFromBottom);
+      setCollapseOverrides((prev) => {
+        const next = new Map(prev);
+        next.set(turnId, nextExpanded);
+        return next;
+      });
+    },
+    [getScrollElement, setShouldFollow],
+  );
+
+  const getItemKey = useCallback(
+    (index: number) => {
+      if (hasHeader && index === HEADER_INDEX) return 'slot:header';
+      if (hasTailContent && index === tailContentIndex) {
+        return `slot:tail:${tailKey}`;
+      }
+      const item = visibleItems[index - headerOffset];
+      return item ? getDisplayItemVirtualKey(item) : `slot:row:${index}`;
+    },
+    [
+      hasHeader,
+      hasTailContent,
+      tailContentIndex,
+      tailKey,
+      visibleItems,
+      headerOffset,
+    ],
+  );
+
+  // Rule 6: skip if content doesn't overflow (no scrollbar).
+  const scrollToBottom = useCallback(
+    (behavior: ScrollBehavior = 'auto') => {
+      const el = getScrollElement();
+      if (!el) return;
+      if (el.scrollHeight <= el.clientHeight) return;
+      scrollCooldownCount.current += 1;
+      const gen = scrollCooldownCount.current;
+      scrollCooldown.current = true;
+      if (behavior === 'smooth') {
+        el.scrollTo({ top: el.scrollHeight, behavior });
+      } else {
+        el.scrollTop = el.scrollHeight;
+      }
+      lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
+      const releaseCooldown = () => {
+        if (scrollCooldownCount.current === gen) {
+          scrollCooldown.current = false;
+        }
+      };
+      if (behavior === 'smooth') {
+        setTimeout(releaseCooldown, 350);
+      } else {
+        requestAnimationFrame(releaseCooldown);
+      }
+    },
+    [getScrollElement],
+  );
+
+  const resumeBottomFollow = useCallback(
+    (behavior: ScrollBehavior = 'smooth') => {
+      setShouldFollow(true);
+      scrollToBottom(behavior);
+    },
+    [scrollToBottom, setShouldFollow],
+  );
+
+  const virtualizer = useVirtualizer({
+    count: totalCount,
+    enabled: useVirtualScroll,
+    getScrollElement,
+    getItemKey,
+    estimateSize: (index) => {
+      if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
+      if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
+      const item = visibleItems[index - headerOffset];
+      if (item?.type === 'turn_collapse') return ESTIMATE_TURN_COLLAPSE;
+      if (item?.type === 'turn_content') {
+        return Math.max(ESTIMATE_MESSAGE, item.items.length * ESTIMATE_MESSAGE);
+      }
+      return ESTIMATE_MESSAGE;
+    },
+    overscan: 20,
+    useFlushSync: false,
+    useAnimationFrameWithResizeObserver: true,
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+  const totalVirtualSize = virtualizer.getTotalSize();
+
+  // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in
+  // transcript" button) with a brief highlight on the target row.
+  const [flashKey, setFlashKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!flashKey) return;
+    const timer = setTimeout(() => setFlashKey(null), 1600);
+    return () => clearTimeout(timer);
+  }, [flashKey]);
+
+  // Scroll a visible row to center and flash it.
+  const performScrollToRow = useCallback(
+    (rowIndex: number) => {
+      // Explicit navigation away from the tail — pause follow so the
+      // auto-scroll driver doesn't yank the viewport straight back down,
+      // and engage the same cooldown scrollToBottom uses so the scroll
+      // events this triggers short-circuit handleScroll. Without it, Rule 3
+      // (near-bottom → resume follow) would re-enable follow whenever the
+      // target sits near the bottom, and the next streaming height change
+      // would pull the viewport back to the tail. An instant (non-smooth)
+      // scroll keeps that cooldown window short and deterministic.
+      setShouldFollow(false);
+      scrollCooldownCount.current += 1;
+      const gen = scrollCooldownCount.current;
+      scrollCooldown.current = true;
+      if (useVirtualScroll) {
+        virtualizer.scrollToIndex(rowIndex, { align: 'center' });
+      } else {
+        containerRef.current
+          ?.querySelector(`[data-index="${rowIndex}"]`)
+          ?.scrollIntoView({ block: 'center' });
+      }
+      // Release once the scroll has settled (the virtualizer may re-scroll
+      // a frame or two later after measuring the target row).
+      setTimeout(() => {
+        if (scrollCooldownCount.current === gen) {
+          scrollCooldown.current = false;
+        }
+      }, 150);
+      const key = getItemKey(rowIndex);
+      setFlashKey(null);
+      requestAnimationFrame(() => setFlashKey(key));
+    },
+    [useVirtualScroll, virtualizer, getItemKey, setShouldFollow],
+  );
+
+  // A scroll target that currently sits inside a collapsed turn: expand the
+  // turn, then finish the scroll once its rows materialize in `visibleItems`.
+  const pendingScrollRef = useRef<{
+    messageId: string;
+    callId?: string;
+  } | null>(null);
+
+  const scrollToMessage = useCallback(
+    (messageId: string, callId?: string): boolean => {
+      const visibleIndex = findDisplayItemIndex(
+        visibleItems,
+        messageId,
+        callId,
+      );
+      if (visibleIndex >= 0) {
+        const visibleItem = visibleItems[visibleIndex];
+        if (visibleItem?.type === 'turn_content' && visibleItem.collapsed) {
+          pendingScrollRef.current = { messageId, callId };
+          setCollapseOverrides((prev) => {
+            if (prev.get(visibleItem.turnId) === true) return prev;
+            const next = new Map(prev);
+            next.set(visibleItem.turnId, true);
+            return next;
+          });
+          return true;
+        }
+        pendingScrollRef.current = null;
+        performScrollToRow(visibleIndex + headerOffset);
+        return true;
+      }
+      // Not on screen — it may be folded inside a collapsed turn. Locate it
+      // in the full list, expand that turn, and defer the scroll.
+      const fullIndex = findDisplayItemIndex(displayItems, messageId, callId);
+      if (fullIndex < 0) return false;
+      const turnId = findTurnIdForIndex(displayItems, fullIndex);
+      if (!turnId) return false;
+      pendingScrollRef.current = { messageId, callId };
+      setCollapseOverrides((prev) => {
+        if (prev.get(turnId) === true) return prev;
+        const next = new Map(prev);
+        next.set(turnId, true);
+        return next;
+      });
+      return true;
+    },
+    [visibleItems, displayItems, headerOffset, performScrollToRow],
+  );
+
+  useImperativeHandle(
+    ref,
+    () => ({ scrollToMessage, scrollToBottom: resumeBottomFollow }),
+    [scrollToMessage, resumeBottomFollow],
+  );
+
+  // Flush a deferred scroll once the expanded turn's rows are visible.
+  useEffect(() => {
+    const pending = pendingScrollRef.current;
+    if (!pending) return;
+    const idx = findDisplayItemIndex(
+      visibleItems,
+      pending.messageId,
+      pending.callId,
+    );
+    if (idx < 0) return;
+    pendingScrollRef.current = null;
+    performScrollToRow(idx + headerOffset);
+  }, [visibleItems, headerOffset, performScrollToRow]);
+
+  // Rules 2 & 3: detect scroll direction to toggle follow mode.
+  // Runs synchronously in the scroll handler — no rAF needed since
+  // the browser already coalesces scroll events.
+  const handleScroll = useCallback(() => {
+    const el = getScrollElement();
+    if (!el) return;
+    if (scrollCooldown.current) {
+      lastScrollTop.current = el.scrollTop;
+      return;
+    }
+    const prev = lastScrollTop.current;
+    const curr = el.scrollTop;
+    lastScrollTop.current = curr;
+    const distanceFromBottom = el.scrollHeight - curr - el.clientHeight;
+
+    // Rule 2: scrolling up → pause follow
+    if (curr < prev - 1) {
+      setShouldFollow(false);
+    }
+    // Rule 3: near bottom → resume follow
+    // (runs unconditionally so that container-resize-induced scrollTop
+    // clamping — which looks like scrolling up — doesn't permanently
+    // disable follow when the viewport is still near the bottom)
+    if (distanceFromBottom < 30) {
+      setShouldFollow(true);
+    }
+  }, [getScrollElement, setShouldFollow]);
+
+  useEffect(() => {
+    const el = getScrollElement();
+    if (!el) return;
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, [getScrollElement, handleScroll]);
+
+  // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
+  // collapse overrides, and disarm any deferred scroll so it can't fire
+  // against the next session.
+  useEffect(() => {
+    if (messages.length === 0) {
+      setShouldFollow(true);
+      pendingScrollRef.current = null;
+      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+    }
+  }, [messages.length, setShouldFollow]);
+
+  // Container-resize guard: when floating panels (e.g. TodoPanel)
+  // appear or disappear the scroll container's clientHeight changes.
+  // Snap back to bottom so the user doesn't lose their place while
+  // follow mode is active.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      if (catchingUpRef.current) return;
+      if (!shouldFollow.current) return;
+      requestAnimationFrame(() => {
+        if (!catchingUpRef.current && shouldFollow.current) {
+          scrollToBottom();
+        }
+      });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [scrollToBottom]);
+
+  // Rule 4: new user message → force follow on so the model's reply
+  // scrolls into view as it streams in.
+  useEffect(() => {
+    const lastId = getLastUserMessageId(messages);
+    if (catchingUp) {
+      prevLastUserMsgId.current = lastId;
+      return;
+    }
+    if (lastId && lastId !== prevLastUserMsgId.current) {
+      setShouldFollow(true);
+      // A new prompt supersedes any pending "Show in transcript" scroll.
+      pendingScrollRef.current = null;
+    }
+    prevLastUserMsgId.current = lastId;
+  }, [messages, catchingUp, setShouldFollow]);
+
+  // Rule 5: session restore — when catchingUp flips from true → falsy,
+  // replay just finished. Scroll to bottom once so the user sees the
+  // latest content without the viewport fighting the replay.
+  useEffect(() => {
+    if (prevCatchingUp.current && !catchingUp) {
+      setShouldFollow(true);
+      requestAnimationFrame(() => scrollToBottom());
+    }
+    prevCatchingUp.current = catchingUp;
+  }, [catchingUp, scrollToBottom, setShouldFollow]);
+
+  // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
+  // at the very bottom of the virtualized list, so if the user had scrolled
+  // up it would open below the fold and the action would look like a no-op.
+  // Only opt-in callers (autoScrollTailIntoView) force-follow it into view, so
+  // unrelated tail panels keep the reader's scroll position.
+  useEffect(() => {
+    if (
+      autoScrollTailIntoView &&
+      hasTailContent &&
+      !prevHasTailContent.current
+    ) {
+      setShouldFollow(true);
+      // Re-check follow inside the frame: if the user scrolls up in the gap
+      // before it fires (Rule 2 clears the flag), don't fight them.
+      requestAnimationFrame(() => {
+        if (shouldFollow.current) scrollToBottom();
+      });
+    }
+    prevHasTailContent.current = hasTailContent;
+  }, [autoScrollTailIntoView, hasTailContent, scrollToBottom, setShouldFollow]);
+
+  const renderVirtualItem = useCallback(
+    (index: number) => {
+      const renderDisplayItem = (
+        displayItem: DisplayItem,
+        isLatest: boolean,
+      ): ReactNode => {
+        if (displayItem.type === 'parallel_agents') {
+          return (
+            <MessageTimestamp timestamp={displayItem.timestamp}>
+              <ParallelAgentsGroup
+                agents={displayItem.agents}
+                pendingApproval={pendingApproval}
+                onConfirm={onConfirm}
+              />
+            </MessageTimestamp>
+          );
+        }
+
+        if (displayItem.type === 'turn_collapse') {
+          return (
+            <TurnCollapseRow
+              turnCollapse={displayItem.turnCollapse}
+              onToggleCollapse={handleToggleCollapse}
+            />
+          );
+        }
+
+        if (displayItem.type === 'turn_content') {
+          return (
+            <TurnContent collapsed={displayItem.collapsed}>
+              {displayItem.items.map((child) => (
+                <div
+                  key={getDisplayItemVirtualKey(child)}
+                  className={getChatRowClassName(child)}
+                >
+                  {renderDisplayItem(child, false)}
+                </div>
+              ))}
+            </TurnContent>
+          );
+        }
+
+        return (
+          <MessageItem
+            message={displayItem.message}
+            pendingApproval={pendingApproval}
+            onConfirm={onConfirm}
+            onShowContextDetail={onShowContextDetail}
+            workspaceCwd={workspaceCwd}
+            isLatest={isLatest}
+            showRetryHint={showRetryHint}
+            onRetryClick={onRetryClick}
+            onBranchSession={onBranchSession}
+            showAssistantActions={
+              displayItem.message.role === 'assistant' &&
+              displayItem.message.id === lastCompletedAssistantId
+            }
+            showAssistantBranch={
+              displayItem.message.role === 'assistant' &&
+              displayItem.message.id === lastCompletedAssistantId
+            }
+            shellOutputMaxLines={shellOutputMaxLines}
+          />
+        );
+      };
+
+      if (hasHeader && index === HEADER_INDEX) {
+        return welcomeHeader;
+      }
+
+      if (hasTailContent && index === tailContentIndex) {
+        return tailContent;
+      }
+
+      const itemIndex = index - headerOffset;
+      const item = visibleItems[itemIndex];
+      if (!item) return null;
+
+      return renderDisplayItem(item, itemIndex === visibleItems.length - 1);
+    },
+    [
+      hasHeader,
+      welcomeHeader,
+      hasTailContent,
+      tailContent,
+      tailContentIndex,
       pendingApproval,
       onConfirm,
       onShowContextDetail,
-      catchingUp,
-      isResponding = false,
-      activeTurnStartedAt,
-      welcomeHeader,
+      headerOffset,
+      visibleItems,
+      lastCompletedAssistantId,
       workspaceCwd,
-      tailContent,
-      tailKey = 'tail',
-      virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
-      shellOutputMaxLines,
-      autoScrollTailIntoView = false,
-      showRetryHint = false,
+      showRetryHint,
       onRetryClick,
       onBranchSession,
-      onFollowStateChange,
-    },
-    ref,
-  ) {
-    const compactMode = useContext(CompactModeContext);
-    const mergedMessages = useMemo(
-      () =>
-        compactMode
-          ? mergeCompactToolGroups(messages, pendingApproval)
-          : messages,
-      [compactMode, messages, pendingApproval],
-    );
-    const displayItems = useMemo(
-      () => groupParallelAgents(mergedMessages),
-      [mergedMessages],
-    );
-    const lastCompletedAssistantId = useMemo(() => {
-      if (isResponding) return null;
-      for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
-        const message = mergedMessages[i];
-        if (
-          message &&
-          (message.role === 'tool_group' || message.role === 'plan')
-        ) {
-          return null;
-        }
-        if (
-          message?.role === 'assistant' &&
-          !message.isStreaming &&
-          message.content?.trim()
-        ) {
-          return message.id;
-        }
-      }
-      return null;
-    }, [isResponding, mergedMessages]);
+      shellOutputMaxLines,
+      handleToggleCollapse,
+    ],
+  );
 
-    // ── Per-turn collapse ────────────────────────────────────────────────
-    // Completed turns fold down to their prompt + final answer (toggle on the
-    // prompt row). `collapseOverrides` records explicit user toggles keyed by
-    // the turn's user-message id; turns absent from it follow the default
-    // (collapsed once complete). `displayItems` stays the full, pre-collapse
-    // list — used only to locate rows hidden inside a collapsed turn — while
-    // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns } = useWebShellCustomization();
-    const collapseEnabled = collapseCompletedTurns ?? true;
-    const [collapseOverrides, setCollapseOverrides] = useState<
-      ReadonlyMap<string, boolean>
-    >(() => new Map());
-    const shouldFollow = useRef(true);
-    const lastScrollTop = useRef(0);
-    const scrollCooldown = useRef(false);
-    const scrollCooldownCount = useRef(0);
-    const lastReportedFollow = useRef(true);
-    const prevLastUserMsgId = useRef<string | null>(null);
-    const prevCatchingUp: MutableRefObject<boolean | undefined> =
-      useRef(catchingUp);
-    const catchingUpRef = useRef(catchingUp);
-    const prevHasTailContent = useRef(false);
-    catchingUpRef.current = catchingUp;
+  const getRowClassName = useCallback(
+    (key: string, item?: DisplayItem): string | undefined =>
+      joinClassNames(
+        flashKey === key ? styles.rowFlash : undefined,
+        item ? getChatRowClassName(item) : undefined,
+      ),
+    [flashKey],
+  );
 
-    const setShouldFollow = useCallback(
-      (value: boolean) => {
-        shouldFollow.current = value;
-        if (lastReportedFollow.current === value) return;
-        lastReportedFollow.current = value;
-        onFollowStateChange?.(value);
-      },
-      [onFollowStateChange],
-    );
-    const visibleItems = useMemo(
-      () =>
-        applyTurnCollapse(displayItems, {
-          overrides: collapseOverrides,
-          isResponding,
-          activeTurnStartedAt,
-          pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
-          enabled: collapseEnabled,
-        }),
-      [
-        displayItems,
-        collapseOverrides,
-        isResponding,
-        activeTurnStartedAt,
-        pendingApproval?.toolCallId,
-        collapseEnabled,
-      ],
-    );
-
-    const containerRef = useRef<HTMLDivElement>(null);
-
-    // ── Scroll-follow state ──────────────────────────────────────────────
-    //
-    // The scroll behavior follows 6 rules:
-    //
-    //   1. Default follow-bottom — while the user is looking at the bottom,
-    //      new content (streaming tokens, tool cards expanding, approval
-    //      cards appearing, any height change) keeps the viewport pinned
-    //      to the latest output.
-    //
-    //   2. Scroll-up pauses follow — if the user scrolls up, the page
-    //      assumes they want to read history and stops auto-scrolling.
-    //      Even if the model is still streaming, the viewport stays put.
-    //
-    //   3. Scroll-back-to-bottom resumes — when the user scrolls back
-    //      near the bottom (< 30px from edge), follow mode re-engages
-    //      and new content resumes sticking.
-    //
-    //   4. New message resets follow — after the user sends a message,
-    //      follow mode is forced on so the model's reply scrolls in
-    //      naturally.
-    //
-    //   5. Session restore / reconnect — during history replay
-    //      (`catchingUp === true`), all auto-scrolling is suppressed to
-    //      avoid fighting the rapidly replaying transcript. Once replay
-    //      finishes (`catchingUp` flips to falsy), a single scroll-to-
-    //      bottom fires so the user lands at the latest content.
-    //
-    //   6. Short content — if the content doesn't overflow the container
-    //      (no scrollbar), scrollToBottom is a no-op. This avoids a
-    //      visual flash when the model just started replying with a
-    //      short first chunk.
-    //
-    // Implementation: three refs, three effects, one scroll handler.
-    //
-    //   - `shouldFollow`      — whether auto-scroll is active
-    //   - `lastScrollTop`     — previous scrollTop for direction detection
-    //   - `prevLastUserMsgId` — tracks when a new user message appears
-    //   - `prevCatchingUp`    — tracks the catchingUp → ready transition
-    //
-    // The single auto-scroll driver is a `useLayoutEffect` on
-    // `totalVirtualSize` (the virtualizer's computed content height).
-    // Every height change — streaming text, card expand, approval
-    // appearance — flows through this one effect.
-    // ─────────────────────────────────────────────────────────────────────
-
-    const hasTailContent = tailContent !== undefined && tailContent !== null;
-    const hasHeader = !!welcomeHeader;
-    const headerOffset = hasHeader ? 1 : 0;
-    const tailContentIndex = headerOffset + visibleItems.length;
-    const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
-    const useVirtualScroll = shouldUseVirtualScroll(
-      totalCount,
-      virtualScrollThreshold,
-    );
-    const getScrollElement = useCallback((): HTMLElement | null => {
-      return containerRef.current;
-    }, []);
-
-    const handleToggleCollapse = useCallback(
-      (turnId: string, nextExpanded: boolean) => {
-        const el = getScrollElement();
-        const distanceFromBottom = el
-          ? el.scrollHeight - el.scrollTop - el.clientHeight
-          : 0;
-        const isScrolledAwayFromBottom =
-          !!el && el.scrollHeight > el.clientHeight && distanceFromBottom >= 30;
-
-        // Only pause follow when the user is actually reading away from the
-        // tail. Short, non-overflowing chats should not surface the
-        // scroll-to-bottom affordance just because a turn was expanded.
-        setShouldFollow(!isScrolledAwayFromBottom);
-        setCollapseOverrides((prev) => {
-          const next = new Map(prev);
-          next.set(turnId, nextExpanded);
-          return next;
-        });
-      },
-      [getScrollElement, setShouldFollow],
-    );
-
-    const getItemKey = useCallback(
-      (index: number) => {
-        if (hasHeader && index === HEADER_INDEX) return 'slot:header';
-        if (hasTailContent && index === tailContentIndex) {
-          return `slot:tail:${tailKey}`;
-        }
-        const item = visibleItems[index - headerOffset];
-        return item ? getDisplayItemVirtualKey(item) : `slot:row:${index}`;
-      },
-      [
-        hasHeader,
-        hasTailContent,
-        tailContentIndex,
-        tailKey,
-        visibleItems,
-        headerOffset,
-      ],
-    );
-
-    // Rule 6: skip if content doesn't overflow (no scrollbar).
-    const scrollToBottom = useCallback(
-      (behavior: ScrollBehavior = 'auto') => {
-        const el = getScrollElement();
-        if (!el) return;
-        if (el.scrollHeight <= el.clientHeight) return;
-        scrollCooldownCount.current += 1;
-        const gen = scrollCooldownCount.current;
-        scrollCooldown.current = true;
-        if (behavior === 'smooth') {
-          el.scrollTo({ top: el.scrollHeight, behavior });
-        } else {
-          el.scrollTop = el.scrollHeight;
-        }
-        lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
-        const releaseCooldown = () => {
-          if (scrollCooldownCount.current === gen) {
-            scrollCooldown.current = false;
-          }
-        };
-        if (behavior === 'smooth') {
-          setTimeout(releaseCooldown, 350);
-        } else {
-          requestAnimationFrame(releaseCooldown);
-        }
-      },
-      [getScrollElement],
-    );
-
-    const resumeBottomFollow = useCallback(
-      (behavior: ScrollBehavior = 'smooth') => {
-        setShouldFollow(true);
-        scrollToBottom(behavior);
-      },
-      [scrollToBottom, setShouldFollow],
-    );
-
-    const virtualizer = useVirtualizer({
-      count: totalCount,
-      enabled: useVirtualScroll,
-      getScrollElement,
-      getItemKey,
-      estimateSize: (index) => {
-        if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
-        if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
-        const item = visibleItems[index - headerOffset];
-        if (item?.type === 'turn_collapse') return ESTIMATE_TURN_COLLAPSE;
-        if (item?.type === 'turn_content') {
-          return Math.max(
-            ESTIMATE_MESSAGE,
-            item.items.length * ESTIMATE_MESSAGE,
-          );
-        }
-        return ESTIMATE_MESSAGE;
-      },
-      overscan: 20,
-      useFlushSync: false,
-      useAnimationFrameWithResizeObserver: true,
-    });
-    const virtualItems = virtualizer.getVirtualItems();
-    const totalVirtualSize = virtualizer.getTotalSize();
-
-    // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in
-    // transcript" button) with a brief highlight on the target row.
-    const [flashKey, setFlashKey] = useState<string | null>(null);
-    useEffect(() => {
-      if (!flashKey) return;
-      const timer = setTimeout(() => setFlashKey(null), 1600);
-      return () => clearTimeout(timer);
-    }, [flashKey]);
-
-    // Scroll a visible row to center and flash it.
-    const performScrollToRow = useCallback(
-      (rowIndex: number) => {
-        // Explicit navigation away from the tail — pause follow so the
-        // auto-scroll driver doesn't yank the viewport straight back down,
-        // and engage the same cooldown scrollToBottom uses so the scroll
-        // events this triggers short-circuit handleScroll. Without it, Rule 3
-        // (near-bottom → resume follow) would re-enable follow whenever the
-        // target sits near the bottom, and the next streaming height change
-        // would pull the viewport back to the tail. An instant (non-smooth)
-        // scroll keeps that cooldown window short and deterministic.
-        setShouldFollow(false);
-        scrollCooldownCount.current += 1;
-        const gen = scrollCooldownCount.current;
-        scrollCooldown.current = true;
-        if (useVirtualScroll) {
-          virtualizer.scrollToIndex(rowIndex, { align: 'center' });
-        } else {
-          containerRef.current
-            ?.querySelector(`[data-index="${rowIndex}"]`)
-            ?.scrollIntoView({ block: 'center' });
-        }
-        // Release once the scroll has settled (the virtualizer may re-scroll
-        // a frame or two later after measuring the target row).
-        setTimeout(() => {
-          if (scrollCooldownCount.current === gen) {
-            scrollCooldown.current = false;
-          }
-        }, 150);
-        const key = getItemKey(rowIndex);
-        setFlashKey(null);
-        requestAnimationFrame(() => setFlashKey(key));
-      },
-      [useVirtualScroll, virtualizer, getItemKey, setShouldFollow],
-    );
-
-    // A scroll target that currently sits inside a collapsed turn: expand the
-    // turn, then finish the scroll once its rows materialize in `visibleItems`.
-    const pendingScrollRef = useRef<{
-      messageId: string;
-      callId?: string;
-    } | null>(null);
-
-    const scrollToMessage = useCallback(
-      (messageId: string, callId?: string): boolean => {
-        const visibleIndex = findDisplayItemIndex(
-          visibleItems,
-          messageId,
-          callId,
-        );
-        if (visibleIndex >= 0) {
-          const visibleItem = visibleItems[visibleIndex];
-          if (visibleItem?.type === 'turn_content' && visibleItem.collapsed) {
-            pendingScrollRef.current = { messageId, callId };
-            setCollapseOverrides((prev) => {
-              if (prev.get(visibleItem.turnId) === true) return prev;
-              const next = new Map(prev);
-              next.set(visibleItem.turnId, true);
-              return next;
-            });
-            return true;
-          }
-          pendingScrollRef.current = null;
-          performScrollToRow(visibleIndex + headerOffset);
-          return true;
-        }
-        // Not on screen — it may be folded inside a collapsed turn. Locate it
-        // in the full list, expand that turn, and defer the scroll.
-        const fullIndex = findDisplayItemIndex(displayItems, messageId, callId);
-        if (fullIndex < 0) return false;
-        const turnId = findTurnIdForIndex(displayItems, fullIndex);
-        if (!turnId) return false;
-        pendingScrollRef.current = { messageId, callId };
-        setCollapseOverrides((prev) => {
-          if (prev.get(turnId) === true) return prev;
-          const next = new Map(prev);
-          next.set(turnId, true);
-          return next;
-        });
-        return true;
-      },
-      [visibleItems, displayItems, headerOffset, performScrollToRow],
-    );
-
-    useImperativeHandle(
-      ref,
-      () => ({ scrollToMessage, scrollToBottom: resumeBottomFollow }),
-      [scrollToMessage, resumeBottomFollow],
-    );
-
-    // Flush a deferred scroll once the expanded turn's rows are visible.
-    useEffect(() => {
-      const pending = pendingScrollRef.current;
-      if (!pending) return;
-      const idx = findDisplayItemIndex(
-        visibleItems,
-        pending.messageId,
-        pending.callId,
-      );
-      if (idx < 0) return;
-      pendingScrollRef.current = null;
-      performScrollToRow(idx + headerOffset);
-    }, [visibleItems, headerOffset, performScrollToRow]);
-
-    // Rules 2 & 3: detect scroll direction to toggle follow mode.
-    // Runs synchronously in the scroll handler — no rAF needed since
-    // the browser already coalesces scroll events.
-    const handleScroll = useCallback(() => {
-      const el = getScrollElement();
-      if (!el) return;
-      if (scrollCooldown.current) {
-        lastScrollTop.current = el.scrollTop;
-        return;
-      }
-      const prev = lastScrollTop.current;
-      const curr = el.scrollTop;
-      lastScrollTop.current = curr;
-      const distanceFromBottom = el.scrollHeight - curr - el.clientHeight;
-
-      // Rule 2: scrolling up → pause follow
-      if (curr < prev - 1) {
-        setShouldFollow(false);
-      }
-      // Rule 3: near bottom → resume follow
-      // (runs unconditionally so that container-resize-induced scrollTop
-      // clamping — which looks like scrolling up — doesn't permanently
-      // disable follow when the viewport is still near the bottom)
-      if (distanceFromBottom < 30) {
-        setShouldFollow(true);
-      }
-    }, [getScrollElement, setShouldFollow]);
-
-    useEffect(() => {
-      const el = getScrollElement();
-      if (!el) return;
-      el.addEventListener('scroll', handleScroll, { passive: true });
-      return () => el.removeEventListener('scroll', handleScroll);
-    }, [getScrollElement, handleScroll]);
-
-    // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
-    // collapse overrides, and disarm any deferred scroll so it can't fire
-    // against the next session.
-    useEffect(() => {
-      if (messages.length === 0) {
-        setShouldFollow(true);
-        pendingScrollRef.current = null;
-        setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
-      }
-    }, [messages.length, setShouldFollow]);
-
-    // Container-resize guard: when floating panels (e.g. TodoPanel)
-    // appear or disappear the scroll container's clientHeight changes.
-    // Snap back to bottom so the user doesn't lose their place while
-    // follow mode is active.
-    useEffect(() => {
-      const el = containerRef.current;
-      if (!el) return;
-      const observer = new ResizeObserver(() => {
-        if (catchingUpRef.current) return;
-        if (!shouldFollow.current) return;
-        requestAnimationFrame(() => {
-          if (!catchingUpRef.current && shouldFollow.current) {
-            scrollToBottom();
-          }
-        });
-      });
-      observer.observe(el);
-      return () => observer.disconnect();
-    }, [scrollToBottom]);
-
-    // Rule 4: new user message → force follow on so the model's reply
-    // scrolls into view as it streams in.
-    useEffect(() => {
+  // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
+  // Fires whenever the virtualizer's total content height changes —
+  // this captures every scenario: streaming tokens appending, tool
+  // cards expanding/collapsing, approval cards appearing, etc.
+  //
+  // Rule 5: during replay (catchingUp) → skip, avoid fighting rapid
+  //         transcript replay. The catchingUp→ready transition effect
+  //         above handles the final scroll.
+  // Rule 1: when shouldFollow is true → scroll to bottom.
+  // Rule 6: scrollToBottom itself checks scrollHeight <= clientHeight
+  //         and is a no-op when there's no overflow.
+  useLayoutEffect(() => {
+    if (catchingUp) return;
+    if (scrollCooldown.current) return;
+    if (shouldFollow.current) {
       const lastId = getLastUserMessageId(messages);
-      if (catchingUp) {
-        prevLastUserMsgId.current = lastId;
-        return;
-      }
-      if (lastId && lastId !== prevLastUserMsgId.current) {
-        setShouldFollow(true);
-        // A new prompt supersedes any pending "Show in transcript" scroll.
-        pendingScrollRef.current = null;
-      }
-      prevLastUserMsgId.current = lastId;
-    }, [messages, catchingUp, setShouldFollow]);
+      const isNewUserMessage =
+        lastId !== null && lastId !== prevLastUserMsgId.current;
+      scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
+    }
+  }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
-    // Rule 5: session restore — when catchingUp flips from true → falsy,
-    // replay just finished. Scroll to bottom once so the user sees the
-    // latest content without the viewport fighting the replay.
-    useEffect(() => {
-      if (prevCatchingUp.current && !catchingUp) {
-        setShouldFollow(true);
-        requestAnimationFrame(() => scrollToBottom());
-      }
-      prevCatchingUp.current = catchingUp;
-    }, [catchingUp, scrollToBottom, setShouldFollow]);
-
-    // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
-    // at the very bottom of the virtualized list, so if the user had scrolled
-    // up it would open below the fold and the action would look like a no-op.
-    // Only opt-in callers (autoScrollTailIntoView) force-follow it into view, so
-    // unrelated tail panels keep the reader's scroll position.
-    useEffect(() => {
-      if (
-        autoScrollTailIntoView &&
-        hasTailContent &&
-        !prevHasTailContent.current
-      ) {
-        setShouldFollow(true);
-        // Re-check follow inside the frame: if the user scrolls up in the gap
-        // before it fires (Rule 2 clears the flag), don't fight them.
-        requestAnimationFrame(() => {
-          if (shouldFollow.current) scrollToBottom();
-        });
-      }
-      prevHasTailContent.current = hasTailContent;
-    }, [
-      autoScrollTailIntoView,
-      hasTailContent,
-      scrollToBottom,
-      setShouldFollow,
-    ]);
-
-    const renderVirtualItem = useCallback(
-      (index: number) => {
-        const renderDisplayItem = (
-          displayItem: DisplayItem,
-          isLatest: boolean,
-        ): ReactNode => {
-          if (displayItem.type === 'parallel_agents') {
-            return (
-              <MessageTimestamp timestamp={displayItem.timestamp}>
-                <ParallelAgentsGroup
-                  agents={displayItem.agents}
-                  pendingApproval={pendingApproval}
-                  onConfirm={onConfirm}
-                />
-              </MessageTimestamp>
-            );
-          }
-
-          if (displayItem.type === 'turn_collapse') {
-            return (
-              <TurnCollapseRow
-                turnCollapse={displayItem.turnCollapse}
-                onToggleCollapse={handleToggleCollapse}
-              />
-            );
-          }
-
-          if (displayItem.type === 'turn_content') {
-            return (
-              <TurnContent collapsed={displayItem.collapsed}>
-                {displayItem.items.map((child) => (
-                  <div
-                    key={getDisplayItemVirtualKey(child)}
-                    className={getChatRowClassName(child)}
-                  >
-                    {renderDisplayItem(child, false)}
-                  </div>
-                ))}
-              </TurnContent>
-            );
-          }
-
+  return (
+    <div ref={containerRef} className={styles.list}>
+      {useVirtualScroll ? (
+        <div
+          style={{
+            height: totalVirtualSize,
+            width: '100%',
+            position: 'relative',
+          }}
+        >
+          {virtualItems.map((virtualRow) => (
+            <div
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={virtualizer.measureElement}
+              className={getRowClassName(
+                String(virtualRow.key),
+                visibleItems[virtualRow.index - headerOffset],
+              )}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                transform: `translateY(${virtualRow.start}px)`,
+              }}
+            >
+              {renderVirtualItem(virtualRow.index)}
+            </div>
+          ))}
+        </div>
+      ) : (
+        Array.from({ length: totalCount }, (_, index) => {
+          const key = getItemKey(index);
+          const item = visibleItems[index - headerOffset];
           return (
-            <MessageItem
-              message={displayItem.message}
-              pendingApproval={pendingApproval}
-              onConfirm={onConfirm}
-              onShowContextDetail={onShowContextDetail}
-              workspaceCwd={workspaceCwd}
-              isLatest={isLatest}
-              showRetryHint={showRetryHint}
-              onRetryClick={onRetryClick}
-              onBranchSession={onBranchSession}
-              showAssistantActions={
-                displayItem.message.role === 'assistant' &&
-                displayItem.message.id === lastCompletedAssistantId
-              }
-              showAssistantBranch={
-                displayItem.message.role === 'assistant' &&
-                displayItem.message.id === lastCompletedAssistantId
-              }
-              shellOutputMaxLines={shellOutputMaxLines}
-            />
+            <div
+              key={key}
+              data-index={index}
+              className={getRowClassName(key, item)}
+            >
+              {renderVirtualItem(index)}
+            </div>
           );
-        };
+        })
+      )}
+    </div>
+  );
+}
 
-        if (hasHeader && index === HEADER_INDEX) {
-          return welcomeHeader;
-        }
-
-        if (hasTailContent && index === tailContentIndex) {
-          return tailContent;
-        }
-
-        const itemIndex = index - headerOffset;
-        const item = visibleItems[itemIndex];
-        if (!item) return null;
-
-        return renderDisplayItem(item, itemIndex === visibleItems.length - 1);
-      },
-      [
-        hasHeader,
-        welcomeHeader,
-        hasTailContent,
-        tailContent,
-        tailContentIndex,
-        pendingApproval,
-        onConfirm,
-        onShowContextDetail,
-        headerOffset,
-        visibleItems,
-        lastCompletedAssistantId,
-        workspaceCwd,
-        showRetryHint,
-        onRetryClick,
-        onBranchSession,
-        shellOutputMaxLines,
-        handleToggleCollapse,
-      ],
-    );
-
-    const getRowClassName = useCallback(
-      (key: string, item?: DisplayItem): string | undefined =>
-        joinClassNames(
-          flashKey === key ? styles.rowFlash : undefined,
-          item ? getChatRowClassName(item) : undefined,
-        ),
-      [flashKey],
-    );
-
-    // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
-    // Fires whenever the virtualizer's total content height changes —
-    // this captures every scenario: streaming tokens appending, tool
-    // cards expanding/collapsing, approval cards appearing, etc.
-    //
-    // Rule 5: during replay (catchingUp) → skip, avoid fighting rapid
-    //         transcript replay. The catchingUp→ready transition effect
-    //         above handles the final scroll.
-    // Rule 1: when shouldFollow is true → scroll to bottom.
-    // Rule 6: scrollToBottom itself checks scrollHeight <= clientHeight
-    //         and is a no-op when there's no overflow.
-    useLayoutEffect(() => {
-      if (catchingUp) return;
-      if (scrollCooldown.current) return;
-      if (shouldFollow.current) {
-        const lastId = getLastUserMessageId(messages);
-        const isNewUserMessage =
-          lastId !== null && lastId !== prevLastUserMsgId.current;
-        scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
-      }
-    }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
-
-    return (
-      <div ref={containerRef} className={styles.list}>
-        {useVirtualScroll ? (
-          <div
-            style={{
-              height: totalVirtualSize,
-              width: '100%',
-              position: 'relative',
-            }}
-          >
-            {virtualItems.map((virtualRow) => (
-              <div
-                key={virtualRow.key}
-                data-index={virtualRow.index}
-                ref={virtualizer.measureElement}
-                className={getRowClassName(
-                  String(virtualRow.key),
-                  visibleItems[virtualRow.index - headerOffset],
-                )}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  transform: `translateY(${virtualRow.start}px)`,
-                }}
-              >
-                {renderVirtualItem(virtualRow.index)}
-              </div>
-            ))}
-          </div>
-        ) : (
-          Array.from({ length: totalCount }, (_, index) => {
-            const key = getItemKey(index);
-            const item = visibleItems[index - headerOffset];
-            return (
-              <div
-                key={key}
-                data-index={index}
-                className={getRowClassName(key, item)}
-              >
-                {renderVirtualItem(index)}
-              </div>
-            );
-          })
-        )}
-      </div>
-    );
-  },
-);
+export const MessageList = forwardRef(MessageListRender);

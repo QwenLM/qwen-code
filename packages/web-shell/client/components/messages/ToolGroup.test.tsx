@@ -22,7 +22,7 @@ const {
   isWebFetchToolName,
   resolveShellOutputMaxLines,
   shouldAutoExpand,
-} = await import('./ToolGroup');
+} = await import('@qwen-code/chat-panel');
 
 function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   return {

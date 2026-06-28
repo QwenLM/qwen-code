@@ -54,7 +54,7 @@ function parseDiff(diff: string): {
   return { lines, additions, deletions };
 }
 
-export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
+function DiffViewComponent({ diff }: DiffViewProps) {
   if (!diff) return null;
 
   const { lines, additions, deletions } = parseDiff(diff);
@@ -89,4 +89,6 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
       </div>
     </div>
   );
-});
+}
+
+export const DiffView = memo(DiffViewComponent);

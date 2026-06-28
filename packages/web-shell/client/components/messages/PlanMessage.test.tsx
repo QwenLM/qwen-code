@@ -2,12 +2,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { getTranslator } from '../../i18n';
 import type { TodoItem } from '../../adapters/types';
 
-import { TodoTimelineContext } from '@qwen-code/chat-panel';
+import { I18nContext, TodoTimelineContext } from '@qwen-code/chat-panel';
 
-const { PlanMessage } = await import('./PlanMessage');
+// The carved component reads the panel's I18nContext; feed it web-shell's
+// translator so assertions see real strings.
+const i18nValue = { language: 'en', t: getTranslator('en') };
+
+const { PlanMessage } = await import('@qwen-code/chat-panel');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -40,11 +44,11 @@ function renderPlan(
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nContext.Provider value={i18nValue}>
         <TodoTimelineContext.Provider value={timeline ?? new Map()}>
           <PlanMessage id={id} todos={todos} />
         </TodoTimelineContext.Provider>
-      </I18nProvider>,
+      </I18nContext.Provider>,
     );
   });
   mounted.push({ root, container });

@@ -1,7 +1,4 @@
-export function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.isContentEditable) return true;
-  return !!target.closest(
-    'input, textarea, select, [contenteditable="true"], .cm-editor, [data-keyboard-scope]',
-  );
-}
+/**
+ * Moved to `@qwen-code/chat-panel`; re-exported so host hooks keep resolving.
+ */
+export { isEditableTarget } from '@qwen-code/chat-panel';

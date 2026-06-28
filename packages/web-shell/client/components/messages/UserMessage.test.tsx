@@ -2,7 +2,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { UserMessage } from './UserMessage';
+import { MarkdownContext, UserMessage } from '@qwen-code/chat-panel';
+import { Markdown, isSafeImageSrc } from './Markdown';
+
+const markdownSeam = {
+  renderMarkdown: (props: Parameters<typeof Markdown>[0]) => (
+    <Markdown {...props} />
+  ),
+  isSafeImageSrc,
+};
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -22,7 +30,11 @@ function render(node: ReactNode): HTMLElement {
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(node);
+    root.render(
+      <MarkdownContext.Provider value={markdownSeam}>
+        {node}
+      </MarkdownContext.Provider>,
+    );
   });
   mounted.push({ root, container });
   return container;

@@ -6,8 +6,8 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Markdown } from './Markdown';
-import { CompactModeContext } from '@qwen-code/chat-panel';
+import { Markdown } from '../../markdown';
+import { CompactModeContext } from '../../context';
 import { useI18n } from '../../i18n';
 import { formatTimestamp } from '../MessageTimestamp';
 import styles from './AssistantMessage.module.css';
@@ -21,7 +21,7 @@ interface AssistantMessageProps {
   showBranchAction?: boolean;
 }
 
-export const AssistantMessage = memo(function AssistantMessage({
+function AssistantMessageComponent({
   content,
   isStreaming,
   timestamp,
@@ -89,7 +89,9 @@ export const AssistantMessage = memo(function AssistantMessage({
       )}
     </div>
   );
-});
+}
+
+export const AssistantMessage = memo(AssistantMessageComponent);
 
 function CopyIcon() {
   return (
@@ -163,7 +165,7 @@ interface ThinkingMessageProps {
   timestamp?: number;
 }
 
-export const ThinkingMessage = memo(function ThinkingMessage({
+function ThinkingMessageComponent({
   content,
   isStreaming,
   timestamp,
@@ -267,7 +269,9 @@ export const ThinkingMessage = memo(function ThinkingMessage({
       )}
     </div>
   );
-});
+}
+
+export const ThinkingMessage = memo(ThinkingMessageComponent);
 
 export function getThinkingSummaryKey({
   isStreaming,

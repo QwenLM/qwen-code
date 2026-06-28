@@ -1,6 +1,6 @@
 import { memo, useContext, useState } from 'react';
 import type { TodoItem } from '../../adapters/types';
-import { TodoTimelineContext } from '@qwen-code/chat-panel';
+import { TodoTimelineContext } from '../../context';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { useI18n } from '../../i18n';
 import styles from './PlanMessage.module.css';
@@ -19,10 +19,7 @@ function PlanEventSummary({ id, todos }: PlanMessageProps) {
   return <TodoEventSummary todos={todos} events={events} />;
 }
 
-export const PlanMessage = memo(function PlanMessage({
-  id,
-  todos,
-}: PlanMessageProps) {
+function PlanMessageComponent({ id, todos }: PlanMessageProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   if (todos.length === 0) return null;
@@ -54,4 +51,6 @@ export const PlanMessage = memo(function PlanMessage({
       )}
     </div>
   );
-});
+}
+
+export const PlanMessage = memo(PlanMessageComponent);

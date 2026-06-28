@@ -3,29 +3,34 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
-import { I18nProvider } from '../i18n';
+import { getTranslator } from '../i18n';
+import { I18nContext } from '@qwen-code/chat-panel';
 
-// Mock the App context and the heavy row children so this test exercises only
-// MessageList's own collapse + deferred-scroll logic, not the whole render tree.
-vi.mock('../App', async () => {
-  const { createContext } = await import('react');
-  return { CompactModeContext: createContext(false) };
-});
-vi.mock('./MessageItem', async () => {
+const i18nValue = { language: 'en', t: getTranslator('en') };
+
+// Mock the heavy row children — now in @qwen-code/chat-panel — so this test
+// exercises only MessageList's own collapse + deferred-scroll logic. The mock
+// paths target the package source MessageList imports from (not web-shell).
+vi.mock('../../../chat-panel/src/components/MessageItem', async () => {
   const React = await import('react');
   return {
     MessageItem: ({ message }: { message: Message }) =>
       React.createElement('div', { 'data-testid': `msg-${message.id}` }),
   };
 });
-vi.mock('./messages/tools/ParallelAgentsGroup', () => ({
-  ParallelAgentsGroup: () => null,
+vi.mock(
+  '../../../chat-panel/src/components/messages/tools/ParallelAgentsGroup',
+  () => ({ ParallelAgentsGroup: () => null }),
+);
+vi.mock('../../../chat-panel/src/components/messages/ToolApproval', () => ({
+  ToolApproval: () => null,
 }));
-vi.mock('./messages/ToolApproval', () => ({ ToolApproval: () => null }));
-vi.mock('./messages/AskUserQuestion', () => ({ AskUserQuestion: () => null }));
+vi.mock('../../../chat-panel/src/components/messages/AskUserQuestion', () => ({
+  AskUserQuestion: () => null,
+}));
 
-const { MessageList } = await import('./MessageList');
-type MessageListHandle = import('./MessageList').MessageListHandle;
+const { MessageList } = await import('@qwen-code/chat-panel');
+type MessageListHandle = import('@qwen-code/chat-panel').MessageListHandle;
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -83,7 +88,7 @@ function mount(
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nContext.Provider value={i18nValue}>
         <MessageList
           ref={ref}
           messages={messages}
@@ -92,7 +97,7 @@ function mount(
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
         />
-      </I18nProvider>,
+      </I18nContext.Provider>,
     );
   });
   mounted.push({ root, container });

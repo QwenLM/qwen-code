@@ -10,6 +10,12 @@ import {
   type StreamingRawInput,
 } from './context';
 import type { TodoSnapshotDiff, TodoDetail } from './todos-types';
+import { I18nContext, type ChatPanelI18n } from './i18n';
+import { MarkdownContext, type MarkdownSeam } from './markdown';
+import {
+  ChatPanelCustomizationContext,
+  type ChatPanelCustomization,
+} from './customization';
 
 /**
  * Single injection point for everything the chat panel reads from context.
@@ -24,6 +30,12 @@ export interface ChatPanelProvidersProps {
   isAgentTool?: IsAgentTool;
   approvalModes?: readonly string[];
   streaming?: StreamingRawInput;
+  /** Host translator + active language; defaults to identity (keys as text). */
+  i18n?: ChatPanelI18n;
+  /** Host markdown renderer + image-safety policy; defaults to plain text. */
+  markdown?: MarkdownSeam;
+  /** Narrow slice of host customization the conversation flow reads. */
+  customization?: ChatPanelCustomization;
   children: ReactNode;
 }
 
@@ -37,6 +49,12 @@ const IDLE_STREAMING: StreamingRawInput = {
   agentTokens: 0,
   isReceiving: false,
 };
+const IDENTITY_I18N: ChatPanelI18n = { language: 'en', t: (key) => key };
+const DEFAULT_MARKDOWN: MarkdownSeam = {
+  renderMarkdown: ({ content }) => content,
+  isSafeImageSrc: () => false,
+};
+const EMPTY_CUSTOMIZATION: ChatPanelCustomization = {};
 
 export function ChatPanelProviders({
   compactMode = false,
@@ -45,21 +63,30 @@ export function ChatPanelProviders({
   isAgentTool = NO_AGENT_TOOL,
   approvalModes = NO_APPROVAL_MODES,
   streaming = IDLE_STREAMING,
+  i18n = IDENTITY_I18N,
+  markdown = DEFAULT_MARKDOWN,
+  customization = EMPTY_CUSTOMIZATION,
   children,
 }: ChatPanelProvidersProps) {
   return (
-    <CompactModeContext.Provider value={compactMode}>
-      <TodoTimelineContext.Provider value={todoTimeline}>
-        <TodoDetailContext.Provider value={todoDetails}>
-          <AgentToolContext.Provider value={isAgentTool}>
-            <ApprovalModeContext.Provider value={approvalModes}>
-              <StreamingStateContext.Provider value={streaming}>
-                {children}
-              </StreamingStateContext.Provider>
-            </ApprovalModeContext.Provider>
-          </AgentToolContext.Provider>
-        </TodoDetailContext.Provider>
-      </TodoTimelineContext.Provider>
-    </CompactModeContext.Provider>
+    <I18nContext.Provider value={i18n}>
+      <MarkdownContext.Provider value={markdown}>
+        <ChatPanelCustomizationContext.Provider value={customization}>
+          <CompactModeContext.Provider value={compactMode}>
+            <TodoTimelineContext.Provider value={todoTimeline}>
+              <TodoDetailContext.Provider value={todoDetails}>
+                <AgentToolContext.Provider value={isAgentTool}>
+                  <ApprovalModeContext.Provider value={approvalModes}>
+                    <StreamingStateContext.Provider value={streaming}>
+                      {children}
+                    </StreamingStateContext.Provider>
+                  </ApprovalModeContext.Provider>
+                </AgentToolContext.Provider>
+              </TodoDetailContext.Provider>
+            </TodoTimelineContext.Provider>
+          </CompactModeContext.Provider>
+        </ChatPanelCustomizationContext.Provider>
+      </MarkdownContext.Provider>
+    </I18nContext.Provider>
   );
 }

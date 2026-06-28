@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { useI18n } from '../../i18n';
-import { Markdown } from './Markdown';
+import { Markdown } from '../../markdown';
 import styles from './BtwMessage.module.css';
 
 interface BtwMessageProps {
@@ -9,11 +9,7 @@ interface BtwMessageProps {
   isPending: boolean;
 }
 
-export const BtwMessage = memo(function BtwMessage({
-  question,
-  answer,
-  isPending,
-}: BtwMessageProps) {
+function BtwMessageComponent({ question, answer, isPending }: BtwMessageProps) {
   const { t } = useI18n();
 
   return (
@@ -36,4 +32,6 @@ export const BtwMessage = memo(function BtwMessage({
       </div>
     </div>
   );
-});
+}
+
+export const BtwMessage = memo(BtwMessageComponent);

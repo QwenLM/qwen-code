@@ -7,7 +7,7 @@ import styles from './AskUserQuestion.module.css';
 interface Question {
   question: string;
   header: string;
-  options: { label: string; description: string }[];
+  options: Array<{ label: string; description: string }>;
   multiSelect?: boolean;
 }
 
@@ -272,7 +272,7 @@ export function AskUserQuestion({
         claimKey(e);
         handleCancel();
       } else if (e.key >= '1' && e.key <= '9') {
-        const idx = parseInt(e.key) - 1;
+        const idx = parseInt(e.key, 10) - 1;
         if (idx < totalOptions) {
           claimKey(e);
           setSelectedIdx(idx);

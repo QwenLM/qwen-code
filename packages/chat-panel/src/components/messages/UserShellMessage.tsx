@@ -1,5 +1,5 @@
 import { memo, useContext } from 'react';
-import { CompactModeContext } from '@qwen-code/chat-panel';
+import { CompactModeContext } from '../../context';
 import { useI18n } from '../../i18n';
 import styles from './UserShellMessage.module.css';
 
@@ -8,10 +8,7 @@ interface UserShellMessageProps {
   output: string;
 }
 
-export const UserShellMessage = memo(function UserShellMessage({
-  command,
-  output,
-}: UserShellMessageProps) {
+function UserShellMessageComponent({ command, output }: UserShellMessageProps) {
   const compactMode = useContext(CompactModeContext);
   const { t } = useI18n();
 
@@ -33,4 +30,6 @@ export const UserShellMessage = memo(function UserShellMessage({
       )}
     </div>
   );
-});
+}
+
+export const UserShellMessage = memo(UserShellMessageComponent);

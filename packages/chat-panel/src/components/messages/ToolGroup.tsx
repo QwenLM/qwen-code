@@ -1,5 +1,5 @@
 import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { DaemonSettingDescriptor } from '@qwen-code/chat-panel';
+import type { DaemonSettingDescriptor } from '../../setting-descriptor';
 import type {
   ACPToolCall,
   PermissionRequest,
@@ -26,6 +26,7 @@ import {
   localizeToolDisplayName,
   StatusIcon,
   truncateText,
+  chromeStyles as styles,
 } from './tools/toolDisplay';
 import {
   extractText,
@@ -43,13 +44,12 @@ import {
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
-import { CompactModeContext, TodoTimelineContext } from '@qwen-code/chat-panel';
+import { CompactModeContext, TodoTimelineContext } from '../../context';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
-  useWebShellCustomization,
+  useChatPanelCustomization,
 } from '../../customization';
-import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
@@ -170,8 +170,8 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
   }
 
   const result: string[] = [];
-  let i = n,
-    j = m;
+  let i = n;
+  let j = m;
   while (i > 0 || j > 0) {
     if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
       result.push(` ${oldLines[i - 1]}`);
@@ -484,7 +484,7 @@ function DefaultToolHeaderExtra({
 }
 
 function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
-  const { renderToolHeaderExtra } = useWebShellCustomization();
+  const { renderToolHeaderExtra } = useChatPanelCustomization();
   const customExtra = renderToolHeaderExtra?.(info);
   if (customExtra) return <>{customExtra}</>;
   return (
@@ -801,7 +801,7 @@ function areSubToolsEqual(
   return true;
 }
 
-export const ToolLine = memo(function ToolLine({
+function ToolLineComponent({
   tool,
   approval,
   onConfirm,
@@ -1067,9 +1067,11 @@ export const ToolLine = memo(function ToolLine({
       )}
     </div>
   );
-}, areToolLinePropsEqual);
+}
 
-export const ToolGroup = memo(function ToolGroup({
+export const ToolLine = memo(ToolLineComponent, areToolLinePropsEqual);
+
+function ToolGroupComponent({
   tools,
   pendingApproval,
   onConfirm,
@@ -1181,4 +1183,6 @@ export const ToolGroup = memo(function ToolGroup({
       ))}
     </div>
   );
-});
+}
+
+export const ToolGroup = memo(ToolGroupComponent);

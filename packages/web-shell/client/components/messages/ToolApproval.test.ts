@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseTitle } from './ToolApproval';
+import { parseTitle } from '@qwen-code/chat-panel';
 
 describe('parseTitle', () => {
   it('splits short CLI-style tool prefixes', () => {

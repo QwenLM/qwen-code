@@ -2,13 +2,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { getTranslator } from '../../i18n';
 import type { TodoItem } from '../../adapters/types';
 import { todoStateKey, type TodoDetail } from '../../utils/todos';
 
-import { TodoDetailContext } from '@qwen-code/chat-panel';
+import { I18nContext, TodoDetailContext } from '@qwen-code/chat-panel';
 
-const { TodoFullList } = await import('./TodoView');
+// The carved component reads the panel's I18nContext; feed it web-shell's
+// translator so assertions see real strings.
+const i18nValue = { language: 'en', t: getTranslator('en') };
+
+const { TodoFullList } = await import('@qwen-code/chat-panel');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -45,7 +49,7 @@ function render(
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nContext.Provider value={i18nValue}>
         <TodoDetailContext.Provider value={details}>
           {/* Parent click handler stands in for the surrounding todo_write
               tool-row header, to assert the expander click doesn't bubble. */}
@@ -53,7 +57,7 @@ function render(
             <TodoFullList todos={todos} />
           </div>
         </TodoDetailContext.Provider>
-      </I18nProvider>,
+      </I18nContext.Provider>,
     );
   });
   mounted.push({ root, container });

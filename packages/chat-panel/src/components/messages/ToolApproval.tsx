@@ -6,7 +6,7 @@ import {
   useMemo,
   useContext,
 } from 'react';
-import { AgentToolContext } from '@qwen-code/chat-panel';
+import { AgentToolContext } from '../../context';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
@@ -202,7 +202,7 @@ export function ToolApproval({
         );
         if (reject) confirm(reject.id);
       } else if (e.key >= '1' && e.key <= '9') {
-        const idx = parseInt(e.key) - 1;
+        const idx = parseInt(e.key, 10) - 1;
         if (idx < optCount) {
           e.preventDefault();
           interactedRef.current = true;
