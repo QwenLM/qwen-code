@@ -306,6 +306,75 @@ describe('LoopTickResolver', () => {
     expect(dynTick.modelText.match(/^# /gm)).toHaveLength(1);
   });
 
+  it('resolve() honors an explicit allowProjectFile override over the getter', async () => {
+    // FIX 3: the caller captures folder-trust ONCE per tick and threads it in,
+    // so the per-tick getter is bypassed. Build a resolver whose getter would
+    // ALLOW the project file, but pass `false`: the repo-controlled project
+    // loop.md must be skipped on this tick, exactly as the getter-false path.
+    await writeProject('- repo-controlled tasks');
+    const threaded = new LoopTickResolver({
+      projectRoot,
+      homeDir,
+      allowProjectFile: () => true, // getter would allow...
+    });
+
+    const tick = await threaded.resolve('cron', false); // ...override forbids
+
+    expect(tick.full).toBe(false);
+    expect(tick.modelText).not.toContain('- repo-controlled tasks');
+    expect(tick.modelText).not.toContain('(project)');
+    expect(tick.modelText).toContain('(home)');
+  });
+
+  it('buildTransientErrorTick mirrors the absent tick with a re-arm and errno note', () => {
+    // FIX 4: a transient, non-whitelisted read error must NOT kill a dynamic
+    // loop. The degraded tick mirrors the absent path — same heading + the
+    // dynamic re-arm sentinel — plus a note that the file was unreadable this
+    // tick, so the model still re-arms LoopWakeup and the loop survives.
+    const tick = resolver.buildTransientErrorTick('dynamic', true, 'EIO');
+
+    expect(tick.full).toBe(false);
+    expect(tick.modelText).toContain(
+      '# /loop tick — loop.md absent (dynamic pacing)\n',
+    );
+    expect(tick.modelText).toContain('could not be read this tick (EIO)');
+    // The dynamic re-arm instruction (the literal sentinel) keeps the loop alive.
+    expect(tick.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
+    // projectChecked=true names BOTH candidates (the set that was probed).
+    expect(tick.modelText).toContain('(project)');
+    expect(tick.modelText).toContain('(home)');
+  });
+
+  it('cron buildTransientErrorTick uses the cron tail and omits an unprobed project', () => {
+    // cron mode degrades only via its own next interval, but the tick text still
+    // uses the cron no-op tail (no LoopWakeup re-arm). With projectChecked=false
+    // (untrusted) the never-probed project candidate must NOT be named.
+    const tick = resolver.buildTransientErrorTick('cron', false, 'EACCES');
+
+    expect(tick.modelText).toContain('could not be read this tick (EACCES)');
+    expect(tick.modelText).toContain('the recurring cron fires the next tick');
+    expect(tick.modelText).not.toContain(LOOP_SENTINEL_DYNAMIC);
+    expect(tick.modelText).not.toContain('(project)');
+    expect(tick.modelText).toContain('(home)');
+  });
+
+  it('a transient-error tick clears the change-detection cache so the next read re-delivers full', async () => {
+    // The degraded tick must behave like absent for caching: after it, a read of
+    // byte-identical content re-expands the FULL block rather than a dangling
+    // short reminder pointing at a block no longer guaranteed to be in context.
+    // Mutation guard: if buildTransientErrorTick doesn't clear the caches, the
+    // second resolve sees "unchanged" and returns a short reminder (full:false).
+    await writeProject('- tasks');
+    const full = await resolver.resolve('dynamic');
+    expect(full.full).toBe(true);
+    resolver.markDelivered();
+
+    resolver.buildTransientErrorTick('dynamic', true, 'EIO');
+
+    const next = await resolver.resolve('dynamic');
+    expect(next.full).toBe(true);
+  });
+
   it('names the real home loop.md in the absent reminder (QWEN_HOME-aware, not a hardcoded ~/.qwen)', async () => {
     // Regression: the absent body hardcoded `~/.qwen/loop.md (home)`, which is
     // wrong once the global dir is relocated (QWEN_HOME). The resolver checks

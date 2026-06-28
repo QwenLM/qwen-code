@@ -227,11 +227,57 @@ export class LoopTickResolver {
       : `${homeLabel} (home)`;
   }
 
-  async resolve(mode: LoopMode): Promise<LoopTickResult> {
+  /** A model-facing no-op tick (loop.md absent, or unreadable this tick). Clears
+   * the change-detection caches so a later successful tick re-delivers the FULL
+   * block instead of a dangling short reminder pointing at a block no longer
+   * guaranteed to be in context — absence (and a failed read) is itself a state
+   * change. */
+  #noOpTick(modelText: string): LoopTickResult {
+    this.#pendingContent = null;
+    this.#lastContent = null;
+    return { modelText, full: false };
+  }
+
+  /**
+   * No-op tick for a transient, non-whitelisted read error (EACCES/EIO, or a
+   * Windows editor/AV briefly locking loop.md). Mirrors the absent tick — same
+   * heading + the mode's re-arm tail (ABSENT_TAIL) — so a `dynamic` loop still
+   * re-arms LoopWakeup and survives the hiccup instead of dying silently: its
+   * firing wakeup was already consumed by the scheduler, and only the
+   * end-of-turn re-arm keeps it alive, so a thrown turn ends the loop forever.
+   * `cron` callers don't use this (they re-fire on their own next interval).
+   * `projectChecked` is the trust captured for THIS tick (so the named candidate
+   * set matches what was probed); `code` is the errno only — never an absolute
+   * path — for a brief model-facing note.
+   */
+  buildTransientErrorTick(
+    mode: LoopMode,
+    projectChecked: boolean,
+    code: string,
+  ): LoopTickResult {
+    return this.#noOpTick(
+      `${tickHeading(mode, { absent: true })}\nloop.md at ${this.absentLocations(
+        projectChecked,
+      )} could not be read this tick (${code}). ${ABSENT_TAIL[mode]}`,
+    );
+  }
+
+  /**
+   * @param allowProjectFileOverride Trust captured once by the caller for this
+   * tick (see LoopTickResolverDeps.allowProjectFile). Threaded in — rather than
+   * re-reading the getter here — so the caller's error path can name the SAME
+   * candidate set that was probed even if `isTrustedFolder()` flips mid-tick.
+   * Omitted by direct callers, who fall back to the per-tick getter.
+   */
+  async resolve(
+    mode: LoopMode,
+    allowProjectFileOverride?: boolean,
+  ): Promise<LoopTickResult> {
     // Re-read trust per tick (see LoopTickResolverDeps.allowProjectFile): a
     // resolver built while trusted must skip the project file once trust flips.
     // Captured so the absent reminder reflects what was ACTUALLY checked.
-    const allowProjectFile = this.deps.allowProjectFile();
+    const allowProjectFile =
+      allowProjectFileOverride ?? this.deps.allowProjectFile();
     const result = await readLoopTaskFile({
       projectRoot: this.deps.projectRoot,
       homeDir: this.deps.homeDir,
@@ -241,16 +287,12 @@ export class LoopTickResolver {
     });
 
     if (result.status === 'missing') {
-      // Absence is itself a state change: clear both caches so a later recreate
-      // — even with byte-identical content — re-expands the full block rather
-      // than sending a dangling short reminder that points at a block no longer
-      // guaranteed to be in context.
-      this.#pendingContent = null;
-      this.#lastContent = null;
-      return {
-        modelText: `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.absentLocations(allowProjectFile))}`,
-        full: false,
-      };
+      // Absence is itself a state change: #noOpTick clears both caches so a
+      // later recreate — even with byte-identical content — re-expands the full
+      // block rather than sending a dangling short reminder.
+      return this.#noOpTick(
+        `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.absentLocations(allowProjectFile))}`,
+      );
     }
 
     const content = result.truncated

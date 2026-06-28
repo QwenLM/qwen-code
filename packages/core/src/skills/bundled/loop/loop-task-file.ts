@@ -231,6 +231,17 @@ export async function readLoopTaskFile({
           });
           continue;
         }
+        // A hard-linked loop.md is an ordinary regular file (lstat sees no
+        // symlink) but shares a sensitive target's inode (e.g. `ln .env
+        // .qwen/loop.md`), so confinement passes on the same fs and the secret
+        // would be read every tick. `nlink > 1` is the only tell — refuse it,
+        // mirroring canonicalizeKeytermsFile.
+        if (projectStat.nlink > 1) {
+          debugLogger.debug('skipping hard-linked project loop.md', {
+            filePath,
+          });
+          continue;
+        }
         // A final-component lstat can't see an ANCESTOR symlink (e.g. a
         // checked-in `.qwen -> /outside`); realpath resolves it, so confine the
         // canonical path to the workspace root before reading.
@@ -255,6 +266,13 @@ export async function readLoopTaskFile({
         const homeStat = await fs.stat(filePath);
         if (!homeStat.isFile()) {
           debugLogger.debug('skipping non-regular home loop.md', { filePath });
+          continue;
+        }
+        // Same hard-link guard as the project candidate: a `nlink > 1` regular
+        // file shares another inode's content (e.g. `ln ~/.ssh/id_ed25519
+        // ~/.qwen/loop.md`) and would otherwise be read and fed to the model.
+        if (homeStat.nlink > 1) {
+          debugLogger.debug('skipping hard-linked home loop.md', { filePath });
           continue;
         }
         // A home symlink IS followed, but its target must stay WITHIN $HOME:
@@ -298,7 +316,13 @@ export async function readLoopTaskFile({
     }
 
     // A whitespace-only file is not a task list; fall through to the next path.
+    // Log it (like every other skip branch) so a present-but-empty loop.md is
+    // distinguishable from an absent one in debug logs.
     if (buffer.toString('utf8').trim().length === 0) {
+      debugLogger.debug('skipping whitespace-only loop.md', {
+        source,
+        filePath,
+      });
       continue;
     }
 

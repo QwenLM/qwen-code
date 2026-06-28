@@ -2540,13 +2540,19 @@ export class Session implements SessionContext {
               let loopTick: LoopTickResult | null = null;
               if (loopMode) {
                 const resolver = this.#getLoopTickResolver();
+                // Capture folder-trust ONCE for this tick and thread it through
+                // both the resolve probe and the error path. isTrustedFolder()
+                // can flip mid-tick (an IDE workspace-trust update), so two
+                // separate reads could let the sanitized error name a different
+                // candidate set than resolve() actually probed.
+                const trustedAtResolve = this.config.isTrustedFolder();
                 try {
-                  loopTick = await resolver.resolve(loopMode);
+                  loopTick = await resolver.resolve(loopMode, trustedAtResolve);
                 } catch (resolveErr) {
                   // resolve() reads .qwen/loop.md (project or home/global); an
                   // EACCES/EIO here is a sentinel-RESOLUTION failure, not a
                   // model-call failure — tag it so the two are distinguishable
-                  // in logs (the shared catch below still surfaces it).
+                  // in logs.
                   const code =
                     (resolveErr as NodeJS.ErrnoException).code ?? 'unknown';
                   // Full detail — including the raw fs error's ABSOLUTE loop.md
@@ -2556,20 +2562,38 @@ export class Session implements SessionContext {
                     `loop.md sentinel resolution failed (mode=${loopMode}, code=${code}) — check .qwen/loop.md permissions/IO`,
                     resolveErr,
                   );
-                  // Re-throw a SANITIZED error: the outer cron catch forwards
-                  // error.message verbatim to the client via emitAgentMessage, so
-                  // re-throwing the raw fs error would leak that absolute path.
-                  // Surface only the candidate labels + errno code via the shared
-                  // absentLocations() — so the QWEN_HOME-aware home label (never a
-                  // hardcoded `~/.qwen`) is reused AND the project candidate is
-                  // named only for a trusted folder, where it was actually read
-                  // (an untrusted folder skips it, so claiming `(project)` would be
-                  // a lie). Trust is re-evaluated here to match the resolve() tick.
-                  throw new Error(
-                    `loop.md resolution failed (${code}) for ${resolver.absentLocations(
-                      this.config.isTrustedFolder(),
-                    )}`,
-                  );
+                  if (loopMode === 'dynamic') {
+                    // A `dynamic` (self-paced) loop is kept alive ONLY by the
+                    // model re-arming LoopWakeup at the end of each turn; the
+                    // firing wakeup was already consumed, so throwing here (no
+                    // turn → no re-arm) would silently kill the loop forever on a
+                    // transient hiccup (EACCES/EIO, or a Windows editor/AV briefly
+                    // locking the file). Degrade to a no-op tick mirroring the
+                    // absent path so the model still re-arms and the loop survives.
+                    // (`cron` re-fires on its own next interval, so it still
+                    // throws below.) The captured trust names the SAME candidate
+                    // set the probe used; the errno (no absolute path) is noted.
+                    loopTick = resolver.buildTransientErrorTick(
+                      loopMode,
+                      trustedAtResolve,
+                      code,
+                    );
+                  } else {
+                    // Re-throw a SANITIZED error: the outer cron catch forwards
+                    // error.message verbatim to the client via emitAgentMessage,
+                    // so re-throwing the raw fs error would leak that absolute
+                    // path. Surface only the candidate labels + errno code via the
+                    // shared absentLocations() — reusing the QWEN_HOME-aware home
+                    // label (never a hardcoded `~/.qwen`) and naming the project
+                    // candidate only when it was actually read (the captured trust
+                    // matches the resolve() probe, so an untrusted folder can't
+                    // falsely claim `(project)`).
+                    throw new Error(
+                      `loop.md resolution failed (${code}) for ${resolver.absentLocations(
+                        trustedAtResolve,
+                      )}`,
+                    );
+                  }
                 }
               }
               const modelText = loopTick ? loopTick.modelText : prompt;

@@ -21,6 +21,20 @@ vi.mock('node:fs/promises', async (importActual) => {
   return { ...actual, open: vi.fn(actual.open) };
 });
 
+// Capture the module's debug calls so a test can assert WHY a candidate was
+// skipped (the whitespace-only branch is the load-bearing case). Other tests
+// don't read it; production debug() no-ops without an active session anyway.
+const debugSpy = vi.hoisted(() => vi.fn());
+vi.mock('../../../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => true,
+    debug: debugSpy,
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 describe('readLoopTaskFile', () => {
   let tempDir: string;
   let projectRoot: string;
@@ -219,6 +233,72 @@ describe('readLoopTaskFile', () => {
       source: 'home',
       content: 'user tasks',
       truncated: false,
+    });
+  });
+
+  it('does not read a HARD-LINKED project loop.md (exfiltration guard)', async () => {
+    // The case the symlink guard misses: `ln <secret> .qwen/loop.md` makes
+    // loop.md an ordinary regular file (lstat sees no symlink, isFile() true)
+    // that SHARES the secret's inode (nlink === 2). It resolves to itself inside
+    // the workspace, so confinement passes too — only the `nlink > 1` guard
+    // refuses it. Mutation check: drop that guard and the secret is returned as
+    // the project source instead of falling through to home.
+    await fs.mkdir(path.join(projectRoot, '.qwen'), { recursive: true });
+    const secret = path.join(tempDir, 'secret-env');
+    await fs.writeFile(secret, 'SECRET=should-not-be-read');
+    const projectLoop = path.join(projectRoot, '.qwen', 'loop.md');
+    await fs.link(secret, projectLoop); // hard link → nlink 2, same inode
+    // Precondition: the link really is a hard link to the secret, not a symlink.
+    const linkStat = await fs.lstat(projectLoop);
+    expect(linkStat.isSymbolicLink()).toBe(false);
+    expect(linkStat.nlink).toBeGreaterThan(1);
+    await writeHome('user tasks');
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    // The hard-linked project file is skipped → home is read; the secret content
+    // is never returned from any candidate.
+    expect(result).toEqual({
+      status: 'found',
+      path: path.join(homeDir, '.qwen', 'loop.md'),
+      source: 'home',
+      content: 'user tasks',
+      truncated: false,
+    });
+    if (result.status === 'found') {
+      expect(result.content).not.toContain('SECRET');
+    }
+  });
+
+  it('does not read a HARD-LINKED home loop.md (exfiltration guard)', async () => {
+    // Same hard-link vector on the home candidate: `ln <secret> ~/.qwen/loop.md`.
+    // fs.stat follows to a regular file with nlink 2, so isFile()/confinement
+    // pass — only the `nlink > 1` guard refuses it. No project file here, so the
+    // result is `missing`; the secret content is never returned.
+    await fs.mkdir(path.join(homeDir, '.qwen'), { recursive: true });
+    const secret = path.join(tempDir, 'home-secret');
+    await fs.writeFile(secret, 'SECRET=should-not-be-read');
+    const homeLoop = path.join(homeDir, '.qwen', 'loop.md');
+    await fs.link(secret, homeLoop);
+    const linkStat = await fs.lstat(homeLoop);
+    expect(linkStat.nlink).toBeGreaterThan(1);
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result).toEqual({
+      status: 'missing',
+      checkedPaths: [
+        path.join(projectRoot, '.qwen', 'loop.md'),
+        path.join(homeDir, '.qwen', 'loop.md'),
+      ],
     });
   });
 
@@ -614,6 +694,28 @@ describe('readLoopTaskFile', () => {
       source: 'home',
       content: 'user tasks',
       truncated: false,
+    });
+  });
+
+  it('logs a debug line when it skips a whitespace-only loop.md', async () => {
+    // The whitespace-only skip was the ONLY skip branch with no debug log, so a
+    // present-but-empty file was indistinguishable from an absent one in logs.
+    // Assert the labelled skip line fires for the project candidate before the
+    // fall-through to home.
+    await writeProject('   \n\t  \n');
+    await writeHome('user tasks');
+    debugSpy.mockClear();
+
+    const result = await readLoopTaskFile({
+      projectRoot,
+      homeDir,
+      allowProjectFile: true,
+    });
+
+    expect(result).toMatchObject({ source: 'home', content: 'user tasks' });
+    expect(debugSpy).toHaveBeenCalledWith('skipping whitespace-only loop.md', {
+      source: 'project',
+      filePath: path.join(projectRoot, '.qwen', 'loop.md'),
     });
   });
 

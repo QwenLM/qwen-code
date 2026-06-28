@@ -5274,6 +5274,209 @@ describe('Session', () => {
         }
       });
 
+      it('threads one captured folder-trust into both the resolve probe and the sanitized error', async () => {
+        // FIX 3: isTrustedFolder() can flip mid-tick (IDE workspace-trust
+        // update). Capturing it ONCE and threading it to BOTH resolve() and the
+        // error's absentLocations() keeps the sanitized error naming the SAME
+        // candidate set that was probed. Assert the trust handed to resolve() is
+        // identical to the one handed to absentLocations(). Mutation guard:
+        // reverting to two separate isTrustedFolder() reads drops the resolve()
+        // trust arg (undefined), so the two no longer match.
+        debugLoggerWarnSpy.mockClear();
+        const eacces = Object.assign(
+          new Error("EACCES: permission denied, open '/home/x/.qwen/loop.md'"),
+          { code: 'EACCES' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+        const absentSpy = vi.spyOn(
+          core.LoopTickResolver.prototype,
+          'absentLocations',
+        );
+        mockConfig.isTrustedFolder = vi.fn().mockReturnValue(true);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() => expect(resolveSpy).toHaveBeenCalled());
+          await vi.waitFor(() => expect(absentSpy).toHaveBeenCalled());
+          // resolve() was probed with the captured trust as its 2nd arg, and the
+          // error's absentLocations() got the SAME value — one capture, both
+          // paths agree.
+          const probedTrust = resolveSpy.mock.calls[0][1];
+          const erroredTrust = absentSpy.mock.calls[0][0];
+          expect(probedTrust).toBe(true);
+          expect(erroredTrust).toBe(true);
+          expect(probedTrust).toBe(erroredTrust);
+        } finally {
+          resolveSpy.mockRestore();
+          absentSpy.mockRestore();
+        }
+      });
+
+      it('keeps a dynamic loop alive on a transient resolve error (no throw, re-arm tick)', async () => {
+        // FIX 4: a `dynamic` loop is re-armed only by the model at end-of-turn,
+        // and the firing wakeup was already consumed. A transient, non-whitelisted
+        // resolve error (EIO) must NOT throw (no turn → no re-arm → silent death)
+        // — it degrades to a no-op tick that mirrors the absent path AND carries
+        // the dynamic re-arm instruction, so the model re-arms and the loop
+        // survives. Mutation guard: drop the `dynamic` branch (always throw) and a
+        // `[loop error]` surfaces while no tick reaches the model.
+        debugLoggerWarnSpy.mockClear();
+        const eio = Object.assign(new Error('EIO: i/o error, read'), {
+          code: 'EIO',
+        });
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eio);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        const errorEchoes = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The degraded no-op tick reached the model (the turn ran → no throw).
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain(
+              '# /loop tick — loop.md absent (dynamic pacing)',
+            );
+          });
+          // It carries the dynamic re-arm instruction (the literal sentinel) and
+          // the errno note, so the loop continues.
+          expect(sentToModel()).toContain('<<loop.md-dynamic>>');
+          expect(sentToModel()).toContain('could not be read this tick (EIO)');
+          // It did NOT surface as a loop/cron error (the loop did not die).
+          expect(errorEchoes()).toHaveLength(0);
+          // The real errno is still recorded in the LOCAL debug warn.
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=EIO) — check .qwen/loop.md permissions/IO',
+            eio,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('still throws on a transient resolve error for a cron loop (no degraded tick)', async () => {
+        // The cron counterpart to the dynamic-survival path: cron re-fires on its
+        // own next interval, so a transient resolve error STILL propagates
+        // (sanitized) rather than degrading to a model tick. Mutation guard:
+        // widening the dynamic no-throw branch to cron would send a `# /loop tick`
+        // block instead of surfacing the error.
+        debugLoggerWarnSpy.mockClear();
+        const eio = Object.assign(new Error('EIO: i/o error, read'), {
+          code: 'EIO',
+        });
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eio);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const cronErrorTexts = () =>
+            (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+              .map((call) => call[0]?.update)
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text: string) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          // Sanitized error carries the errno; no degraded loop tick was sent.
+          for (const text of cronErrorTexts()) {
+            expect(text).toContain('EIO');
+          }
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          expect(sentToModel()).not.toContain('# /loop tick');
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
       it('echoes the absent label when a sentinel fires with no loop.md present', async () => {
         // The `loopTick && !loopTick.sourceLabel` branch: a sentinel fires but no
         // project or home loop.md exists, so the tick is a labelled no-op.
