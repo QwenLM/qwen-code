@@ -55,6 +55,8 @@ const TAB_TARGET_ID = 'qwen-cdp-tab';
 const PAGE_TARGET_ID = 'qwen-cdp-page';
 const TAB_SESSION_ID = 'qwen-cdp-tab-session';
 const PAGE_SESSION_ID = 'qwen-cdp-page-session';
+// Must match CDP_PROTOCOL_VERSION in packages/chrome-extension/src/background/cdp-bridge.ts.
+const CDP_PROTOCOL_VERSION = '1.3';
 
 /** CDP error code for "command failed" (matches Chrome's generic server error). */
 const SERVER_ERROR = -32000;
@@ -119,7 +121,7 @@ export class CdpBrowserEmulator {
           return this.cb.reply({
             id,
             result: {
-              protocolVersion: '1.3',
+              protocolVersion: CDP_PROTOCOL_VERSION,
               product: 'QwenCDPTunnel/1.0',
               revision: '@qwen',
               userAgent: 'QwenCDPTunnel',

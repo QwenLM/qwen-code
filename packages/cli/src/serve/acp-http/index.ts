@@ -564,8 +564,7 @@ export function mountAcpHttp(
   // ── WebSocket upgrade (ACP RFD) ────────────────────────────────────
   let wss: WebSocketServer | undefined;
   let upgradeListener:
-    | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
-    | undefined;
+    ((req: IncomingMessage, socket: Duplex, head: Buffer) => void) | undefined;
   let upgradeServer: import('node:http').Server | undefined;
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
@@ -672,8 +671,7 @@ export function mountAcpHttp(
           // opening the reverse tool channel — past the CSWSH wall.
           const isAllowlistedOrigin =
             opts.allowedOrigins !== undefined &&
-            (opts.allowedOrigins.allowAny ||
-              opts.allowedOrigins.origins.has(origin.toLowerCase()));
+            opts.allowedOrigins.origins.has(origin.toLowerCase());
           if (!isLoopbackOrigin && !isAllowlistedOrigin) {
             logReject(`origin-not-allowed ${originHost}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');

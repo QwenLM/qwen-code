@@ -26,7 +26,21 @@ export function safeWsSend(
   context = 'frame',
 ): void {
   if (ws.readyState === ws.OPEN) {
-    ws.send(payload);
+    try {
+      ws.send(payload);
+    } catch (err) {
+      if (isServeDebugMode()) {
+        try {
+          writeStderrLine(
+            `qwen serve: failed to send ${context} frame on /acp socket: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        } catch {
+          // stderr gone; preserve the no-throw contract.
+        }
+      }
+    }
     return;
   }
   if (isServeDebugMode()) {

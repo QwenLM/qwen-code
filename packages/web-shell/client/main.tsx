@@ -10,6 +10,7 @@ import {
   getDaemonBaseUrl,
   getDaemonToken,
   removeDaemonTokenFromUrl,
+  waitForDaemonTokenMessage,
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
@@ -17,8 +18,6 @@ import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
-const DAEMON_TOKEN = getDaemonToken();
-removeDaemonTokenFromUrl();
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
@@ -89,7 +88,7 @@ function getSessionIdFromUrl(): string | undefined {
   }
 }
 
-function StandaloneApp() {
+function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
@@ -106,7 +105,7 @@ function StandaloneApp() {
   }, []);
 
   return (
-    <DaemonWorkspaceProvider baseUrl={baseUrl} token={DAEMON_TOKEN}>
+    <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
       <DaemonSessionProvider
         key={sessionId ?? 'new'}
         initialSessionId={sessionId}
@@ -125,8 +124,15 @@ function StandaloneApp() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <StandaloneApp />
-  </React.StrictMode>,
-);
+async function main() {
+  const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
+  removeDaemonTokenFromUrl();
+
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <StandaloneApp daemonToken={daemonToken} />
+    </React.StrictMode>,
+  );
+}
+
+void main();

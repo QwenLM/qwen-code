@@ -21,6 +21,7 @@
  */
 
 import type { WebSocket } from 'ws';
+import { safeWsSend } from '../acp-http/safe-ws-send.js';
 import { CdpBrowserEmulator, type CdpFrame } from './cdp-browser-emulator.js';
 import { CDP_FRAME_TYPES, CdpReverseLink } from './cdp-reverse-link.js';
 import type { CdpTunnelRegistry } from './cdp-tunnel-registry.js';
@@ -81,16 +82,7 @@ export function attachCdpClient(
   // Emulator answers browser-level CDP locally; page-domain → reverse link.
   const emulator = new CdpBrowserEmulator({
     reply: (frame: CdpFrame) => {
-      if (ws.readyState !== ws.OPEN) return;
-      try {
-        ws.send(JSON.stringify(frame));
-      } catch (err) {
-        log(
-          `qwen serve: /cdp reply send failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
+      safeWsSend(ws, JSON.stringify(frame), 'CDP');
     },
     forwardToTab: link.forwardToTab,
     log,

@@ -47,7 +47,7 @@ export {
 import type { FunctionDeclaration } from '@google/genai';
 import { mcpToTool } from '@google/genai';
 import { existsSync } from 'node:fs';
-import { basename, isAbsolute, resolve } from 'node:path';
+import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
@@ -1725,8 +1725,7 @@ export async function createTransport(
   ) {
     const provider = new ServiceAccountImpersonationProvider(mcpServerConfig);
     const transportOptions:
-      | StreamableHTTPClientTransportOptions
-      | SSEClientTransportOptions = {
+      StreamableHTTPClientTransportOptions | SSEClientTransportOptions = {
       authProvider: provider,
     };
 
@@ -1754,8 +1753,7 @@ export async function createTransport(
   ) {
     const provider = new GoogleCredentialProvider(mcpServerConfig);
     const transportOptions:
-      | StreamableHTTPClientTransportOptions
-      | SSEClientTransportOptions = {
+      StreamableHTTPClientTransportOptions | SSEClientTransportOptions = {
       authProvider: provider,
     };
     if (mcpServerConfig.httpUrl) {
@@ -1874,34 +1872,6 @@ export async function createTransport(
       throw new Error(
         `MCP server '${mcpServerName}': configured cwd does not exist: ${mcpServerConfig.cwd}`,
       );
-    }
-
-    // Validate that the entry script exists for stdio-based MCP servers
-    // This provides a clear error message instead of a silent connection failure
-    if (mcpServerConfig.args?.length) {
-      const entryPath = mcpServerConfig.args[0];
-      // Only treat the first arg as a local entry script when it's clearly a
-      // filesystem path. A bare `includes('/')` also matches scoped npm package
-      // names (e.g. `npx @modelcontextprotocol/server-filesystem`), which would
-      // wrongly resolve under the workspace and throw before the runner runs.
-      const looksLikePath =
-        entryPath.startsWith('./') ||
-        entryPath.startsWith('../') ||
-        entryPath.startsWith('.\\') ||
-        entryPath.startsWith('..\\') ||
-        isAbsolute(entryPath) ||
-        /^[A-Za-z]:[\\/]/.test(entryPath);
-      if (looksLikePath) {
-        // Resolve relative paths against cwd before checking existence
-        const resolvedPath = isAbsolute(entryPath)
-          ? entryPath
-          : resolve(mcpServerConfig.cwd ?? process.cwd(), entryPath);
-        if (!existsSync(resolvedPath)) {
-          throw new Error(
-            `MCP server '${mcpServerName}' entry script not found at: ${resolvedPath}`,
-          );
-        }
-      }
     }
 
     // Normalize process.env PATH first (merge PATH+Path → single PATH on

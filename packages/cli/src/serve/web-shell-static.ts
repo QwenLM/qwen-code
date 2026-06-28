@@ -49,7 +49,7 @@ export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
 ): string {
   const fa = frameAncestors.length
-    ? `frame-ancestors 'self' ${frameAncestors.join(' ')}`
+    ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
   return [...WEB_SHELL_CSP_DIRECTIVES, fa].join('; ');
 }

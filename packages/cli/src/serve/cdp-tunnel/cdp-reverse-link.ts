@@ -68,9 +68,7 @@ export interface CdpReleaseFrame {
 
 /** Any outbound frame this link pushes to the extension socket. */
 export type CdpOutboundFrame =
-  | CdpCommandFrame
-  | CdpAttachFrame
-  | CdpReleaseFrame;
+  CdpCommandFrame | CdpAttachFrame | CdpReleaseFrame;
 
 /** A `cdp_result` frame the extension sends back for a `cdp_command`. */
 export interface CdpResultFrame {
@@ -103,6 +101,9 @@ export interface CdpDetachFrame {
   reason?: string;
 }
 
+type CdpInboundFrame =
+  CdpResultFrame | CdpEventFrame | CdpAttachedFrame | CdpDetachFrame;
+
 /** Sink for pushing one outbound frame down the extension `/acp` socket. */
 export type CdpSendToExtension = (frame: CdpOutboundFrame) => void;
 
@@ -117,6 +118,12 @@ export function isCdpInboundFrameType(type: unknown): boolean {
     type === CDP_FRAME_TYPES.attached ||
     type === CDP_FRAME_TYPES.detach
   );
+}
+
+function isCdpInboundFrame(
+  frame: Record<string, unknown>,
+): frame is CdpInboundFrame {
+  return isCdpInboundFrameType(frame.type);
 }
 
 interface PendingCommand {
@@ -245,29 +252,20 @@ export class CdpReverseLink {
    * Feed one inbound frame from the extension `/acp` socket. Returns true if
    * the frame was consumed by this link (so the WS layer can skip it).
    */
-  handleInbound(frame: {
-    type?: unknown;
-    id?: unknown;
-    method?: unknown;
-    params?: unknown;
-    result?: unknown;
-    error?: unknown;
-    reason?: unknown;
-    url?: unknown;
-    title?: unknown;
-  }): boolean {
+  handleInbound(frame: Record<string, unknown>): boolean {
+    if (!isCdpInboundFrame(frame)) return false;
     switch (frame.type) {
       case CDP_FRAME_TYPES.result:
-        this.handleResult(frame as unknown as CdpResultFrame);
+        this.handleResult(frame);
         return true;
       case CDP_FRAME_TYPES.event:
-        this.handleEvent(frame as unknown as CdpEventFrame);
+        this.handleEvent(frame);
         return true;
       case CDP_FRAME_TYPES.attached:
-        this.handleAttached(frame as unknown as CdpAttachedFrame);
+        this.handleAttached(frame);
         return true;
       case CDP_FRAME_TYPES.detach:
-        this.handleDetach(frame as unknown as CdpDetachFrame);
+        this.handleDetach(frame);
         return true;
       default:
         return false;

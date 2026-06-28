@@ -18,6 +18,7 @@ const STORAGE_KEY = 'qwen.daemon';
 const POLL_MS = 2000;
 const PROBE_TIMEOUT_MS = 2000;
 const FRAMED_MISS_LIMIT = 2;
+const SHELL_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 
 /** The command to start a daemon that allows this extension's own origin. */
 const allowOriginCommand = (extensionId) =>
@@ -117,13 +118,25 @@ function showWelcome(state, command) {
 
 let framedUrl = null;
 let framedMisses = 0;
+function postShellAuth(baseUrl, token) {
+  const win = els.iframe.contentWindow;
+  if (!win) return;
+  win.postMessage(
+    { type: SHELL_AUTH_MESSAGE_TYPE, token: token || null },
+    new URL(baseUrl).origin,
+  );
+}
+
 /** Swap to the Web Shell iframe; only (re)assigns src when the URL changes. */
-function showShell(baseUrl) {
+function showShell(baseUrl, token) {
   framedMisses = 0;
   els.welcome.classList.add('hidden');
+  els.iframe.onload = () => postShellAuth(baseUrl, token);
   if (framedUrl !== baseUrl) {
     framedUrl = baseUrl;
     els.iframe.src = baseUrl;
+  } else {
+    postShellAuth(baseUrl, token);
   }
   els.iframe.classList.remove('hidden');
 }
@@ -144,12 +157,7 @@ async function tick() {
     const { baseUrl, token } = await readConfig();
     const state = await probeState(baseUrl, token);
     if (state === 'ready') {
-      // Pass the bearer token through the Web Shell URL fragment — the iframe
-      // reads its token from the URL, so a token-gated daemon would otherwise
-      // 401 every embedded request after the probe passed.
-      showShell(
-        token ? `${baseUrl}#token=${encodeURIComponent(token)}` : baseUrl,
-      );
+      showShell(baseUrl, token);
     } else {
       if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
         framedMisses += 1;

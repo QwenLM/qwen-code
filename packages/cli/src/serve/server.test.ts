@@ -1952,6 +1952,24 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
+    it('allows configured extension origins to frame the shell without self-framing', async () => {
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          allowOrigins: ['chrome-extension://abcdefghijklmnop'],
+        },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app).get('/').set('Host', host);
+      const csp = String(res.headers['content-security-policy']);
+      expect(csp).toContain(
+        'frame-ancestors chrome-extension://abcdefghijklmnop',
+      );
+      expect(csp).not.toContain("frame-ancestors 'self'");
+      expect(res.headers['x-frame-options']).toBeUndefined();
+    });
+
     it('serves hashed asset chunks from /assets', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app).get('/assets/app.js').set('Host', host);
@@ -10412,9 +10430,8 @@ describe('runQwenServe', () => {
       // changes the call shape (different deps order, different
       // fields), this test will start failing to type-check —
       // which is the point: the failure is the audit trail.
-      const { createWorkspaceFileSystemFactory } = await import(
-        './fs/index.js'
-      );
+      const { createWorkspaceFileSystemFactory } =
+        await import('./fs/index.js');
       const factory = createWorkspaceFileSystemFactory({
         boundWorkspace: wsRoot,
         trusted: false,
@@ -12137,9 +12154,8 @@ describe('auth device-flow routes', () => {
   it('sweeper-driven auto-expiry transitions a stale entry to status:error and surfaces over GET', async () => {
     // PR 21 fold-in 0 P1-13: cover the time-based expiry path via an
     // injected registry with a controlled clock + manual sweeper trigger.
-    const { DeviceFlowRegistry, brandSecret } = await import(
-      './auth/device-flow.js'
-    );
+    const { DeviceFlowRegistry, brandSecret } =
+      await import('./auth/device-flow.js');
     const fakeProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
       providerId: 'qwen-oauth',
       async start() {
@@ -12240,9 +12256,8 @@ describe('auth device-flow routes', () => {
 
   it('POST returns 409 too_many_active_flows when registry cap is reached', async () => {
     // Inject a fake registry whose `start` always throws the cap error.
-    const { TooManyActiveDeviceFlowsError } = await import(
-      './auth/device-flow.js'
-    );
+    const { TooManyActiveDeviceFlowsError } =
+      await import('./auth/device-flow.js');
     const fakeRegistry = {
       start: async () => {
         throw new TooManyActiveDeviceFlowsError();

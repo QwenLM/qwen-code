@@ -13,10 +13,9 @@
     "declaration": false,
     "declarationMap": false,
     "noEmit": true,
-    "baseUrl": ".",
     "types": ["chrome"],
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src/**/*"],

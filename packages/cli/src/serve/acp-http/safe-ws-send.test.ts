@@ -25,6 +25,14 @@ describe('safeWsSend', () => {
     expect(send).toHaveBeenCalledWith('hello');
   });
 
+  it('does not throw when OPEN send fails', () => {
+    const { ws, send } = fakeWs(1); // OPEN
+    send.mockImplementationOnce(() => {
+      throw new Error('socket write failed');
+    });
+    expect(() => safeWsSend(ws, 'hello', 'CDP')).not.toThrow();
+  });
+
   it('drops (no send, no throw) when the socket is CLOSING', () => {
     const { ws, send } = fakeWs(2); // CLOSING
     expect(() => safeWsSend(ws, 'late', 'CDP')).not.toThrow();
