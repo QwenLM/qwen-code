@@ -1128,7 +1128,7 @@ export class QQChannel extends ChannelBase {
     const isSlash = cleanText.startsWith('/');
     const text = isSlash
       ? cleanText
-      : `[${senderName} (openid: ${event.author.user_openid || 'unknown'})]: ${cleanText}`;
+      : `[${senderName} <@${event.author.user_openid || 'unknown'}>]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
@@ -1183,7 +1183,7 @@ export class QQChannel extends ChannelBase {
     // Don't prefix slash commands, keep [senderName] for normal messages
     const text = isSlash
       ? cleanText
-      : `[${senderName} (openid: ${event.author.member_openid || event.author.user_openid || 'unknown'})]: ${cleanText}`;
+      : `[${senderName} <@${event.author.member_openid || event.author.user_openid || 'unknown'}>]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1286,7 +1286,7 @@ export class QQChannel extends ChannelBase {
 
     const text = isSlash
       ? cleanText
-      : `${isAtBot ? '' : '[可选回复] '}[${senderName} (openid: ${event.author.member_openid || 'unknown'})]: ${content}`;
+      : `${isAtBot ? '' : '[可选回复] '}[${senderName} <@${event.author.member_openid || 'unknown'}>]: ${content}`;
 
     if (this.isDuplicate(event.id)) return;
 
