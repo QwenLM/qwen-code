@@ -76,9 +76,10 @@ vi.mock('./login.js', () => ({
 }));
 
 vi.mock('@qwen-code/channel-base', async () => {
-  // Pull the REAL sanitizeSenderName from the built package so a trojan-source
-  // or control-char regression in the shared helper is caught here, instead of
-  // silently drifting from an inline re-implementation.
+  // Pull the REAL sanitizeSenderName from the shared helper so a trojan-source
+  // or control-char regression is caught here, not masked by a stub. The vitest
+  // config aliases @qwen-code/channel-base to its SOURCE, so this resolves with
+  // no prior channel-base build (dist may be absent/stale in package-local runs).
   const real = await vi.importActual<typeof import('@qwen-code/channel-base')>(
     '@qwen-code/channel-base',
   );
@@ -97,7 +98,7 @@ vi.mock('@qwen-code/channel-base', async () => {
         this.name = name;
         this.config = config;
         this.bridge = bridge;
-        this.router = options?.router ?? {};
+        this.router = (options?.['router'] as Record<string, unknown>) ?? {};
       }
       protected handleInbound(_env: unknown): Promise<void> {
         return Promise.resolve();
@@ -116,6 +117,7 @@ vi.mock('@qwen-code/channel-base', async () => {
 const { QQChannel } = await import('./QQChannel.js');
 type QQChannelOptions = ConstructorParameters<typeof QQChannel>[3];
 type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
+type QQChannelInstance = InstanceType<typeof QQChannel>;
 
 afterEach(() => {
   vi.useRealTimers();
@@ -271,7 +273,10 @@ describe('splitText', () => {
 });
 
 describe('session persistence paths', () => {
-  function makeChannel(name: string, options?: QQChannelOptions): QQChannel {
+  function makeChannel(
+    name: string,
+    options?: QQChannelOptions,
+  ): QQChannelInstance {
     return new QQChannel(
       name,
       {
@@ -291,7 +296,7 @@ describe('session persistence paths', () => {
     );
   }
 
-  function getGlobalSessionsPath(ch: QQChannel): string {
+  function getGlobalSessionsPath(ch: QQChannelInstance): string {
     return (ch as unknown as { globalSessionsPath: string }).globalSessionsPath;
   }
 
@@ -411,7 +416,7 @@ describe('sendMessage', () => {
     chatType?: 'c2c' | 'group';
     replyMsgId?: string;
     tokenExpiresAt?: number;
-  }): QQChannel {
+  }): QQChannelInstance {
     const ch = new QQChannel(
       'test-bot',
       {
@@ -705,7 +710,7 @@ describe('sendMessage', () => {
 });
 
 describe('gateway reconnect timer', () => {
-  function makeChannel(): QQChannel {
+  function makeChannel(): QQChannelInstance {
     return new QQChannel(
       'test-bot',
       {

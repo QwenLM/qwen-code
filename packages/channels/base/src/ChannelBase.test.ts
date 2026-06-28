@@ -634,6 +634,48 @@ describe('ChannelBase', () => {
       expect(text).not.toContain('private to you');
     });
 
+    it('/who in a shared group is restricted to authorized senders', async () => {
+      const ch = createChannel({
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+        senderPolicy: 'open',
+        allowedUsers: ['boss'],
+        cwd: '/home/alice/secret-workspace',
+      });
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+
+      // An unauthorized member's /who is gated — the workspace basename mustn't leak.
+      await ch.handleInbound({ ...g, senderId: 'rando', text: '/who' });
+      expect(ch.sent[0]!.text).toContain('authorized');
+      expect(ch.sent[0]!.text).not.toContain('Workspace');
+
+      // The authorized member's /who still reports normally.
+      ch.sent = [];
+      await ch.handleInbound({ ...g, senderId: 'boss', text: '/who' });
+      expect(ch.sent[0]!.text).toContain('Workspace: secret-workspace');
+    });
+
+    it('/who in a per-user group is not auth-gated (session is private, not shared)', async () => {
+      const ch = createChannel({
+        sessionScope: 'user',
+        groupPolicy: 'open',
+        allowedUsers: ['boss'],
+        cwd: '/home/alice/work',
+      });
+      // A non-listed member's /who works: their group session is private to them.
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'rando',
+          chatId: 'g1',
+          text: '/who',
+        }),
+      );
+      expect(ch.sent[0]!.text).toContain('Workspace: work');
+      expect(ch.sent[0]!.text).not.toContain('authorized');
+    });
+
     it('/cancel reports when no request is running', async () => {
       const ch = createChannel();
       ch.enableCancelCommand();
@@ -910,11 +952,11 @@ describe('ChannelBase', () => {
       return shellCommand;
     }
 
-    it('refuses ! shell commands in a shared group session (no host shell exposure)', async () => {
-      // Phase 0 has no per-sender trust model, so a shared (thread-scope group)
-      // session must NOT let any participant run host shell commands — a group
-      // member could otherwise `!rm -rf /`. Mutation check: dropping the
-      // isSharedSession gate makes shellCommand run here.
+    it('refuses ! shell commands in a group session (no host shell exposure)', async () => {
+      // Phase 0 has no per-sender trust model, so NO group — shared or not — may
+      // let a participant run host shell commands; a member could otherwise
+      // `!rm -rf /`. The refusal lands BEFORE router.resolve, so no session is
+      // created. Mutation check: dropping the isGroup gate makes shellCommand run.
       const shellCommand = withShellCommand();
       const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
       await ch.handleInbound(
@@ -926,9 +968,32 @@ describe('ChannelBase', () => {
         }),
       );
       expect(shellCommand).not.toHaveBeenCalled();
+      expect(bridge.newSession).not.toHaveBeenCalled();
       expect(ch.sent).toHaveLength(1);
-      expect(ch.sent[0]!.text).toContain('disabled in shared sessions');
+      expect(ch.sent[0]!.text).toContain('disabled in group chats');
       // Not forwarded to the agent either — it is fully refused.
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('refuses ! shell commands in a user-scope group (not shared, still multi-operator)', async () => {
+      // A group with sessionScope:'user' is NOT a shared session, so the old
+      // isSharedSession-only gate missed it and every allowed member reached the
+      // host shell — group RCE. The isGroup gate must refuse here too, before any
+      // session is resolved.
+      const shellCommand = withShellCommand();
+      const ch = createChannel({ sessionScope: 'user', groupPolicy: 'open' });
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          text: '!whoami',
+        }),
+      );
+      expect(shellCommand).not.toHaveBeenCalled();
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('disabled in group chats');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 

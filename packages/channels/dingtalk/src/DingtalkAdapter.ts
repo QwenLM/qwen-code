@@ -4,7 +4,7 @@ import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
-import { ChannelBase } from '@qwen-code/channel-base';
+import { ChannelBase, sanitizeSenderName } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
 import type {
@@ -534,7 +534,9 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] Group message has no conversationId, skipping (msgId=${
             msgId || 'unknown'
-          }, sender=${data.senderNick || data.senderStaffId || 'unknown'})\n`,
+          }, sender=${sanitizeSenderName(
+            data.senderNick || data.senderStaffId || 'unknown',
+          )})\n`,
         );
         return;
       }

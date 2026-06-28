@@ -365,7 +365,19 @@ export abstract class ChannelBase {
     this.registerCommand('new', clearHandler);
 
     // Read-only: report the current (possibly group-shared) session and workspace.
+    // For a shared session, gate it to authorized senders like /clear — /who
+    // leaks the workspace basename, so non-members shouldn't see it either.
     this.registerCommand('who', async (envelope) => {
+      if (this.isSharedSession(envelope)) {
+        const authorized = this.config.allowedUsers;
+        if (authorized.length > 0 && !authorized.includes(envelope.senderId)) {
+          await this.sendMessage(
+            envelope.chatId,
+            'Only authorized members can view this shared session.',
+          );
+          return true;
+        }
+      }
       const active = this.router.hasSession(
         this.name,
         envelope.senderId,
@@ -599,6 +611,30 @@ export abstract class ChannelBase {
       // Unrecognized commands fall through to the agent
     }
 
+    // 3.5. Bang (!) shell command — refuse outside a private 1:1 chat BEFORE
+    // resolving a session, so a refused command never creates or persists one.
+    // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
+    // boundary). Any group is multi-operator — even a user-scope group, which is
+    // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
+    if (envelope.text.startsWith('!')) {
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Shell commands (`!`) are disabled in group chats.',
+        );
+        return;
+      }
+      // A single-scope DM collapses every DM to one channel-wide session, so it
+      // is multi-operator too despite not being a group.
+      if (this.isSharedSession(envelope)) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Shell commands (`!`) are disabled in shared sessions.',
+        );
+        return;
+      }
+    }
+
     const sessionId = await this.router.resolve(
       this.name,
       envelope.senderId,
@@ -607,22 +643,10 @@ export abstract class ChannelBase {
       this.config.cwd,
     );
 
-    // 3.5. Bang (!) shell command — direct execution, no LLM
+    // Bang (!) execution — a private 1:1 session has a single operator, so
+    // direct shell execution stays allowed. Group/shared contexts were refused
+    // above, before the session was resolved.
     if (envelope.text.startsWith('!')) {
-      // Phase 0 has no per-sender trust model (the [sender] marker is NOT a
-      // trust boundary), so a shared session must not expose the host shell:
-      // any participant could run `!rm -rf /`. Refuse in shared sessions; a 1:1
-      // session is the lone operator's own, so direct execution stays allowed.
-      if (this.isSharedSession(envelope)) {
-        // "shared" (not "group"): isSharedSession is also true for single-scope
-        // DMs, which are not groups — calling them "group sessions" would confuse
-        // a user in a 1:1 chat.
-        await this.sendMessage(
-          envelope.chatId,
-          'Shell commands (`!`) are disabled in shared sessions.',
-        );
-        return;
-      }
       const cmd = envelope.text.slice(1).trim();
       const bridgeShellCommand = (
         this.bridge as unknown as Record<string, unknown>
