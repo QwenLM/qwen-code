@@ -35,6 +35,9 @@ import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+// Records every LoopTickResolver construction's deps so a test can assert what
+// Session computed (e.g. the home confinement root) without a private-field peek.
+const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -49,6 +52,16 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     }),
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
+    // Transparent recording wrapper: records the constructor deps, then behaves
+    // exactly like the real resolver (subclass → instanceof + methods preserved).
+    LoopTickResolver: class extends actual.LoopTickResolver {
+      constructor(
+        ...args: ConstructorParameters<typeof actual.LoopTickResolver>
+      ) {
+        loopTickResolverDepsSpy(args[0]);
+        super(...args);
+      }
+    },
   };
 });
 
@@ -4798,6 +4811,71 @@ describe('Session', () => {
           restoreHome();
           await fs.rm(tmpDir, { recursive: true, force: true });
           await fs.rm(fakeHome, { recursive: true, force: true });
+        }
+      });
+
+      it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', async () => {
+        // Minimal containers with no HOME make os.homedir() === ''. With QWEN_HOME
+        // unset the home confinement root must NOT collapse to '': isWithin('',
+        // anyPath) is trivially true, so an empty root lets a home
+        // `~/.qwen/loop.md` symlink resolve anywhere and bypass the confinement.
+        // The guard falls back to the parent of the global qwen dir
+        // (Storage.getGlobalQwenDir(), itself empty-home-safe), which is the
+        // homeQwenDir Session passes to the resolver.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-nohome-'),
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        // HOME='' makes libuv's os.homedir() return '' on every platform — it
+        // null-checks HOME, never its emptiness.
+        const restoreHome = setFakeHome('');
+        const prevQwenHome = process.env['QWEN_HOME'];
+        delete process.env['QWEN_HOME'];
+        loopTickResolverDepsSpy.mockClear();
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() => {
+            expect(loopTickResolverDepsSpy).toHaveBeenCalled();
+          });
+
+          const deps = loopTickResolverDepsSpy.mock.calls.at(-1)![0] as {
+            homeDir: string;
+            homeQwenDir?: string;
+          };
+          // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
+          // (os.homedir()); the guard makes it the non-empty parent of the
+          // empty-home-safe global qwen dir.
+          expect(deps.homeDir).not.toBe('');
+          expect(deps.homeDir).toBe(path.dirname(deps.homeQwenDir!));
+        } finally {
+          if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = prevQwenHome;
+          restoreHome();
+          await fs.rm(tmpDir, { recursive: true, force: true });
         }
       });
 

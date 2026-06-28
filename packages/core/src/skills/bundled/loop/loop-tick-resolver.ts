@@ -72,8 +72,7 @@ const INTRO =
 // reminder — the no-op/re-arm instruction applies on every tick.
 const PACING_SUFFIX: Record<LoopMode, string> = {
   cron: 'The recurring cron fires the next tick automatically — do not call LoopWakeup from this tick.',
-  dynamic:
-    'You scheduled this tick via LoopWakeup (not a recurring cron). To keep the loop alive, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
+  dynamic: `You scheduled this tick via LoopWakeup (not a recurring cron). To keep the loop alive, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel \`${LOOP_SENTINEL_DYNAMIC}\` — otherwise the loop ends after this tick.`,
 };
 
 // Preamble for the UNCHANGED-tick reminder, which points back to the full block
@@ -117,8 +116,7 @@ const SOURCE_LABELS: Record<LoopTaskFileSource, string> = {
 // guidance differs by mode.
 const ABSENT_TAIL: Record<LoopMode, string> = {
   cron: 'Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
-  dynamic:
-    'Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel `<<loop.md-dynamic>>` — otherwise the loop ends after this tick.',
+  dynamic: `Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel \`${LOOP_SENTINEL_DYNAMIC}\` — otherwise the loop ends after this tick.`,
 };
 
 // Body of the absent reminder — the H1 is supplied by tickHeading() so the

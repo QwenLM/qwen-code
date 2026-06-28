@@ -298,6 +298,10 @@ describe('LoopTickResolver', () => {
     expect(dynTick.modelText).toContain(
       '# /loop tick — loop.md absent (dynamic pacing)\n',
     );
+    // The absent dynamic tail names the re-arm sentinel by interpolating the
+    // constant — asserting against LOOP_SENTINEL_DYNAMIC catches a future rename
+    // drift between the constant and the user-facing instruction.
+    expect(dynTick.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
     // Exactly one H1 — the heading isn't duplicated by the body.
     expect(dynTick.modelText.match(/^# /gm)).toHaveLength(1);
   });

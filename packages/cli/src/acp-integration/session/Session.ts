@@ -5,6 +5,7 @@
  */
 
 import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
   Content,
   FunctionCall,
@@ -2472,9 +2473,14 @@ export class Session implements SessionContext {
       // Confinement root for the home candidate's resolved target: $QWEN_HOME
       // when set (it IS the global dir), else $HOME — keeps the earlier
       // confinement (an in-root dotfile symlink resolves; an escape is refused).
-      const homeConfineRoot = process.env['QWEN_HOME']
-        ? homeQwenDir
-        : os.homedir();
+      // The `|| path.dirname(homeQwenDir)` guards an empty os.homedir() (minimal
+      // containers with no HOME): an empty root makes isWithin('', target) always
+      // true, trivially bypassing the symlink confinement. homeQwenDir
+      // (Storage.getGlobalQwenDir()) is always non-empty, so its parent is a
+      // sound non-empty fallback root.
+      const homeConfineRoot =
+        (process.env['QWEN_HOME'] ? homeQwenDir : os.homedir()) ||
+        path.dirname(homeQwenDir);
       this.loopTickResolver = new LoopTickResolver({
         projectRoot: root,
         homeDir: homeConfineRoot,
