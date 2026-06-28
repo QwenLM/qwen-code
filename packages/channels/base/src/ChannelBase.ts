@@ -536,7 +536,13 @@ export abstract class ChannelBase {
     ) {
       return false;
     }
-    const firstToken = trimmed.slice(1).trimStart().split(/\s+/u)[0] ?? '';
+    // No trimStart: the token must immediately follow `/`. A space after the
+    // slash (`/ foo`) makes split()[0] empty, so this returns false — matching
+    // parseCommand, whose regex also requires the token right after `/`. If they
+    // diverged, `/ foo` in a shared group session would suppress the [sender] tag
+    // (isSlashCommand true) yet run no command (parseCommand null), reaching the
+    // agent unattributed.
+    const firstToken = trimmed.slice(1).split(/\s+/u)[0] ?? '';
     return COMMAND_TOKEN_RE.test(firstToken);
   }
 

@@ -1293,6 +1293,18 @@ describe('ChannelBase', () => {
       expect(promptText).toBe('[Alice] /');
     });
 
+    it('prefixes a space after the slash (not a command shape)', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      // `/ foo` has a space between `/` and the token, so parseCommand returns
+      // null. isSlashCommand must agree and treat it as prose, or the [sender]
+      // tag would be suppressed while no command runs — reaching the agent
+      // unattributed. So it keeps the speaker tag, like a path or a bare slash.
+      await ch.handleInbound(groupEnv({ senderName: 'Alice', text: '/ foo' }));
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] / foo');
+    });
+
     it('does not prefix a namespaced slash command', async () => {
       const ch = createChannel({ groupPolicy: 'open' });
       // /git:commit is a single command token (the `:` namespace separator is not
@@ -2926,6 +2938,36 @@ describe('ChannelBase', () => {
       expect((ch as any).isLocalCommand('hello')).toBe(false);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((ch as any).isLocalCommand('/unknown')).toBe(false);
+    });
+  });
+
+  describe('isSlashCommand / parseCommand consistency', () => {
+    it('agrees with parseCommand that "/ foo" is not a command (both false)', () => {
+      const ch = createChannel();
+      // A space after the slash makes the token NOT immediately follow `/`, so
+      // parseCommand returns null. isSlashCommand must classify it the same way;
+      // otherwise a shared group session suppresses the [sender] tag yet runs no
+      // command, leaking `/ foo` to the agent unattributed. Mutation guard:
+      // re-adding `.trimStart()` flips isSlashCommand('/ foo') to true and breaks
+      // the invariant below.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const slash = (ch as any).isSlashCommand('/ foo') as boolean;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const parsed = (ch as any).parseCommand('/ foo');
+      expect(slash).toBe(false);
+      expect(parsed).toBeNull();
+      expect(slash).toBe(parsed !== null);
+    });
+
+    it('agrees with parseCommand that "/help" is a command (both true)', () => {
+      const ch = createChannel();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const slash = (ch as any).isSlashCommand('/help') as boolean;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const parsed = (ch as any).parseCommand('/help');
+      expect(slash).toBe(true);
+      expect(parsed).not.toBeNull();
+      expect(slash).toBe(parsed !== null);
     });
   });
 });
