@@ -1482,11 +1482,13 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    // Use cleanText (without <@OPENID> tags) so the LLM input is
-    // attacker-safe — raw openid tags are not needed for understanding.
+    // Strip <@OPENID> tags for empty check and slash detection, but keep
+    // the raw content (with tags) in the text passed to the LLM — the model
+    // needs the <@OPENID> syntax to correctly @mention other group members
+    // in its replies.
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] [${safeName}]: ${cleanText}`;
+      : `[atMention=${isAtBot}] [${safeName}]: ${content}`;
 
     // Only track replyMsgId for at-mention messages — non-@messages should
     // not clobber a preceding @mention's replyMsgId, or the bot's response
