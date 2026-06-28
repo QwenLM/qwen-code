@@ -19,6 +19,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   estimateContentChars,
   resolveCompactionTuning,
@@ -38,6 +39,8 @@ import {
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+
+const debugLogger = createDebugLogger('COMPRESSION');
 
 /**
  * Hard cap on the compression sideQuery output (summary text only, since
@@ -359,8 +362,10 @@ export class ChatCompressionService {
       const rawContextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      const contextLimit =
-        Math.max(0, rawContextLimit - (opts.reservedOutputTokens ?? 0));
+      const contextLimit = Math.max(
+        0,
+        rawContextLimit - (opts.reservedOutputTokens ?? 0),
+      );
       const { auto } = computeThresholds(
         contextLimit,
         config.getAutoCompactThreshold(),
@@ -399,6 +404,12 @@ export class ChatCompressionService {
           countToolResponseImages(chat.getHistoryShallow(true)) >=
             tuning.screenshotTriggerThreshold;
         if (!screenshotOverflow) {
+          debugLogger.debug(
+            `[compaction] cheap-gate NOOP: effectiveTokens=${effectiveTokens}, ` +
+              `auto=${auto}, contextLimit=${contextLimit}, ` +
+              `rawContextLimit=${rawContextLimit}, ` +
+              `reservedOutputTokens=${opts.reservedOutputTokens ?? 0}`,
+          );
           return {
             newHistory: null,
             info: {
