@@ -882,11 +882,22 @@ export function FreeFormInput({
     loadInputSettings();
   }, []);
 
-  // Persist the selected voice (ASR) model; the voice server reads it per recording.
-  const handleVoiceModelChange = React.useCallback((modelId: string) => {
-    setVoiceModel(modelId);
-    void window.electronAPI?.setVoiceModel?.(modelId);
-  }, []);
+  // Persist the selected voice (ASR) model; the voice server reads it per
+  // recording. Optimistic update, but roll back if the IPC write fails so the
+  // dropdown never diverges from the persisted model the server actually uses.
+  const handleVoiceModelChange = React.useCallback(
+    async (modelId: string) => {
+      const prev = voiceModel;
+      setVoiceModel(modelId);
+      try {
+        await window.electronAPI?.setVoiceModel?.(modelId);
+      } catch (error) {
+        setVoiceModel(prev);
+        logInputError('Failed to update voice model:', error);
+      }
+    },
+    [voiceModel],
+  );
 
   // Double-Esc interrupt: show warning overlay on first Esc, interrupt on second
   const { showEscapeOverlay } = useEscapeInterrupt();
