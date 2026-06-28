@@ -333,22 +333,19 @@ export abstract class ChannelBase {
     // explicit "confirm". DMs on per-user/thread scope and per-user groups clear
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
-      if (this.isSharedSession(envelope)) {
-        const authorized = this.config.allowedUsers;
-        if (authorized.length > 0 && !authorized.includes(envelope.senderId)) {
-          await this.sendMessage(
-            envelope.chatId,
-            'Only authorized members can clear this shared session.',
-          );
-          return true;
-        }
-        if (args.toLowerCase() !== 'confirm') {
-          await this.sendMessage(
-            envelope.chatId,
-            'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
-          );
-          return true;
-        }
+      if (!this.isAuthorizedForSharedSession(envelope)) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Only authorized members can clear this shared session.',
+        );
+        return true;
+      }
+      if (this.isSharedSession(envelope) && args.toLowerCase() !== 'confirm') {
+        await this.sendMessage(
+          envelope.chatId,
+          'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
+        );
+        return true;
       }
       await doClear(envelope);
       return true;
@@ -362,15 +359,12 @@ export abstract class ChannelBase {
     // For a shared session, gate it to authorized senders like /clear — /who
     // leaks the workspace basename, so non-members shouldn't see it either.
     this.registerCommand('who', async (envelope) => {
-      if (this.isSharedSession(envelope)) {
-        const authorized = this.config.allowedUsers;
-        if (authorized.length > 0 && !authorized.includes(envelope.senderId)) {
-          await this.sendMessage(
-            envelope.chatId,
-            'Only authorized members can view this shared session.',
-          );
-          return true;
-        }
+      if (!this.isAuthorizedForSharedSession(envelope)) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Only authorized members can view this shared session.',
+        );
+        return true;
       }
       const active = this.router.hasSession(
         this.name,
@@ -498,6 +492,19 @@ export abstract class ChannelBase {
   }
 
   /**
+   * Whether `envelope.senderId` may act on the resolved session's destructive or
+   * workspace-leaking commands (/clear, /who). A SHARED session with a non-empty
+   * allowedUsers list is restricted to those members; a per-user session, or one
+   * with no allowlist, is unrestricted. Shared verbatim by /clear and /who so the
+   * gate can't drift; each caller sends its own rejection wording.
+   */
+  private isAuthorizedForSharedSession(envelope: Envelope): boolean {
+    if (!this.isSharedSession(envelope)) return true;
+    const authorized = this.config.allowedUsers;
+    return authorized.length === 0 || authorized.includes(envelope.senderId);
+  }
+
+  /**
    * Cancel the active turn and wait (bounded) for it to wind down. Stops the
    * BlockStreamer so buffered text can't leak via the idle timer, then fires a
    * best-effort cancelSession (NOT awaited — a wedged child/daemon can leave the
@@ -514,7 +521,14 @@ export abstract class ChannelBase {
   ): Promise<boolean> {
     active.cancelled = true;
     active.stopStreaming?.();
-    void this.bridge.cancelSession(sessionId).catch(() => {});
+    // Fire-and-forget, but LOG the IPC failure: a swallowed reason leaves a
+    // wedged turn undiagnosable (operator sees only the wind-down timeout below
+    // with no cause).
+    void this.bridge.cancelSession(sessionId).catch((err) => {
+      process.stderr.write(
+        `[${this.name}] cancelSession failed for session=${sessionId} (clear/await): ${err instanceof Error ? err.message : err}\n`,
+      );
+    });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const settled = await Promise.race([
       active.done.then(() => true),
@@ -808,7 +822,13 @@ export abstract class ChannelBase {
           // of scope for this phase (wenshao option (b)).
           active.cancelled = true;
           active.stopStreaming?.();
-          void this.bridge.cancelSession(sessionId).catch(() => {});
+          // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
+          // best-effort cancel that fails isn't silently invisible to operators.
+          void this.bridge.cancelSession(sessionId).catch((err) => {
+            process.stderr.write(
+              `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
+            );
+          });
           // Prepend a cancellation note so the agent understands context.
           promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
           break;

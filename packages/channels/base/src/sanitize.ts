@@ -1,12 +1,15 @@
 /**
  * Characters that must be neutralized in ANY attacker-controlled text we embed
- * into a prompt, independent of the wrapper's own delimiters: Unicode line and
- * paragraph separators (U+2028/U+2029 render as newlines in many contexts ->
- * prompt-line injection) and bidirectional override/isolate controls
- * (U+202A-U+202E, U+2066-U+2069 -> trojan-source, where the visual order differs
- * from the logical byte order). ASCII CR/LF are handled by each caller.
+ * into a prompt, independent of the wrapper's own delimiters: the C1 control
+ * block (U+0080-U+009F) - notably NEL (U+0085), a Unicode line break (UAX#14 BK
+ * class) that renders as a new line, i.e. prompt-line injection - plus the
+ * Unicode line/paragraph separators (U+2028/U+2029, likewise rendered as
+ * newlines) and the bidirectional override/isolate controls (U+202A-U+202E,
+ * U+2066-U+2069 -> trojan-source, where the visual order differs from the
+ * logical byte order). ASCII C0/DEL (incl. CR/LF) are stripped by each caller.
  */
-const PROMPT_UNSAFE_INVISIBLES = /[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const PROMPT_UNSAFE_INVISIBLES =
+  /[\u0080-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
 /**
  * Neutralize a platform display name before embedding it in a `[name]` prompt

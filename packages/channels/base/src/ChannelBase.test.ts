@@ -1432,6 +1432,21 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('treats /command@botname as a command in a group (no [sender] prefix)', async () => {
+      // COMMAND_TOKEN_RE / PARSE_COMMAND_RE both accept an optional `@botname`
+      // suffix (Telegram group convention), so `/help@mybot` parses as the /help
+      // command and dispatches locally — the existing `@botname` test was a DM, so
+      // nothing covered this on the GROUP path where the suppression matters. It
+      // must NOT reach the agent as `[Alice] /help@mybot`.
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/help@mybot' }),
+      );
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('/help');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('still parses /help and namespaced /git:commit after the trim change', async () => {
       const ch = createChannel({ groupPolicy: 'open' });
       // Regression guard: trimming parseCommand must not break the no-whitespace
