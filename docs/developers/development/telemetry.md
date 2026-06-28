@@ -18,6 +18,10 @@ Learn how to enable and setup OpenTelemetry for Qwen Code.
     - [Spans](#spans)
     - [Performance Monitoring (Reserved)](#performance-monitoring-reserved)
 
+## Migration Notes
+
+- `tool_output_truncated` was renamed to `qwen-code.tool_output_truncated` for namespace consistency — downstream consumers filtering on the old name should update their queries.
+
 ## Key Benefits
 
 - **🔍 Usage Analytics**: Understand interaction patterns and feature adoption

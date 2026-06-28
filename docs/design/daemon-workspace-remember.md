@@ -283,7 +283,7 @@ wrapper that:
   auto-memory root or user memory root (`~/.qwen/memories`).
 - **Read tools** (`read_file`, `grep`, `ls`): when `restrictReadsToMemoryPaths`
   is true, only allowed within memory directories.
-- **Shell**: disabled by default; if enabled, only read-only commands allowed.
+- **Shell**: always disabled — no configuration toggle exists, given the security implications of processing untrusted user content.
 - Resolves symlinks to prevent path-traversal escapes.
 
 ---
