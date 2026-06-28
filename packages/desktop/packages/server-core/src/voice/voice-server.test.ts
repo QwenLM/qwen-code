@@ -103,6 +103,40 @@ describe('closeVoiceServerResources', () => {
     expect(events).toContain('terminate')
     expect(events.indexOf('close')).toBeLessThan(events.indexOf('terminate'))
   })
+
+  it('logs shutdown start (with client count), force-terminate, and completion', async () => {
+    const logger = createFakeLogger()
+    const client = { close: () => undefined, terminate: () => undefined }
+
+    await closeVoiceServerResources(
+      {
+        close: (cb?: () => void) => cb?.(),
+        closeAllConnections: () => undefined,
+      },
+      {
+        clients: new Set([client]),
+        close: () => undefined,
+      },
+      100, // timeoutMs ceiling
+      5, // short grace before terminate
+      logger,
+    )
+
+    expect(
+      logger.infos.some((m) =>
+        m.includes('shutting down stream server (1 active client(s))'),
+      ),
+    ).toBe(true)
+    // The fake client never removes itself from the set, so it is a straggler.
+    expect(
+      logger.warnings.some((m) =>
+        m.includes('force-terminated 1 straggling client(s)'),
+      ),
+    ).toBe(true)
+    expect(
+      logger.infos.some((m) => m.includes('stream server shutdown complete')),
+    ).toBe(true)
+  })
 })
 
 describe('terminateVoiceClients', () => {
@@ -218,13 +252,16 @@ describe('classifyVoiceUpgrade', () => {
 
 interface FakeLogger extends Logger {
   warnings: string[]
+  infos: string[]
 }
 
 function createFakeLogger(): FakeLogger {
   const warnings: string[] = []
+  const infos: string[] = []
   return {
     warnings,
-    info: () => {},
+    infos,
+    info: (...args: unknown[]) => infos.push(args.map(String).join(' ')),
     warn: (...args: unknown[]) => warnings.push(args.map(String).join(' ')),
     error: () => {},
     debug: () => {},

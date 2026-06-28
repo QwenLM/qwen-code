@@ -174,6 +174,74 @@ describe('openVoiceStream', () => {
     expect(recoverWarn).toContain('8192 bytes')
   })
 
+  it('reports the cumulative dropped total once when a dropping session ends', async () => {
+    warnCalls.length = 0
+    const socket = new FakeSocket()
+    const streamPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('open')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+    )
+    const stream = await streamPromise
+
+    // Force two frames to be dropped under upstream backpressure.
+    socket.bufferedAmount = 2 * 1024 * 1024
+    stream.pushAudio(new Uint8Array(4096))
+    stream.pushAudio(new Uint8Array(4096))
+
+    // End the session normally; the cumulative loss must be surfaced once.
+    const finishPromise = stream.finish()
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-finished' } }),
+    )
+    await finishPromise
+
+    const endReports = warnCalls.filter((m) => m.includes('session ended with'))
+    expect(endReports).toHaveLength(1)
+    expect(endReports[0]).toContain('2 dropped frame(s)')
+    expect(endReports[0]).toContain('8192 bytes total')
+  })
+
+  it('does not report a dropped total when no frames were dropped', async () => {
+    warnCalls.length = 0
+    const socket = new FakeSocket()
+    const streamPromise = openVoiceStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'paraformer-realtime-v2',
+      },
+      {},
+      { createWebSocket: () => socket },
+    )
+
+    socket.emit('open')
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-started' } }),
+    )
+    const stream = await streamPromise
+    stream.pushAudio(new Uint8Array(4096))
+
+    const finishPromise = stream.finish()
+    socket.emit(
+      'message',
+      JSON.stringify({ header: { event: 'task-finished' } }),
+    )
+    await finishPromise
+
+    expect(warnCalls.some((m) => m.includes('session ended with'))).toBe(false)
+  })
+
   it('redacts credentials from stream server errors', async () => {
     const socket = new FakeSocket()
     const streamPromise = openVoiceStream(

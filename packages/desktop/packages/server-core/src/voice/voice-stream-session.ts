@@ -128,9 +128,26 @@ export function openVoiceStream(
       }
     };
 
+    // Per-frame drops are warned on backpressure enter/recover transitions, but a
+    // session that ends mid-backpressure (or after a recovery) would otherwise
+    // leave the cumulative loss unreported. Surface the running total exactly once
+    // at session end so a degraded session is quantified end-to-end.
+    let droppedTotalsReported = false;
+    const reportDroppedTotals = () => {
+      if (droppedTotalsReported) return;
+      droppedTotalsReported = true;
+      if (droppedFrames > 0) {
+        debugLogger.warn(
+          `[voice] session ended with ${droppedFrames} dropped frame(s) / ` +
+            `${droppedBytes} bytes total`,
+        );
+      }
+    };
+
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
+      reportDroppedTotals();
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       clearConnectTimer();
@@ -311,6 +328,7 @@ export function openVoiceStream(
         }
         finishedTranscript = lastPartial.trim() || committed.trim();
         settled = true;
+        reportDroppedTotals();
         clearConnectTimer();
         clearFinishTimer();
         try {
@@ -347,6 +365,7 @@ export function openVoiceStream(
       clearConnectTimer();
       clearFinishTimer();
       if (settled) return;
+      reportDroppedTotals();
       if (started && finishReject) {
         settled = true;
         finishReject(

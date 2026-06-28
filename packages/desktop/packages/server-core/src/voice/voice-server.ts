@@ -126,14 +126,17 @@ export function isAllowedVoiceOrigin(
 
 export function terminateVoiceClients(
   wss: Pick<ClosableWebSocketServer, 'clients'>,
-): void {
+): number {
+  let terminated = 0;
   for (const client of wss.clients) {
     try {
       client.terminate();
+      terminated++;
     } catch {
       // ignore
     }
   }
+  return terminated;
 }
 
 export function closeVoiceClients(
@@ -158,6 +161,7 @@ export function closeVoiceServerResources(
   wss: ClosableWebSocketServer,
   timeoutMs = CLOSE_TIMEOUT_MS,
   graceMs = SHUTDOWN_GRACE_MS,
+  log?: Logger,
 ): Promise<void> {
   return new Promise<void>((resolve) => {
     let settled = false;
@@ -166,6 +170,7 @@ export function closeVoiceServerResources(
       settled = true;
       clearTimeout(graceTimer);
       clearTimeout(deadline);
+      log?.info('voice: stream server shutdown complete');
       resolve();
     };
 
@@ -175,7 +180,12 @@ export function closeVoiceServerResources(
       tornDown = true;
       // RST any client that ignored the graceful close, then drop the servers.
       // closeAllConnections lets httpServer.close actually complete.
-      terminateVoiceClients(wss);
+      const terminated = terminateVoiceClients(wss);
+      if (terminated > 0) {
+        log?.warn(
+          `voice: force-terminated ${terminated} straggling client(s) after grace period`,
+        );
+      }
       httpServer.closeAllConnections?.();
       wss.close();
       httpServer.close(finish);
@@ -184,7 +194,8 @@ export function closeVoiceServerResources(
     // Graceful first: a WS close frame flushes any buffered `final` transcript
     // and lets the renderer observe a clean close instead of a TCP reset (a bare
     // terminate would drop an in-flight transcript on quit).
-    closeVoiceClients(wss, 1001, 'server shutting down');
+    const closed = closeVoiceClients(wss, 1001, 'server shutting down');
+    log?.info(`voice: shutting down stream server (${closed} active client(s))`);
     // After a short grace period, force-terminate stragglers and tear down.
     const graceTimer = setTimeout(teardown, Math.min(graceMs, timeoutMs));
     graceTimer.unref?.();
@@ -317,7 +328,13 @@ export async function startVoiceServer(
       if (!closePromise) {
         if (enabledTimer) clearInterval(enabledTimer);
         clearTimeout(disabledCloseTimer);
-        closePromise = closeVoiceServerResources(httpServer, wss);
+        closePromise = closeVoiceServerResources(
+          httpServer,
+          wss,
+          CLOSE_TIMEOUT_MS,
+          SHUTDOWN_GRACE_MS,
+          log,
+        );
       }
       return closePromise;
     },
