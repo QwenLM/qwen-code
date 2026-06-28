@@ -559,6 +559,8 @@ The following events are logged:
 - `qwen-code.api_error`: API request failed.
   - **Attributes**: `model` (string), `prompt_id` (string), `duration_ms` (int), `error_message` (string), `response_id` (string, optional), `auth_type` (string, optional), `error_type` (string, optional), `status_code` (int/string, optional), `subagent_name` (string, optional)
 
+  Additionally, OTel-standard aliases (`http.status_code`, `error.message`, `model_name`, `duration`) are emitted for compatibility.
+
 - `qwen-code.api_cancel`: API request cancelled by user.
   - **Attributes**: `model` (string), `prompt_id` (string), `auth_type` (string, optional), `loop_wakeups_cancelled` (int, optional)
 
@@ -583,7 +585,7 @@ The following events are logged:
   - **Attributes**: `total_attempts` (int), `final_error_type` (string), `total_duration_ms` (int, optional), `model` (string)
 
 - `qwen-code.chat.invalid_chunk`: Invalid chunk received from stream.
-  - **Attributes**: `error_message` (string, optional)
+  - **Attributes**: `error.message` (string, optional)
 
 #### Command & Extension Events
 
@@ -628,10 +630,10 @@ The following events are logged:
   - **Attributes**: `arena_session_id` (string), `model_ids` (JSON string array), `task_length` (int)
 
 - `qwen-code.arena_agent_completed`: An arena agent finishes.
-  - **Attributes**: `arena_session_id`, `agent_session_id`, `agent_model_id`, `status` ("completed"/"failed"/"cancelled"), `duration_ms`, `rounds`, `total_tokens`, `input_tokens`, `output_tokens`, `tool_calls`, `successful_tool_calls`, `failed_tool_calls`
+  - **Attributes**: `arena_session_id` (string), `agent_session_id` (string), `agent_model_id` (string), `status` (string: "completed"/"failed"/"cancelled"), `duration_ms` (int), `rounds` (int), `total_tokens` (int), `input_tokens` (int), `output_tokens` (int), `tool_calls` (int), `successful_tool_calls` (int), `failed_tool_calls` (int)
 
 - `qwen-code.arena_session_ended`: Arena session completes.
-  - **Attributes**: `arena_session_id`, `status` ("selected"/"discarded"/"failed"/"cancelled"), `duration_ms`, `display_backend` (optional), `agent_count`, `completed_agents`, `failed_agents`, `cancelled_agents`, `winner_model_id` (optional)
+  - **Attributes**: `arena_session_id` (string), `status` (string: "selected"/"discarded"/"failed"/"cancelled"), `duration_ms` (int), `display_backend` (string, optional), `agent_count` (int), `completed_agents` (int), `failed_agents` (int), `cancelled_agents` (int), `winner_model_id` (string, optional)
 
 #### Workflow Events
 
