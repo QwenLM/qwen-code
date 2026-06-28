@@ -2533,9 +2533,9 @@ export class Session implements SessionContext {
               const loopMode = detectLoopSentinel(prompt);
               let loopTick: LoopTickResult | null = null;
               if (loopMode) {
+                const resolver = this.#getLoopTickResolver();
                 try {
-                  loopTick =
-                    await this.#getLoopTickResolver().resolve(loopMode);
+                  loopTick = await resolver.resolve(loopMode);
                 } catch (resolveErr) {
                   // resolve() reads .qwen/loop.md (project or home/global); an
                   // EACCES/EIO here is a sentinel-RESOLUTION failure, not a
@@ -2553,9 +2553,11 @@ export class Session implements SessionContext {
                   // Re-throw a SANITIZED error: the outer cron catch forwards
                   // error.message verbatim to the client via emitAgentMessage, so
                   // re-throwing the raw fs error would leak that absolute path.
-                  // Surface only the relative candidate labels + errno code.
+                  // Surface only the relative candidate labels + errno code. The
+                  // home label reuses the resolver's QWEN_HOME-aware tilde label
+                  // (the real checked path), not a hardcoded `~/.qwen`.
                   throw new Error(
-                    `loop.md resolution failed (${code}) for .qwen/loop.md (project) or ~/.qwen/loop.md (home)`,
+                    `loop.md resolution failed (${code}) for .qwen/loop.md (project) or ${resolver.homeLoopLabel()} (home)`,
                   );
                 }
               }

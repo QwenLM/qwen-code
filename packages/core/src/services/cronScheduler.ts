@@ -755,15 +755,27 @@ export class CronScheduler {
         // run). They are not notified and, critically, left on disk (not
         // in removeMissedFromDisk) so the owning interactive session still
         // surfaces and runs them instead of losing the task permanently.
+        const skipped: string[] = [];
         const runnable = pending.tasks.filter((t) => {
-          if (this.skipDurableFire?.(durableTaskToJob(t))) {
+          const job = durableTaskToJob(t);
+          // `job.durable &&` mirrors catch-up/final/tick — durableTaskToJob always
+          // sets durable, so it's a no-op today, but keeps the four skip sites
+          // identical so a future non-durable carrier can't be silently dropped.
+          if (job.durable && this.skipDurableFire?.(job)) {
             debugLogger.debug(
               `Skipping durable job ${t.id} (missed): consumer cannot run it`,
             );
+            skipped.push(t.id);
             return false;
           }
           return true;
         });
+        // A skipped sentinel stays on disk (not in removeMissedFromDisk) for its
+        // interactive owner — so drop its pendingRemoval guard too. Left set, it
+        // would sit out of BOTH the job map and disk reconciliation forever;
+        // cleared, the next loadFileTasks re-installs it (the intended
+        // "defer to the owning session" path).
+        for (const id of skipped) this.pendingRemoval.delete(id);
         if (runnable.length > 0) {
           onFire({
             ...durableTaskToJob(runnable[0]!),
@@ -805,6 +817,9 @@ export class CronScheduler {
             debugLogger.debug(
               `Skipping durable job ${job.id} (final): consumer cannot run it`,
             );
+            // Same limbo as the missed branch: a skipped final task stays on
+            // disk, so clear its pendingRemoval guard rather than strand it.
+            this.pendingRemoval.delete(job.id);
             continue;
           }
           onFire(job);

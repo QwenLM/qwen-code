@@ -1003,6 +1003,16 @@ describe('CronScheduler', () => {
       expect(fired[0]!.prompt).toContain('normal one-shot');
       expect(fired[0]!.prompt).not.toContain('<<loop.md>>');
 
+      // The skipped sentinel must NOT linger in pendingRemoval: it stays on disk
+      // (not removed), so a stuck guard would keep it out of both the job map and
+      // disk reconciliation forever. Delivery is synchronous within enableDurable,
+      // so this is race-free. Mutation check: drop the pendingRemoval.delete and
+      // this fails (the sentinel is stranded in pendingRemoval).
+      const pendingRemoval = (
+        scheduler as unknown as { pendingRemoval: Set<string> }
+      ).pendingRemoval;
+      expect(pendingRemoval.has('loopmd')).toBe(false);
+
       // The sentinel survives on disk; only the fired sibling is removed.
       await vi.waitFor(async () => {
         expect((await readCronTasks(tmpDir)).map((t) => t.id)).toEqual([
@@ -1129,6 +1139,13 @@ describe('CronScheduler', () => {
       await scheduler.enableDurable('session-1');
 
       expect(fired.map((j) => j.prompt)).toEqual(['aged recurring']);
+
+      // Same limbo guard as the missed branch: a skipped final task stays on
+      // disk, so it must not be stranded in pendingRemoval.
+      const pendingRemoval = (
+        scheduler as unknown as { pendingRemoval: Set<string> }
+      ).pendingRemoval;
+      expect(pendingRemoval.has('loopmd-f')).toBe(false);
 
       // The fired sibling is deleted; the skipped sentinel stays on disk.
       await vi.waitFor(async () => {

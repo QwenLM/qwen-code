@@ -107,6 +107,10 @@ describe('LoopTickResolver', () => {
     expect(tick.full).toBe(false);
     expect(tick.sourceLabel).toBeUndefined();
     expect(tick.modelText).toContain('loop.md is not currently present');
+    // The project candidate was never read (untrusted), so the absent message
+    // must not claim it was checked — only the home path was.
+    expect(tick.modelText).not.toContain('(project)');
+    expect(tick.modelText).toContain(`${tildeifyPath(homeFile())} (home)`);
   });
 
   it('re-reads folder trust per tick: a trusted→untrusted flip stops reading the project file', async () => {
@@ -138,6 +142,8 @@ describe('LoopTickResolver', () => {
       'loop.md is not currently present',
     );
     expect(untrustedTick.modelText).not.toContain('- repo-controlled tasks');
+    // Trust is revoked, so the project file was not read — don't claim it.
+    expect(untrustedTick.modelText).not.toContain('(project)');
   });
 
   it('delivers the full task block on first fire', async () => {

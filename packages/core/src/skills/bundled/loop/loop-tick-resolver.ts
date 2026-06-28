@@ -113,7 +113,8 @@ const SOURCE_LABELS: Record<LoopTaskFileSource, string> = {
 };
 
 // Per-mode tail of the absent reminder. The shared prefix (built in absentBody)
-// names BOTH candidate locations; only this no-op/re-arm guidance differs by mode.
+// names the candidate location(s) actually checked; only this no-op/re-arm
+// guidance differs by mode.
 const ABSENT_TAIL: Record<LoopMode, string> = {
   cron: 'Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
   dynamic:
@@ -125,9 +126,17 @@ const ABSENT_TAIL: Record<LoopMode, string> = {
 // `homeLabel` is the resolver's REAL home loop.md location (so a $QWEN_HOME-
 // relocated home is reported accurately instead of a hardcoded, wrong `~/.qwen`);
 // its OS-home prefix is tilde-abbreviated so the common case still reads
-// `~/.qwen/loop.md`.
-function absentBody(mode: LoopMode, homeLabel: string): string {
-  return `loop.md is not currently present at .qwen/loop.md (project) or ${homeLabel} (home). ${ABSENT_TAIL[mode]}`;
+// `~/.qwen/loop.md`. When `projectChecked` is false (untrusted folder), the
+// project candidate is never read, so it is omitted rather than claimed checked.
+function absentBody(
+  mode: LoopMode,
+  homeLabel: string,
+  projectChecked: boolean,
+): string {
+  const where = projectChecked
+    ? `.qwen/loop.md (project) or ${homeLabel} (home)`
+    : `${homeLabel} (home)`;
+  return `loop.md is not currently present at ${where}. ${ABSENT_TAIL[mode]}`;
 }
 
 /** Detect whether a scheduled prompt is a loop.md sentinel, and which mode. */
@@ -189,21 +198,25 @@ export class LoopTickResolver {
 
   /** The real home loop.md path for user-facing messages, OS-home tilde-
    * abbreviated. Mirrors readLoopTaskFile's home-candidate path exactly so the
-   * absent reminder names the location actually checked (QWEN_HOME-aware). */
-  #homeLoopLabel(): string {
+   * absent reminder — and the caller's sanitized resolve-error — names the
+   * location actually checked (QWEN_HOME-aware). Public so the Session error
+   * message reuses the same label instead of hardcoding a wrong `~/.qwen`. */
+  homeLoopLabel(): string {
     const homeQwenDir =
       this.deps.homeQwenDir ?? path.join(this.deps.homeDir, '.qwen');
     return tildeifyPath(path.join(homeQwenDir, 'loop.md'));
   }
 
   async resolve(mode: LoopMode): Promise<LoopTickResult> {
+    // Re-read trust per tick (see LoopTickResolverDeps.allowProjectFile): a
+    // resolver built while trusted must skip the project file once trust flips.
+    // Captured so the absent reminder reflects what was ACTUALLY checked.
+    const allowProjectFile = this.deps.allowProjectFile();
     const result = await readLoopTaskFile({
       projectRoot: this.deps.projectRoot,
       homeDir: this.deps.homeDir,
       homeQwenDir: this.deps.homeQwenDir,
-      // Re-read trust per tick (see LoopTickResolverDeps.allowProjectFile): a
-      // resolver built while trusted must skip the project file once trust flips.
-      allowProjectFile: this.deps.allowProjectFile(),
+      allowProjectFile,
       realDirCache: this.#realDirCache,
     });
 
@@ -215,7 +228,7 @@ export class LoopTickResolver {
       this.#pendingContent = null;
       this.#lastContent = null;
       return {
-        modelText: `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.#homeLoopLabel())}`,
+        modelText: `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.homeLoopLabel(), allowProjectFile)}`,
         full: false,
       };
     }

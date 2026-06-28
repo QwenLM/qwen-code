@@ -5000,6 +5000,107 @@ describe('Session', () => {
         }
       });
 
+      it('names the QWEN_HOME-aware home path in the sanitized resolve error, not a hardcoded ~/.qwen', async () => {
+        // Regression: the sanitized resolve-error hardcoded `~/.qwen/loop.md
+        // (home)`, but the resolver's home candidate is QWEN_HOME-aware. With
+        // QWEN_HOME relocated, the error must name the REAL checked path
+        // (<QWEN_HOME>/loop.md) — reusing the resolver's homeLoopLabel() — while
+        // staying leak-safe (no absolute project path).
+        debugLoggerWarnSpy.mockClear();
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-err-proj-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-err-home-'),
+        );
+        const qwenHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-err-qwenhome-'),
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        const restoreHome = setFakeHome(fakeHome);
+        const prevQwenHome = process.env['QWEN_HOME'];
+        process.env['QWEN_HOME'] = qwenHome;
+        // qwenHome is under os.tmpdir() (not the OS home), so it is not tilde-
+        // abbreviated — the label is the relocated path verbatim.
+        const expectedHomeLabel = `${path.join(qwenHome, 'loop.md')} (home)`;
+
+        const eacces = Object.assign(
+          new Error(
+            `EACCES: permission denied, open '${path.join(tmpDir, '.qwen', 'loop.md')}'`,
+          ),
+          { code: 'EACCES' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const sessionUpdateMock = mockClient.sessionUpdate as ReturnType<
+            typeof vi.fn
+          >;
+          const cronErrorTexts = () =>
+            sessionUpdateMock.mock.calls
+              .map(
+                (call) =>
+                  (
+                    call[0] as {
+                      update?: {
+                        sessionUpdate?: string;
+                        content?: { text?: string };
+                      };
+                    }
+                  ).update,
+              )
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of cronErrorTexts()) {
+            // The QWEN_HOME-aware home path is named...
+            expect(text).toContain(expectedHomeLabel);
+            expect(text).toContain('.qwen/loop.md (project)');
+            // ...and the old hardcoded label is gone.
+            expect(text).not.toContain('~/.qwen/loop.md');
+            // Still leak-safe: no absolute project path.
+            expect(text).not.toContain(path.join(tmpDir, '.qwen', 'loop.md'));
+          }
+        } finally {
+          resolveSpy.mockRestore();
+          restoreHome();
+          if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = prevQwenHome;
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+          await fs.rm(qwenHome, { recursive: true, force: true });
+        }
+      });
+
       it('echoes the absent label when a sentinel fires with no loop.md present', async () => {
         // The `loopTick && !loopTick.sourceLabel` branch: a sentinel fires but no
         // project or home loop.md exists, so the tick is a labelled no-op.
