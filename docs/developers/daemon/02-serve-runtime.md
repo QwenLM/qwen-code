@@ -51,11 +51,11 @@
 | `serve/acp-http/`                                                | ACP Streamable HTTP transport (RFD #721), mounted at `/acp`. Seven files implement JSON-RPC POST, SSE GET, DELETE teardown, and shared bridge usage in parallel with the REST surface.                                                                                                                                                                                                                                                                       |
 | `serve/demo.ts`                                                  | Self-contained inline HTML for `GET /demo`: browser debug console with chat UI, event log, and workspace inspector. On loopback without `--require-auth`, it is registered **before** `bearerAuth`; on non-loopback or with `--require-auth`, it is registered **after** `bearerAuth`. Served with CSP `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'` plus `X-Frame-Options: DENY`. |
 
-**Re-export shims** for compatibility with pre-F1 import paths:
+**ACP bridge package imports**:
 
-- `serve/event-bus.ts` -> `@qwen-code/acp-bridge/eventBus`
-- `serve/status.ts` -> `@qwen-code/acp-bridge/status`
-- `serve/httpAcpBridge.ts` -> `@qwen-code/acp-bridge`
+- Event-bus primitives are imported from `@qwen-code/acp-bridge/eventBus`.
+- Status primitives are imported from `@qwen-code/acp-bridge/status`.
+- `serve/acp-session-bridge.ts` remains as the CLI-local compatibility facade for the broader bridge surface.
 
 ## Flow
 

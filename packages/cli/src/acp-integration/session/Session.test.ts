@@ -212,6 +212,7 @@ describe('Session', () => {
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
+    isInitialized: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
@@ -271,19 +272,26 @@ describe('Session', () => {
         currentModel = modelId;
       });
 
+    const getHistoryMock = vi.fn().mockReturnValue([]);
     mockChat = {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
-      getHistory: vi.fn().mockReturnValue([]),
+      getHistory: getHistoryMock,
+      // continueLastTurn classifies from a bounded tail; delegate to getHistory
+      // so tests that set getHistory drive detection (fixtures are small).
+      getHistoryTail: vi.fn(() => getHistoryMock()),
+      getHistoryTailShallow: vi.fn(() => getHistoryMock()),
       getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set<string>()),
       getLastModelMessageText: vi.fn().mockReturnValue(''),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
+      stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
     } as unknown as GeminiChat;
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
+      isInitialized: vi.fn().mockReturnValue(true),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -404,6 +412,176 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  describe('continueLastTurn', () => {
+    it('returns none and starts no continuation when the last turn ended cleanly', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hi' }] },
+        { role: 'model', parts: [{ text: 'all done' }] },
+      ]);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('accepts an interrupted prompt as the classification only, without firing the turn itself', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered question' }] },
+      ]);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      // continueLastTurn is now a pure accept/reject pre-check — the daemon
+      // bridge drives the actual turn through sendPrompt, so the agent must NOT
+      // fire its own internal prompt() here.
+      await Promise.resolve();
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('classifies a turn with dangling tool calls as interrupted_turn', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'read it' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+          ],
+        },
+      ]);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+      // continueLastTurn is decision-only for interrupted_turn too — the bridge
+      // drives the turn, so the agent must not fire its own prompt() here.
+      await Promise.resolve();
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the gemini client is not initialized', async () => {
+      vi.mocked(mockGeminiClient.isInitialized).mockReturnValue(false);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('preserves the orphaned turn when a continuation send fails (no data loss)', async () => {
+      // An interrupted prompt: an orphaned user turn the model never answered.
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      // Force the continuation send to fail NON-cancelled (session token limit)
+      // so it hits the `!responseStream` branch — the data-loss window.
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat.mockResolvedValue({
+        originalTokenCount: 999,
+        newTokenCount: 999,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+
+      const continueRequest = {
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0];
+      const result = await session.prompt(continueRequest);
+
+      expect(result).toEqual({ stopReason: 'max_tokens' });
+      // The orphan was stripped before the send; on a non-cancelled failure the
+      // full message must be preserved back into history, not dropped.
+      expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'unanswered' }),
+          ]),
+        }),
+      );
+    });
+
+    it('restores the orphaned turn when a continuation send throws (no data loss)', async () => {
+      // Same data-loss window as above, but the send THROWS instead of
+      // returning a graceful null stream — the path #preserveUnsentMessageHistory
+      // misses. The catch must restore the stripped orphan.
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      // No token limit, so we reach the send; the send then throws.
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(0);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValue(new Error('send blew up'));
+
+      const continueRequest = {
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0];
+
+      await expect(session.prompt(continueRequest)).rejects.toThrow(
+        'send blew up',
+      );
+
+      expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'unanswered' }),
+          ]),
+        }),
+      );
+    });
+
+    it('rejects (accepted:false) when a prompt is already in flight', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      // Simulate an active prompt so the re-entrancy guard trips: there is no
+      // settled turn to continue while one is running.
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = new AbortController();
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: false,
+        interruption: 'interrupted_prompt',
+      });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('setMode', () => {
