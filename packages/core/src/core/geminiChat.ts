@@ -33,6 +33,7 @@ import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
   ESCALATED_MAX_TOKENS,
+  parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
@@ -1771,7 +1772,11 @@ export class GeminiChat {
     const effectiveReservedOutput: number =
       params.config?.maxOutputTokens ??
       (hasUserMaxTokensOverrideForThreshold
-        ? (cgConfigForThresholds?.samplingParams?.max_tokens ?? 0)
+        ? (cgConfigForThresholds?.samplingParams?.max_tokens ??
+          parsePositiveIntegerEnvValue(
+            process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+          ) ??
+          0)
         : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
 
     try {

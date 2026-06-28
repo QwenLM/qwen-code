@@ -37,6 +37,7 @@ import { buildContextUsage } from '../hooks/context-usage.js';
 import {
   DEFAULT_TOKEN_LIMIT,
   ESCALATED_MAX_TOKENS,
+  parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
 
@@ -2717,7 +2718,11 @@ export class GeminiClient {
         cgConfig?.samplingParams?.max_tokens !== null) ||
       !!process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
     const reservedOutputTokens: number = hasUserMaxTokensOverride
-      ? (cgConfig?.samplingParams?.max_tokens ?? 0)
+      ? (cgConfig?.samplingParams?.max_tokens ??
+        parsePositiveIntegerEnvValue(
+          process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+        ) ??
+        0)
       : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'));
 
     const previousSessionStartContext = this.lastSessionStartContext;
