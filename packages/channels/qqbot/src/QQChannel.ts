@@ -119,8 +119,6 @@ export class QQChannel extends ChannelBase {
   private isReconnecting: boolean = false;
   /** Whether this process has never received READY (cold start vs RESUME fallback). */
   private coldStart: boolean = true;
-  /** Bot's own openid from READY event (d.user.id). Used for @mention detection. */
-  private botOpenId: string = '';
 
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
@@ -878,16 +876,6 @@ export class QQChannel extends ChannelBase {
             ] as string) || '';
           this.tryResume = true;
           this.connectReject = null;
-          // Store bot's own openid for @mention detection in handleGroupAll
-          this.botOpenId =
-            ((
-              (msg['d'] as Record<string, unknown> | undefined)?.['user'] as
-                | Record<string, unknown>
-                | undefined
-            )?.['id'] as string) || '';
-          if (this.botOpenId) {
-            this.config.instructions += `\n\n你的 Bot OpenID: ${this.botOpenId}`;
-          }
           this.startHeartbeat();
           if (this.coldStart) {
             this.coldStart = false;
