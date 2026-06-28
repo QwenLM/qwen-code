@@ -14,6 +14,15 @@ type McpRestartResult = Awaited<ReturnType<McpHook['restartServer']>>;
 
 type McpAction = 'enable' | 'disable' | 'authenticate' | 'clear-auth';
 type ServerIssueTone = 'ok' | 'warning' | 'error' | 'muted';
+type ToolFilter = 'all' | 'invalid' | 'schema' | 'annotations';
+
+const DEFAULT_VISIBLE_TOOL_COUNT = 20;
+const MCP_TOOL_FILTERS: Array<{ label: string; value: ToolFilter }> = [
+  { label: 'All tools', value: 'all' },
+  { label: 'Invalid only', value: 'invalid' },
+  { label: 'Has schema', value: 'schema' },
+  { label: 'Has annotations', value: 'annotations' },
+];
 
 interface PendingAction {
   action: 'tools' | 'restart' | McpAction;
@@ -167,6 +176,9 @@ export function McpPanel() {
                     {server.source ? <span>{server.source}</span> : null}
                     {server.errorKind ? <span>{server.errorKind}</span> : null}
                     {server.hasOAuthTokens ? <span>oauth</span> : null}
+                    {serverTools ? (
+                      <span>{formatToolsSummary(serverTools)}</span>
+                    ) : null}
                   </div>
                   <ServerIssue issue={issue} />
                   {expanded ? <ServerDetails server={server} /> : null}
@@ -403,21 +415,72 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 function ToolsDiagnostics({ status }: { status: McpToolsStatus }) {
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<ToolFilter>('all');
+  const [showAll, setShowAll] = useState(false);
   const invalidTools = status.tools.filter((tool) => !tool.isValid);
+  const filteredTools = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return [...status.tools]
+      .sort((left, right) => Number(left.isValid) - Number(right.isValid))
+      .filter((tool) => matchesToolFilter(tool, filter))
+      .filter((tool) =>
+        normalizedQuery ? matchesToolQuery(tool, normalizedQuery) : true,
+      );
+  }, [filter, query, status.tools]);
+  const visibleTools = showAll
+    ? filteredTools
+    : filteredTools.slice(0, DEFAULT_VISIBLE_TOOL_COUNT);
+  const hiddenCount = filteredTools.length - visibleTools.length;
+
   return (
     <div className="mcp-tool-list">
       <div className="mcp-tool-summary">
         <strong>{status.tools.length} tools</strong>
         <span>{invalidTools.length} invalid</span>
         <span>{status.acpChannelLive ? 'ACP live' : 'ACP idle'}</span>
+        <span>{filteredTools.length} shown by filter</span>
+      </div>
+      <div className="mcp-tool-controls">
+        <input
+          aria-label={`Search ${status.serverName} tools`}
+          placeholder="Search tools"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <select
+          aria-label={`Filter ${status.serverName} tools`}
+          value={filter}
+          onChange={(event) => setFilter(event.target.value as ToolFilter)}
+        >
+          {MCP_TOOL_FILTERS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        {filteredTools.length > DEFAULT_VISIBLE_TOOL_COUNT ? (
+          <button type="button" onClick={() => setShowAll((value) => !value)}>
+            {showAll ? 'Collapse' : `Show all ${filteredTools.length}`}
+          </button>
+        ) : null}
       </div>
       <McpIssueList
         errors={status.errors ?? []}
         title={`${status.serverName} tools`}
       />
-      {status.tools.map((tool) => (
-        <ToolDiagnostic key={tool.name} tool={tool} />
-      ))}
+      {visibleTools.length > 0 ? (
+        visibleTools.map((tool) => (
+          <ToolDiagnostic key={tool.name} tool={tool} />
+        ))
+      ) : (
+        <div className="mcp-tool-empty">No tools match the current filter.</div>
+      )}
+      {hiddenCount > 0 ? (
+        <div className="mcp-tool-count">
+          {hiddenCount} tools hidden. Use Show all to expand.
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -636,6 +699,39 @@ function formatConfigCommand(server: DaemonWorkspaceMcpServerStatus) {
   if (!command) return undefined;
   const args = server.config?.args?.join(' ');
   return args ? `${command} ${args}` : command;
+}
+
+function formatToolsSummary(status: McpToolsStatus) {
+  const invalidCount = status.tools.filter((tool) => !tool.isValid).length;
+  return `${status.tools.length} tools · ${invalidCount} invalid · ${
+    status.acpChannelLive ? 'ACP live' : 'ACP idle'
+  }`;
+}
+
+function matchesToolFilter(
+  tool: DaemonWorkspaceMcpToolStatus,
+  filter: ToolFilter,
+) {
+  switch (filter) {
+    case 'invalid':
+      return !tool.isValid;
+    case 'schema':
+      return Boolean(tool.schema);
+    case 'annotations':
+      return Boolean(
+        tool.annotations && Object.keys(tool.annotations).length > 0,
+      );
+    default:
+      return true;
+  }
+}
+
+function matchesToolQuery(tool: DaemonWorkspaceMcpToolStatus, query: string) {
+  return [tool.name, tool.serverToolName, tool.description, tool.invalidReason]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(query);
 }
 
 function getToolMetadata(tool: DaemonWorkspaceMcpToolStatus) {

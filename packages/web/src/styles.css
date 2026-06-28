@@ -1139,6 +1139,34 @@ pre {
   gap: 8px;
 }
 
+.mcp-tool-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mcp-tool-controls input,
+.mcp-tool-controls select {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--web-border);
+  border-radius: 10px;
+  color: var(--web-text);
+  font: inherit;
+  padding: 7px 9px;
+}
+
+.mcp-tool-controls input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.mcp-tool-controls input:focus,
+.mcp-tool-controls select:focus {
+  border-color: rgba(78, 141, 108, 0.45);
+  outline: none;
+}
+
 .mcp-tool-summary strong,
 .mcp-tool-item strong {
   color: var(--web-text);
@@ -1169,6 +1197,19 @@ pre {
 .mcp-tool-invalid {
   background: rgba(180, 72, 72, 0.08);
   border-color: rgba(180, 72, 72, 0.2);
+}
+
+.mcp-tool-count,
+.mcp-tool-empty {
+  color: var(--web-muted);
+  font-size: 11px;
+}
+
+.mcp-tool-empty {
+  background: rgba(31, 33, 29, 0.04);
+  border: 1px dashed var(--web-border);
+  border-radius: 12px;
+  padding: 10px;
 }
 
 @media (max-width: 900px) {
