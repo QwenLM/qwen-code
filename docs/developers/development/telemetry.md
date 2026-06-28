@@ -16,6 +16,7 @@ Learn how to enable and setup OpenTelemetry for Qwen Code.
     - [Metrics](#metrics)
     - [Daemon Metrics](#daemon-metrics)
     - [Spans](#spans)
+    - [Resource Metrics](#resource-metrics)
     - [Performance Monitoring (Reserved)](#performance-monitoring-reserved)
 
 ## Migration Notes
@@ -535,7 +536,7 @@ The following events are logged:
 #### Tool Events
 
 - `qwen-code.tool_call`: Each function/tool call.
-  - **Attributes**: `function_name`, `function_args`, `duration_ms`, `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (optional), `error_type` (optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp", optional), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
+  - **Attributes**: `function_name` (string), `function_args` (object), `duration_ms` (int), `status` (string: "success", "error", or "cancelled"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, optional), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
 
 - `qwen-code.file_operation`: Each file operation.
   - **Attributes**: `tool_name` (string), `operation` (string: "create", "read", "update"), `lines` (int, optional), `mimetype` (string, optional), `extension` (string, optional), `programming_language` (string, optional)
@@ -549,16 +550,16 @@ The following events are logged:
   - **Attributes**: `model` (string), `prompt_id` (string), `request_text` (string, optional), `subagent_name` (string, optional)
 
 - `qwen-code.api_response`: Response received from LLM API.
-  - **Attributes**: `model`, `status_code`, `duration_ms`, `input_token_count`, `output_token_count`, `cached_content_token_count`, `thoughts_token_count`, `auth_type`, `response_text` (optional), `subagent_name` (optional)
+  - **Attributes**: `response_id` (string), `model` (string), `status_code` (int, optional), `duration_ms` (int), `input_token_count` (int), `output_token_count` (int), `cached_content_token_count` (int), `thoughts_token_count` (int), `total_token_count` (int), `prompt_id` (string), `auth_type` (string, optional), `response_text` (string, optional), `subagent_name` (string, optional)
 
 - `qwen-code.api_error`: API request failed.
-  - **Attributes**: `model`, `error_message`, `error_type`, `status_code`, `duration_ms`, `auth_type`, `subagent_name` (optional)
+  - **Attributes**: `model` (string), `prompt_id` (string), `duration_ms` (int), `error_message` (string), `response_id` (string, optional), `auth_type` (string, optional), `error_type` (string, optional), `status_code` (int/string, optional), `subagent_name` (string, optional)
 
 - `qwen-code.api_cancel`: API request cancelled by user.
   - **Attributes**: `model` (string), `prompt_id` (string), `auth_type` (string, optional), `loop_wakeups_cancelled` (int, optional)
 
 - `qwen-code.api_retry`: HTTP-status retry (429/5xx) at an LLM call site. Distinct from `chat.content_retry` which handles `InvalidStreamError` retries on a separate budget.
-  - **Attributes**: `model` (string), `prompt_id` (string, optional), `attempt_number` (int), `error_type` (string), `error_message` (string), `status_code` (int/string, optional), `retry_delay_ms` (int), `duration_ms` (int), `subagent_name` (string, optional)
+  - **Attributes**: `model` (string), `prompt_id` (string, optional), `attempt_number` (int), `error_type` (string, optional), `error_message` (string), `status_code` (int/string, optional), `retry_delay_ms` (int), `duration_ms` (int), `subagent_name` (string, optional)
 
 - `qwen-code.malformed_json_response`: `generateJson` response couldn't be parsed.
   - **Attributes**: `model` (string)
@@ -657,7 +658,7 @@ The following events are logged:
 #### Other Events
 
 - `qwen-code.chat_compression`: Chat context compressed.
-  - **Attributes**: `tokens_before` (int), `tokens_after` (int), `compression_input_token_count` (number, optional), `compression_output_token_count` (number, optional)
+  - **Attributes**: `tokens_before` (int), `tokens_after` (int), `compression_input_token_count` (int, optional), `compression_output_token_count` (int, optional)
 
 - `qwen-code.next_speaker_check`: Next speaker determination.
   - **Attributes**: `prompt_id` (string), `finish_reason` (string), `result` (string)
@@ -832,18 +833,20 @@ Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each in
 - `qwen-code.daemon.bridge`: Wraps daemon bridge operations.
   - **Attributes**: `qwen-code.daemon.operation`
 
+#### Resource Metrics
+
+- `qwen-code.memory.usage` (Histogram, bytes): Memory usage. Recorded by the memory-pressure monitor when telemetry is enabled.
+  - **Attributes**: `memory_type` (string: "heap_used"/"rss")
+
+- `qwen-code.cpu.usage` (Histogram, percent): CPU usage percentage. Recorded by the memory-pressure monitor when telemetry is enabled.
+  - **Attributes**: (none)
+
 ### Performance Monitoring (Reserved)
 
 The following metrics are defined but **not yet enabled in production**. They will be activated behind a dedicated performance monitoring config flag.
 
 - `qwen-code.startup.duration` (Histogram, ms): CLI startup time by phase.
   - **Attributes**: `phase` (string)
-
-- `qwen-code.memory.usage` (Histogram, bytes): Memory usage.
-  - **Attributes**: `memory_type` ("heap_used"/"heap_total"/"external"/"rss"), `component` (optional)
-
-- `qwen-code.cpu.usage` (Histogram, percent): CPU usage percentage.
-  - **Attributes**: `component` (optional)
 
 - `qwen-code.tool.queue.depth` (Histogram, count): Tools in execution queue.
 
