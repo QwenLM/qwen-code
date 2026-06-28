@@ -125,6 +125,44 @@ describe('qwen resolve workflow', () => {
     expect(agentStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
   });
 
+  it('allows maintainers to extend review timeout from /review comments', () => {
+    const contextStep = step(reviewJob, 'Resolve PR context');
+    const runStep = step(reviewJob, 'Run review');
+
+    expect(reviewJob).toContain('timeout-minutes: 200');
+    expect(contextStep).toContain('DEFAULT_TIMEOUT_MINUTES=120');
+    expect(contextStep).toContain('case "$token" in');
+    expect(contextStep).toContain('--timeout=*)');
+    expect(contextStep).toContain('TIMEOUT_MINUTES="${token#--timeout=}"');
+    expect(contextStep).toContain('timeout=*)');
+    expect(contextStep).toContain('TIMEOUT_MINUTES="${token#timeout=}"');
+    expect(runStep).toContain('if [ "${#TIMEOUT_MINUTES}" -gt 3 ]; then');
+    expect(runStep).toContain('timeout_minutes must not exceed 180 minutes');
+    expect(runStep).toContain('QWEN_TIMEOUT="$TIMEOUT_MINUTES"');
+    expect(runStep).not.toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))');
+  });
+
+  it('tells maintainers how to retry timed-out reviews with more time', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const fallbackStep = step(reviewJob, 'Post fallback comment on failure');
+
+    expect(runStep).toContain('failure_kind=$kind');
+    expect(runStep).toContain(
+      'fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes." 1 "timeout"',
+    );
+    expect(runStep).toContain('[ "$qwen_status" -eq 137 ]');
+    expect(fallbackStep).toContain('FAILURE_KIND:');
+    expect(fallbackStep).toContain('TIMEOUT_MINUTES:');
+    expect(fallbackStep).toContain('@qwen-code /review --timeout=180');
+    expect(fallbackStep).toContain(
+      'This run already used the maximum 180 minute timeout.',
+    );
+    expect(fallbackStep).toContain('**Qwen Code review timed out.**');
+    expect(fallbackStep).not.toContain(
+      '_Qwen Code review did not complete successfully:',
+    );
+  });
+
   // Whole-file `toContain` cannot tell which job a guard lives on. Slice the
   // resolve-pr job so these assertions fail if a future edit drops a guard
   // specifically from the credentialed conflict-resolution path. Bound the slice
