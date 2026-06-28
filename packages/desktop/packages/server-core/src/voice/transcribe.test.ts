@@ -82,4 +82,28 @@ describe('transcribeQwenAsrBatch', () => {
     await expect(promise).rejects.toThrow('Bearer [REDACTED]')
     await expect(promise).rejects.not.toThrow('leaked-token')
   })
+
+  it('redacts credentials leaked through the response status line', async () => {
+    // A malicious/non-standard ASR proxy controls the reason phrase too; the
+    // body is clean so any leak can only come from response.statusText.
+    const fetchFn = async () =>
+      new Response('', {
+        status: 500,
+        statusText: 'Bearer leaked-token rejected for leaked-token',
+      })
+
+    const promise = transcribeQwenAsrBatch(
+      { data: new Uint8Array([1]), mimeType: 'audio/wav' },
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-asr-flash',
+        apiKey: 'leaked-token',
+      },
+      {},
+      fetchFn as unknown as typeof fetch,
+    )
+
+    await expect(promise).rejects.toThrow('[REDACTED]')
+    await expect(promise).rejects.not.toThrow('leaked-token')
+  })
 })

@@ -7,7 +7,11 @@ import type {
   VoiceStreamSession,
 } from './voice-stream-session';
 import { deriveWebSocketBase } from './voice-stream-session';
-import { CONSOLE_LOGGER, createScopedLogger } from '../runtime/platform';
+import {
+  CONSOLE_LOGGER,
+  createScopedLogger,
+  type Logger,
+} from '../runtime/platform';
 import { escapeAnsiCtrlCodes } from './ansi';
 import { sanitizeResponseDetails } from './transcribe';
 
@@ -16,6 +20,8 @@ export interface QwenRealtimeDeps {
     url: string,
     options: { headers: Record<string, string> },
   ) => SocketLike;
+  /** Override the scoped logger (used by tests to capture diagnostics). */
+  logger?: Logger;
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
@@ -57,6 +63,7 @@ export function openQwenAsrRealtimeStream(
       new WebSocket(url, {
         headers: options.headers,
       }) as unknown as SocketLike);
+  const logger = deps.logger ?? debugLogger;
 
   return new Promise<VoiceStreamSession>((resolve, reject) => {
     const ws = createWebSocket(
@@ -80,9 +87,27 @@ export function openQwenAsrRealtimeStream(
     let terminalError: Error | null = null;
     let settled = false;
     let backpressureWarned = false;
+    let droppedFrames = 0;
+    let droppedBytes = 0;
 
     const sendJson = (body: Record<string, unknown>) => {
       ws.send(JSON.stringify({ event_id: randomUUID(), ...body }));
+    };
+
+    // A session that drops audio under backpressure would otherwise leave the
+    // cumulative loss unreported. Surface the running total exactly once at
+    // session end (mirrors voice-stream-session) so a degraded session is
+    // quantified end-to-end.
+    let droppedTotalsReported = false;
+    const reportDroppedTotals = () => {
+      if (droppedTotalsReported) return;
+      droppedTotalsReported = true;
+      if (droppedFrames > 0) {
+        logger.warn(
+          `[voice] session ended with ${droppedFrames} dropped frame(s) / ` +
+            `${droppedBytes} bytes total`,
+        );
+      }
     };
 
     const close = () => {
@@ -110,6 +135,7 @@ export function openQwenAsrRealtimeStream(
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
+      reportDroppedTotals();
       const normalized = toError(error);
       clearConnectTimer();
       clearFinishTimer();
@@ -164,7 +190,7 @@ export function openQwenAsrRealtimeStream(
       try {
         msg = JSON.parse(String(data));
       } catch (error) {
-        debugLogger.warn(
+        logger.warn(
           '[voice] failed to parse Qwen ASR realtime message:',
           error,
         );
@@ -183,9 +209,13 @@ export function openQwenAsrRealtimeStream(
             pushAudio: (pcm) => {
               if (ws.readyState !== ws.OPEN || pcm.length === 0) return;
               if ((ws.bufferedAmount ?? 0) > MAX_BUFFERED_AUDIO_BYTES) {
+                // Count every drop — silent gaps are otherwise invisible — and
+                // warn once on entering backpressure (reset on recovery below).
+                droppedFrames += 1;
+                droppedBytes += pcm.length;
                 if (!backpressureWarned) {
                   backpressureWarned = true;
-                  debugLogger.warn(
+                  logger.warn(
                     '[voice] dropping Qwen ASR realtime audio due to socket backpressure.',
                   );
                 }
@@ -262,6 +292,7 @@ export function openQwenAsrRealtimeStream(
             break;
           }
           settled = true;
+          reportDroppedTotals();
           clearFinishTimer();
           finishedTranscript = lastPartial.trim() || committed.trim();
           finishResolve?.(finishedTranscript);
@@ -291,6 +322,7 @@ export function openQwenAsrRealtimeStream(
       clearConnectTimer();
       clearFinishTimer();
       if (settled) return;
+      reportDroppedTotals();
       // Every branch below is terminal; mark settled so a late error/close event
       // can't re-enter via fail() and double-fire reject/onError.
       settled = true;

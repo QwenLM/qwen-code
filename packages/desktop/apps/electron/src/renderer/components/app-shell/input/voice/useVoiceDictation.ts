@@ -16,8 +16,33 @@ const BAR_COUNT = 32;
 const VOICE_URL_RETRY_INTERVAL_MS = 1500;
 const MAX_VOICE_URL_RETRIES = 10;
 
+/**
+ * True once the retry budget is spent with no resolved URL. The effect uses
+ * this to stop polling and surface the failure; exported so the retry-exhaustion
+ * decision is unit-testable by driving the counter directly (no timers).
+ */
+export function isVoiceInitExhausted(
+  wsUrl: string | null,
+  retryCount: number,
+): boolean {
+  return !wsUrl && retryCount >= MAX_VOICE_URL_RETRIES;
+}
+
+/** Diagnostic logged once when voice-server URL resolution is abandoned. */
+export function formatVoiceInitFailureWarning(): string {
+  const seconds = Math.round(
+    (MAX_VOICE_URL_RETRIES * VOICE_URL_RETRY_INTERVAL_MS) / 1000,
+  );
+  return (
+    `[voice] voice server URL unavailable after ${MAX_VOICE_URL_RETRIES} retries ` +
+    `(~${seconds}s); dictation will not be available this session.`
+  );
+}
+
 export interface UseVoiceDictationReturn {
   available: boolean;
+  /** True once the voice-server URL never resolved within the retry budget. */
+  initFailed: boolean;
   status: VoiceCaptureStatus;
   isRecording: boolean;
   isConnecting: boolean;
@@ -47,15 +72,28 @@ export function useVoiceDictation(options: {
   // null, so a separate retry counter is what actually re-fires this effect on
   // each miss (re-running with only `[wsUrl]` would stall after the first try).
   const [retryCount, setRetryCount] = useState(0);
+  // Set once the retry budget is exhausted with no URL — voice silently never
+  // appears otherwise (wsUrl stays null → available=false with no signal).
+  const [initFailed, setInitFailed] = useState(false);
   useEffect(() => {
-    if (wsUrl || retryCount >= MAX_VOICE_URL_RETRIES) return;
+    if (wsUrl) return;
+    if (isVoiceInitExhausted(wsUrl, retryCount)) {
+      // Surface the dead end exactly once so it's diagnosable in the renderer
+      // console (and via the returned `initFailed` flag) instead of failing
+      // silently. Guard on the transition so re-renders don't re-log.
+      if (!initFailed) {
+        setInitFailed(true);
+        console.warn(formatVoiceInitFailureWarning());
+      }
+      return;
+    }
     const id = setTimeout(() => {
       const next = window.electronAPI?.getVoiceStreamUrl?.() ?? null;
       if (next) setWsUrl(next);
       else setRetryCount((n) => n + 1);
     }, VOICE_URL_RETRY_INTERVAL_MS);
     return () => clearTimeout(id);
-  }, [wsUrl, retryCount]);
+  }, [wsUrl, retryCount, initFailed]);
 
   const [notice, setNotice] = useState<string | undefined>(undefined);
   const onInsertRef = useRef(options.onInsert);
@@ -118,6 +156,7 @@ export function useVoiceDictation(options: {
   return useMemo(
     () => ({
       available: Boolean(wsUrl),
+      initFailed,
       status,
       isRecording,
       isConnecting,
@@ -135,6 +174,7 @@ export function useVoiceDictation(options: {
     }),
     [
       wsUrl,
+      initFailed,
       status,
       isRecording,
       isConnecting,

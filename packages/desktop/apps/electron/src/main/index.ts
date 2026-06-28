@@ -106,6 +106,7 @@ import { setBundledAssetsRoot } from '@craft-agent/shared/utils'
 import { initializeBackendHostRuntime } from '@craft-agent/shared/agent/backend'
 import { setPowerShellValidatorRoot } from '@craft-agent/shared/agent'
 import { handleDeepLink } from './deep-link'
+import { getRendererDevOrigin as deriveRendererDevOrigin, isTrustedRendererFrameUrl } from './voice/frame-trust'
 import { BrowserPaneManager } from './browser-pane-manager'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { registerThumbnailScheme, registerThumbnailHandler } from './thumbnail-protocol'
@@ -199,30 +200,11 @@ let moduleClientResolver: ((webContentsId: number) => string | undefined) | null
 let voiceServer: VoiceServer | null = null
 let voiceStreamUrl: string | null = null
 
+// The renderer dev origin and frame-trust gate are extracted to ./voice/frame-trust
+// (pure, Electron-free) so the gate guarding the voice token is unit-testable.
+// Wrap them here to keep the existing call sites reading process.env directly.
 function getRendererDevOrigin(): string | undefined {
-  const devUrl = process.env.VITE_DEV_SERVER_URL
-  if (!devUrl) return undefined
-  try {
-    return new URL(devUrl).origin
-  } catch {
-    return undefined
-  }
-}
-
-// The app's own renderer is loaded from `file://` (packaged, via loadFile) or
-// the Vite dev server (development). Anything else — an injected/cross-origin
-// frame or a stray webview — is untrusted. Mirrors the will-navigate origin
-// trust check in window-manager.
-function isTrustedRendererFrameUrl(url: string | undefined): boolean {
-  if (!url) return false
-  if (url.startsWith('file://')) return true
-  const devOrigin = getRendererDevOrigin()
-  if (!devOrigin) return false
-  try {
-    return new URL(url).origin === devOrigin
-  } catch {
-    return false
-  }
+  return deriveRendererDevOrigin(process.env.VITE_DEV_SERVER_URL)
 }
 
 // Messaging gateway: the bootstrap handle is created once sessionManager is
@@ -1043,7 +1025,7 @@ app.whenReady().then(async () => {
         if (
           !frame ||
           frame !== e.sender.mainFrame ||
-          !isTrustedRendererFrameUrl(frame.url)
+          !isTrustedRendererFrameUrl(frame.url, process.env.VITE_DEV_SERVER_URL)
         ) {
           e.returnValue = null
           return

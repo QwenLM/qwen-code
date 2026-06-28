@@ -136,8 +136,14 @@ export async function transcribeQwenAsrBatch(
       );
     }
     const suffix = details ? `: ${details}` : '';
+    // The status line is attacker-influenced too (a non-standard ASR proxy can
+    // set an arbitrary reason phrase), so sanitize it like the body.
+    const statusText = sanitizeResponseDetails(
+      response.statusText,
+      config.apiKey,
+    );
     throw new Error(
-      `Voice transcription request failed (${response.status} ${response.statusText})${suffix}`,
+      `Voice transcription request failed (${response.status} ${statusText})${suffix}`,
     );
   }
 

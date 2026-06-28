@@ -9,6 +9,26 @@ mock.module('../runtime/platform', () => ({
   }),
 }))
 
+/**
+ * A capturing logger injected via deps so warn assertions don't depend on the
+ * shared `../runtime/platform` module mock (which is global in bun and would
+ * race with the sibling voice-stream-session test's own capturing mock).
+ */
+function makeCapturingLogger() {
+  const warnCalls: string[] = []
+  return {
+    warnCalls,
+    logger: {
+      info: () => {},
+      error: () => {},
+      debug: () => {},
+      warn: (...args: unknown[]) => {
+        warnCalls.push(args.map(String).join(' '))
+      },
+    },
+  }
+}
+
 const { deriveQwenRealtimeUrl, openQwenAsrRealtimeStream } = await import(
   './qwen-asr-realtime-session'
 )
@@ -232,5 +252,99 @@ describe('openQwenAsrRealtimeStream', () => {
 
     expect(errors).toHaveLength(1)
     expect(errors[0]?.message).toContain('closed unexpectedly')
+  })
+
+  it('counts dropped frames and reports the cumulative total once when a dropping session ends', async () => {
+    const socket = new FakeSocket()
+    const { warnCalls, logger } = makeCapturingLogger()
+    const streamPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket, logger },
+    )
+
+    socket.emit('message', JSON.stringify({ type: 'session.created' }))
+    socket.emit('message', JSON.stringify({ type: 'session.updated' }))
+    const stream = await streamPromise
+
+    // Ignore the session.update control frame buffered on open.
+    socket.sent.length = 0
+    // Upstream socket is backed up past the 1 MiB ceiling: frames must be dropped.
+    socket.bufferedAmount = 2 * 1024 * 1024
+    stream.pushAudio(new Uint8Array(4096))
+    stream.pushAudio(new Uint8Array(4096))
+
+    // Dropped, not forwarded, and surfaced once on entering backpressure.
+    expect(socket.sent).toHaveLength(0)
+    const dropWarn = warnCalls.find((m) => m.includes('dropping Qwen ASR'))
+    expect(dropWarn).toBeDefined()
+
+    // End the session normally; the cumulative loss must be surfaced once.
+    const finishPromise = stream.finish()
+    socket.emit('message', JSON.stringify({ type: 'session.finished' }))
+    await finishPromise
+
+    const endReports = warnCalls.filter((m) => m.includes('session ended with'))
+    expect(endReports).toHaveLength(1)
+    expect(endReports[0]).toContain('2 dropped frame(s)')
+    expect(endReports[0]).toContain('8192 bytes total')
+  })
+
+  it('reports the cumulative dropped total exactly once across multiple terminal paths', async () => {
+    const socket = new FakeSocket()
+    const { warnCalls, logger } = makeCapturingLogger()
+    const streamPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket, logger },
+    )
+
+    socket.emit('message', JSON.stringify({ type: 'session.created' }))
+    socket.emit('message', JSON.stringify({ type: 'session.updated' }))
+    const stream = await streamPromise
+
+    socket.bufferedAmount = 2 * 1024 * 1024
+    stream.pushAudio(new Uint8Array(4096))
+    stream.pushAudio(new Uint8Array(4096))
+
+    // Two terminal paths fire: a close, then a late session.finished. Only the
+    // droppedTotalsReported guard keeps the totals line to a single entry.
+    socket.emit('close')
+    socket.emit('message', JSON.stringify({ type: 'session.finished' }))
+
+    const endReports = warnCalls.filter((m) => m.includes('session ended with'))
+    expect(endReports).toHaveLength(1)
+    expect(endReports[0]).toContain('2 dropped frame(s)')
+    expect(endReports[0]).toContain('8192 bytes total')
+  })
+
+  it('does not report a dropped total when no frames were dropped', async () => {
+    const socket = new FakeSocket()
+    const { warnCalls, logger } = makeCapturingLogger()
+    const streamPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      { createWebSocket: () => socket, logger },
+    )
+
+    socket.emit('message', JSON.stringify({ type: 'session.created' }))
+    socket.emit('message', JSON.stringify({ type: 'session.updated' }))
+    const stream = await streamPromise
+    stream.pushAudio(new Uint8Array(4096))
+
+    const finishPromise = stream.finish()
+    socket.emit('message', JSON.stringify({ type: 'session.finished' }))
+    await finishPromise
+
+    expect(warnCalls.some((m) => m.includes('session ended with'))).toBe(false)
   })
 })
