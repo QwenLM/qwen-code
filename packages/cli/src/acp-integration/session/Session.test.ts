@@ -5492,6 +5492,213 @@ describe('Session', () => {
         }
       });
 
+      it('keeps a dynamic loop alive on a transient EACCES resolve error', async () => {
+        // EACCES is in TRANSIENT_FS_CODES, so a `dynamic` loop degrades to a
+        // no-op re-arm tick (same survival as the EIO case) rather than dying.
+        debugLoggerWarnSpy.mockClear();
+        const eacces = Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        const errorEchoes = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The degraded no-op tick reached the model (the turn ran → no throw),
+          // carrying the dynamic re-arm sentinel and the EACCES errno note.
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain(
+              '# /loop tick — loop.md absent (dynamic pacing)',
+            );
+          });
+          expect(sentToModel()).toContain('<<loop.md-dynamic>>');
+          expect(sentToModel()).toContain(
+            'could not be read this tick (EACCES)',
+          );
+          // The loop did NOT surface an error (it survived).
+          expect(errorEchoes()).toHaveLength(0);
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=EACCES) — check .qwen/loop.md permissions/IO',
+            eacces,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('re-throws (does NOT degrade) a dynamic loop on a NON-fs resolve error', async () => {
+        // The gate's reason for existing: a non-transient error (a TypeError /
+        // programming bug → code 'unknown') is NOT in TRANSIENT_FS_CODES, so the
+        // `dynamic` branch must NOT degrade to an infinite silent no-op cycle. It
+        // falls through to the sanitized throw so the real bug surfaces.
+        // Mutation guard: drop the `&& TRANSIENT_FS_CODES.includes(code)` gate and
+        // 'unknown' degrades — a `# /loop tick` reaches the model and no
+        // `[loop error]` surfaces, failing both assertions below.
+        debugLoggerWarnSpy.mockClear();
+        const bug = new TypeError(
+          "Cannot read properties of undefined (reading 'x')",
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(bug);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const loopErrorTexts = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('[loop error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The unexpected error surfaced (the loop did NOT silently degrade).
+          await vi.waitFor(() =>
+            expect(loopErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of loopErrorTexts()) {
+            // Sanitized: carries the 'unknown' errno, not the raw TypeError text.
+            expect(text).toContain('loop.md resolution failed (unknown)');
+            expect(text).not.toContain('Cannot read properties');
+          }
+          // No degraded tick was ever sent to the model.
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          expect(sentToModel()).not.toContain('# /loop tick');
+          // The real (unsanitized) bug is still recorded in the LOCAL debug warn.
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=unknown) — check .qwen/loop.md permissions/IO',
+            bug,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('still throws on a transient EACCES resolve error for a cron loop', async () => {
+        // The cron counterpart: cron re-fires on its own next interval, so even a
+        // known-transient EACCES STILL propagates (sanitized) rather than degrading.
+        debugLoggerWarnSpy.mockClear();
+        const eacces = Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const cronErrorTexts = () =>
+            (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+              .map((call) => call[0]?.update)
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text: string) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of cronErrorTexts()) {
+            expect(text).toContain('EACCES');
+          }
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          expect(sentToModel()).not.toContain('# /loop tick');
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
       it('echoes the absent label when a sentinel fires with no loop.md present', async () => {
         // The `loopTick && !loopTick.sourceLabel` branch: a sentinel fires but no
         // project or home loop.md exists, so the tick is a labelled no-op.

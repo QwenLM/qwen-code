@@ -217,6 +217,16 @@ const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // conforming-but-busy client, while a client that never answers stops
 // costing a stall per tool batch after a few batches.
 const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+// Known-transient fs error codes for loop.md sentinel resolution. A `dynamic`
+// (self-paced) loop degrades to a no-op re-arm tick ONLY on these; any other
+// (unexpected) error re-throws so a real bug surfaces instead of looping forever.
+const TRANSIENT_FS_CODES: readonly string[] = [
+  'EACCES',
+  'EIO',
+  'EBUSY',
+  'EPERM',
+  'ENOENT',
+];
 
 type DrainedMidTurnMessage =
   | { kind: 'text'; message: string }
@@ -2562,7 +2572,10 @@ export class Session implements SessionContext {
                     `loop.md sentinel resolution failed (mode=${loopMode}, code=${code}) — check .qwen/loop.md permissions/IO`,
                     resolveErr,
                   );
-                  if (loopMode === 'dynamic') {
+                  if (
+                    loopMode === 'dynamic' &&
+                    TRANSIENT_FS_CODES.includes(code)
+                  ) {
                     // A `dynamic` (self-paced) loop is kept alive ONLY by the
                     // model re-arming LoopWakeup at the end of each turn; the
                     // firing wakeup was already consumed, so throwing here (no
@@ -2573,14 +2586,21 @@ export class Session implements SessionContext {
                     // (`cron` re-fires on its own next interval, so it still
                     // throws below.) The captured trust names the SAME candidate
                     // set the probe used; the errno (no absolute path) is noted.
+                    // Only KNOWN-transient codes degrade: an unexpected error
+                    // (TypeError / assertion → code 'unknown') falls through to the
+                    // throw so the real bug surfaces instead of an infinite no-op
+                    // cycle.
                     loopTick = resolver.buildTransientErrorTick(
                       loopMode,
                       trustedAtResolve,
                       code,
                     );
                   } else {
-                    // Re-throw a SANITIZED error: the outer cron catch forwards
-                    // error.message verbatim to the client via emitAgentMessage,
+                    // Reached by `cron` (re-fires on its own next interval) and by
+                    // `dynamic` with an UNEXPECTED (non-transient) error — both
+                    // surface rather than silently degrade. Re-throw a SANITIZED
+                    // error: the outer catch forwards error.message verbatim to the
+                    // client via emitAgentMessage,
                     // so re-throwing the raw fs error would leak that absolute
                     // path. Surface only the candidate labels + errno code via the
                     // shared absentLocations() — reusing the QWEN_HOME-aware home
@@ -2605,7 +2625,9 @@ export class Session implements SessionContext {
                       : loopTick.sourceLabel
                         ? 'reminder'
                         : 'absent'
-                  } source=${loopTick.sourceLabel ?? 'none'}`,
+                  } source=${loopTick.sourceLabel ?? 'none'} transient=${
+                    loopTick.transientError ?? false
+                  }`,
                 );
               }
               // For a loop tick echo a stable, relative label — never the bare
