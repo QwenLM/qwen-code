@@ -4,6 +4,7 @@ import type { ChannelConfig, Envelope } from './types.js';
 import type { AcpBridge } from './AcpBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
+import { BlockStreamer } from './BlockStreamer.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -1252,6 +1253,37 @@ describe('ChannelBase', () => {
       expect(promptText).toBe('[Alice] just chatting');
     });
 
+    it('handles a leading-whitespace slash command (no [sender] tag, parseable)', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      // " /help" (leading space — common from IME / copy-paste) must be handled as
+      // the /help command, not leaked to the agent. isSlashCommand already trims, so
+      // unless parseCommand trims too it suppresses the [sender] tag yet returns null
+      // — sending the command to the shared session unattributed. Closing that gap
+      // means " /help" dispatches locally: help text sent, nothing forwarded.
+      await ch.handleInbound(groupEnv({ senderName: 'Alice', text: ' /help' }));
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('/help');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('still parses /help and namespaced /git:commit after the trim change', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      // Regression guard: trimming parseCommand must not break the no-whitespace
+      // path. /help dispatches locally...
+      await ch.handleInbound(groupEnv({ senderName: 'Alice', text: '/help' }));
+      expect(ch.sent.some((m) => m.text.includes('/help'))).toBe(true);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      // ...and /git:commit (no local handler) is still forwarded verbatim, un-tagged.
+      ch.sent = [];
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/git:commit' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('/git:commit');
+    });
+
     it('does not double-prefix already attributed group messages', async () => {
       const ch = createChannel({ groupPolicy: 'open' });
       await ch.handleInbound(
@@ -1662,6 +1694,65 @@ describe('ChannelBase', () => {
           expect.objectContaining({ text: 'steered response' }),
         ]),
       );
+    });
+
+    it('steer: stops the BlockStreamer so a wedged turn buffered text can not leak via the idle timer after the replacement turn begins', async () => {
+      // A wedged turn left sub-minChars text buffered in its BlockStreamer, sitting
+      // on the idle timer (idleMs < CLEAR_CANCEL_TIMEOUT_MS, so it fires DURING the
+      // steer wind-down). cancelled alone only suppresses NEW chunks, so without
+      // stopStreaming() the idle flush delivers that stale text into the chat after
+      // the steered replacement turn has already started. Mirrors the /clear test.
+      vi.useFakeTimers();
+      try {
+        const ch = createChannel({ dispatchMode: 'steer' });
+        await ch.handleInbound(envelope({ text: 'first' }));
+        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0][0] as string;
+
+        // Real BlockStreamer holding buffered text the idle timer would flush.
+        const idleMs = 1500;
+        expect(idleMs).toBeLessThan(CLEAR_CANCEL_TIMEOUT_MS);
+        const streamer = new BlockStreamer({
+          minChars: 5,
+          maxChars: 1000,
+          idleMs,
+          send: (text) => ch.sendMessage('chat1', text),
+        });
+        // >= minChars and no paragraph boundary → stays buffered, idle timer armed.
+        streamer.push('half-written stale answer');
+        const stopSpy = vi.fn(() => streamer.stop());
+        const maps = ch as unknown as { activePrompts: Map<string, unknown> };
+        maps.activePrompts.set(sid, {
+          cancelled: false,
+          // Wedged: never resolves, so the turn's own finally (which would also
+          // stop the streamer) never runs — only the steer's stopStreaming can.
+          done: new Promise<void>(() => {}),
+          resolve: () => {},
+          stopStreaming: stopSpy,
+        });
+
+        ch.sent = [];
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockClear();
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
+          'steered response',
+        );
+
+        // Steer: must cancel AND stop the streamer, then the bounded wait times out.
+        const p = ch.handleInbound(envelope({ text: 'second' }));
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        await p;
+
+        // Load-bearing: removing active.stopStreaming?.() drops this to 0 calls.
+        expect(stopSpy).toHaveBeenCalledTimes(1);
+        // The buffered stale text must NEVER reach the chat (streamer stopped).
+        expect(
+          ch.sent.some((m) => m.text === 'half-written stale answer'),
+        ).toBe(false);
+        // The replacement turn still ran and delivered.
+        expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('steer: bounded wait lets the next turn progress when active.done is wedged', async () => {

@@ -455,11 +455,16 @@ export abstract class ChannelBase {
    * Returns { command, args } or null if not a slash command.
    */
   private parseCommand(text: string): { command: string; args: string } | null {
-    if (!text.startsWith('/')) return null;
+    // Trim first so a leading-whitespace slash command (common from IME /
+    // copy-paste, e.g. " /help") parses, and so this agrees with isSlashCommand
+    // (which already trims). Otherwise isSlashCommand suppresses the [sender] tag
+    // while parseCommand returns null, leaking the command to the agent unattributed.
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('/')) return null;
     // Handle /command@botname format (Telegram groups). The token allows `-` and
     // `:` so hyphenated and namespaced agent commands (e.g. /compress-fast,
     // /git:commit) still parse as commands rather than being treated as text.
-    const match = text.match(/^\/([a-zA-Z0-9_:-]+)(?:@\S+)?\s*(.*)/s);
+    const match = trimmed.match(/^\/([a-zA-Z0-9_:-]+)(?:@\S+)?\s*(.*)/s);
     if (!match) return null;
     return { command: match[1].toLowerCase(), args: match[2].trim() };
   }
@@ -680,9 +685,24 @@ export abstract class ChannelBase {
         case 'steer': {
           // Cancel the running prompt, then fall through to send a new one.
           active.cancelled = true;
+          // Stop the BlockStreamer too (mirror doClear): cancelled alone only
+          // suppresses NEW chunks — text already buffered can still be flushed by
+          // the idle timer (which fires before the steer wind-down bound) and leak
+          // into the chat after the replacement turn starts unless we stop it.
+          active.stopStreaming?.();
           // Best-effort cancel (fire-and-forget): a wedged child/daemon can leave
           // the cancelSession request pending forever — don't await it.
           void this.bridge.cancelSession(sessionId).catch(() => {});
+          // NOTE (network-bridge limitation): cancelSession is keyed only by
+          // sessionId and the replacement prompt below reuses the SAME sessionId.
+          // The shipping AcpBridge sends cancel + prompt over one in-order stdin
+          // stream and cancel is enqueued HERE, before the bounded wait and the new
+          // prompt, so the child always processes it first — the replacement turn
+          // is safe. A FUTURE network/daemon bridge with cancel latency could
+          // instead process this cancel AFTER the new prompt and cancel the
+          // replacement turn. The proper fix is turn-scoped cancellation (a cancel
+          // token threaded through the Bridge contract); deferred here to avoid an
+          // API-breaking change to every adapter in this phase.
           // Bound the wind-down wait the same way /clear does: a wedged child may
           // never resolve active.done, and an UNBOUNDED await here would pin the
           // session queue forever (steer is the default mode), so race it against
