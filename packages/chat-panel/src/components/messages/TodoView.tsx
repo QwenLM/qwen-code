@@ -1,11 +1,11 @@
 import { useContext, useState, type ReactNode } from 'react';
-import type { TodoItem } from '../../adapters/types';
-import { getTodoStatusIcon, todoStateKey } from '../../utils/todos';
-import type { TodoDetail, TodoEvent } from '../../todos-types';
-import { TodoDetailContext } from '../../context';
-import { formatTimestamp } from '../MessageTimestamp';
-import { formatDuration } from '../../utils/format';
-import { useI18n } from '../../i18n';
+import type { TodoItem } from '../../adapters/types.js';
+import { getTodoStatusIcon, todoStateKey } from '../../utils/todos.js';
+import type { TodoDetail, TodoEvent } from '../../todos-types.js';
+import { TodoDetailContext } from '../../context.js';
+import { formatTimestamp } from '../MessageTimestamp.js';
+import { formatDuration } from '../../utils/format.js';
+import { useI18n } from '../../i18n.js';
 import styles from './TodoView.module.css';
 
 function statusClass(status: TodoItem['status']): string {

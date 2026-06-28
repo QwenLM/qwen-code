@@ -5,7 +5,7 @@
  * panel. Host injects them via `ChatPanelProviders`.
  */
 import { createContext, useContext, type ReactNode } from 'react';
-import type { ACPToolCall } from './adapters/types';
+import type { ACPToolCall } from './adapters/types.js';
 
 export type ToolHeaderKind =
   | 'agent'

@@ -14,20 +14,24 @@ import {
   type ForwardedRef,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
-import type { PermissionRequest } from '../adapters/types';
+import type {
+  Message,
+  ACPToolCall,
+  TurnCollapseHead,
+} from '../adapters/types.js';
+import type { PermissionRequest } from '../adapters/types.js';
 import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
-} from '../adapters/toolClassification';
-import { CompactModeContext } from '../context';
-import { MessageTimestamp } from './MessageTimestamp';
-import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
-import { useChatPanelCustomization } from '../customization';
-import { useI18n } from '../i18n';
-import { MessageItem } from './MessageItem';
-import { useSharedNow } from '../hooks/useSharedNow';
-import { toolContainsCallId } from './messages/toolFormatting';
+} from '../adapters/toolClassification.js';
+import { CompactModeContext } from '../context.js';
+import { MessageTimestamp } from './MessageTimestamp.js';
+import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup.js';
+import { useChatPanelCustomization } from '../customization.js';
+import { useI18n } from '../i18n.js';
+import { MessageItem } from './MessageItem.js';
+import { useSharedNow } from '../hooks/useSharedNow.js';
+import { toolContainsCallId } from './messages/toolFormatting.js';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import styles from './MessageList.module.css';
 

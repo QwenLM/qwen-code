@@ -6,28 +6,28 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
-import type { ACPToolCall } from '../../../adapters/types';
-import { useChatPanelCustomization } from '../../../customization';
-import { useI18n } from '../../../i18n';
+import type { ACPToolCall } from '../../../adapters/types.js';
+import { useChatPanelCustomization } from '../../../customization.js';
+import { useI18n } from '../../../i18n.js';
 // Circular import with ToolGroup (agents render tool rows; agent tool
 // rows render SubAgentPanel). Safe only while both modules dereference
 // each other's exports at render time — never in top-level code.
-import { ToolLine } from '../ToolGroup';
-import { Markdown } from '../../../markdown';
-import { formatTimestamp } from '../../MessageTimestamp';
+import { ToolLine } from '../ToolGroup.js';
+import { Markdown } from '../../../markdown.js';
+import { formatTimestamp } from '../../MessageTimestamp.js';
 import {
   formatDurationMs,
   formatElapsed,
   StatusIcon,
   truncateText,
-} from './toolDisplay';
+} from './toolDisplay.js';
 import {
   getAgentDisplayStatus,
   formatTokenCount,
   getAgentType,
   getAgentDescription,
   localizeToolDisplayName,
-} from '../toolFormatting';
+} from '../toolFormatting.js';
 import chromeStyles from './ToolChrome.module.css';
 import styles from './SubAgentPanel.module.css';
 

@@ -1,6 +1,6 @@
 import { memo } from 'react';
-import { useI18n } from '../../i18n';
-import { Markdown } from '../../markdown';
+import { useI18n } from '../../i18n.js';
+import { Markdown } from '../../markdown.js';
 import styles from './BtwMessage.module.css';
 
 interface BtwMessageProps {

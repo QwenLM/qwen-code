@@ -17,7 +17,7 @@ import type {
   DaemonMessageToolKind,
   DaemonMessageToolCallLocation,
   DaemonMessageTodoItem,
-} from './messageTypes';
+} from './messageTypes.js';
 
 export type Message = DaemonMessage;
 export type ACPToolCall = DaemonMessageToolCall;

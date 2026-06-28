@@ -1,6 +1,6 @@
 import { memo, useContext } from 'react';
-import { CompactModeContext } from '../../context';
-import { useI18n } from '../../i18n';
+import { CompactModeContext } from '../../context.js';
+import { useI18n } from '../../i18n.js';
 import styles from './UserShellMessage.module.css';
 
 interface UserShellMessageProps {

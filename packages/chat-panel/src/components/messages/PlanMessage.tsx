@@ -1,8 +1,8 @@
 import { memo, useContext, useState } from 'react';
-import type { TodoItem } from '../../adapters/types';
-import { TodoTimelineContext } from '../../context';
-import { TodoEventSummary, TodoFullList } from './TodoView';
-import { useI18n } from '../../i18n';
+import type { TodoItem } from '../../adapters/types.js';
+import { TodoTimelineContext } from '../../context.js';
+import { TodoEventSummary, TodoFullList } from './TodoView.js';
+import { useI18n } from '../../i18n.js';
 import styles from './PlanMessage.module.css';
 
 interface PlanMessageProps {

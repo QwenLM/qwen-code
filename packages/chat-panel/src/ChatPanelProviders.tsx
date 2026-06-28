@@ -8,14 +8,14 @@ import {
   StreamingStateContext,
   type IsAgentTool,
   type StreamingRawInput,
-} from './context';
-import type { TodoSnapshotDiff, TodoDetail } from './todos-types';
-import { I18nContext, type ChatPanelI18n } from './i18n';
-import { MarkdownContext, type MarkdownSeam } from './markdown';
+} from './context.js';
+import type { TodoSnapshotDiff, TodoDetail } from './todos-types.js';
+import { I18nContext, type ChatPanelI18n } from './i18n.js';
+import { MarkdownContext, type MarkdownSeam } from './markdown.js';
 import {
   ChatPanelCustomizationContext,
   type ChatPanelCustomization,
-} from './customization';
+} from './customization.js';
 
 /**
  * Single injection point for everything the chat panel reads from context.

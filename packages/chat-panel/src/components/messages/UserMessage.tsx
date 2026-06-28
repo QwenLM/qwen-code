@@ -6,8 +6,8 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useMarkdown } from '../../markdown';
-import { useI18n } from '../../i18n';
+import { useMarkdown } from '../../markdown.js';
+import { useI18n } from '../../i18n.js';
 import styles from './UserMessage.module.css';
 
 interface UserMessageImage {

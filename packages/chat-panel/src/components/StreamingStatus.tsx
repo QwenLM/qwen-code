@@ -2,11 +2,11 @@ import { useState, useEffect, useRef, useContext } from 'react';
 import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
-} from '../constants/loadingPhrases';
-import { useI18n } from '../i18n';
-import { StreamingStateContext } from '../context';
-import { useStreamingLoadingMetrics } from '../useStreamingLoadingMetrics';
-import { formatTokenCount } from '../utils/formatTokenCount';
+} from '../constants/loadingPhrases.js';
+import { useI18n } from '../i18n.js';
+import { StreamingStateContext } from '../context.js';
+import { useStreamingLoadingMetrics } from '../useStreamingLoadingMetrics.js';
+import { formatTokenCount } from '../utils/formatTokenCount.js';
 import styles from './StreamingStatus.module.css';
 
 interface StreamingStatusProps {

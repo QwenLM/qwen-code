@@ -8,7 +8,7 @@ export {
   formatToolDisplayName,
   localizeToolDisplayName,
   truncateText,
-} from '../toolFormatting';
+} from '../toolFormatting.js';
 
 export function StatusIcon({ status }: { status: string }) {
   switch (status) {

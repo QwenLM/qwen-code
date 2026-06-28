@@ -1,24 +1,24 @@
 import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { DaemonSettingDescriptor } from '../../setting-descriptor';
+import type { DaemonSettingDescriptor } from '../../setting-descriptor.js';
 import type {
   ACPToolCall,
   PermissionRequest,
   TodoItem,
-} from '../../adapters/types';
-import { isSubAgentToolCall } from '../../adapters/toolClassification';
+} from '../../adapters/types.js';
+import { isSubAgentToolCall } from '../../adapters/toolClassification.js';
 // Circular import with SubAgentPanel (its SubToolLine renders ToolLine
 // from this module). Safe only while both modules dereference each
 // other's exports at render time — never in top-level code.
-import { SubAgentPanel } from './tools/SubAgentPanel';
-import { DiffView } from './tools/DiffView';
-import { ToolApproval } from './ToolApproval';
-import { parseAnsi, hasAnsi } from '../../utils/ansi';
+import { SubAgentPanel } from './tools/SubAgentPanel.js';
+import { DiffView } from './tools/DiffView.js';
+import { ToolApproval } from './ToolApproval.js';
+import { parseAnsi, hasAnsi } from '../../utils/ansi.js';
 import {
   extractTodosFromToolCall,
   isTodoWriteToolName,
-} from '../../utils/todos';
-import { useSharedNow } from '../../hooks/useSharedNow';
-import { TodoEventSummary, TodoFullList } from './TodoView';
+} from '../../utils/todos.js';
+import { useSharedNow } from '../../hooks/useSharedNow.js';
+import { TodoEventSummary, TodoFullList } from './TodoView.js';
 import {
   formatDurationMs,
   formatElapsed,
@@ -27,7 +27,7 @@ import {
   StatusIcon,
   truncateText,
   chromeStyles as styles,
-} from './tools/toolDisplay';
+} from './tools/toolDisplay.js';
 import {
   extractText,
   formatTokenCount,
@@ -42,14 +42,14 @@ import {
   isAskUserQuestionToolName,
   isShellToolName,
   toolContainsCallId,
-} from './toolFormatting';
-import { useI18n } from '../../i18n';
-import { CompactModeContext, TodoTimelineContext } from '../../context';
+} from './toolFormatting.js';
+import { useI18n } from '../../i18n.js';
+import { CompactModeContext, TodoTimelineContext } from '../../context.js';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
   useChatPanelCustomization,
-} from '../../customization';
+} from '../../customization.js';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];

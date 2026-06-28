@@ -6,10 +6,10 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Markdown } from '../../markdown';
-import { CompactModeContext } from '../../context';
-import { useI18n } from '../../i18n';
-import { formatTimestamp } from '../MessageTimestamp';
+import { Markdown } from '../../markdown.js';
+import { CompactModeContext } from '../../context.js';
+import { useI18n } from '../../i18n.js';
+import { formatTimestamp } from '../MessageTimestamp.js';
 import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {

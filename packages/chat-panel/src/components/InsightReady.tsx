@@ -1,5 +1,5 @@
 import styles from './InsightProgress.module.css';
-import { useI18n } from '../i18n';
+import { useI18n } from '../i18n.js';
 
 interface InsightReadyProps {
   path: string;

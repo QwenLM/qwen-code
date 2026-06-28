@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
-import { useI18n } from '../../../i18n';
+import type {
+  ACPToolCall,
+  PermissionRequest,
+} from '../../../adapters/types.js';
+import { useI18n } from '../../../i18n.js';
 import {
   formatElapsed,
   formatLiveElapsed,
   StatusIcon,
   truncateText,
-} from './toolDisplay';
+} from './toolDisplay.js';
 import {
   getTaskExecutionRecord,
   getAgentType,
@@ -16,9 +19,9 @@ import {
   getAgentCancellationReason,
   getAgentDisplayStatus,
   toolContainsCallId,
-} from '../toolFormatting';
-import { SubAgentPanel } from './SubAgentPanel';
-import { ToolApproval } from '../ToolApproval';
+} from '../toolFormatting.js';
+import { SubAgentPanel } from './SubAgentPanel.js';
+import { ToolApproval } from '../ToolApproval.js';
 import styles from './ParallelAgentsGroup.module.css';
 
 interface ParallelAgentsGroupProps {

@@ -8,7 +8,7 @@
  * placeholders pending the real types.
  */
 import { createContext } from 'react';
-import type { TodoSnapshotDiff, TodoDetail } from './todos-types';
+import type { TodoSnapshotDiff, TodoDetail } from './todos-types.js';
 
 // ── Streaming — replaces StreamingStatus + useStreamingLoadingMetrics daemon hooks.
 // Hosts inject only the raw inputs; the panel keeps the interpolation animation.

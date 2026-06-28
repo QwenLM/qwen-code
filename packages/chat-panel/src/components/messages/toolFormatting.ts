@@ -1,4 +1,4 @@
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall } from '../../adapters/types.js';
 
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',

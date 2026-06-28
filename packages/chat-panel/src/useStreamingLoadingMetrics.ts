@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { StreamingRawInput } from './context';
+import type { StreamingRawInput } from './context.js';
 
 export interface LoadingMetrics {
   estimatedOutputTokens: number;

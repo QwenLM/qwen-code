@@ -1,10 +1,10 @@
-import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
+import type { ACPToolCall, Message, TodoItem } from '../adapters/types.js';
 import type {
   TodoEvent,
   TodoSnapshotDiff,
   TodoResources,
   TodoDetail,
-} from '../todos-types';
+} from '../todos-types.js';
 
 /**
  * The todo tool is registered as `todo_write` on the wire, but older paths and

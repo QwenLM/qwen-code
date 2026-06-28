@@ -4,17 +4,20 @@ import type {
   Message,
   PermissionRequest,
   TodoItem,
-} from '../adapters/types';
-import { MessageTimestamp } from './MessageTimestamp';
-import { InsightProgress } from './InsightProgress';
-import { InsightReady } from './InsightReady';
-import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
-import { BtwMessage } from './messages/BtwMessage';
-import { UserShellMessage } from './messages/UserShellMessage';
-import { PlanMessage } from './messages/PlanMessage';
-import { ToolGroup } from './messages/ToolGroup';
-import { SystemMessage } from './messages/SystemMessage';
+} from '../adapters/types.js';
+import { MessageTimestamp } from './MessageTimestamp.js';
+import { InsightProgress } from './InsightProgress.js';
+import { InsightReady } from './InsightReady.js';
+import { UserMessage } from './messages/UserMessage.js';
+import {
+  AssistantMessage,
+  ThinkingMessage,
+} from './messages/AssistantMessage.js';
+import { BtwMessage } from './messages/BtwMessage.js';
+import { UserShellMessage } from './messages/UserShellMessage.js';
+import { PlanMessage } from './messages/PlanMessage.js';
+import { ToolGroup } from './messages/ToolGroup.js';
+import { SystemMessage } from './messages/SystemMessage.js';
 
 interface MessageItemProps {
   message: Message;

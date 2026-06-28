@@ -1,7 +1,7 @@
 import { memo } from 'react';
-import { useI18n } from '../../i18n';
-import { useChatPanelCustomization } from '../../customization';
-import { Markdown } from '../../markdown';
+import { useI18n } from '../../i18n.js';
+import { useChatPanelCustomization } from '../../customization.js';
+import { Markdown } from '../../markdown.js';
 import styles from './SystemMessage.module.css';
 
 interface SystemMessageProps {

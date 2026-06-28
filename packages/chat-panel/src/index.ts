@@ -5,25 +5,25 @@
  * Scaffold (WS1 in progress). The `Message[]` contract, `ChatPanel`, message
  * renderers, `ChatEditor`, and the render seam land as their workstreams complete.
  */
-export * from './todos-types';
-export * from './setting-descriptor';
-export * from './context';
-export * from './i18n';
-export * from './markdown';
-export * from './customization';
-export * from './adapters/messageTypes';
-export * from './adapters/types';
-export * from './adapters/toolClassification';
-export * from './ChatPanelProviders';
-export * from './useStreamingLoadingMetrics';
+export * from './todos-types.js';
+export * from './setting-descriptor.js';
+export * from './context.js';
+export * from './i18n.js';
+export * from './markdown.js';
+export * from './customization.js';
+export * from './adapters/messageTypes.js';
+export * from './adapters/types.js';
+export * from './adapters/toolClassification.js';
+export * from './ChatPanelProviders.js';
+export * from './useStreamingLoadingMetrics.js';
 
 // Shared utilities the carved components depend on.
-export * from './utils/format';
-export * from './utils/formatTokenCount';
-export * from './utils/todos';
-export * from './utils/dom';
-export * from './hooks/useSharedNow';
-export * from './constants/loadingPhrases';
+export * from './utils/format.js';
+export * from './utils/formatTokenCount.js';
+export * from './utils/todos.js';
+export * from './utils/dom.js';
+export * from './hooks/useSharedNow.js';
+export * from './constants/loadingPhrases.js';
 // Tool formatting — `formatTokenCount` is intentionally omitted (it names a
 // different function than ./utils/formatTokenCount; barrelling both clashes).
 export {
@@ -43,27 +43,27 @@ export {
   getAgentType,
   getAgentDescription,
   getAgentCurrentToolHint,
-} from './components/messages/toolFormatting';
+} from './components/messages/toolFormatting.js';
 
 // Conversation-flow components (carved in WS1, leaf-first).
-export * from './components/MessageTimestamp';
-export * from './components/InsightProgress';
-export * from './components/InsightReady';
-export * from './components/StreamingStatus';
-export * from './components/messages/UserMessage';
-export * from './components/messages/AssistantMessage';
-export * from './components/messages/BtwMessage';
-export * from './components/messages/UserShellMessage';
-export * from './components/messages/TodoView';
-export * from './components/messages/PlanMessage';
-export * from './components/messages/ToolApproval';
-export * from './components/messages/AskUserQuestion';
-export * from './components/messages/ToolGroup';
-export * from './components/messages/SystemMessage';
-export * from './components/messages/tools/ParallelAgentsGroup';
-export * from './components/messages/tools/SubAgentPanel';
-export * from './components/MessageItem';
-export * from './components/MessageList';
+export * from './components/MessageTimestamp.js';
+export * from './components/InsightProgress.js';
+export * from './components/InsightReady.js';
+export * from './components/StreamingStatus.js';
+export * from './components/messages/UserMessage.js';
+export * from './components/messages/AssistantMessage.js';
+export * from './components/messages/BtwMessage.js';
+export * from './components/messages/UserShellMessage.js';
+export * from './components/messages/TodoView.js';
+export * from './components/messages/PlanMessage.js';
+export * from './components/messages/ToolApproval.js';
+export * from './components/messages/AskUserQuestion.js';
+export * from './components/messages/ToolGroup.js';
+export * from './components/messages/SystemMessage.js';
+export * from './components/messages/tools/ParallelAgentsGroup.js';
+export * from './components/messages/tools/SubAgentPanel.js';
+export * from './components/MessageItem.js';
+export * from './components/MessageList.js';
 
 // Composed panel (conversation flow + streaming indicator + composer slot).
-export * from './ChatPanel';
+export * from './ChatPanel.js';

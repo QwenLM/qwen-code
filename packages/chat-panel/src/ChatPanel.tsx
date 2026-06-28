@@ -18,9 +18,12 @@ import {
 import {
   ChatPanelProviders,
   type ChatPanelProvidersProps,
-} from './ChatPanelProviders';
-import { MessageList, type MessageListHandle } from './components/MessageList';
-import { StreamingStatus } from './components/StreamingStatus';
+} from './ChatPanelProviders.js';
+import {
+  MessageList,
+  type MessageListHandle,
+} from './components/MessageList.js';
+import { StreamingStatus } from './components/StreamingStatus.js';
 
 type MessageListProps = Omit<ComponentProps<typeof MessageList>, 'ref'>;
 type ProviderSeams = Omit<ChatPanelProvidersProps, 'children'>;

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { PermissionRequest } from '../../adapters/types';
-import { useI18n } from '../../i18n';
-import { localizeToolDisplayName } from './toolFormatting';
+import type { PermissionRequest } from '../../adapters/types.js';
+import { useI18n } from '../../i18n.js';
+import { localizeToolDisplayName } from './toolFormatting.js';
 import styles from './AskUserQuestion.module.css';
 
 interface Question {

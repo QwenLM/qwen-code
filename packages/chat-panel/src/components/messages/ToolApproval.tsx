@@ -6,10 +6,10 @@ import {
   useMemo,
   useContext,
 } from 'react';
-import { AgentToolContext } from '../../context';
-import type { PermissionRequest } from '../../adapters/types';
-import { useI18n } from '../../i18n';
-import { isEditableTarget } from '../../utils/dom';
+import { AgentToolContext } from '../../context.js';
+import type { PermissionRequest } from '../../adapters/types.js';
+import { useI18n } from '../../i18n.js';
+import { isEditableTarget } from '../../utils/dom.js';
 import styles from './ToolApproval.module.css';
 
 interface ToolApprovalProps {
