@@ -39,6 +39,29 @@
  (daemon)    (ACP)            (ACP + 双向同步)
 ```
 
+## 包里现在有啥（WS1 之后）
+
+`packages/chat-panel/src/`：
+
+- **统一契约** `adapters/`：`Message` 判别联合（11 种）+ `ToolCall` / `TodoItem` / `PermissionRequest`。大概长这样：
+
+  ```ts
+  type Message =
+    | { id; role: 'user'; content; images? }
+    | { id; role: 'assistant'; content; isStreaming?; usage? }
+    | { id; role: 'tool_group'; tools: ToolCall[] }
+    | { id; role: 'plan'; todos: TodoItem[] }
+    | { id; role: 'system'; content; variant: 'info' | 'error' | 'warning' }
+    | ...; // user_shell / thinking / btw / insight_* 共 11 种
+  ```
+
+- **三个注入口（seam）**：`i18n`（翻译函数 `t`）/ `markdown`（渲染器 + 图片白名单）/ `customization`（工具头徽章、紧凑思考、整轮折叠、以及 `renderSystemMessage`——`/stats` `/mcp` 这类面板留宿主，由它注入）。全部经一个 `ChatPanelProviders` 一次性注入。
+- **组件**：`MessageList`（顶层列表）、`MessageItem`（按 role 分发）、11 个消息渲染器、`ToolGroup` 子树（diff / 子 agent / 并行 agent）、`StreamingStatus`（流式 + 计时）。
+- **`<ChatPanel>`**：把上面这些 + `composerSlot`（宿主自己的输入框）组装好的成品。
+- **构建**：`bun run build` → `dist/index.js`（CSS 自动注入，不用单独引样式）+ `.d.ts`；**包内零 daemon 依赖**（lint 卡死）。
+
+宿主只做两件事：把自己的数据映射成 `Message[]`、把自己的 `t` / markdown 渲染器注进去。
+
 ## 路线图（一步步）
 
 每步都在 feature flag 后面合入，能随时回滚；每步都要现有测试全绿才算过。
@@ -67,7 +90,17 @@
 
 - WS0、WS1 都已落地、全绿（web-shell 类型检查 0 错、测试 466/471，5 个是环境缺构建产物的已知项）。
 - 包能独立构建出 `dist`（带自注入 CSS），且**完全不依赖 daemon**。
-- **下一步**：WS2——让 web-shell 自己改用 `<ChatPanel>` 这个统一入口。
+- 已提交（分支 `feat/chat-panel`，尚未 push）：`33cd35d9` WS1 搬家、`5124e6de` 本路线图。
+
+### 下一步 WS2 具体要做啥
+
+现在 web-shell 只是"从包里 import 这些组件"，还没换成统一入口。WS2 就是把 `App.tsx` 里**各自摆放的** `MessageList` + `StreamingStatus` + `ChatEditor`，换成**一个** `<ChatPanel>`：
+
+1. `App.tsx` 渲染 `<ChatPanel messages={...} composerSlot={<ChatEditor/>} .../>`，把现有的 daemon 数据继续喂进 `messages`、把 seam 值注进去。
+2. session / 导航 / shell 这些不动（它们本来就不归面板管）。
+3. 验收：跑通现有全部测试 + 抽包前后**像素对比**干净，确认没画歪。
+
+这一步把"web-shell 自己也走统一面板"坐实，之后 VSCode / 桌面照着同一个 `<ChatPanel>` 接就行。
 
 ## 想看更细的
 
