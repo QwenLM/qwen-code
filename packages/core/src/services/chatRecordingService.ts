@@ -1230,10 +1230,6 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.turnParentUuids = [];
-    let prevUuid: string | null =
-      this.config.getResumedSessionData()?.lastCompletedUuid !== undefined
-        ? null
-        : this.lastRecordUuid;
 
     for (let i = 0; i < messages.length; i++) {
       const record = messages[i];
@@ -1243,9 +1239,10 @@ export class ChatRecordingService {
         record.subtype !== 'cron' &&
         record.subtype !== 'mid_turn_user_message'
       ) {
-        this.turnParentUuids.push(prevUuid);
+        // Reconstructed histories can start mid-chain; the persisted edge is
+        // the source of truth, not the previous item in this sliced list.
+        this.turnParentUuids.push(record.parentUuid ?? null);
       }
-      prevUuid = record.uuid;
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
     if (messages.length > 0) {

@@ -38,7 +38,6 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import {
   tokenLimit,
-  CAPPED_DEFAULT_MAX_TOKENS,
   hasExplicitOutputLimit,
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
@@ -594,7 +593,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ? Math.min(userMaxTokens, modelLimit)
         : userMaxTokens;
     } else {
-      // No explicit user config — check env var, then use capped default.
+      // No explicit user config — check env var, then use the model limit.
       const envMaxTokens = parsePositiveIntegerEnvValue(
         process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
       );
@@ -603,7 +602,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        maxTokens = Math.min(modelLimit, CAPPED_DEFAULT_MAX_TOKENS);
+        maxTokens = modelLimit;
       }
     }
 

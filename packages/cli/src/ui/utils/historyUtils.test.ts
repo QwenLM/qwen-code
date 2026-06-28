@@ -20,13 +20,14 @@ const mk = (
 ): HistoryItem => ({ id, ...(overrides as object) }) as HistoryItem;
 
 describe('isSyntheticHistoryItem', () => {
-  it('treats info/error/warning/success/retry/notification/summary/thought as synthetic', () => {
+  it('treats info/error/warning/success/retry/vision_notice/notification/summary/thought as synthetic', () => {
     for (const type of [
       'info',
       'error',
       'warning',
       'success',
       'retry_countdown',
+      'vision_notice',
       'notification',
       'tool_use_summary',
       'gemini_thought',

@@ -271,6 +271,10 @@ export type {
   DaemonWorkspaceMcpToolStatus,
   /** All tools from a single MCP server. */
   DaemonWorkspaceMcpToolsStatus,
+  /** Single MCP resource: uri, name, title, mime type, size, description. */
+  DaemonWorkspaceMcpResourceStatus,
+  /** All resources from a single MCP server. */
+  DaemonWorkspaceMcpResourcesStatus,
   /** Memory file entry: path, scope, byte size. */
   DaemonWorkspaceMemoryFile,
   /** Skill status: name, description, level, model-invocable flag. */

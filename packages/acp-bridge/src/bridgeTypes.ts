@@ -26,6 +26,7 @@ import type {
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
+  ServeWorkspaceMcpResourcesStatus,
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
@@ -121,6 +122,17 @@ export interface BridgeForkAgentResult {
   sessionId: string;
   description: string;
   launched: boolean;
+}
+
+export interface ChangeSessionCwdRequest {
+  path: string;
+}
+
+export interface ChangeSessionCwdResult {
+  sessionId: string;
+  previousCwd: string;
+  newCwd: string;
+  warnings: string[];
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
@@ -302,6 +314,21 @@ export interface AcpSessionBridge {
   ): Promise<BridgeBranchedSession>;
 
   /**
+   * Change the working directory of a live session. The session must be
+   * idle (no active prompt). Chains onto `entry.promptQueue` and updates
+   * the tail to prevent concurrent mutations.
+   *
+   * Throws `CdWhilePromptActiveError` when a prompt is running,
+   * `SessionNotFoundError` for unknown ids, and `InvalidClientIdError`
+   * when the caller's client id is not bound to the session.
+   */
+  changeSessionCwd(
+    sessionId: string,
+    req: ChangeSessionCwdRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<ChangeSessionCwdResult>;
+
+  /**
    * Forward a prompt to the agent. Concurrent prompts against the same
    * session FIFO-serialize through a per-session queue.
    *
@@ -456,6 +483,16 @@ export interface AcpSessionBridge {
   getWorkspaceMcpToolsStatus(
     serverName: string,
   ): Promise<ServeWorkspaceMcpToolsStatus>;
+
+  /**
+   * Read discovered MCP resources (`resources/list`) for one server from
+   * the live ACP registry. Drill-down companion to
+   * `getWorkspaceMcpToolsStatus`; the per-server `resourceCount` rides
+   * the base `/workspace/mcp` status.
+   */
+  getWorkspaceMcpResourcesStatus(
+    serverName: string,
+  ): Promise<ServeWorkspaceMcpResourcesStatus>;
 
   /**
    * Read the live built-in tool registry for the bound workspace.

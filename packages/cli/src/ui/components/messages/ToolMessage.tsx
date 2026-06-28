@@ -802,10 +802,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
   }, [emphasis]);
   return (
     <Box flexGrow={1}>
-      <Text
-        wrap="truncate-end"
-        strikethrough={status === ToolCallStatus.Canceled}
-      >
+      <Text wrap="wrap" strikethrough={status === ToolCallStatus.Canceled}>
         <Text color={nameColor} bold>
           {localizeToolDisplayName(name)}
         </Text>{' '}

@@ -1012,11 +1012,13 @@ function ColumnFilterMenu({
 interface EnhancedMarkdownTableProps {
   children?: ReactNode;
   fallback?: ReactNode;
+  toolbarExtra?: ReactNode;
 }
 
 export function EnhancedMarkdownTable({
   children,
   fallback,
+  toolbarExtra,
 }: EnhancedMarkdownTableProps) {
   const { t } = useI18n();
   const table = useMemo(
@@ -1036,10 +1038,16 @@ export function EnhancedMarkdownTable({
     return <>{fallback ?? <table>{children}</table>}</>;
   }
 
-  return <InteractiveMarkdownTable table={table} />;
+  return <InteractiveMarkdownTable table={table} toolbarExtra={toolbarExtra} />;
 }
 
-function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
+function InteractiveMarkdownTable({
+  table,
+  toolbarExtra,
+}: {
+  table: ParsedTable;
+  toolbarExtra?: ReactNode;
+}) {
   const { t } = useI18n();
   const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
@@ -1053,7 +1061,18 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   );
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [copiedVisible, setCopiedVisible] = useState(false);
+  const [copiedSelection, setCopiedSelection] = useState(false);
   const draggingRef = useRef(false);
+  const copiedVisibleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const copiedSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const copiedVisibleGenRef = useRef(0);
+  const copiedSelectionGenRef = useRef(0);
+  const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1086,6 +1105,24 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     setOpenFilterMenu(null);
     focusFilterTrigger();
   }, [focusFilterTrigger]);
+
+  const resetCopiedVisible = useCallback(() => {
+    copiedVisibleGenRef.current += 1;
+    if (copiedVisibleTimerRef.current) {
+      clearTimeout(copiedVisibleTimerRef.current);
+      copiedVisibleTimerRef.current = null;
+    }
+    setCopiedVisible(false);
+  }, []);
+
+  const resetCopiedSelection = useCallback(() => {
+    copiedSelectionGenRef.current += 1;
+    if (copiedSelectionTimerRef.current) {
+      clearTimeout(copiedSelectionTimerRef.current);
+      copiedSelectionTimerRef.current = null;
+    }
+    setCopiedSelection(false);
+  }, []);
 
   const flushPendingSelection = useCallback(() => {
     if (selectionFrameRef.current) {
@@ -1141,9 +1178,32 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     setOpenFilterMenu(null);
     setHiddenColumns(new Set());
     setDetailRowKey(null);
+    resetCopiedVisible();
+    resetCopiedSelection();
     draggingRef.current = false;
     setIsDragging(false);
-  }, [tableStructureKey]);
+  }, [resetCopiedSelection, resetCopiedVisible, tableStructureKey]);
+
+  useEffect(() => {
+    resetCopiedSelection();
+  }, [resetCopiedSelection, selection]);
+
+  useEffect(() => {
+    // StrictMode simulates an unmount/remount without re-running useRef's
+    // initializer, so restore this before clipboard callbacks can run.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copiedVisibleTimerRef.current) {
+        clearTimeout(copiedVisibleTimerRef.current);
+        copiedVisibleTimerRef.current = null;
+      }
+      if (copiedSelectionTimerRef.current) {
+        clearTimeout(copiedSelectionTimerRef.current);
+        copiedSelectionTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!openFilterMenu) return;
@@ -1238,6 +1298,10 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
         .filter((index) => !hiddenColumns.has(index)),
     [hiddenColumns, table.headers],
   );
+
+  useEffect(() => {
+    resetCopiedVisible();
+  }, [resetCopiedVisible, visibleColumnIndexes, visibleRows]);
 
   useEffect(() => {
     if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
@@ -1449,8 +1513,21 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   const copySelection = () => {
     const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
     if (!text || !navigator.clipboard) return;
+    const copyGeneration = copiedSelectionGenRef.current;
     void navigator.clipboard
       .writeText(text)
+      .then(() => {
+        if (!mountedRef.current) return;
+        if (copiedSelectionGenRef.current !== copyGeneration) return;
+        if (copiedSelectionTimerRef.current) {
+          clearTimeout(copiedSelectionTimerRef.current);
+        }
+        setCopiedSelection(true);
+        copiedSelectionTimerRef.current = setTimeout(
+          () => setCopiedSelection(false),
+          2000,
+        );
+      })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
       );
@@ -1463,8 +1540,21 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       visibleColumnIndexes,
     );
     if (!text || !navigator.clipboard) return;
+    const copyGeneration = copiedVisibleGenRef.current;
     void navigator.clipboard
       .writeText(text)
+      .then(() => {
+        if (!mountedRef.current) return;
+        if (copiedVisibleGenRef.current !== copyGeneration) return;
+        if (copiedVisibleTimerRef.current) {
+          clearTimeout(copiedVisibleTimerRef.current);
+        }
+        setCopiedVisible(true);
+        copiedVisibleTimerRef.current = setTimeout(
+          () => setCopiedVisible(false),
+          2000,
+        );
+      })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
       );
@@ -1511,7 +1601,14 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           type="button"
           onClick={copyVisibleTable}
         >
-          {t('markdownTable.copyVisible')}
+          {copiedVisible ? (
+            <>
+              <span className={styles.copyCheck}>✓</span>
+              {t('code.copied')}
+            </>
+          ) : (
+            t('markdownTable.copyVisible')
+          )}
         </button>
         {hiddenColumns.size > 0 && (
           <button
@@ -1539,10 +1636,18 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
               type="button"
               onClick={copySelection}
             >
-              {t('markdownTable.copyTsv')}
+              {copiedSelection ? (
+                <>
+                  <span className={styles.copyCheck}>✓</span>
+                  {t('code.copied')}
+                </>
+              ) : (
+                t('markdownTable.copyTsv')
+              )}
             </button>
           </>
         )}
+        {toolbarExtra}
       </div>
       <div
         ref={containerRef}
