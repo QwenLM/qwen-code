@@ -39,7 +39,7 @@ on:
       timeout_minutes:
         description: 'Review timeout in minutes'
         required: false
-        default: '90'
+        default: '120'
         type: 'number'
       dry_run:
         description: 'Run /resolve without pushing'
@@ -319,7 +319,7 @@ jobs:
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
-    timeout-minutes: 90
+    timeout-minutes: 120
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     permissions:
       contents: 'read'
@@ -397,7 +397,7 @@ jobs:
             exit 1
           fi
 
-          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '90' }}"
+          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '120' }}"
 
           {
             echo "should_run=true"
@@ -527,8 +527,8 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          if [ "$TIMEOUT_MINUTES" -gt 90 ]; then
-            fail "timeout_minutes must not exceed the 90 minute job timeout"
+          if [ "$TIMEOUT_MINUTES" -gt 120 ]; then
+            fail "timeout_minutes must not exceed the 120 minute job timeout"
           fi
 
           if ! PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')"; then
@@ -640,7 +640,7 @@ jobs:
     # determine command for sandbox"). Hosted runners ship docker and are
     # ephemeral, which suits the sandboxed conflict-resolution job.
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 90
+    timeout-minutes: 120
     concurrency:
       group: 'qwen-resolve-${{ github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: false
