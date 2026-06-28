@@ -6,6 +6,7 @@
 
 import {
   AuthType,
+  type Config,
   InputFormat,
   isDebugLoggingDegraded,
   isBareMode,
@@ -612,47 +613,7 @@ export async function main() {
       registerCleanup(disposeMcpHotReload);
     }
 
-    if (config.isLspEnabled() && config.getLspClient()?.reinitialize) {
-      const lspConfigWatcher = new LspConfigWatcher(config.getProjectRoot());
-      debugLogger.info(
-        `Registering LSP config hot reload watcher for ${config.getProjectRoot()}`,
-      );
-      lspConfigWatcher.startWatching(async (event) => {
-        debugLogger.info(
-          `Reloading LSP server settings: changeType=${event.changeType}, path=${event.path}`,
-        );
-        try {
-          const result = await config.reinitializeLsp();
-          if (result) {
-            debugLogger.info(
-              `Reloaded LSP server settings: added=${formatRuntimeReloadNames(
-                result.reconcile.added,
-              )}, removed=${formatRuntimeReloadNames(
-                result.reconcile.removed,
-              )}, restarted=${formatRuntimeReloadNames(
-                result.reconcile.restarted,
-              )}, unchanged=${formatRuntimeReloadNames(
-                result.reconcile.unchanged,
-              )}, skipped=${formatRuntimeReloadNames(
-                result.skipped.map((server) => server.name),
-              )}`,
-            );
-          } else {
-            debugLogger.info(
-              'Skipped LSP server settings reload because LSP is disabled or no client is available',
-            );
-          }
-          appEvents.emit(AppEvent.LspStatusChanged);
-        } catch (error) {
-          debugLogger.warn('Failed to reload LSP server settings:', error);
-          appEvents.emit(
-            AppEvent.LogError,
-            'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.',
-          );
-        }
-      });
-      registerCleanup(() => lspConfigWatcher.stopWatching());
-    }
+    registerLspHotReload(config, registerCleanup);
 
     // Phase D-1: persist the WorktreeSession sidecar so Phase C's restore
     // machinery on a subsequent `--resume` picks the worktree back up, and
@@ -1091,6 +1052,64 @@ export async function main() {
 
 export function createNonInteractivePromptId(sessionId: string): string {
   return `${sessionId}########0`;
+}
+
+/**
+ * Watches `.lsp.json` for changes and reconciles running LSP servers
+ * (add / remove / restart) without requiring a session restart.
+ *
+ * Silently no-ops when LSP is disabled or the active client does not
+ * support runtime reinitialization.
+ *
+ * Emits {@link AppEvent.LspStatusChanged} after every successful reload
+ * so the UI can reflect the new server state.
+ */
+function registerLspHotReload(
+  config: Config,
+  registerCleanup: (fn: () => void) => void,
+): void {
+  if (!config.isLspEnabled() || !config.getLspClient()?.reinitialize) {
+    return;
+  }
+  const lspConfigWatcher = new LspConfigWatcher(config.getProjectRoot());
+  debugLogger.info(
+    `Registering LSP config hot reload watcher for ${config.getProjectRoot()}`,
+  );
+  lspConfigWatcher.startWatching(async (event) => {
+    debugLogger.info(
+      `Reloading LSP server settings: changeType=${event.changeType}, path=${event.path}`,
+    );
+    try {
+      const result = await config.reinitializeLsp();
+      if (result) {
+        debugLogger.info(
+          `Reloaded LSP server settings: added=${formatRuntimeReloadNames(
+            result.reconcile.added,
+          )}, removed=${formatRuntimeReloadNames(
+            result.reconcile.removed,
+          )}, restarted=${formatRuntimeReloadNames(
+            result.reconcile.restarted,
+          )}, unchanged=${formatRuntimeReloadNames(
+            result.reconcile.unchanged,
+          )}, skipped=${formatRuntimeReloadNames(
+            result.skipped.map((server) => server.name),
+          )}`,
+        );
+      } else {
+        debugLogger.info(
+          'Skipped LSP server settings reload because LSP is disabled or no client is available',
+        );
+      }
+      appEvents.emit(AppEvent.LspStatusChanged);
+    } catch (error) {
+      debugLogger.warn('Failed to reload LSP server settings:', error);
+      appEvents.emit(
+        AppEvent.LogError,
+        'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.',
+      );
+    }
+  });
+  registerCleanup(() => lspConfigWatcher.stopWatching());
 }
 
 function formatRuntimeReloadNames(names: readonly string[]): string {
