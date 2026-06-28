@@ -68,7 +68,9 @@ export interface CdpReleaseFrame {
 
 /** Any outbound frame this link pushes to the extension socket. */
 export type CdpOutboundFrame =
-  CdpCommandFrame | CdpAttachFrame | CdpReleaseFrame;
+  | CdpCommandFrame
+  | CdpAttachFrame
+  | CdpReleaseFrame;
 
 /** A `cdp_result` frame the extension sends back for a `cdp_command`. */
 export interface CdpResultFrame {
@@ -102,7 +104,11 @@ export interface CdpDetachFrame {
 }
 
 type CdpInboundFrame =
-  CdpResultFrame | CdpEventFrame | CdpAttachedFrame | CdpDetachFrame;
+  | CdpResultFrame
+  | CdpEventFrame
+  | CdpAttachedFrame
+  | CdpDetachFrame;
+type CdpInboundCandidate = { type?: unknown };
 
 /** Sink for pushing one outbound frame down the extension `/acp` socket. */
 export type CdpSendToExtension = (frame: CdpOutboundFrame) => void;
@@ -121,7 +127,7 @@ export function isCdpInboundFrameType(type: unknown): boolean {
 }
 
 function isCdpInboundFrame(
-  frame: Record<string, unknown>,
+  frame: CdpInboundCandidate,
 ): frame is CdpInboundFrame {
   return isCdpInboundFrameType(frame.type);
 }
