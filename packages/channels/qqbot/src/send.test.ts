@@ -124,6 +124,8 @@ describe('sendMessage', () => {
     chatType?: 'c2c' | 'group';
     replyMsgId?: string;
     tokenExpiresAt?: number;
+    accessToken?: string;
+    groupActiveMsgEnabled?: boolean;
   }): QQChannelClass {
     const ch = new QQChannel(
       'test-bot',
@@ -145,9 +147,16 @@ describe('sendMessage', () => {
     // Set internal state for sendMessage preconditions.
     // accessToken and tokenExpiresAt bypass the fetchToken flow.
     const chp = ch as unknown as Record<string, unknown>;
-    chp['accessToken'] = 'test-token';
+    chp['accessToken'] = overrides?.accessToken ?? 'test-token';
     chp['tokenExpiresAt'] = overrides?.tokenExpiresAt ?? Date.now() + 3600_000;
     if (overrides?.disposed) chp['disposed'] = true;
+
+    if (overrides?.groupActiveMsgEnabled !== undefined) {
+      (chp['groupActiveMsgEnabled'] as Map<string, boolean>).set(
+        'test-chat-id',
+        overrides.groupActiveMsgEnabled,
+      );
+    }
 
     if (overrides?.chatType) {
       (chp['chatTypeMap'] as Map<string, string>).set(
@@ -334,5 +343,149 @@ describe('sendMessage', () => {
         msg_type: 2,
       },
     );
+  });
+
+  // --- Boundary: resolveRoute token refresh success ---
+
+  it('refreshes token and sends when tokenExpiresAt is expired and refresh succeeds', async () => {
+    const ch = makeChannel({
+      chatType: 'c2c',
+      tokenExpiresAt: Date.now() - 1000,
+    });
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'refreshed-token',
+      expiresIn: 7200,
+    });
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    expect(mockFetchAccessToken).toHaveBeenCalled();
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'refreshed-token',
+      { markdown: { content: 'hello' }, msg_type: 2 },
+    );
+  });
+
+  // --- Boundary: groupActiveMsgEnabled blocks ---
+
+  it('returns early without sending when groupActiveMsgEnabled is false', async () => {
+    const ch = makeChannel({
+      chatType: 'group',
+      groupActiveMsgEnabled: false,
+    });
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('sends normally when groupActiveMsgEnabled is true', async () => {
+    const ch = makeChannel({
+      chatType: 'group',
+      groupActiveMsgEnabled: true,
+    });
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Boundary: msgSeq increments across consecutive sends ---
+
+  it('increments msg_seq on consecutive sendMessage calls with same replyMsgId', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-999' });
+
+    await ch.sendMessage('test-chat-id', 'first');
+    await ch.sendMessage('test-chat-id', 'second');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      1,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      {
+        markdown: { content: 'first' },
+        msg_id: 'msg-999',
+        msg_seq: 1,
+        msg_type: 2,
+      },
+    );
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      2,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      {
+        markdown: { content: 'second' },
+        msg_id: 'msg-999',
+        msg_seq: 2,
+        msg_type: 2,
+      },
+    );
+  });
+
+  // --- Boundary: replyMsgId older than 5 minutes ---
+
+  it('sends without msg_id when replyMsgId is older than 5 minutes', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    // Set replyMsgId with a timestamp older than 5 minutes
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat-id', {
+      msgId: 'msg-old',
+      timestamp: Date.now() - 300_001,
+    });
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { markdown: { content: 'hello' }, msg_type: 2 },
+    );
+    // No msg_id / msg_seq should be present
+    const callArgs = mockSendQQMessage.mock.calls[0];
+    const body = callArgs[3] as Record<string, unknown>;
+    expect(body['msg_id']).toBeUndefined();
+    expect(body['msg_seq']).toBeUndefined();
+  });
+
+  // --- Boundary: <noreply> text ---
+
+  it('returns early without sending when text is <noreply>', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+
+    await ch.sendMessage('test-chat-id', '<noreply>');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  // --- Boundary: SSRF failure + no accessToken ---
+
+  it('returns null from resolveRoute when chatId fails SSRF and accessToken is empty', async () => {
+    const ch = makeChannel({ accessToken: '' });
+
+    await ch.sendMessage('../traversal', 'hello');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  // --- Boundary: both markdown and plain text fail ---
+
+  it('does not crash when both markdown and plain text fallback fail', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    mockSendQQMessage.mockResolvedValue(
+      mockResponse(false, 400, 'bad request'),
+    );
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    // Two attempts: markdown, then plain text. No crash.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
   });
 });
