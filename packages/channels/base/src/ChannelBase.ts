@@ -268,6 +268,18 @@ export abstract class ChannelBase {
       );
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          // Audit: clearing a SHARED session wipes the conversation for every
+          // participant, so record who triggered it (sanitized display name +
+          // stable senderId) and which session — mirrors the file's stderr audit
+          // style. A 1:1 DM clear only touches the caller, so it isn't logged.
+          if (this.isSharedSession(envelope)) {
+            const who = sanitizeSenderName(
+              envelope.senderName || envelope.senderId || 'unknown',
+            );
+            process.stderr.write(
+              `[${this.name}] shared session ${id} cleared by ${who} (sender ${envelope.senderId})\n`,
+            );
+          }
           // Bump the generation up-front (before any await) so a followup turn
           // already queued onto this session sees a stale generation and bails
           // instead of running bridge.prompt() against the cleared session.
@@ -648,6 +660,17 @@ export abstract class ChannelBase {
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
     if (envelope.text.startsWith('!')) {
+      if (envelope.isGroup || this.isSharedSession(envelope)) {
+        // Audit a blocked host-shell attempt — a group/shared member trying `!`
+        // is security-relevant, so surface it to operators. Sanitize the display
+        // name (attacker-controlled) and do NOT echo the command payload.
+        const who = sanitizeSenderName(
+          envelope.senderName || envelope.senderId || 'unknown',
+        );
+        process.stderr.write(
+          `[${this.name}] blocked ! shell command from ${who} (sender ${envelope.senderId}) in chat ${envelope.chatId}\n`,
+        );
+      }
       if (envelope.isGroup) {
         await this.sendMessage(
           envelope.chatId,

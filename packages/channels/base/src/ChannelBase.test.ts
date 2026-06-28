@@ -493,6 +493,70 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session cleared');
     });
 
+    it('audit-logs a successful shared /clear with a sanitized sender and the session id', async () => {
+      // Clearing a SHARED session wipes the conversation for every participant, so a
+      // SUCCESSFUL clear (not just the unauthorized branch) must leave an operator
+      // audit trail: who triggered it and which session. The display name is
+      // sanitized like the file's other audit lines. Mutation check: removing the
+      // success-path stderr.write leaves nothing for these assertions to match.
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const ch = createChannel({
+          sessionScope: 'thread',
+          groupPolicy: 'open',
+        });
+        const g = envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          threadId: 't1',
+          senderId: 'alice',
+          // A crafted nick with a newline tries to forge an extra log line.
+          senderName: 'al\nice',
+        });
+        await ch.handleInbound({ ...g, text: 'hello' });
+        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0][0] as string;
+
+        await ch.handleInbound({ ...g, text: '/clear confirm' });
+        expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
+          true,
+        );
+
+        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain(`shared session ${sid} cleared by`);
+        // Stable senderId is recorded for the audit trail.
+        expect(logged).toContain('alice');
+        // The injected newline can't split the line into a forged second log entry.
+        expect(logged).not.toContain('al\nice');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('does NOT audit-log a 1:1 DM /clear (only multi-participant clears are logged)', async () => {
+      // A per-user DM clear only touches the caller's own session — it is not
+      // multi-participant — so it must NOT emit the shared-clear audit line.
+      // Mutation check: dropping the isSharedSession guard makes this DM clear log.
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const ch = createChannel(); // DM, sessionScope: 'user'
+        await ch.handleInbound(envelope({ text: 'hello' }));
+        await ch.handleInbound(envelope({ text: '/clear' }));
+        expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
+          true,
+        );
+        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).not.toContain('cleared by');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it("treats a 'single'-scoped group as a SHARED session (confirm + auth gated)", async () => {
       // `single` collapses the whole channel to one `__single__` session, so it
       // is even more shared than `thread`. A bare /clear from any member must NOT
@@ -1201,6 +1265,47 @@ describe('ChannelBase', () => {
         ch.sent.some((m) => m.text.includes('disabled in shared sessions')),
       ).toBe(false);
       expect(ch.sent.some((m) => m.text.includes('whoami'))).toBe(true);
+    });
+
+    it('audit-logs a blocked ! shell attempt with a sanitized sender and no payload echo', async () => {
+      // A group member ATTEMPTING a host shell command is security-relevant, so the
+      // refusal must surface to operators — not just reply to the user. The audit
+      // line sanitizes the (attacker-controlled) display name and must NOT echo the
+      // command payload. Mutation check: removing the stderr.write makes this fail.
+      const shellCommand = withShellCommand();
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const ch = createChannel({
+          sessionScope: 'thread',
+          groupPolicy: 'open',
+        });
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'g1',
+            senderId: 'rando',
+            // A crafted nick with a newline tries to forge an extra log line.
+            senderName: 'ev\nil',
+            text: '!rm -rf /',
+          }),
+        );
+
+        expect(shellCommand).not.toHaveBeenCalled();
+        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('blocked ! shell command');
+        // Stable senderId is recorded for the attempt...
+        expect(logged).toContain('rando');
+        // ...the display name is sanitized (the injected newline can't split the
+        // line into a forged second log entry)...
+        expect(logged).not.toContain('ev\nil');
+        // ...and the command payload is never echoed into the operator log.
+        expect(logged).not.toContain('rm -rf /');
+      } finally {
+        stderr.mockRestore();
+      }
     });
   });
 
@@ -2091,6 +2196,55 @@ describe('ChannelBase', () => {
           expect.objectContaining({ text: 'steered response' }),
         ]),
       );
+    });
+
+    it("steer: best-effort cancel stops the running turn's streamer (stopStreaming called)", async () => {
+      // The steered turn must STOP the wedged turn's BlockStreamer, not just flip
+      // `cancelled` — otherwise text already buffered in the old turn's streamer
+      // can still flush out via its idle timer after the new turn has started.
+      // Mutation check: removing `active.stopStreaming?.()` from the steer path
+      // leaves the spy uncalled and fails the assertion below.
+      let resolveA!: (v: string) => void;
+      const promiseA = new Promise<string>((r) => {
+        resolveA = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        return callCount === 1 ? promiseA : Promise.resolve('steered response');
+      });
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const ch = createChannel({ dispatchMode: 'steer' });
+
+      // Turn A starts and stays in-flight (don't await it — it can't settle yet).
+      const pA = ch.handleInbound(envelope({ text: 'A' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+
+      // Replace stopStreaming on the SAME active-prompt object the steer path reads
+      // from activePrompts, so we observe steer's best-effort cancel invoking it.
+      const active = (
+        ch as unknown as {
+          activePrompts: Map<string, { stopStreaming?: () => void }>;
+        }
+      ).activePrompts.get(sid)!;
+      const stopStreaming = vi.fn();
+      active.stopStreaming = stopStreaming;
+
+      // Turn B steers in: it best-effort cancels A (which must stop A's streamer)
+      // and chains behind A's tail.
+      const pB = ch.handleInbound(envelope({ text: 'B' }));
+
+      // A completes → B dequeues and runs.
+      resolveA('A (cancelled, never sent)');
+      await pA;
+      await pB;
+
+      expect(stopStreaming).toHaveBeenCalledTimes(1);
     });
 
     it('steer: waits for the running turn to finish before starting the new turn (no concurrent bridge.prompt)', async () => {
