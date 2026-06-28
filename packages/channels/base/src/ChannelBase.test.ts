@@ -2398,12 +2398,18 @@ describe('ChannelBase', () => {
 
         // Bob's turn queues onto the chain before /clear, capturing the soon-to-
         // be-bumped generation. His text carries control chars (CR + an ANSI escape
-        // + a newline) so the drop log's sanitization is exercised: this text is
-        // attacker-controlled and lands on an operator's terminal.
+        // + a newline + NEL U+0085 + a C1 char U+009B) so the drop log's sanitization
+        // is exercised: this text is attacker-controlled and lands on an operator's
+        // terminal, where a raw NEL/C1 would render as a line break forging a log line.
         const pB = ch.handleInbound({
           ...g,
           senderId: 'bob',
-          text: 'task two\r\x1b[2K\nline',
+          text:
+            'task two\r\x1b[2K\nline' +
+            String.fromCharCode(0x85) +
+            'NEL' +
+            String.fromCharCode(0x9b) +
+            'C1',
         });
         await vi.waitFor(() =>
           expect(maps.sessionQueues.get(sid)).not.toBe(aliceQueue),
@@ -2425,13 +2431,16 @@ describe('ChannelBase', () => {
         expect(logged).toContain(`session ${sid}`);
         expect(logged).toContain('from bob');
         // FIX (log hygiene): the embedded text is sanitized — newline rendered
-        // visibly, but CR (could overwrite the log line) and ESC (ANSI/OSC
-        // injection) stripped. Mutation check: dropping the C0/DEL strip lets the
-        // raw ESC/CR through and fails the not.toContain assertions.
+        // visibly, but CR (could overwrite the log line), ESC (ANSI/OSC injection),
+        // and the C1 block — NEL U+0085 (a line break) and U+009B (CSI) — stripped.
+        // Mutation check: dropping the C0/DEL+C1 strip lets the raw ESC/CR/NEL/C1
+        // through and fails the not.toContain assertions (NEL fails the C1 case).
         expect(logged).toContain('task two');
         expect(logged).toContain('\\nline');
         expect(logged).not.toContain('\r');
         expect(logged).not.toContain('\x1b');
+        expect(logged).not.toContain(String.fromCharCode(0x85));
+        expect(logged).not.toContain(String.fromCharCode(0x9b));
 
         // Once Bob's bail drains the queue, nothing reads the bumped generation,
         // so the entry must be reclaimed rather than leaked for the gateway's life.

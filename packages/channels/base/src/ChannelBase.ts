@@ -865,14 +865,16 @@ export abstract class ChannelBase {
         // Surface the drop — otherwise an unanswered queued message vanishes
         // silently, making "my message was never answered" undiagnosable.
         // envelope.text is attacker-controlled: render newline visibly, then strip
-        // the remaining control chars (CR could overwrite the log line, ESC could
-        // inject ANSI/OSC sequences) before they reach an operator's terminal —
-        // matching the C0/DEL neutralization every other embed path does.
+        // the remaining control chars — C0/DEL plus the C1 block (notably NEL
+        // U+0085, which renders as a line break and could forge an extra [channel]
+        // log line; CR could overwrite the log line, ESC could inject ANSI/OSC) —
+        // before they reach an operator's terminal. Matches the C0/DEL+C1 the
+        // prompt embed paths now neutralize (see PROMPT_UNSAFE_INVISIBLES).
         const loggedText = envelope.text
           .slice(0, 80)
           .replace(/\n/g, '\\n')
           // eslint-disable-next-line no-control-regex
-          .replace(/[\u0000-\u001f\u007f]/g, ' ');
+          .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
         process.stderr.write(
           `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${loggedText})\n`,
         );

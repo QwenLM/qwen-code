@@ -430,10 +430,15 @@ describe('group sender-name sanitization', () => {
       });
 
     const ESC = String.fromCharCode(0x1b);
+    // NEL (U+0085) is a Unicode line break and U+009B a C1 CSI introducer: both are
+    // attacker-controlled C1 chars that must be neutralized like ESC/CR, or a raw
+    // NEL would render as a line break and forge a second audit entry.
+    const NEL = String.fromCharCode(0x85);
+    const C1 = String.fromCharCode(0x9b);
     (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
       id: 'evt-audit',
       group_openid: 'grp-1',
-      content: `/deploy ${ESC}[31m\nrm -rf prod`,
+      content: `/deploy ${ESC}[31m${NEL}halt${C1}go\nrm -rf prod`,
       author: { username: `Ev${ESC}[2J\nil`, id: 'uid', user_openid: 'uo' },
     });
 
@@ -449,6 +454,11 @@ describe('group sender-name sanitization', () => {
     expect(audit!.endsWith('\n')).toBe(true);
     // The raw (unsanitized) nick fragment never appears verbatim.
     expect(audit!.includes(`Ev${ESC}`)).toBe(false);
+    // The C1 block is neutralized too: a raw NEL (U+0085) would render as a line
+    // break — forging a second audit entry — and U+009B is a CSI introducer.
+    // Mutation check: reverting the strip to C0/DEL only lets NEL/C1 through here.
+    expect(audit!.includes(NEL)).toBe(false);
+    expect(audit!.includes(C1)).toBe(false);
     // The command's embedded newline is rendered visibly (\n), not as a real break.
     expect(audit).toContain('\\n');
     expect(audit).toContain('Slash cmd from');
