@@ -110,6 +110,9 @@ packages/core/src/utils/filesearch/fzfWorker.js
 *storybook.log
 storybook-static
 
+# test
+coverage/
+
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
 tmp/

@@ -44,6 +44,7 @@ import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
 } from './permission-audit.js';
+import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import {
   initDaemonLogger,
   resolveDaemonLogBaseDir,
@@ -81,6 +82,13 @@ import {
 } from '../utils/startupProfiler.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
+// Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
+// `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
+// the daemon WS. Off by default while the contract settles.
+const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
+// CDP tunnel opt-in (Plan C, issue #5626). `=1` advertises `cdp_tunnel_over_ws`
+// and exposes the `/cdp` WebSocket. Off by default while the contract settles.
+const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
@@ -634,6 +642,10 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
+    // Advertise the same WS feature flags as the runtime path (serve-features.ts)
+    // so the bootstrap `/capabilities` window doesn't briefly under-report them.
+    clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
+    cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
   });
 }
 
@@ -1082,6 +1094,19 @@ export async function runQwenServe(
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
+    // Reverse tool channel (issue #5626, Phase 2). Opt-in via env until the
+    // public contract settles — the WS `mcp_register` / `mcp_message` frames
+    // and the child↔parent `client_mcp/message` round-trip stay dormant
+    // otherwise. An explicit `clientMcpOverWs` in `optsIn` (embedded callers)
+    // still wins.
+    clientMcpOverWs:
+      optsIn.clientMcpOverWs ??
+      process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV] === '1',
+    // CDP tunnel (Plan C, issue #5626). Opt-in via env until the contract
+    // settles; an explicit `cdpTunnelOverWs` in `optsIn` still wins.
+    cdpTunnelOverWs:
+      optsIn.cdpTunnelOverWs ??
+      process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
   };
   validateRateLimitOptions(opts);
 
@@ -1402,6 +1427,23 @@ export async function runQwenServe(
         ? String(opts.mcpClientBudget)
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
+    // CDP tunnel (Plan C, #5626): forward the flag + bound port so the spawned
+    // ACP child can auto-register chrome-devtools-mcp against this `/cdp`
+    // endpoint. Only meaningful with a fixed `--port`: the override map is frozen
+    // at bridge construction, so an ephemeral `--port 0` (resolved only after
+    // `listen`) can't be threaded here. Leave the port unset in that case so the
+    // child surfaces a clear diagnostic instead of a bogus port "0".
+    QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
+    QWEN_SERVE_CDP_TUNNEL_PORT:
+      opts.cdpTunnelOverWs && opts.port > 0 ? String(opts.port) : undefined,
+    // Tell the child whether `/cdp` requires bearer auth. The ACP child can't
+    // inherit QWEN_SERVER_TOKEN (the spawn path scrubs it) and chrome-devtools-
+    // mcp is launched with `--wsEndpoint` only, so it can't authenticate against
+    // an auth-gated `/cdp`. The child uses this flag to skip auto-registering the
+    // browser tools (with a diagnostic) instead of registering tools that can't
+    // connect. See buildCdpTunnelMcpServer in acpAgent.ts.
+    QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED:
+      opts.cdpTunnelOverWs && (token || opts.requireAuth) ? '1' : undefined,
   };
 
   const cliVersionPromise = getCliVersion();
@@ -1605,6 +1647,12 @@ export async function runQwenServe(
     const statusProvider = runtime.createDaemonStatusProvider();
     const workspaceProvidersStatusProvider =
       runtime.createWorkspaceProvidersStatusProvider();
+    // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
+    // between the bridge (which answers the ACP child's `client_mcp/message`
+    // ext-method via `clientMcpSender`) and the WS provider in `createServeApp`
+    // (which registers a per-connection `ClientMcpRegistrar`'s sender on
+    // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
+    const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -1680,6 +1728,9 @@ export async function runQwenServe(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
+        // connection that hosts a named client MCP server (#5626).
+        clientMcpSender: clientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
@@ -1764,6 +1815,9 @@ export async function runQwenServe(
       fsFactory,
       daemonLog,
       workspace: workspaceService,
+      // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
+      // so the WS provider and the child-answering bridge share one sender map.
+      clientMcpSenderRegistry,
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,

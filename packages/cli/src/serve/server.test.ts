@@ -332,6 +332,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'client_mcp_over_ws',
+  'cdp_tunnel_over_ws',
   'voice_transcribe',
 ] as const;
 
@@ -1612,6 +1614,14 @@ function abortableBridgePromptImpl(): FakeBridgeOpts['promptImpl'] {
 }
 
 describe('createServeApp', () => {
+  it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
+    expect(() =>
+      createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/deps\.bridge requires deps\.clientMcpSenderRegistry/);
+  });
+
   describe('serve capability registry', () => {
     it('returns a fresh ordered registered feature list', () => {
       const features = getRegisteredServeFeatures();
@@ -1815,6 +1825,34 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'client_mcp_over_ws') {
+          expect(predicate({ clientMcpOverWsEnabled: true })).toBe(true);
+          expect(predicate({ clientMcpOverWsEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              clientMcpOverWsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'cdp_tunnel_over_ws') {
+          expect(predicate({ cdpTunnelOverWsEnabled: true })).toBe(true);
+          expect(predicate({ cdpTunnelOverWsEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              cdpTunnelOverWsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'voice_transcribe') {
           expect(predicate({ voiceWsAvailable: true })).toBe(true);
           expect(predicate({ voiceWsAvailable: false })).toBe(false);
@@ -1943,6 +1981,24 @@ describe('createServeApp', () => {
       expect(res.headers['x-frame-options']).toBe('DENY');
       expect(res.headers['referrer-policy']).toBe('no-referrer');
       expect(res.headers['cache-control']).toContain('no-cache');
+    });
+
+    it('allows configured extension origins to frame the shell without self-framing', async () => {
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          allowOrigins: ['chrome-extension://abcdefghijklmnop'],
+        },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app).get('/').set('Host', host);
+      const csp = String(res.headers['content-security-policy']);
+      expect(csp).toContain(
+        'frame-ancestors chrome-extension://abcdefghijklmnop',
+      );
+      expect(csp).not.toContain("frame-ancestors 'self'");
+      expect(res.headers['x-frame-options']).toBeUndefined();
     });
 
     it('serves hashed asset chunks from /assets', async () => {
