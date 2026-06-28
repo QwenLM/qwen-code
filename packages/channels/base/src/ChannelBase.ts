@@ -35,6 +35,10 @@ type ActivePrompt = {
   done: Promise<void>;
   resolve: () => void;
   stopStreaming?: () => void;
+  /** The originating turn's chat/message, so a clear-time eviction can run this
+   * turn's own onPromptEnd (its finally may settle long after — or never). */
+  chatId: string;
+  messageId?: string;
   /**
    * Set when a steer abandons this (wedged) turn and a replacement takes over the
    * session. Its late-settling finally then skips onPromptEnd so it can't clobber
@@ -42,6 +46,13 @@ type ActivePrompt = {
    * (it has no replacement), so its finally still runs platform cleanup.
    */
   superseded?: boolean;
+  /**
+   * Set when /clear's bounded wait times out and evicts this (wedged) turn. Unlike
+   * superseded, /clear has NO replacement turn — so /clear runs this turn's
+   * onPromptEnd at eviction time, and the late-settling finally then skips it so a
+   * turn the user started AFTER the clear can't have its indicator clobbered.
+   */
+  clearEvicted?: boolean;
 };
 
 /**
@@ -266,7 +277,22 @@ export abstract class ChannelBase {
           this.collectBuffers.delete(id);
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
-            await this.cancelAndAwaitActive(active, id);
+            const settled = await this.cancelAndAwaitActive(active, id);
+            if (!settled) {
+              // Wedged: the turn never wound down within the bound. Surface it —
+              // otherwise a zombie bridge.prompt() lingers in the child with zero
+              // observability ("/clear worked" but a turn is still pinned).
+              process.stderr.write(
+                `[${this.name}] /clear abandoned a wedged turn for session ${id}: it did not wind down within ${CLEAR_CANCEL_TIMEOUT_MS}ms\n`,
+              );
+              // The wedged turn's finally may run much later (or never), so clean
+              // up its OWN platform indicator now, while no replacement exists yet.
+              // Mark it clearEvicted so that late finally skips onPromptEnd — a turn
+              // the user starts after this /clear owns the chat indicator by then,
+              // and re-running cleanup would clobber it.
+              this.onPromptEnd(active.chatId, id, active.messageId);
+              active.clearEvicted = true;
+            }
           }
           // Purge every per-session map (all keyed by sessionId) so a
           // long-running gateway doesn't leak dead entries after /clear.
@@ -588,9 +614,12 @@ export abstract class ChannelBase {
       // any participant could run `!rm -rf /`. Refuse in shared sessions; a 1:1
       // session is the lone operator's own, so direct execution stays allowed.
       if (this.isSharedSession(envelope)) {
+        // "shared" (not "group"): isSharedSession is also true for single-scope
+        // DMs, which are not groups — calling them "group sessions" would confuse
+        // a user in a 1:1 chat.
         await this.sendMessage(
           envelope.chatId,
-          'Shell commands (`!`) are disabled in shared group sessions.',
+          'Shell commands (`!`) are disabled in shared sessions.',
         );
         return;
       }
@@ -802,8 +831,17 @@ export abstract class ChannelBase {
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         // Surface the drop — otherwise an unanswered queued message vanishes
         // silently, making "my message was never answered" undiagnosable.
+        // envelope.text is attacker-controlled: render newline visibly, then strip
+        // the remaining control chars (CR could overwrite the log line, ESC could
+        // inject ANSI/OSC sequences) before they reach an operator's terminal —
+        // matching the C0/DEL neutralization every other embed path does.
+        const loggedText = envelope.text
+          .slice(0, 80)
+          .replace(/\n/g, '\\n')
+          // eslint-disable-next-line no-control-regex
+          .replace(/[\u0000-\u001f\u007f]/g, ' ');
         process.stderr.write(
-          `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${envelope.text.slice(0, 80).replace(/\n/g, '\\n')})\n`,
+          `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${loggedText})\n`,
         );
         return;
       }
@@ -816,6 +854,8 @@ export abstract class ChannelBase {
         cancelled: false,
         done,
         resolve: doneResolve,
+        chatId: envelope.chatId,
+        messageId: envelope.messageId,
       };
       // This turn is a steer replacement for a wedged predecessor: mark that
       // predecessor superseded right before we take over its session slot, so its
@@ -878,13 +918,16 @@ export abstract class ChannelBase {
         // only touch the session-scoped state when the entry is still ours.
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         // onPromptEnd runs platform cleanup (clear the typing interval, recall the
-        // working reaction, finalize the card). Run it UNLESS a steer replacement
-        // took this turn over (superseded): that replacement re-seeded the
-        // indicator, so ending it would stop the successor's indicator while it is
-        // still working. A /clear that cancelled this turn deletes its entry with
-        // NO replacement, so it is NOT superseded — its finally must still run the
-        // cleanup, or the platform indicator leaks on past the cleared turn.
-        if (stillCurrent || !promptState.superseded) {
+        // working reaction, finalize the card). Run it UNLESS this turn was taken
+        // over or already cleaned up: a steer replacement (superseded) re-seeded
+        // the indicator, and a /clear eviction (clearEvicted) already ran this
+        // turn's onPromptEnd at clear-time. In both cases a later turn may now own
+        // the chat-scoped indicator, so re-running cleanup here would clobber it.
+        // A still-current turn (normal completion) always cleans up.
+        if (
+          stillCurrent ||
+          (!promptState.superseded && !promptState.clearEvicted)
+        ) {
           this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
         }
         if (stillCurrent) {

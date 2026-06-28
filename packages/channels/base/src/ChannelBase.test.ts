@@ -927,7 +927,7 @@ describe('ChannelBase', () => {
       );
       expect(shellCommand).not.toHaveBeenCalled();
       expect(ch.sent).toHaveLength(1);
-      expect(ch.sent[0]!.text).toContain('disabled in shared group sessions');
+      expect(ch.sent[0]!.text).toContain('disabled in shared sessions');
       // Not forwarded to the agent either — it is fully refused.
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -939,7 +939,11 @@ describe('ChannelBase', () => {
       const ch = createChannel({ sessionScope: 'single' });
       await ch.handleInbound(envelope({ text: '!whoami' }));
       expect(shellCommand).not.toHaveBeenCalled();
-      expect(ch.sent[0]!.text).toContain('disabled in shared group sessions');
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('disabled in shared sessions');
+      // Not forwarded to the agent either — it is fully refused (regression: a
+      // refusal that ALSO forwards the text would be caught here).
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('executes ! shell commands in a 1:1 (non-shared) session', async () => {
@@ -951,9 +955,7 @@ describe('ChannelBase', () => {
       expect(shellCommand).toHaveBeenCalledTimes(1);
       expect(shellCommand.mock.calls[0][1]).toBe('whoami');
       expect(
-        ch.sent.some((m) =>
-          m.text.includes('disabled in shared group sessions'),
-        ),
+        ch.sent.some((m) => m.text.includes('disabled in shared sessions')),
       ).toBe(false);
       expect(ch.sent.some((m) => m.text.includes('whoami'))).toBe(true);
     });
@@ -2077,15 +2079,16 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('/clear runs onPromptEnd when its cancelled turn settles late (no replacement) so platform cleanup is not leaked', async () => {
+    it('/clear runs onPromptEnd at eviction time for a wedged turn (no replacement) so platform cleanup is not leaked', async () => {
       // REGRESSION (onPromptEnd cleanup-leak after /clear): a turn cancelled by
-      // /clear has NO replacement — on the wedged path /clear times out, deletes
-      // the turn's activePrompts entry, and confirms before the cancelled prompt
-      // settles. When it settles late and runs its finally, stillCurrent is false
-      // (its entry is gone) but it was NOT superseded, so onPromptEnd MUST still
-      // fire: adapters clear typing intervals / recall working reactions / finalize
-      // cards there, and skipping it leaks that platform cleanup past the cleared
-      // turn. Mutation check: a `stillCurrent`-only guard skips onPromptEnd here.
+      // /clear has NO replacement — on the wedged path /clear times out and evicts
+      // the turn. Adapters clear typing intervals / recall working reactions /
+      // finalize cards in onPromptEnd, and the wedged turn's own finally may run
+      // much later (or never), so /clear runs that cleanup at eviction time. The
+      // turn is marked clearEvicted, so its late-settling finally then SKIPS
+      // onPromptEnd — cleanup fires exactly once, not zero (leak) or twice.
+      // Mutation check: dropping the clear-time onPromptEnd call makes no 'mA'
+      // cleanup fire here at all.
       let resolveA!: (v: string) => void;
       const wedgedA = new Promise<string>((r) => {
         resolveA = r;
@@ -2110,24 +2113,105 @@ describe('ChannelBase', () => {
 
       vi.useFakeTimers();
       try {
-        // /clear cancels A and (A wedged) times out, purges A's entry, confirms.
+        // /clear cancels A and (A wedged) times out, evicts A's entry, confirms.
         const pClear = ch.handleInbound(envelope({ text: '/clear' }));
         await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
         await pClear;
         expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
           true,
         );
-        // A's entry is gone and it was never superseded; its prompt hasn't settled.
+        // A's entry is gone, and /clear ran A's onPromptEnd at eviction time so the
+        // platform cleanup is not leaked (A's prompt hasn't settled yet).
         expect(maps.activePrompts.has(sid)).toBe(false);
-        expect(ch.promptEnds.some((e) => e.messageId === 'mA')).toBe(false);
+        expect(ch.promptEnds.filter((e) => e.messageId === 'mA')).toHaveLength(
+          1,
+        );
 
         // A's wedged prompt finally settles and runs A's finally LATE. `await pA`
         // is the deterministic sync point — it resolves after A's finally completes.
         resolveA('late response from A');
         await pA;
 
-        // onPromptEnd fired for the cancelled turn even though its entry was gone.
-        expect(ch.promptEnds.some((e) => e.messageId === 'mA')).toBe(true);
+        // The late finally skipped onPromptEnd (clearEvicted) — cleanup did not
+        // fire a second time, so it can't clobber a turn started after the clear.
+        expect(ch.promptEnds.filter((e) => e.messageId === 'mA')).toHaveLength(
+          1,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('/clear evicts a wedged turn; that turn settling late does not end a turn started after the clear', async () => {
+      // FIX (clearEvicted): turn A wedges and /clear times out, evicting A and
+      // cleaning A's OWN indicator at clear-time. The user then sends a new message
+      // (turn B), whose onPromptStart re-seeds the chat-scoped working indicator.
+      // When A's wedged prompt finally settles, its finally must SKIP onPromptEnd
+      // (A is clearEvicted) — otherwise it ends the indicator B re-seeded, stopping
+      // B's typing while B is still working (the same chat-scoped indicator the
+      // superseded guard protects on the steer path). Mutation check: without the
+      // clearEvicted handling, A's late finally fires onPromptEnd here and
+      // promptEnds gains a second entry.
+      let resolveA!: (v: string) => void;
+      const wedgedA = new Promise<string>((r) => {
+        resolveA = r;
+      });
+      const pendingB = new Promise<string>(() => {}); // never resolves: B stays active
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        return callCount === 1 ? wedgedA : pendingB;
+      });
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const ch = createChannel();
+      const maps = ch as unknown as { activePrompts: Map<string, unknown> };
+
+      // Turn A starts and wedges; don't await it (it can't settle on its own).
+      const pA = ch.handleInbound(envelope({ text: 'A', messageId: 'mA' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+      vi.useFakeTimers();
+      try {
+        // /clear evicts wedged A (bounded wait times out), cleaning A's indicator now.
+        const pClear = ch.handleInbound(envelope({ text: '/clear' }));
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        await pClear;
+        expect(ch.promptEnds.filter((e) => e.messageId === 'mA')).toHaveLength(
+          1,
+        );
+
+        // Turn B (a message the user sends AFTER the clear) starts a fresh session
+        // and re-seeds the chat indicator via onPromptStart; its prompt never settles.
+        const pB = ch.handleInbound(envelope({ text: 'B', messageId: 'mB' }));
+        void pB; // floating by design: B's prompt never settles
+        for (
+          let i = 0;
+          i < 50 &&
+          (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls.length < 2;
+          i++
+        ) {
+          await Promise.resolve();
+        }
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        const sidB = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[1][0] as string;
+        expect(maps.activePrompts.get(sidB)).toBeDefined();
+        expect(ch.promptStarts.some((e) => e.messageId === 'mB')).toBe(true);
+        // Only A's clear-time cleanup so far — B is still working (no end yet).
+        expect(ch.promptEnds).toHaveLength(1);
+
+        // A's wedged prompt finally settles and runs A's finally LATE.
+        resolveA('late response from A');
+        await pA;
+
+        // A's finally skipped onPromptEnd (clearEvicted) — no new end fired, so B's
+        // indicator survives and B remains the active turn.
+        expect(ch.promptEnds).toHaveLength(1);
+        expect(ch.promptEnds.some((e) => e.messageId === 'mB')).toBe(false);
+        expect(maps.activePrompts.get(sidB)).toBeDefined();
       } finally {
         vi.useRealTimers();
       }
@@ -2403,11 +2487,13 @@ describe('ChannelBase', () => {
         const aliceQueue = maps.sessionQueues.get(sid);
 
         // Bob's turn queues onto the chain before /clear, capturing the soon-to-
-        // be-bumped generation.
+        // be-bumped generation. His text carries control chars (CR + an ANSI escape
+        // + a newline) so the drop log's sanitization is exercised: this text is
+        // attacker-controlled and lands on an operator's terminal.
         const pB = ch.handleInbound({
           ...g,
           senderId: 'bob',
-          text: 'task two',
+          text: 'task two\r\x1b[2K\nline',
         });
         await vi.waitFor(() =>
           expect(maps.sessionQueues.get(sid)).not.toBe(aliceQueue),
@@ -2428,6 +2514,14 @@ describe('ChannelBase', () => {
         expect(logged).toContain('dropped queued turn');
         expect(logged).toContain(`session ${sid}`);
         expect(logged).toContain('from bob');
+        // FIX (log hygiene): the embedded text is sanitized — newline rendered
+        // visibly, but CR (could overwrite the log line) and ESC (ANSI/OSC
+        // injection) stripped. Mutation check: dropping the C0/DEL strip lets the
+        // raw ESC/CR through and fails the not.toContain assertions.
+        expect(logged).toContain('task two');
+        expect(logged).toContain('\\nline');
+        expect(logged).not.toContain('\r');
+        expect(logged).not.toContain('\x1b');
 
         // Once Bob's bail drains the queue, nothing reads the bumped generation,
         // so the entry must be reclaimed rather than leaked for the gateway's life.
