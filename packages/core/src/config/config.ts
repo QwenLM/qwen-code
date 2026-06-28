@@ -12,7 +12,7 @@ import * as path from 'node:path';
 import process from 'node:process';
 
 // External dependencies
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 
 // Types
 import type {
@@ -103,7 +103,10 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_TELEMETRY_TARGET,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  isValidSensitiveSpanAttributeMaxLength,
   isTelemetrySdkInitialized,
   initializeTelemetry,
   shutdownTelemetry,
@@ -146,7 +149,7 @@ import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 
 // Local config modules
@@ -177,11 +180,21 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
-import { getAutoMemoryRoot, getUserAutoMemoryRoot } from '../memory/paths.js';
+import {
+  getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from '../memory/paths.js';
 import {
   readAutoMemoryIndex,
   readUserAutoMemoryIndex,
 } from '../memory/store.js';
+import {
+  rebuildTeamAutoMemoryIndex,
+  TeamMemoryRootSecurityError,
+} from '../memory/indexer.js';
+import { syncTeamMemory } from '../memory/team-memory-sync.js';
+import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -193,6 +206,7 @@ const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 import {
   ModelsConfig,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type AvailableModel,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
@@ -404,6 +418,7 @@ export interface TelemetrySettings {
   otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
   includeSensitiveSpanAttributes?: boolean;
+  sensitiveSpanAttributeMaxLength?: number;
   outfile?: string;
   /**
    * Static resource attributes attached to every span/log/metric the SDK
@@ -426,6 +441,10 @@ export interface TelemetrySettings {
    */
   resourceAttributeWarnings?: string[];
 }
+
+export type ResolvedTelemetrySettings = TelemetrySettings & {
+  sensitiveSpanAttributeMaxLength: number;
+};
 
 export interface TelemetryMetricsSettings {
   /**
@@ -584,6 +603,21 @@ export const DEFAULT_TOOL_OUTPUT_BATCH_BUDGET = 200_000;
  * `scope` unset.
  */
 export type McpServerScope = 'project' | 'workspace' | 'system';
+
+/**
+ * Why an MCP server's tools are currently unavailable, used to give the model a
+ * precise tool-not-found recovery action. See
+ * {@link Config.getMcpServerUnavailableReason}.
+ * - `removed`: deleted from config this session.
+ * - `not_allowed`: filtered out by the `mcp.allowed` allow-list.
+ * - `excluded`: present in the `mcp.excluded` list.
+ * - `pending_approval`: a gated server awaiting approval (#4615).
+ */
+export type McpServerUnavailableReason =
+  | 'removed'
+  | 'not_allowed'
+  | 'excluded'
+  | 'pending_approval';
 
 /**
  * Scopes whose servers are checked-in / shareable and therefore untrusted: they
@@ -774,6 +808,13 @@ export interface ConfigParameters {
   toolCallCommand?: string;
   mcpServerCommand?: string;
   mcpServers?: Record<string, MCPServerConfig>;
+  /**
+   * Session-injected (ACP/IDE) + `--mcp-config` servers that sit above the
+   * settings layer and `.mcp.json` and are never gated (#4615). Retained so the
+   * hot-reload subscriber (sub-task 3) can re-assemble the effective map the
+   * same way boot did. See `assembleMcpServers`.
+   */
+  topTierMcpServers?: Record<string, MCPServerConfig>;
   lsp?: {
     enabled?: boolean;
   };
@@ -848,12 +889,21 @@ export interface ConfigParameters {
   skipWorkflowUsageWarning?: boolean;
   computerUseEnabled?: boolean;
   computerUseMaxImageDimension?: number;
+  computerUseIdleTimeoutMs?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   /** Locale code for resolving localizable extension fields (e.g., 'en', 'zh'). */
   locale?: string;
   allowedMcpServers?: string[];
+  /**
+   * The startup `--allowed-mcp-server-names` CLI flag value, if passed (the
+   * flag only — NOT the settings-derived allow-list). When present it is an
+   * immutable upper bound on MCP admission: a hot-reload may narrow within it
+   * but never widen beyond it. Undefined when the flag was not passed (then
+   * settings fully drive admission). See issue #3696 sub-task 3.
+   */
+  cliAllowedMcpServerNames?: string[];
   excludedMcpServers?: string[];
   /**
    * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
@@ -927,8 +977,10 @@ export interface ConfigParameters {
    * watches it to process messages as if the user typed them.
    */
   inputFile?: string;
-  /** Model providers configuration grouped by authType */
+  /** Model providers configuration grouped by provider id */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Maps custom provider ids to their SDK protocol (AuthType) */
+  providerProtocolConfig?: ProviderProtocolConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -937,6 +989,13 @@ export interface ConfigParameters {
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
   enableManagedAutoDream?: boolean;
+  /**
+   * Enable the git-shared team memory tier. Defaults to false (opt-in).
+   * Overridable at runtime by `QWEN_CODE_MEMORY_TEAM` ('0'/'1') via
+   * {@link Config.getTeamMemoryEnabled}.
+   */
+  enableTeamMemory?: boolean;
+  enableTeamMemorySync?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
@@ -948,6 +1007,13 @@ export interface ConfigParameters {
    * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
    */
   fastModel?: string;
+  /**
+   * Explicit vision model for the vision bridge. When a text-only primary model
+   * receives an image, the bridge transcribes it through this model instead of
+   * auto-picking a same-provider one. Corresponds to the `visionModel` setting
+   * (configurable via `/model --vision`).
+   */
+  visionModel?: string;
   /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
@@ -1119,6 +1185,24 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
 
+function resolveSensitiveSpanAttributeMaxLength(
+  value: number | undefined,
+): number {
+  if (value === undefined) {
+    return DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH;
+  }
+
+  if (!isValidSensitiveSpanAttributeMaxLength(value)) {
+    throw new FatalConfigError(
+      `Invalid telemetry.sensitiveSpanAttributeMaxLength: must be a positive integer no greater than ${SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT}, got ${String(
+        value,
+      )}`,
+    );
+  }
+
+  return value;
+}
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
@@ -1188,6 +1272,7 @@ export class Config {
 
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
+  private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -1222,13 +1307,42 @@ export class Config {
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
+  /**
+   * Names of MCP servers that were present in the effective server map but
+   * disappeared after a runtime reconcile (hot-reload / `/reload`). Used only
+   * to give a precise "this MCP server was removed this session" message when
+   * the model later calls a tool that no longer exists (see
+   * `CoreToolScheduler.getToolNotFoundMessage`). Self-heals: a name is dropped
+   * from the set the moment the server reappears in the effective map.
+   */
+  private readonly recentlyRemovedMcpServers = new Set<string>();
+  private readonly topTierMcpServers:
+    | Record<string, MCPServerConfig>
+    | undefined;
   private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private lspInitializationError?: string;
-  private readonly allowedMcpServers?: string[];
+  private allowedMcpServers?: string[];
+  /** Immutable upper bound from `--allowed-mcp-server-names`; see ConfigParameters. */
+  private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  /**
+   * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
+   * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
+   * shares no such lock; without this, two `reinitializeMcpServers` calls could
+   * interleave their `discoverAllMcpToolsIncremental` passes. See sub-task 3.
+   */
+  private mcpReconcileInProgress = false;
+  private mcpReconcilePending = false;
+  /**
+   * The in-flight reconcile (pass 1 + its coalesced drain loop), exposed so a
+   * call arriving mid-flight can await the same work instead of returning
+   * before its coalesced change has actually been applied. Cleared when the
+   * loop settles.
+   */
+  private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -1242,7 +1356,7 @@ export class Config {
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
-  private readonly telemetrySettings: TelemetrySettings;
+  private readonly telemetrySettings: ResolvedTelemetrySettings;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
@@ -1297,6 +1411,7 @@ export class Config {
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly computerUseMaxImageDimension?: number;
+  private readonly computerUseIdleTimeoutMs?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1350,9 +1465,17 @@ export class Config {
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
+  private readonly enableTeamMemory: boolean;
+  private readonly enableTeamMemorySync: boolean;
+  // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
+  // warning is emitted at most once per repo, even though refreshHierarchicalMemory
+  // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
+  // re-checks shareability instead of reusing the first repo's result.
+  private readonly teamMemoryShareabilityChecked = new Set<string>();
   private readonly enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
+  private visionModel?: string;
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
@@ -1421,9 +1544,11 @@ export class Config {
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
     this.mcpServers = params.mcpServers;
+    this.topTierMcpServers = params.topTierMcpServers;
     this.lspEnabled = params.lsp?.enabled ?? false;
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
+    this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
     this.sessionSubagents = params.sessionSubagents ?? [];
@@ -1446,6 +1571,9 @@ export class Config {
       logPrompts: params.telemetry?.logPrompts ?? true,
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
+      sensitiveSpanAttributeMaxLength: resolveSensitiveSpanAttributeMaxLength(
+        params.telemetry?.sensitiveSpanAttributeMaxLength,
+      ),
       outfile: params.telemetry?.outfile,
       resourceAttributes: params.telemetry?.resourceAttributes,
       metrics: params.telemetry?.metrics,
@@ -1510,6 +1638,7 @@ export class Config {
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
+    this.computerUseIdleTimeoutMs = params.computerUseIdleTimeoutMs;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -1518,6 +1647,7 @@ export class Config {
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
+    this.providerProtocolConfig = params.providerProtocolConfig;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -1582,6 +1712,7 @@ export class Config {
     this.modelsConfig = new ModelsConfig({
       initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
+      providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),
@@ -1597,7 +1728,19 @@ export class Config {
 
     const proxyUrl = this.getProxy();
     if (proxyUrl) {
-      setGlobalDispatcher(new ProxyAgent(proxyUrl));
+      // Use EnvHttpProxyAgent (not a bare ProxyAgent) so `NO_PROXY` is
+      // honored. A bare ProxyAgent tunnels EVERY request — including local
+      // MCP servers reached over `http://localhost:...` — through the proxy,
+      // which typically can't route back to localhost and fails with an
+      // opaque `fetch failed`. EnvHttpProxyAgent connects hosts listed in
+      // `NO_PROXY` (e.g. `localhost,127.0.0.1`) directly while still proxying
+      // everything else (LLM API calls, remote MCP). The explicit
+      // `--proxy` / `settings.proxy` value (resolved by `getProxy()`)
+      // overrides env `http(s)_proxy`; `NO_PROXY` continues to come from the
+      // environment. See issue #3696 (local MCP + corporate proxy).
+      setGlobalDispatcher(
+        new EnvHttpProxyAgent({ httpProxy: proxyUrl, httpsProxy: proxyUrl }),
+      );
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -1611,9 +1754,12 @@ export class Config {
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
+    this.enableTeamMemory = params.enableTeamMemory ?? false;
+    this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
+    this.visionModel = params.visionModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
@@ -2177,6 +2323,88 @@ export class Config {
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
       // section out of the system prompt. Project-level read still bubbles
       // (its failure is a real config-load problem).
+      const teamMemoryEnabled =
+        this.getTeamMemoryEnabled() && this.isTrustedFolder();
+      if (this.getTeamMemoryEnabled() && !this.isTrustedFolder()) {
+        // Surface why team memory is silently absent from the prompt.
+        this.debugLogger.debug(
+          'Team memory enabled but inactive: workspace is not trusted.',
+        );
+      }
+      const teamProjectRoot = this.getProjectRoot();
+      // When the tier is active, warn (once per repo) if its directory is not
+      // actually git-shareable — no git root, or a directory-form .gitignore
+      // swallowing it — so the tier never silently shares nothing.
+      if (
+        teamMemoryEnabled &&
+        !this.teamMemoryShareabilityChecked.has(teamProjectRoot)
+      ) {
+        this.teamMemoryShareabilityChecked.add(teamProjectRoot);
+        const shareabilityWarning =
+          getTeamMemoryShareabilityWarning(teamProjectRoot);
+        if (shareabilityWarning) {
+          this.warnings.push(shareabilityWarning);
+          this.debugLogger.warn(shareabilityWarning);
+        }
+      }
+      // Rebuild the team index BEFORE syncing so the freshly generated MEMORY.md
+      // is what gets committed and pushed, not a stale one. Then, when opted in,
+      // best-effort git sync (never throws — a failure must not break session
+      // start): pull collaborators' updates and push local ones. If the sync
+      // PULLED new files, rebuild once more so the in-prompt index reflects them.
+      let teamAutoMemoryIndex: string | null = null;
+      if (teamMemoryEnabled) {
+        // rebuildTeamAutoMemoryIndex throws for two distinct classes, and only
+        // ONE may block sync:
+        //   • SECURITY — a symlink/escape rejection (TeamMemoryRootSecurityError)
+        //     means the team root could redirect the committed index OUTSIDE the
+        //     repo. Sync MUST be blocked: otherwise syncTeamMemory would git
+        //     add/commit/push that out-of-repo dir, defeating the indexer's
+        //     refusal. This invariant is non-negotiable.
+        //   • OPERATIONAL — EACCES/ENOSPC/EPERM on lstat/readdir/write. Not a
+        //     security problem, so it must NOT permanently gate legitimate sync;
+        //     it self-corrects on the next successful rebuild. Log and sync on.
+        let teamRootSecurityBlocked = false;
+        try {
+          teamAutoMemoryIndex =
+            await rebuildTeamAutoMemoryIndex(teamProjectRoot);
+        } catch (err) {
+          if (err instanceof TeamMemoryRootSecurityError) {
+            teamRootSecurityBlocked = true;
+            this.debugLogger.warn(
+              'team memory root failed the symlink/escape safety check; skipping sync',
+              err,
+            );
+          } else {
+            this.debugLogger.warn(
+              'team memory index rebuild failed (operational); not security-gating sync',
+              err,
+            );
+          }
+        }
+        if (!teamRootSecurityBlocked && this.getTeamMemorySyncEnabled()) {
+          const syncResult = await syncTeamMemory(teamProjectRoot, {
+            message: 'chore(memory): sync team memory',
+          }).catch((err) => {
+            this.debugLogger.warn('team memory sync failed', err);
+            return undefined;
+          });
+          // Surface the silent no-op: the user opted into sync but, e.g., the
+          // repo has no upstream, so nothing is shared. Debug-level — not every
+          // session should warn loudly, but an operator can see why sync did
+          // nothing.
+          if (syncResult?.skippedReason) {
+            this.debugLogger.warn(
+              `team memory sync skipped: ${syncResult.skippedReason}`,
+            );
+          }
+          if (syncResult?.pulled) {
+            teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
+              teamProjectRoot,
+            ).catch(() => teamAutoMemoryIndex);
+          }
+        }
+      }
       const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
         readAutoMemoryIndex(this.getProjectRoot()),
         readUserAutoMemoryIndex().catch(() => null),
@@ -2195,6 +2423,12 @@ export class Config {
             memoryDir: getUserAutoMemoryRoot(),
             indexContent: userAutoMemoryIndex,
           },
+          teamMemoryEnabled
+            ? {
+                memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+                indexContent: teamAutoMemoryIndex,
+              }
+            : undefined,
         ),
       );
     } else {
@@ -2301,11 +2535,17 @@ export class Config {
    * Should be called before refreshAuth when settings.json has been updated.
    *
    * @param modelProvidersConfig - The updated model providers configuration
+   * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
+   *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
+    providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    this.modelsConfig.reloadModelProvidersConfig(modelProvidersConfig);
+    this.modelsConfig.reloadModelProvidersConfig(
+      modelProvidersConfig,
+      providerProtocolConfig,
+    );
   }
 
   /**
@@ -2668,15 +2908,105 @@ export class Config {
   }
 
   /**
-   * Pick an image-capable model from the registered models to use as the
-   * vision bridge model. This lets the bridge work out-of-the-box when the user
-   * already has a vision model on the SAME provider as their text-only primary
-   * (see {@link selectVisionBridgeModel} — it never reaches across providers).
-   * `runSideQuery` resolves the chosen model's credentials by id.
+   * Update the vision bridge model at runtime (e.g. `/model --vision <model>`).
+   * Pass undefined or an empty string to clear the override and fall back to
+   * same-provider auto-select.
+   */
+  setVisionModel(model: string | undefined): void {
+    this.visionModel = model || undefined;
+  }
+
+  /**
+   * Whether `model` is the same entry as the current primary model — matched on
+   * the provider identity (auth type, and baseUrl when both carry one), not just
+   * the bare id. The vision bridge must never route at the primary (it's the
+   * text-only model the bridge works around), but a cross-provider namesake —
+   * the same bare id on another provider/endpoint, e.g. `anthropic:shared-model`
+   * vs an `openai` `shared-model` primary — is a different model and stays
+   * eligible. When the primary's auth type is unknown we can't disambiguate, so
+   * fall back to a conservative bare-id match (never risk hitting the primary).
+   */
+  isCurrentPrimaryModel(model: AvailableModel): boolean {
+    if (model.id !== this.getModel()) return false;
+    const cfg = this.getContentGeneratorConfig();
+    const primaryAuthType = cfg?.authType;
+    if (primaryAuthType === undefined) return true;
+    if (model.authType !== primaryAuthType) return false;
+    const primaryBaseUrl = cfg?.baseUrl;
+    if (primaryBaseUrl !== undefined && model.baseUrl !== undefined) {
+      return model.baseUrl === primaryBaseUrl;
+    }
+    return true;
+  }
+
+  /**
+   * Resolve the user's explicit `visionModel` (set via `/model --vision`) into a
+   * bridge selection. The id is passed through verbatim so `runSideQuery` can
+   * resolve an `authType:modelId` selector; the endpoint is looked up for the
+   * egress notice. Returns `undefined` (so the caller falls back to
+   * same-provider auto-select) when no explicit model is set, the selector can't
+   * be parsed, the pinned model isn't actually configured, or it points at the
+   * text-only primary itself — those guards keep a stale/typo'd pin from firing
+   * the bridge at an unreachable, or non-image-capable, model.
+   */
+  private resolveVisionModelSelection():
+    | VisionBridgeModelSelection
+    | undefined {
+    if (!this.visionModel) return undefined;
+    let selector;
+    try {
+      selector = resolveModelId(this.visionModel);
+    } catch {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' could not be parsed; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    if (!selector) {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' resolved to no selector; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    // Each guard below silently drops the pin (the hardest failure mode to
+    // debug, hence the warn): skip fast/voice-only models (a `settings.json`
+    // pin can bypass the slash command's filter), and never route the bridge at
+    // the primary entry itself (the text-only model the bridge works around) —
+    // via the provider-aware identity check so a cross-provider namesake stays
+    // eligible.
+    const match = this.getAllConfiguredModels().find(
+      (m) =>
+        m.id === selector.modelId &&
+        (!selector.authType || m.authType === selector.authType) &&
+        !m.fastOnly &&
+        !m.voiceOnly &&
+        !this.isCurrentPrimaryModel(m),
+    );
+    if (!match) {
+      this.debugLogger.warn(
+        `vision model pin '${this.visionModel}' did not match a usable configured model ` +
+          `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
+      );
+      return undefined;
+    }
+    return {
+      id: this.visionModel,
+      ...(match.baseUrl && { baseUrl: match.baseUrl }),
+    };
+  }
+
+  /**
+   * The vision bridge model: the explicit `visionModel` (`/model --vision`) when
+   * set, otherwise an auto-picked image-capable model on the SAME provider as
+   * the text-only primary (see {@link selectVisionBridgeModel} — auto-select
+   * never reaches across providers; an explicit override may). `runSideQuery`
+   * resolves the chosen model's credentials by id.
    *
-   * @returns A same-provider image-capable model, or `undefined`.
+   * @returns The bridge model selection, or `undefined`.
    */
   getDefaultVisionBridgeModel(): VisionBridgeModelSelection | undefined {
+    const explicit = this.resolveVisionModelSelection();
+    if (explicit) return explicit;
     const contentGeneratorConfig = this.getContentGeneratorConfig();
     return selectVisionBridgeModel(
       this.getModel(),
@@ -2748,9 +3078,17 @@ export class Config {
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
+      // Modalities are model-derived: a hot switch between oauth models with
+      // different image support must update them, or the vision-bridge gate and
+      // image-stripping read the previous model's modalities.
+      this.contentGeneratorConfig.modalities = config.modalities;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
+      }
+      if ('modalities' in sources) {
+        this.contentGeneratorConfigSources['modalities'] =
+          sources['modalities'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =
@@ -2955,6 +3293,7 @@ export class Config {
     oldStorage: Storage,
     newStorage: Storage,
     oldDir: string,
+    opts?: { skipProcessChdir?: boolean },
   ): Promise<void> {
     this.chatRecordingService?.finalize();
     await this.chatRecordingService?.flush();
@@ -2962,13 +3301,15 @@ export class Config {
     try {
       this.moveCurrentSessionArtifacts(oldStorage, newStorage);
     } catch (error) {
-      try {
-        process.chdir(oldDir);
-      } catch (rollbackError) {
-        this.debugLogger.warn(
-          'Failed to roll back working directory after session artifact migration failed',
-          rollbackError,
-        );
+      if (!opts?.skipProcessChdir) {
+        try {
+          process.chdir(oldDir);
+        } catch (rollbackError) {
+          this.debugLogger.warn(
+            'Failed to roll back working directory after session artifact migration failed',
+            rollbackError,
+          );
+        }
       }
       throw error;
     }
@@ -2977,8 +3318,11 @@ export class Config {
   async relocateWorkingDirectory(
     newDir: string,
     expectedCanonicalDir?: string,
+    opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
   ): Promise<{ memoryRefreshError?: unknown }> {
-    const oldDir = fs.realpathSync(process.cwd());
+    const oldDir = opts?.skipProcessChdir
+      ? this.cwd
+      : fs.realpathSync(process.cwd());
     const targetPath = path.resolve(newDir);
     const expected = expectedCanonicalDir ?? fs.realpathSync(targetPath);
     if (!fs.statSync(targetPath).isDirectory()) {
@@ -2989,23 +3333,42 @@ export class Config {
       this.explicitIncludeDirectories,
     );
 
-    process.chdir(targetPath);
-    const actualCwd = fs.realpathSync(process.cwd());
-    if (actualCwd !== expected) {
-      process.chdir(oldDir);
-      throw new Error(
-        `Changed directory to ${actualCwd}, expected ${expected}.`,
-      );
+    if (!opts?.skipProcessChdir) {
+      process.chdir(targetPath);
+      const actualCwd = fs.realpathSync(process.cwd());
+      if (actualCwd !== expected) {
+        process.chdir(oldDir);
+        throw new Error(
+          `Changed directory to ${actualCwd}, expected ${expected}.`,
+        );
+      }
+    } else {
+      // ACP path: validate realpath matches expected without calling
+      // process.chdir — guards against TOCTOU swaps between the trust
+      // check and the config state update.
+      const actualCanonical = fs.realpathSync(targetPath);
+      if (actualCanonical !== expected) {
+        throw new Error(
+          `Realpath mismatch: resolved ${actualCanonical}, expected ${expected}.`,
+        );
+      }
     }
 
     const oldStorage = this.storage;
-    const newStorage = new Storage(expected);
-    await this.prepareSessionArtifactMigration(oldStorage, newStorage, oldDir);
+    if (!opts?.skipArtifactMigration) {
+      const newStorage = new Storage(expected);
+      await this.prepareSessionArtifactMigration(
+        oldStorage,
+        newStorage,
+        oldDir,
+        opts,
+      );
+      this.storage = newStorage;
+      this.chatRecordingService?.resetStoragePaths();
+    }
 
     this.targetDir = expected;
     this.cwd = expected;
-    this.storage = newStorage;
-    this.chatRecordingService?.resetStoragePaths();
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
@@ -3304,8 +3667,25 @@ export class Config {
     return this.mcpServers;
   }
 
-  getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    let mcpServers = { ...(this.mcpServers || {}) };
+  /**
+   * Session-injected + `--mcp-config` ("top-tier") servers captured at boot, so
+   * the hot-reload subscriber can re-assemble the effective MCP map exactly the
+   * way boot did. See sub-task 3 and `assembleMcpServers`.
+   */
+  getTopTierMcpServers(): Record<string, MCPServerConfig> | undefined {
+    return this.topTierMcpServers;
+  }
+
+  /**
+   * The merged MCP server map (settings + extensions + runtime overlay) WITHOUT
+   * any admission filtering. `getMcpServers()` is this map with the
+   * `allowedMcpServers` filter applied; the unfiltered form is what tells us a
+   * server is "configured" regardless of allow-list / excluded / pending gating
+   * (used to classify why a server is unavailable — see
+   * {@link getMcpServerUnavailableReason}).
+   */
+  private getMergedMcpServers(): Record<string, MCPServerConfig> {
+    const mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
     for (const extension of extensions) {
       Object.entries(extension.config.mcpServers || {}).forEach(
@@ -3323,6 +3703,12 @@ export class Config {
     for (const [name, cfg] of this.runtimeMcpServers) {
       mcpServers[name] = cfg;
     }
+
+    return mcpServers;
+  }
+
+  getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    let mcpServers = this.getMergedMcpServers();
 
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
@@ -3399,6 +3785,222 @@ export class Config {
       throw new Error('Cannot modify mcpServers after initialization');
     }
     this.mcpServers = { ...this.mcpServers, ...servers };
+  }
+
+  /**
+   * Replace the settings-layer MCP server map at runtime (hot-reload).
+   * Unlike {@link addMcpServers}, this bypasses the `initialized` guard and
+   * REPLACES (not merges) so removals take effect. The runtime overlay
+   * ({@link addRuntimeMcpServer}) and extension contributions are unaffected —
+   * {@link getMcpServers} still layers them on top. See sub-task 3.
+   */
+  setMcpServers(servers: Record<string, MCPServerConfig> | undefined): void {
+    this.mcpServers = servers;
+  }
+
+  /**
+   * Replace the allow-list of MCP server names at runtime (hot-reload). When
+   * set, {@link getMcpServers} only yields servers whose name is in this list.
+   * `allowedMcpServers` is consulted as a filter inside `getMcpServers()`, so
+   * without this setter an allow-list edit would silently require a restart.
+   */
+  setAllowedMcpServers(allowed: string[] | undefined): void {
+    this.allowedMcpServers = allowed;
+  }
+
+  getAllowedMcpServers(): string[] | undefined {
+    return this.allowedMcpServers;
+  }
+
+  /**
+   * The startup `--allowed-mcp-server-names` upper bound (the CLI flag only),
+   * or undefined if the flag was not passed. The hot-reload recompute caps the
+   * settings-derived allow-list to this so a runtime settings edit can narrow
+   * MCP admission but never widen it beyond what the launch flag permitted.
+   */
+  getCliAllowedMcpServerNames(): string[] | undefined {
+    return this.cliAllowedMcpServerNames;
+  }
+
+  /**
+   * Replace the pending-approval set of gated MCP server names at runtime
+   * (hot-reload). The discovery layer skips these BEFORE any connection side
+   * effect, so a hot-reload must recompute them (#4615) lest it connect a
+   * newly-added but unapproved `.mcp.json`/workspace server.
+   */
+  setPendingMcpServers(pending: string[] | undefined): void {
+    this.pendingMcpServers = pending;
+  }
+
+  /**
+   * Snapshot of the three connection-admission lists consulted by discovery,
+   * used by the hot-reload subscriber as the pre-image to diff against. Paired
+   * with {@link setExcludedMcpServers} / {@link setAllowedMcpServers} /
+   * {@link setPendingMcpServers}.
+   */
+  getMcpGating(): {
+    excluded?: string[];
+    allowed?: string[];
+    pending?: string[];
+  } {
+    return {
+      excluded: this.excludedMcpServers,
+      allowed: this.allowedMcpServers,
+      pending: this.pendingMcpServers,
+    };
+  }
+
+  /**
+   * Names of MCP servers removed from config during this session by a runtime
+   * reconcile and not since re-added. "Removed" means gone from the merged map
+   * (settings + extensions + runtime), NOT merely filtered out by an admission
+   * gate — a server that is still configured but excluded / not-allowed /
+   * pending is reported via {@link getMcpServerUnavailableReason} instead.
+   * Consumed by the tool-not-found path.
+   */
+  getRecentlyRemovedMcpServers(): string[] {
+    return [...this.recentlyRemovedMcpServers];
+  }
+
+  /** All configured MCP server names (merged, before admission gating). */
+  getMcpServerNames(): string[] {
+    return Object.keys(this.getMergedMcpServers());
+  }
+
+  /**
+   * Why a given MCP server is currently unavailable (its tools aren't usable),
+   * or `undefined` if it is configured and admitted (so a missing tool is a
+   * genuine "not found" / disconnected, not an admission decision). Lets the
+   * tool-not-found path explain the right recovery action. Covers every
+   * admission gate:
+   * - `removed`: deleted from config this session (see
+   *   {@link getRecentlyRemovedMcpServers}).
+   * - `not_allowed`: filtered out by the `mcp.allowed` allow-list.
+   * - `excluded`: in the `mcp.excluded` list.
+   * - `pending_approval`: a gated server awaiting approval (#4615).
+   */
+  getMcpServerUnavailableReason(
+    serverName: string,
+  ): McpServerUnavailableReason | undefined {
+    if (this.recentlyRemovedMcpServers.has(serverName)) return 'removed';
+    if (!(serverName in this.getMergedMcpServers())) return undefined;
+    if (
+      this.allowedMcpServers &&
+      !this.allowedMcpServers.includes(serverName)
+    ) {
+      return 'not_allowed';
+    }
+    if (this.excludedMcpServers?.includes(serverName)) return 'excluded';
+    if (this.isMcpServerPendingApproval(serverName)) return 'pending_approval';
+    return undefined;
+  }
+
+  /**
+   * Apply a new settings-layer MCP map and incrementally reconcile live
+   * connections (connect added, disconnect removed, restart changed; unchanged
+   * servers untouched). Safe no-op before {@link initialize}. A shared
+   * "reconcile in progress" guard serializes against a concurrent caller (e.g.
+   * `/reload`): a request arriving mid-flight is coalesced into a single
+   * follow-up pass so the latest config always wins. See sub-task 3.
+   */
+  async reinitializeMcpServers(
+    servers: Record<string, MCPServerConfig> | undefined,
+  ): Promise<void> {
+    this.debugLogger.debug(
+      `[mcp-hot-reload] reinitializeMcpServers: servers=[${Object.keys(
+        servers ?? {},
+      ).join(
+        ', ',
+      )}] initialized=${this.initialized} inProgress=${this.mcpReconcileInProgress}`,
+    );
+
+    // Track which servers were DELETED from config this session (gone from the
+    // merged map), so the tool-not-found path can say "removed this session"
+    // vs an admission-gate reason. The merged map is independent of the
+    // admission gates (allowed/excluded/pending), so the diff is unaffected by
+    // the gating setters the hot-reload caller applied just before this — no
+    // pre-gating snapshot needed. Re-added names self-heal.
+    const prevConfigured = new Set(Object.keys(this.getMergedMcpServers()));
+    this.setMcpServers(servers);
+    const nextConfigured = new Set(Object.keys(this.getMergedMcpServers()));
+    for (const name of nextConfigured) {
+      this.recentlyRemovedMcpServers.delete(name);
+    }
+    for (const name of prevConfigured) {
+      if (!nextConfigured.has(name)) {
+        this.recentlyRemovedMcpServers.add(name);
+      }
+    }
+    if (!this.initialized) {
+      // No tool registry yet — boot-time discovery will pick up the new map.
+      this.debugLogger.debug(
+        '[mcp-hot-reload] not initialized yet — deferring to boot-time discovery (no-op)',
+      );
+      return;
+    }
+    if (this.mcpReconcileInProgress) {
+      // Coalesce: a pass is already running. Mark that the desired state
+      // advanced so its drain loop runs again with the latest config, and
+      // await that in-flight pass — NOT a resolved promise — so this caller
+      // does not proceed (e.g. the hot-reload listener emitting approval events
+      // and logging "complete") before its coalesced change is actually
+      // reconciled, and so it observes a shared reconcile failure.
+      this.mcpReconcilePending = true;
+      this.debugLogger.debug(
+        '[mcp-hot-reload] reconcile already in flight — coalescing into a follow-up pass',
+      );
+      return this.mcpReconcilePromise ?? Promise.resolve();
+    }
+    this.mcpReconcileInProgress = true;
+    const registry = this.getToolRegistry();
+    // Run pass 1 + its drain loop as a single promise, assigned BEFORE the
+    // first await so a coalesced caller arriving mid-flight can await it.
+    const runReconcile = (async () => {
+      try {
+        this.debugLogger.debug(
+          '[mcp-hot-reload] running incremental reconcile (pass 1)',
+        );
+        await registry
+          .getMcpClientManager()
+          .discoverAllMcpToolsIncremental(this);
+        // Drain any change that arrived while this pass was in flight. The pool
+        // path returns the in-flight promise rather than queuing, so awaiting
+        // is not enough — re-run once more to pick up the latest config.
+        let pass = 1;
+        while (this.mcpReconcilePending) {
+          this.mcpReconcilePending = false;
+          pass += 1;
+          this.debugLogger.debug(
+            `[mcp-hot-reload] running coalesced incremental reconcile (pass ${pass})`,
+          );
+          await registry
+            .getMcpClientManager()
+            .discoverAllMcpToolsIncremental(this);
+        }
+        this.debugLogger.debug(
+          `[mcp-hot-reload] reconcile complete after ${pass} pass(es); live servers=[${Object.keys(
+            this.getMcpServers() ?? {},
+          ).join(', ')}]`,
+        );
+      } catch (err) {
+        this.debugLogger.error(
+          `[mcp-hot-reload] reconcile failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+        throw err;
+      } finally {
+        this.mcpReconcileInProgress = false;
+        // Clear the coalesce flag too: if a pass threw, a pending follow-up
+        // would otherwise stay stuck `true` and make the next (unrelated)
+        // reconcile run an extra no-op drain pass. The next real settings
+        // change re-triggers reconcile anyway.
+        this.mcpReconcilePending = false;
+        this.mcpReconcilePromise = undefined;
+      }
+    })();
+    this.mcpReconcilePromise = runReconcile;
+    // Propagate failure to this caller (and, via the shared promise, to any
+    // coalesced callers). Existing callers rely on the throw.
+    await runReconcile;
   }
 
   /**
@@ -3923,6 +4525,10 @@ export class Config {
     return this.telemetrySettings.includeSensitiveSpanAttributes ?? false;
   }
 
+  getTelemetrySensitiveSpanAttributeMaxLength(): number {
+    return this.telemetrySettings.sensitiveSpanAttributeMaxLength;
+  }
+
   getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
@@ -4090,6 +4696,10 @@ export class Config {
    */
   getComputerUseMaxImageDimension(): number | undefined {
     return this.computerUseMaxImageDimension;
+  }
+
+  getComputerUseIdleTimeoutMs(): number | undefined {
+    return this.computerUseIdleTimeoutMs;
   }
 
   /**
@@ -4263,6 +4873,45 @@ export class Config {
 
   getManagedAutoMemoryEnabled(): boolean {
     return this.enableManagedAutoMemory && !this.getBareMode();
+  }
+
+  /**
+   * Whether the git-shared team memory tier is active. Opt-in: off unless the
+   * `memory.enableTeamMemory` setting is on. `QWEN_CODE_MEMORY_TEAM` overrides
+   * for tests / power users ('0' forces off, '1' forces on).
+   */
+  getTeamMemoryEnabled(): boolean {
+    if (this.getBareMode()) {
+      return false;
+    }
+    const override = process.env['QWEN_CODE_MEMORY_TEAM'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableTeamMemory;
+  }
+
+  /**
+   * Whether the daemon/session should auto-sync team memory with the git
+   * remote (pull + commit + push). Resolves the `memory.enableTeamMemorySync`
+   * setting, with env `QWEN_CODE_MEMORY_TEAM_SYNC` ('0'/'1') as an override.
+   * Off by default since it mutates the repo and pushes. Inert in bare mode.
+   */
+  getTeamMemorySyncEnabled(): boolean {
+    if (this.getBareMode()) {
+      return false;
+    }
+    const override = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableTeamMemorySync;
   }
 
   isManagedMemoryAvailable(): boolean {

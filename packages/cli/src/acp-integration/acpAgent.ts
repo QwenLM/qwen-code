@@ -75,6 +75,8 @@ import type {
   ProviderModelConfig,
   ProviderSetupInputs,
   ResumedSessionData,
+  DiscoveredMCPResource,
+  DiscoveredMCPPrompt,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -172,7 +174,11 @@ import {
   getCurrentLanguage,
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
-import { isWorkspaceTrusted } from '../config/trustedFolders.js';
+import {
+  isWorkspaceTrusted,
+  isFolderTrustEnabled,
+  loadTrustedFolders,
+} from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
@@ -188,6 +194,8 @@ import {
   type ServeMcpTransport,
   type ServeWorkspaceMcpToolStatus,
   type ServeWorkspaceMcpToolsStatus,
+  type ServeWorkspaceMcpResourceStatus,
+  type ServeWorkspaceMcpResourcesStatus,
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
@@ -291,6 +299,8 @@ type QwenMemorySettings = {
   enableManagedAutoDream: boolean;
   enableAutoSkill: boolean;
   autoSkillConfirm: boolean;
+  enableTeamMemory: boolean;
+  enableTeamMemorySync: boolean;
 };
 
 type QwenMemoryPaths = {
@@ -371,6 +381,8 @@ type QwenCoreSettingKey =
   | 'memory.enableManagedAutoDream'
   | 'memory.enableAutoSkill'
   | 'memory.autoSkillConfirm'
+  | 'memory.enableTeamMemory'
+  | 'memory.enableTeamMemorySync'
   | 'disableAllHooks';
 
 type QwenMcpServerConfig = {
@@ -439,6 +451,8 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'memory.enableManagedAutoDream': { type: 'boolean' },
   'memory.enableAutoSkill': { type: 'boolean' },
   'memory.autoSkillConfirm': { type: 'boolean' },
+  'memory.enableTeamMemory': { type: 'boolean' },
+  'memory.enableTeamMemorySync': { type: 'boolean' },
   disableAllHooks: { type: 'boolean' },
 } as const satisfies Record<
   QwenCoreSettingKey,
@@ -460,6 +474,8 @@ const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoDream: true,
   enableAutoSkill: true,
   autoSkillConfirm: true,
+  enableTeamMemory: false,
+  enableTeamMemorySync: false,
 };
 
 const QWEN_MEMORY_SETTING_KEYS = [
@@ -467,6 +483,8 @@ const QWEN_MEMORY_SETTING_KEYS = [
   'enableManagedAutoDream',
   'enableAutoSkill',
   'autoSkillConfirm',
+  'enableTeamMemory',
+  'enableTeamMemorySync',
 ] as const satisfies ReadonlyArray<keyof QwenMemorySettings>;
 
 function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
@@ -492,6 +510,14 @@ function normalizeQwenMemorySettings(value: unknown): QwenMemorySettings {
       typeof record['autoSkillConfirm'] === 'boolean'
         ? record['autoSkillConfirm']
         : DEFAULT_QWEN_MEMORY_SETTINGS.autoSkillConfirm,
+    enableTeamMemory:
+      typeof record['enableTeamMemory'] === 'boolean'
+        ? record['enableTeamMemory']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableTeamMemory,
+    enableTeamMemorySync:
+      typeof record['enableTeamMemorySync'] === 'boolean'
+        ? record['enableTeamMemorySync']
+        : DEFAULT_QWEN_MEMORY_SETTINGS.enableTeamMemorySync,
   };
 }
 
@@ -3392,6 +3418,21 @@ class QwenAgent implements Agent {
                 status: this.mcpStatus(e.status),
               }));
             }
+            // Resource / prompt counts ride the base status so the /mcp
+            // dialog can render "Resources: N" / "Prompts: N" and gate the
+            // resource-browser affordance without a separate round-trip.
+            // Disabled servers are not discovered, so leave their counts
+            // absent — mirrors the TUI ServerDetailStep gating.
+            if (!disabled) {
+              out.resourceCount = this.resolveServerMcpResources(
+                config,
+                name,
+              ).length;
+              out.promptCount = this.resolveServerMcpPrompts(
+                config,
+                name,
+              ).length;
+            }
             return out;
           }),
         ),
@@ -3523,6 +3564,142 @@ class QwenAgent implements Agent {
         acpChannelLive: true,
         tools: [],
         errors: [this.errorCell('mcp_tools', error)],
+      };
+    }
+  }
+
+  /**
+   * Resolve the resources discovered for one server, with the same
+   * pool-mode fallback `buildWorkspaceMcpToolsStatus` uses for tools: the
+   * workspace `Config`'s `ResourceRegistry` is authoritative in
+   * single-session mode, but in pool mode resources are registered into
+   * per-session registries (`SessionMcpView.applyResources`), leaving the
+   * workspace registry empty. Fall back to the first active session that
+   * has this server's resources.
+   */
+  private resolveServerMcpResources(
+    config: Config,
+    serverName: string,
+  ): DiscoveredMCPResource[] {
+    // Defensive optional-call mirrors useAtCompletion.ts: a partial Config
+    // (older snapshot or a test stub) may not expose the registry accessor,
+    // and a missing registry must degrade to "no resources" rather than
+    // throwing and collapsing the whole /mcp status into an error cell.
+    const resources =
+      config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
+    if (resources.length > 0) {
+      return resources;
+    }
+    for (const session of this.getActiveSessions()) {
+      try {
+        const sessionResources =
+          session
+            .getConfig()
+            .getResourceRegistry?.()
+            ?.getResourcesByServer(serverName) ?? [];
+        if (sessionResources.length > 0) {
+          return sessionResources;
+        }
+      } catch {
+        // A degraded session must not collapse the base /workspace/mcp
+        // status — skip it and keep scanning. (The counts ride that status,
+        // so one bad session shouldn't blank out every server's row.)
+      }
+    }
+    return resources;
+  }
+
+  /**
+   * Resolve the prompts discovered for one server, mirroring
+   * {@link resolveServerMcpResources}. Used only for the per-server
+   * `promptCount` on the base status — prompts have no drill-down
+   * endpoint (they surface as slash commands).
+   */
+  private resolveServerMcpPrompts(
+    config: Config,
+    serverName: string,
+  ): DiscoveredMCPPrompt[] {
+    // Defensive optional-call — see resolveServerMcpResources.
+    const prompts =
+      config.getPromptRegistry?.()?.getPromptsByServer(serverName) ?? [];
+    if (prompts.length > 0) {
+      return prompts;
+    }
+    for (const session of this.getActiveSessions()) {
+      try {
+        const sessionPrompts =
+          session
+            .getConfig()
+            .getPromptRegistry?.()
+            ?.getPromptsByServer(serverName) ?? [];
+        if (sessionPrompts.length > 0) {
+          return sessionPrompts;
+        }
+      } catch {
+        // See resolveServerMcpResources — skip a degraded session.
+      }
+    }
+    return prompts;
+  }
+
+  private buildWorkspaceMcpResourcesStatus(
+    config: Config,
+    serverName: string,
+  ): ServeWorkspaceMcpResourcesStatus {
+    const workspaceCwd = this.safeWorkspaceCwd(config);
+    try {
+      const servers = config.getMcpServers() ?? {};
+      if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd,
+          serverName,
+          initialized: true,
+          acpChannelLive: true,
+          resources: [],
+          errors: [
+            {
+              kind: 'mcp_resources',
+              status: 'error',
+              error: `MCP server not configured: ${serverName}`,
+            },
+          ],
+        };
+      }
+
+      const resources: ServeWorkspaceMcpResourceStatus[] =
+        this.resolveServerMcpResources(config, serverName).map((resource) => ({
+          uri: resource.uri,
+          ...(typeof resource.name === 'string' ? { name: resource.name } : {}),
+          ...(typeof resource.title === 'string'
+            ? { title: resource.title }
+            : {}),
+          ...(typeof resource.description === 'string'
+            ? { description: resource.description }
+            : {}),
+          ...(typeof resource.mimeType === 'string'
+            ? { mimeType: resource.mimeType }
+            : {}),
+          ...(typeof resource.size === 'number' ? { size: resource.size } : {}),
+        }));
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        serverName,
+        initialized: true,
+        acpChannelLive: true,
+        resources,
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        serverName,
+        initialized: true,
+        acpChannelLive: true,
+        resources: [],
+        errors: [this.errorCell('mcp_resources', error)],
       };
     }
   }
@@ -4963,6 +5140,19 @@ class QwenAgent implements Agent {
           serverName,
         ) as unknown as Record<string, unknown>;
       }
+      case SERVE_STATUS_EXT_METHODS.workspaceMcpResources: {
+        const serverName = params['serverName'];
+        if (typeof serverName !== 'string' || serverName.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing serverName',
+          );
+        }
+        return this.buildWorkspaceMcpResourcesStatus(
+          this.config,
+          serverName,
+        ) as unknown as Record<string, unknown>;
+      }
       case SERVE_STATUS_EXT_METHODS.workspaceSkills:
         return (await this.buildWorkspaceSkillsStatus(
           this.config,
@@ -5510,6 +5700,109 @@ class QwenAgent implements Agent {
         }
         await this.closeStoredSession(sessionId);
         return { sessionId, closed: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionCd: {
+        const sessionId = params['sessionId'];
+        const targetPath = params['path'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof targetPath !== 'string' ||
+          targetPath.length === 0 ||
+          !path.isAbsolute(targetPath) ||
+          targetPath.includes('\0')
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing path (must be an absolute path)',
+          );
+        }
+
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+
+        // Restrictive sandbox check
+        if (config.isRestrictiveSandbox()) {
+          throw new RequestError(-32003, 'Restrictive sandbox mode active', {
+            errorKind: 'restrictive_sandbox',
+          });
+        }
+
+        // Verify directory exists
+        let stats;
+        try {
+          stats = await fs.stat(targetPath);
+        } catch {
+          throw new RequestError(-32002, `Directory not found: ${targetPath}`, {
+            errorKind: 'directory_not_found',
+            path: targetPath,
+          });
+        }
+        if (!stats.isDirectory()) {
+          throw new RequestError(-32002, `Not a directory: ${targetPath}`, {
+            errorKind: 'directory_not_found',
+            path: targetPath,
+          });
+        }
+
+        // Canonicalize path
+        const canonicalPath = await fs.realpath(targetPath);
+
+        // Noop check
+        const previousCwd = config.getTargetDir();
+        if (canonicalPath === previousCwd) {
+          return { previousCwd, newCwd: canonicalPath, warnings: [] };
+        }
+
+        // Trust check
+        if (isFolderTrustEnabled(this.settings.merged)) {
+          const trustedFolders = loadTrustedFolders();
+          if (trustedFolders.isPathTrusted(canonicalPath) !== true) {
+            throw new RequestError(
+              -32001,
+              `Directory not trusted: ${canonicalPath}`,
+              { errorKind: 'directory_not_trusted', path: canonicalPath },
+            );
+          }
+        }
+
+        // Relocate working directory (skip process.chdir and artifact
+        // migration for ACP — storage stays at the bound workspace so
+        // branch/load/lifecycle paths remain consistent).
+        const warnings: string[] = [];
+        const relocation = await config.relocateWorkingDirectory(
+          canonicalPath,
+          canonicalPath,
+          { skipProcessChdir: true, skipArtifactMigration: true },
+        );
+        if (relocation.memoryRefreshError) {
+          warnings.push(
+            `Memory refresh failed: ${
+              relocation.memoryRefreshError instanceof Error
+                ? relocation.memoryRefreshError.message
+                : String(relocation.memoryRefreshError)
+            }`,
+          );
+        }
+
+        // Update model context
+        try {
+          await config
+            .getGeminiClient()
+            ?.addWorkingDirectoryChangedContext(previousCwd, canonicalPath);
+        } catch (error) {
+          warnings.push(
+            `Model context refresh failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+
+        return { previousCwd, newCwd: canonicalPath, warnings };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         const sessionId = params['sessionId'];
@@ -6807,10 +7100,19 @@ class QwenAgent implements Agent {
             }
             const config = session.getConfig();
             const authType = config.getAuthType();
+            const providersChanged =
+              changed.has('modelProviders') || changed.has('providerProtocol');
 
-            if (changed.has('modelProviders')) {
+            // Long-lived ACP sessions never restart, so honor providerProtocol
+            // changes here too (its requiresRestart only gates the TUI path) and
+            // always pass the current map so a modelProviders-only reload doesn't
+            // re-register against a stale protocol mapping.
+            if (providersChanged) {
               try {
-                config.reloadModelProvidersConfig(newMerged.modelProviders);
+                config.reloadModelProvidersConfig(
+                  newMerged.modelProviders,
+                  newMerged.providerProtocol ?? {},
+                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,
@@ -6832,10 +7134,7 @@ class QwenAgent implements Agent {
                   `reload: switchModel failed for session ${id}: ${err}`,
                 );
               }
-            } else if (
-              (changed.has('modelProviders') || envChanged) &&
-              authType
-            ) {
+            } else if ((providersChanged || envChanged) && authType) {
               try {
                 await config.refreshAuth(authType);
               } catch (err) {
@@ -7142,6 +7441,12 @@ class QwenAgent implements Agent {
       config
         .getFileHistoryService()
         .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+    }
+
+    if (sessionData?.conversation.messages) {
+      config
+        .getChatRecordingService()
+        ?.rebuildTurnBoundaries(sessionData.conversation.messages);
     }
 
     if (options.replayHistory !== false && sessionData?.conversation.messages) {

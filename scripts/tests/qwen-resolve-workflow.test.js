@@ -14,6 +14,31 @@ const repoRoot = path.resolve(
   '../..',
 );
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function job(workflow, name) {
+  const start = workflow.indexOf(`\n  ${name}:`);
+  if (start === -1) {
+    return '';
+  }
+  const nextJob = workflow.slice(start + 1).search(/\n {2}\S/);
+  return nextJob === -1
+    ? workflow.slice(start)
+    : workflow.slice(start, start + 1 + nextJob);
+}
+
+function step(section, name) {
+  const escaped = escapeRegExp(name);
+  const match = section.match(
+    new RegExp(
+      `\\n\\s+- name:\\s*(['"])${escaped}\\1[\\s\\S]*?(?=\\n\\s+- name:\\s*['"]|\\n\\s{2}[a-zA-Z0-9_-]+:|$)`,
+    ),
+  );
+  return match?.[0] ?? '';
+}
+
 describe('qwen resolve workflow', () => {
   const workflow = readFileSync(
     path.join(repoRoot, '.github/workflows/qwen-code-pr-review.yml'),
@@ -52,9 +77,6 @@ describe('qwen resolve workflow', () => {
   });
 
   it('reports failure paths instead of falling through silently', () => {
-    expect(workflow).toContain('if ! npm run build; then');
-    expect(workflow).toContain('if ! npm run typecheck; then');
-    expect(workflow).toContain('if ! npm run lint; then');
     expect(workflow).toContain("- name: 'Report result'");
     expect(workflow).toContain(
       'Qwen Code attempted to resolve merge conflicts but the run did not complete successfully.',
@@ -75,9 +97,13 @@ describe('qwen resolve workflow', () => {
     expect(workflow).toContain('Could not determine conflict status');
   });
 
-  it('refreshes dependencies after conflict resolution', () => {
-    expect(workflow).toContain("- name: 'Refresh dependencies'");
-    expect(workflow).toContain("steps.resolve_conflicts.outcome == 'success'");
+  it('only resolves conflicts — runs no build, typecheck, lint, test, or install', () => {
+    expect(resolveJob).not.toContain('npm run build');
+    expect(resolveJob).not.toContain('npm run typecheck');
+    expect(resolveJob).not.toContain('npm run lint');
+    expect(resolveJob).not.toContain('npm run test');
+    expect(resolveJob).not.toContain("- name: 'Install dependencies'");
+    expect(resolveJob).not.toContain("- name: 'Refresh dependencies'");
   });
 
   it('uses resolve naming for run artifacts', () => {
@@ -85,6 +111,18 @@ describe('qwen resolve workflow', () => {
     expect(workflow).toContain('/tmp/qwen-resolve');
     expect(workflow).toContain('<!-- qwen-resolve-result -->');
     expect(workflow).not.toContain('qwen-fix-conflicts');
+  });
+
+  it('isolates review agent state per run', () => {
+    const cleanStep = step(reviewJob, 'Clean stale agent state');
+    const agentStep = step(reviewJob, 'Run review');
+
+    expect(cleanStep).toContain('QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"');
+    expect(cleanStep).toContain('rm -rf "$QWEN_HOME"');
+    expect(cleanStep).toContain('mkdir -p "$QWEN_HOME"');
+    expect(cleanStep).toContain('rm -f /tmp/stage-*.md');
+    expect(cleanStep).toContain('echo "stale agent state cleaned"');
+    expect(agentStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
   });
 
   // Whole-file `toContain` cannot tell which job a guard lives on. Slice the
@@ -100,16 +138,17 @@ describe('qwen resolve workflow', () => {
     nextJob === -1
       ? workflow.slice(resolveJobStart)
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
+  const reviewJob = job(workflow, 'review-pr');
 
   it('keeps the authorization and scope guards on resolve-pr', () => {
     // /resolve must require write+ permission before any credentialed push.
     expect(resolveJob).toContain(
       "needs.authorize.outputs.should_review == 'true'",
     );
-    // Fork PRs are rejected before checkout.
-    expect(resolveJob).toContain(
-      'this first version only pushes same-repository branches',
-    );
+    // Fork PRs are supported: the head is fetched through refs/pull/N/head and
+    // the resolved branch is pushed back to the PR's head repository.
+    expect(resolveJob).toContain('refs/pull/${PR_NUMBER}/head');
+    expect(resolveJob).toContain('github.com/${HEAD_REPO}.git');
     // Out-of-scope edits (prompt-injection symptom) fail closed.
     expect(resolveJob).toContain(
       'Agent modified files outside the conflict set',
@@ -119,6 +158,22 @@ describe('qwen resolve workflow', () => {
     // state, defeating the concurrent-update guard.
     expect(resolveJob).toContain('--force-with-lease="refs/heads/');
     expect(resolveJob).toContain(':${HEAD_SHA}"');
+  });
+
+  it('fetches the PR head into a collision-free local ref', () => {
+    expect(resolveJob).toContain(
+      'head_fetch_ref="refs/remotes/origin/qwen-resolve/pr-${PR_NUMBER}/head"',
+    );
+    expect(resolveJob).toContain(
+      '"+refs/pull/${PR_NUMBER}/head:${head_fetch_ref}"',
+    );
+    expect(resolveJob).not.toContain(
+      '+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/${head_ref}',
+    );
+    expect(resolveJob).toContain('HEAD_FETCH_REF:');
+    expect(resolveJob).toContain(
+      'git diff --name-only -z --diff-filter=ACMRT "$HEAD_FETCH_REF" HEAD',
+    );
   });
 
   it('keeps the verification-gate failure checks on resolve-pr', () => {
@@ -142,13 +197,10 @@ describe('qwen resolve workflow', () => {
   it('pins the core security controls on resolve-pr', () => {
     // Checkout must not persist GITHUB_TOKEN into .git/config.
     expect(resolveJob).toContain('persist-credentials: false');
-    // The verification gate runs untrusted PR code with no GitHub token.
+    // The resolution check carries no writable GitHub token (defense in depth).
     expect(resolveJob).toContain("GITHUB_TOKEN: ''");
     // The agent runs sandboxed.
     expect(resolveJob).toContain('"sandbox": true');
-    // PR-controlled lifecycle scripts never run during install/refresh.
-    expect(resolveJob).toContain('npm ci --ignore-scripts');
-    expect(resolveJob).toContain('npm install --ignore-scripts');
     // Concurrent /resolve runs must not interleave on the credentialed push.
     expect(resolveJob).toContain('cancel-in-progress: false');
   });
@@ -156,7 +208,7 @@ describe('qwen resolve workflow', () => {
   it('runs the agent without any GitHub credentials', () => {
     const agentStep = resolveJob.slice(
       resolveJob.indexOf("- name: 'Resolve conflicts'"),
-      resolveJob.indexOf("- name: 'Refresh dependencies'"),
+      resolveJob.indexOf("- name: 'Resolution check'"),
     );
     expect(agentStep.length).toBeGreaterThan(0);
     expect(agentStep).not.toContain('GH_TOKEN');
@@ -170,5 +222,17 @@ describe('qwen resolve workflow', () => {
     expect(workflow).toContain('in dry-run mode');
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow).toContain("github.event.inputs.command == 'resolve'");
+  });
+
+  it('classifies push failures so forks get an actionable comment', () => {
+    // Resolving merges the base in, so the push carries the base's workflow-file
+    // changes; a token without the `workflow` scope is rejected, and that gets its
+    // own actionable reason. A 403 (maintainer-edits off / org-owned fork / PAT
+    // lacking push) and a stale force-with-lease are reported differently too.
+    expect(resolveJob).toContain("push_fail_reason='workflow_scope'");
+    expect(resolveJob).toContain('grant that scope to the push bot');
+    expect(resolveJob).toContain("push_fail_reason='permission'");
+    expect(resolveJob).toContain("push_fail_reason='moved'");
+    expect(resolveJob).toContain('Allow edits by maintainers');
   });
 });

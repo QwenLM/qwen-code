@@ -281,9 +281,11 @@ export interface DaemonSessionActions {
     answers?: Record<string, string>,
   ): Promise<boolean>;
   heartbeat(): Promise<HeartbeatResult | undefined>;
-  listSessions(): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string): Promise<void>;
-  resumeSession(sessionId: string): Promise<void>;
+  listSessions(options?: {
+    pageSize?: number;
+  }): Promise<DaemonSessionSummary[]>;
+  loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
   createSession(): Promise<DaemonSession>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
@@ -326,6 +328,10 @@ export interface DaemonSessionActions {
     name?: string,
   ): Promise<{ sessionId: string; displayName: string }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
+}
+
+export interface SessionSwitchOptions {
+  deferTranscriptReset?: boolean;
 }
 
 export interface DaemonSessionContextValue {

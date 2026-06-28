@@ -139,6 +139,28 @@ describe('SessionRouter', () => {
     });
   });
 
+  describe('getSession', () => {
+    it('returns the session for the configured scope without creating one', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sid = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.getSession('ch', 'bob', 'chat1', 'thread1')).toBe(sid);
+      expect(
+        router.getSession('ch', 'bob', 'chat1', 'thread2'),
+      ).toBeUndefined();
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('respects per-channel single scope overrides', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelScope('telegram', 'single');
+      const sid = await router.resolve('telegram', 'alice', 'chat1');
+
+      expect(router.getSession('telegram', 'bob', 'chat2')).toBe(sid);
+      expect(router.getSession('other', 'bob', 'chat2')).toBeUndefined();
+    });
+  });
+
   describe('hasSession', () => {
     it('returns true for existing session with chatId', async () => {
       const router = new SessionRouter(bridge, '/tmp');

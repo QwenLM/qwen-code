@@ -27,6 +27,10 @@ class TestChannel extends ChannelBase {
     this.connected = false;
   }
 
+  enableCancelCommand(): void {
+    this.registerCancelCommand();
+  }
+
   protected override onPromptStart(
     chatId: string,
     sessionId: string,
@@ -148,6 +152,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('/help');
       expect(ch.sent[0]!.text).toContain('/clear');
+      expect(ch.sent[0]!.text).not.toContain('/cancel');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
@@ -432,6 +437,256 @@ describe('ChannelBase', () => {
       expect(text).toContain('Session: none');
       expect(text).not.toContain('shared by this group');
       expect(text).not.toContain('private to you');
+    });
+
+    it('/cancel reports when no request is running', async () => {
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('No request is currently running');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+    });
+
+    it('/cancel aborts the active request without sending its response', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          resolvePrompt('late response');
+        },
+      );
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await new Promise((r) => setTimeout(r, 10));
+
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      await prompt;
+
+      expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+      expect(ch.sent).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'late response' }),
+        ]),
+      );
+    });
+
+    it('/cancel reports failure without suppressing the active response', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('session not found'),
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await new Promise((r) => setTimeout(r, 10));
+
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      resolvePrompt('agent response');
+      await prompt;
+
+      expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: 'Failed to cancel current request.',
+          }),
+          expect.objectContaining({ text: 'agent response' }),
+        ]),
+      );
+      expect(ch.sent).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+    });
+
+    it('/cancel retries after a failed cancellation while the prompt is still active', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('temporary failure'))
+        .mockImplementationOnce(async () => {
+          resolvePrompt('late response');
+        });
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await new Promise((r) => setTimeout(r, 10));
+
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      resolvePrompt('late response');
+      await prompt;
+
+      expect(bridge.cancelSession).toHaveBeenCalledTimes(2);
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: 'Failed to cancel current request.',
+          }),
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+      expect(ch.sent).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'late response' }),
+        ]),
+      );
+    });
+
+    it('/cancel reuses an in-flight cancellation request', async () => {
+      let resolvePrompt!: (v: string) => void;
+      let resolveCancel!: () => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await new Promise((r) => setTimeout(r, 10));
+
+      const firstCancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      const secondCancel = ch.handleInbound(envelope({ text: '/cancel' }));
+
+      expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
+      resolveCancel();
+      await Promise.all([firstCancel, secondCancel]);
+      resolvePrompt('late response');
+      await prompt;
+
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+      expect(ch.sent).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'late response' }),
+        ]),
+      );
+    });
+
+    it('/cancel follows single session scope', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          resolvePrompt('late response');
+        },
+      );
+
+      const ch = createChannel({ sessionScope: 'single' });
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(
+        envelope({ senderId: 'alice', chatId: 'chat-a', text: 'long task' }),
+      );
+      await new Promise((r) => setTimeout(r, 10));
+
+      await ch.handleInbound(
+        envelope({ senderId: 'bob', chatId: 'chat-b', text: '/cancel' }),
+      );
+      await prompt;
+
+      expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            chatId: 'chat-b',
+            text: 'Cancelled current request.',
+          }),
+        ]),
+      );
+    });
+
+    it('/cancel follows thread session scope', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          resolvePrompt('late response');
+        },
+      );
+
+      const ch = createChannel({ sessionScope: 'thread' });
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(
+        envelope({
+          senderId: 'alice',
+          chatId: 'chat-a',
+          threadId: 'topic-1',
+          text: 'long task',
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 10));
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'bob',
+          chatId: 'chat-a',
+          threadId: 'topic-1',
+          text: '/cancel',
+        }),
+      );
+      await prompt;
+
+      expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            chatId: 'chat-a',
+            text: 'Cancelled current request.',
+          }),
+        ]),
+      );
     });
 
     it('handles /command@botname format', async () => {
@@ -886,6 +1141,82 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope());
       // BlockStreamer flush should have sent the accumulated text
       expect(ch.sent.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('does not emit buffered stream text after cancellation', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolvePrompt!: (v: string) => void;
+        let resolveCancel!: () => void;
+        const pendingPrompt = new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        });
+        const pendingCancel = new Promise<void>((resolve) => {
+          resolveCancel = resolve;
+        });
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+          (sid: string) => {
+            (bridge as unknown as EventEmitter).emit(
+              'textChunk',
+              sid,
+              'partial response that should not leak',
+            );
+            return pendingPrompt;
+          },
+        );
+        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+          pendingCancel,
+        );
+
+        const ch = createChannel({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 5, maxChars: 1000 },
+          blockStreamingCoalesce: { idleMs: 500 },
+        });
+        ch.enableCancelCommand();
+        const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+        for (let i = 0; i < 10 && ch.promptStarts.length === 0; i++) {
+          await Promise.resolve();
+        }
+        expect(ch.promptStarts).toHaveLength(1);
+
+        const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+        await Promise.resolve();
+        resolveCancel();
+        await cancel;
+
+        (bridge as unknown as EventEmitter).emit(
+          'textChunk',
+          's-1',
+          'late chunk after cancel',
+        );
+        await vi.advanceTimersByTimeAsync(500);
+
+        resolvePrompt('late full response');
+        await prompt;
+
+        expect(ch.sent).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ text: 'Cancelled current request.' }),
+          ]),
+        );
+        expect(ch.sent).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              text: 'partial response that should not leak',
+            }),
+          ]),
+        );
+        expect(ch.sent).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              text: 'late chunk after cancel',
+            }),
+          ]),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
@@ -1543,6 +1874,11 @@ describe('ChannelBase', () => {
       expect((ch as any).isLocalCommand('/help')).toBe(true);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((ch as any).isLocalCommand('/clear')).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((ch as any).isLocalCommand('/cancel')).toBe(false);
+      ch.enableCancelCommand();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((ch as any).isLocalCommand('/cancel')).toBe(true);
     });
 
     it('returns false for non-commands', () => {

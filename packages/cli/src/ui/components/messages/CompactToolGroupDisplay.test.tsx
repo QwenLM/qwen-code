@@ -7,7 +7,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
-import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
+import {
+  CompactToolGroupDisplay,
+  buildToolSummary,
+  isCollapsibleTool,
+} from './CompactToolGroupDisplay.js';
 import { ToolCallStatus } from '../../types.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 
@@ -108,53 +112,19 @@ describe('<CompactToolGroupDisplay /> — shell timeout plumbing', () => {
 });
 
 describe('<CompactToolGroupDisplay /> — summary label', () => {
-  it('renders default header (active tool name + count) when no compactLabel is provided', () => {
+  it('renders semantic summary for collapsible tools', () => {
     const tools = [
-      toolCall({ callId: 'c1', name: 'read_file' }),
-      toolCall({ callId: 'c2', name: 'read_file' }),
-      toolCall({ callId: 'c3', name: 'grep' }),
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
+      toolCall({ callId: 'c3', name: 'Grep', description: 'search pattern' }),
     ];
     const { lastFrame } = render(
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
     const frame = lastFrame()!;
-    // Active tool = last in array when none are executing/confirming.
-    expect(frame).toContain('grep');
-    expect(frame).toContain('× 3');
-  });
-
-  it('replaces header with compactLabel when provided', () => {
-    const tools = [
-      toolCall({ callId: 'c1', name: 'read_file' }),
-      toolCall({ callId: 'c2', name: 'grep' }),
-    ];
-    const { lastFrame } = render(
-      <CompactToolGroupDisplay
-        toolCalls={tools}
-        contentWidth={80}
-        compactLabel="Searched in auth/"
-      />,
-    );
-    const frame = lastFrame()!;
-    expect(frame).toContain('Searched in auth/');
-    expect(frame).toContain('2 tools');
-    // The raw tool name should not appear as the primary header when a
-    // summary is shown.
-    expect(frame).not.toContain('read_file × 2');
-  });
-
-  it('shows tool count suffix only when multiple tools are present', () => {
-    const tools = [toolCall({ callId: 'c1', name: 'read_file' })];
-    const { lastFrame } = render(
-      <CompactToolGroupDisplay
-        toolCalls={tools}
-        contentWidth={80}
-        compactLabel="Read config.json"
-      />,
-    );
-    const frame = lastFrame()!;
-    expect(frame).toContain('Read config.json');
-    expect(frame).not.toContain('tools');
+    // CATEGORY_ORDER: search → read → list → ...
+    expect(frame).toContain('Searched 1 pattern');
+    expect(frame).toContain('read 2 files');
   });
 
   it('renders nothing for empty tool calls', () => {
@@ -164,18 +134,137 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     expect(lastFrame()).toBe('');
   });
 
-  it('preserves default rendering for shell commands without label', () => {
+  it('renders semantic summary for shell commands without label', () => {
     const tools = [
       toolCall({
         callId: 'c1',
-        name: 'Bash',
+        name: 'Shell',
         description: 'ls -la',
       }),
     ];
     const { lastFrame } = render(
       <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
     );
-    expect(lastFrame()).toContain('Bash');
-    expect(lastFrame()).toContain('ls -la');
+    expect(lastFrame()).toContain('Ran 1 command');
+  });
+});
+
+describe('buildToolSummary', () => {
+  const make = (
+    overrides: Partial<IndividualToolCallDisplay>,
+  ): IndividualToolCallDisplay => ({
+    callId: 'c1',
+    name: 'ReadFile',
+    description: 'a.ts',
+    status: ToolCallStatus.Success,
+    resultDisplay: '',
+    confirmationDetails: undefined,
+    ...overrides,
+  });
+
+  it('returns empty string for empty array', () => {
+    expect(buildToolSummary([], false)).toBe('');
+  });
+
+  it('single tool uses count format', () => {
+    expect(buildToolSummary([make({})], false)).toBe('Read 1 file');
+  });
+
+  it('single tool uses progressive verb when active', () => {
+    expect(buildToolSummary([make({})], true)).toBe('Reading 1 file');
+  });
+
+  it('multiple same-type tools use count', () => {
+    const tools = [
+      make({ callId: 'c1', description: 'a.ts' }),
+      make({ callId: 'c2', description: 'b.ts' }),
+      make({ callId: 'c3', description: 'c.ts' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read 3 files');
+  });
+
+  it('mixed types joined with comma and lowercase verbs', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'Edit', description: 'b.ts' }),
+      make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
+    ];
+    // CATEGORY_ORDER: search → read → list → command → edit
+    expect(buildToolSummary(tools, false)).toBe(
+      'Read 1 file, ran 1 command, edited 1 file',
+    );
+  });
+
+  it('respects CATEGORY_ORDER (read before command)', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'Shell', description: 'ls' }),
+    ];
+    const result = buildToolSummary(tools, false);
+    expect(result).toBe('Read 1 file, ran 1 command');
+  });
+
+  it('unknown tool names fall to other category', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'UnknownTool', description: 'something' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Used 1 tool');
+  });
+
+  it('mixed group with count per category', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
+      make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran 1 command');
+  });
+
+  it('legacy display names map to correct categories', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'SearchFiles', description: 'pattern' }),
+      make({ callId: 'c2', name: 'ReadFolder', description: '/src' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe(
+      'Searched 1 pattern, listed 1 directory',
+    );
+  });
+});
+
+describe('isCollapsibleTool', () => {
+  it('returns true for read/search/list tools', () => {
+    expect(isCollapsibleTool('ReadFile')).toBe(true);
+    expect(isCollapsibleTool('Grep')).toBe(true);
+    expect(isCollapsibleTool('Glob')).toBe(true);
+    expect(isCollapsibleTool('ListFiles')).toBe(true);
+    expect(isCollapsibleTool('Read File')).toBe(true);
+    expect(isCollapsibleTool('Read File(s)')).toBe(true);
+    expect(isCollapsibleTool('Read Directory')).toBe(true);
+  });
+
+  it('returns false for mutation/command/agent tools', () => {
+    expect(isCollapsibleTool('Shell')).toBe(false);
+    expect(isCollapsibleTool('Edit')).toBe(false);
+    expect(isCollapsibleTool('WriteFile')).toBe(false);
+    expect(isCollapsibleTool('Agent')).toBe(false);
+    expect(isCollapsibleTool('Workflow')).toBe(false);
+    expect(isCollapsibleTool('NotebookEdit')).toBe(false);
+  });
+
+  it('returns false for unknown tool names', () => {
+    expect(isCollapsibleTool('CustomMcpTool')).toBe(false);
+    expect(isCollapsibleTool('unknown')).toBe(false);
+  });
+
+  it('handles legacy display names from ToolDisplayNamesMigration', () => {
+    // Legacy search tools → collapsible
+    expect(isCollapsibleTool('SearchFiles')).toBe(true);
+    expect(isCollapsibleTool('FindFiles')).toBe(true);
+    // Legacy list tool → collapsible
+    expect(isCollapsibleTool('ReadFolder')).toBe(true);
+    // Legacy agent tool → non-collapsible
+    expect(isCollapsibleTool('Task')).toBe(false);
+    // Legacy todo tool → non-collapsible
+    expect(isCollapsibleTool('TodoWrite')).toBe(false);
   });
 });

@@ -56,6 +56,12 @@ export interface MCPServerDisplayInfo {
   hasOAuthTokens?: boolean;
   /** 未连接且需要（重新）认证：连接时收到 401，或声明了 OAuth 但无已存 token */
   requiresAuth?: boolean;
+  /**
+   * 对于受门控（gated，#4615）但尚未审批的 server：discovery 跳过它（保持
+   * disconnected）的原因。`pending`=等待首次/重新审批，`rejected`=已被拒绝。
+   * 仅 gated scope 有值，其余为 undefined。
+   */
+  approvalState?: 'pending' | 'rejected';
 }
 
 /**

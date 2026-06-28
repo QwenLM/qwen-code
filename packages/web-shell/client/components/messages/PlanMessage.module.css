@@ -20,20 +20,20 @@
 .chevron {
   flex-shrink: 0;
   width: 12px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .title {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 600;
 }
 
 .header:hover .title {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .progress {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
