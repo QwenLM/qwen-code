@@ -390,7 +390,7 @@ export class LoopDetectionService {
     // making progress, so it must not share the stagnation bucket and trip a
     // false halt. Failing open is the safe direction for an always-on guard.
     const segments = command
-      .split(/&&|\|\||[;&|]/)
+      .split(/&&|\|\||[;&|\n]/)
       .map((segment) => segment.trim())
       .filter(Boolean);
     if (segments.length === 0) {

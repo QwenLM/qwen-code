@@ -332,8 +332,7 @@ describe('LoopDetectionService', () => {
       expect(
         service.checkAlwaysOnSafeties({
           type: GeminiEventType.Retry,
-          value: {},
-        }),
+        } as ServerGeminiStreamEvent),
       ).toBe(false);
 
       for (const command of variants) {
@@ -417,6 +416,56 @@ describe('LoopDetectionService', () => {
       expect(service.getLastLoopType()).not.toBe(
         LoopType.SHELL_COMMAND_STAGNATION,
       );
+    });
+
+    it('does not halt repeated non-git shell commands', () => {
+      for (let i = 0; i < SHELL_COMMAND_STAGNATION_THRESHOLD + 2; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command: `npm test -- --runInBand=${i}`,
+              description: 'Run tests',
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(service.getLastLoopType()).not.toBe(
+        LoopType.SHELL_COMMAND_STAGNATION,
+      );
+    });
+
+    it('halts newline-separated git inspection command variants', () => {
+      const commands = [
+        'git diff --stat\ngit status --short',
+        'git diff --name-only HEAD\ngit ls-files --modified',
+        'git --no-pager diff --stat\ngit status --porcelain=v1',
+        'git diff --stat HEAD\ngit ls-files --others',
+        'git diff --name-only\ngit status --short',
+        'git diff --stat\ngit -C . status --short',
+        'git --no-pager diff --stat\ngit ls-files --modified',
+        'git diff --name-only HEAD\ngit status --short',
+      ];
+
+      for (const command of commands.slice(0, -1)) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command,
+              description: 'Inspect repository changes',
+            }),
+          ),
+        ).toBe(false);
+      }
+
+      expect(
+        service.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('run_shell_command', {
+            command: commands.at(-1),
+            description: 'Inspect repository changes',
+          }),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.SHELL_COMMAND_STAGNATION);
     });
 
     it('does not halt file-specific git diff review commands', () => {
