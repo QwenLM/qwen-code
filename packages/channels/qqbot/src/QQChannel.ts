@@ -213,8 +213,6 @@ export class QQChannel extends ChannelBase {
         '',
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
         '支持 Markdown 格式，回复自然流畅即可。',
-        '群聊中可以通过 <@OPENID> 格式 @ 指定成员，例如 <@D5B53C0123456789ABCDEF...>。',
-        '也可使用 QQ Markdown 富文本格式 @ 人: [@用户名](mqqapi://markdown/mention?at_type=1&at_tinyid=TINYID)',
         '未 @ 你的消息以 [可选回复] 标记。不想回复时只输出 <noreply> 即可，系统不会发送。',
       ].join('\n');
     }
@@ -1103,10 +1101,6 @@ export class QQChannel extends ChannelBase {
     if (this.isDuplicate(event.id)) return;
     // Ignore messages with no text content (images, stickers, etc.)
     if (!event.content?.trim()) return;
-    // C2C messages carry user_openid per QQ Bot API docs.
-    // Falling back to author.id provides a safety net for edge cases
-    // but may produce a different identity for the same user across
-    // C2C and group contexts, creating two separate sessions.
     const chatId = event.author.user_openid || event.author.id || 'unknown';
     this.chatTypeMap.set(chatId, 'c2c');
     this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
@@ -1114,9 +1108,7 @@ export class QQChannel extends ChannelBase {
     const senderName = event.author.username || event.author.id || 'QQ User';
     const cleanText = event.content.trim();
     const isSlash = cleanText.startsWith('/');
-    const text = isSlash
-      ? cleanText
-      : `[${senderName} <@${event.author.user_openid || 'unknown'}>]: ${cleanText}`;
+    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
@@ -1149,12 +1141,6 @@ export class QQChannel extends ChannelBase {
       event.author.id ||
       event.author.member_openid ||
       'QQ User';
-    // Strip @mention tags from message content. QQ Bot API docs state the API
-    // cleans these, but the format varies across API versions:
-    //   - Legacy: <@!12345> (numeric user ID with bang)
-    //   - V2:     <@D5B53C...> (hex openid, no bang)
-    // Use a broad pattern to handle both. Bound to 64 chars — QQ openids
-    // and user IDs are short; this prevents quadratic backtracking on <@<@... chains.
     const cleanText = (event.content || '')
       .replace(/<@[^>]{1,64}>/g, '')
       .trim();
@@ -1168,10 +1154,7 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText.split(/\s/)[0]}\n`,
       );
     }
-    // Don't prefix slash commands, keep [senderName] for normal messages
-    const text = isSlash
-      ? cleanText
-      : `[${senderName} <@${event.author.member_openid || event.author.user_openid || 'unknown'}>]: ${cleanText}`;
+    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1274,7 +1257,7 @@ export class QQChannel extends ChannelBase {
 
     const text = isSlash
       ? cleanText
-      : `${isAtBot ? '' : '[可选回复] '}[${senderName} <@${event.author.member_openid || 'unknown'}>]: ${content}`;
+      : `${isAtBot ? '' : '[可选回复] '}[${senderName}]: ${cleanText}`;
 
     if (this.isDuplicate(event.id)) return;
 
