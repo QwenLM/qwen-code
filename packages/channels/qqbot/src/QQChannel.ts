@@ -63,27 +63,6 @@ export function isValidChatId(id: string): boolean {
  * it as plain text — so false positives are safe. False negatives (missing
  * markdown in msg_type=0) would strip formatting, so we bias toward markdown.
  */
-export function hasLinkSyntax(text: string): boolean {
-  const open = text.indexOf('[');
-  if (open === -1) return false;
-  const mid = text.indexOf('](', open + 1);
-  if (mid === -1) return false;
-  return text.indexOf(')', mid + 2) !== -1;
-}
-
-export function hasMarkdownSyntax(text: string): boolean {
-  return (
-    /^\|/m.test(text) ||
-    /^#{1,6}\s/m.test(text) ||
-    text.includes('```') ||
-    /\*\*|__|~~/.test(text) ||
-    /`[^`]+`/.test(text) ||
-    hasLinkSyntax(text) ||
-    /^[-*+]\s/m.test(text) ||
-    /^\d+\.\s/m.test(text)
-  );
-}
-
 export class QQChannel extends ChannelBase {
   private ws: WebSocket | null = null;
   private accessToken: string = '';
@@ -146,6 +125,12 @@ export class QQChannel extends ChannelBase {
   /**
    * Per-session stream state to prevent concurrent sessions from
    * clobbering each other's buffers. Keyed by sessionId.
+   *
+   * Entries are cleaned up in onResponseComplete. Cancelled or errored
+   * prompts may leak entries — ChannelBase does not expose an onPromptEnd
+   * hook that fires in the finally block — but this is acceptable because
+   * a leaked entry occupies only ~100 bytes and the overall Map is bounded
+   * by the number of active conversations.
    */
   private streamState: Map<
     string,
@@ -216,6 +201,7 @@ export class QQChannel extends ChannelBase {
         '消息前缀 [atMention=true] 表示该消息 @了你，[atMention=false] 表示未 @你。',
         '不想回复时只输出 <noreply> 即可，消息不会发出。',
         '',
+        '以下规则仅适用于群聊消息。C2C 私聊中请始终正常回复。',
         '## 群聊唤醒与静默规则',
         '',
         '### 当 [atMention=false] — 未 @你',
@@ -241,6 +227,7 @@ export class QQChannel extends ChannelBase {
       ].join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (this.disposed) return;
       try {
         await this.fetchToken();
         await this.connectGateway();
@@ -261,19 +248,35 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    if (text.trim() === '<noreply>') return;
+    if (text.trim() === '<noreply>') {
+      // LLM 判断不需要回复——静默跳过。加一行日志方便排查"是不是 bot 挂了"。
+      process.stderr.write(
+        `[QQ:${this.name}] <noreply> skipped for ${chatId}\n`,
+      );
+      return;
+    }
     const route = await this.resolveRoute(chatId);
     if (!route) return;
+
+    // Respect QQ Bot active-message toggle: when a group admin disables
+    // active messages, drop outbound sends silently to avoid platform-policy
+    // violations.
+    if (this.groupActiveMsgEnabled.get(chatId) === false) {
+      process.stderr.write(
+        `[QQ:${this.name}] sendMessage blocked: active messages disabled for ${chatId}\n`,
+      );
+      return;
+    }
 
     const entry = this.replyMsgId.get(chatId);
     const msgId =
       entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
-    const useMarkdown = true;
 
     try {
-      const body: Record<string, unknown> = useMarkdown
-        ? { msg_type: 2, markdown: { content: text } }
-        : { content: text, msg_type: 0 };
+      const body: Record<string, unknown> = {
+        msg_type: 2,
+        markdown: { content: text },
+      };
       const nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
       if (msgId) {
         body['msg_id'] = msgId;
@@ -288,7 +291,7 @@ export class QQChannel extends ChannelBase {
         body,
       );
 
-      if (!resp.ok && useMarkdown) {
+      if (!resp.ok) {
         const errBody = await resp.text().catch(() => '');
         process.stderr.write(
           `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 100)}), retrying as plain text\n`,
@@ -469,18 +472,18 @@ export class QQChannel extends ChannelBase {
    * model's intent text (e.g. "我先来查一下天气") immediately rather
    * than waiting for the tool call to complete.
    */
-  override onToolCall(_chatId: string, _event: ToolCallEvent): void {
-    // Flush ALL sessions' buffers on tool call — there's typically only one
-    // active session, but iterating covers the edge case.
-    for (const [, state] of this.streamState) {
-      if (state.timer) {
-        clearTimeout(state.timer);
-        state.timer = null;
-      }
-      if (state.buffer) {
-        this.sendMessage(state.chatId, state.buffer).catch(() => {});
-        state.buffer = '';
-      }
+  override onToolCall(_chatId: string, event: ToolCallEvent): void {
+    // Only flush the triggering session — flushing all sessions would
+    // prematurely send partial buffers from unrelated concurrent conversations.
+    const state = this.streamState.get(event.sessionId);
+    if (!state) return;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    if (state.buffer) {
+      this.sendMessage(state.chatId, state.buffer).catch(() => {});
+      state.buffer = '';
     }
   }
 
@@ -571,21 +574,52 @@ export class QQChannel extends ChannelBase {
     try {
       if (!existsSync(this.qqStatePath)) return false;
       const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
-      if (raw.chatTypeMap) this.chatTypeMap = new Map(raw.chatTypeMap);
+      if (raw.chatTypeMap) {
+        // Validate: only accept 'c2c' | 'group' values to prevent
+        // manipulated state files from injecting invalid routing entries.
+        this.chatTypeMap = new Map(
+          (raw.chatTypeMap as Array<[string, unknown]>).filter(
+            ([, v]) => v === 'c2c' || v === 'group',
+          ),
+        ) as Map<string, 'c2c' | 'group'>;
+      }
       if (raw.replyMsgId) {
         const now = Date.now();
         this.replyMsgId = new Map(
-          raw.replyMsgId.map(
-            ([k, v]: [string, unknown]) =>
-              typeof v === 'string'
-                ? ([k, { msgId: v, timestamp: now }] as const) // Old format: msgId only
-                : ([k, v] as const), // New format: { msgId, timestamp }
-          ),
-        );
+          (raw.replyMsgId as Array<[string, unknown]>)
+            .map(
+              ([k, v]: [string, unknown]) =>
+                typeof v === 'string'
+                  ? ([k, { msgId: v, timestamp: now }] as const) // Old format: msgId only
+                  : ([k, v] as const), // New format: { msgId, timestamp }
+            )
+            // Validate new-format entries: must have string msgId and numeric timestamp.
+            .filter(([, v]) => {
+              if (typeof v === 'string') return true; // old format, normalized above
+              if (typeof v !== 'object' || v === null) return false;
+              const entry = v as { msgId?: unknown; timestamp?: unknown };
+              return (
+                typeof entry.msgId === 'string' &&
+                typeof entry.timestamp === 'number'
+              );
+            }),
+        ) as Map<string, { msgId: string; timestamp: number }>;
       }
-      if (raw.msgSeqMap) this.msgSeqMap = new Map(raw.msgSeqMap);
+      if (raw.msgSeqMap) {
+        // Validate: values must be non-negative numbers.
+        this.msgSeqMap = new Map(
+          (raw.msgSeqMap as Array<[string, unknown]>).filter(
+            ([, v]) => typeof v === 'number' && v >= 0,
+          ),
+        ) as Map<string, number>;
+      }
       if (raw.groupActiveMsgEnabled) {
-        this.groupActiveMsgEnabled = new Map(raw.groupActiveMsgEnabled);
+        // Validate: values must be booleans.
+        this.groupActiveMsgEnabled = new Map(
+          (raw.groupActiveMsgEnabled as Array<[string, unknown]>).filter(
+            ([, v]) => typeof v === 'boolean',
+          ),
+        ) as Map<string, boolean>;
       }
       return true;
     } catch (e) {
@@ -607,8 +641,10 @@ export class QQChannel extends ChannelBase {
         if (data.trim())
           writeFileSync(this.sessionsBackupPath, data, { mode: 0o600 });
       }
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] backupGlobalSessions failed: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
     }
   }
 
@@ -624,8 +660,10 @@ export class QQChannel extends ChannelBase {
           { mode: 0o600 },
         );
       }
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] restoreGlobalSessions failed: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
     }
   }
 
@@ -672,8 +710,10 @@ export class QQChannel extends ChannelBase {
           tc.set(correctId, entry.cwd || '');
         }
       }
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] fixRestoredSessions failed: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
     }
   }
 
@@ -741,6 +781,7 @@ export class QQChannel extends ChannelBase {
                 retry();
               });
             }, 60_000);
+            this.tokenRefreshTimer.unref?.();
           };
           retry();
         });
@@ -900,7 +941,6 @@ export class QQChannel extends ChannelBase {
           this.connectReject = null;
           this.startHeartbeat();
           if (this.coldStart) {
-            this.coldStart = false;
             this.restoreGlobalSessions();
             this.restoreQQState();
             this.router
@@ -919,9 +959,16 @@ export class QQChannel extends ChannelBase {
                 process.stderr.write(
                   `[QQ:${this.name}] Ready (${count} sessions)\n`,
                 );
+                this.coldStart = false;
                 onReady();
               })
-              .catch(() => onReady());
+              .catch((err: unknown) => {
+                process.stderr.write(
+                  `[QQ:${this.name}] restoreSessions failed: ${err instanceof Error ? err.message : String(err)}\n`,
+                );
+                this.coldStart = false;
+                onReady();
+              });
           } else {
             process.stderr.write(
               `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
@@ -969,6 +1016,10 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Server sent INVALID_SESSION, falling back to IDENTIFY\n`,
         );
         this.tryResume = false;
+        // Trigger full state restore on the next READY — the gateway
+        // assigned a new session_id, so in-memory routing state
+        // (chatTypeMap, replyMsgId, msgSeqMap) must be reloaded.
+        this.coldStart = true;
         this.sendIdentify();
         break;
       default:
@@ -999,7 +1050,8 @@ export class QQChannel extends ChannelBase {
         op: OpCode.IDENTIFY,
         d: {
           token: `QQBot ${this.accessToken}`,
-          intents: Intent.C2C_MESSAGE | Intent.GROUP_AT_MESSAGE,
+          intents:
+            Intent.C2C_MESSAGE | Intent.GROUP_AT_MESSAGE | Intent.GROUP_MESSAGE,
           shard: [0, 1],
           properties: {},
         },
@@ -1061,6 +1113,11 @@ export class QQChannel extends ChannelBase {
     process.stderr.write(
       `[QQ:${this.name}] RC: exhausted ${maxGwRetries} gateway retries, will retry in 60s\n`,
     );
+    // Increment reconnectAttempts here as well — the close handler only
+    // fires when a WebSocket was opened, so gateway-fetch failures never
+    // increment it. Without this, the 60-second fallback below retries
+    // indefinitely, ignoring maxReconnectAttempts.
+    this.reconnectAttempts++;
     this.tryResume = false; // fall back to full IDENTIFY next time
     this.isReconnecting = false; // release guard for future retries
     // Schedule another attempt with longer delay
@@ -1130,9 +1187,14 @@ export class QQChannel extends ChannelBase {
     this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
     this.saveQQState();
     const senderName = event.author.username || event.author.id || 'QQ User';
+    // Sanitize: strip [ ] so a crafted display name cannot spoof the
+    // [atMention=...] protocol marker.
+    const safeName = senderName.replace(/[[\]]/g, '');
     const cleanText = event.content.trim();
     const isSlash = cleanText.startsWith('/');
-    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
+    const text = isSlash
+      ? cleanText
+      : `[atMention=true] [${safeName}]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
@@ -1165,6 +1227,9 @@ export class QQChannel extends ChannelBase {
       event.author.id ||
       event.author.member_openid ||
       'QQ User';
+    // Sanitize: strip [ ] so a crafted display name cannot spoof the
+    // [atMention=...] protocol marker.
+    const safeName = senderName.replace(/[[\]]/g, '');
     const cleanText = (event.content || '')
       .replace(/<@[^>]{1,64}>/g, '')
       .trim();
@@ -1178,7 +1243,9 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText.split(/\s/)[0]}\n`,
       );
     }
-    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
+    const text = isSlash
+      ? cleanText
+      : `[atMention=true] [${safeName}]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1215,10 +1282,19 @@ export class QQChannel extends ChannelBase {
     if (!groupId) return;
     this.chatTypeMap.delete(groupId);
     this.groupActiveMsgEnabled.delete(groupId);
+    // msgSeqMap is keyed by message ID, not group_openid — get the
+    // message ID from replyMsgId before deleting the reply entry.
+    const replyEntry = this.replyMsgId.get(groupId);
+    if (replyEntry) this.msgSeqMap.delete(replyEntry.msgId);
     this.replyMsgId.delete(groupId);
-    this.msgSeqMap.delete(groupId);
     for (const [sid, state] of this.streamState) {
-      if (state.chatId === groupId) this.streamState.delete(sid);
+      if (state.chatId === groupId) {
+        // Cancel the pending idle-flush timer before deleting the entry,
+        // otherwise the setTimeout callback will fire and attempt to send
+        // to the removed group, creating orphaned API calls.
+        if (state.timer) clearTimeout(state.timer);
+        this.streamState.delete(sid);
+      }
     }
     this.saveQQState();
     process.stderr.write(
@@ -1227,6 +1303,7 @@ export class QQChannel extends ChannelBase {
   }
 
   private handleGroupMsgReject(event: GroupMsgToggleEvent): void {
+    if (!event.group_openid) return;
     this.groupActiveMsgEnabled.set(event.group_openid, false);
     this.saveQQState();
     process.stderr.write(
@@ -1235,6 +1312,7 @@ export class QQChannel extends ChannelBase {
   }
 
   private handleGroupMsgReceive(event: GroupMsgToggleEvent): void {
+    if (!event.group_openid) return;
     this.groupActiveMsgEnabled.set(event.group_openid, true);
     this.saveQQState();
     process.stderr.write(
@@ -1247,12 +1325,24 @@ export class QQChannel extends ChannelBase {
       return;
     }
     const chatId = event.group_openid;
-    // Group messages use member_openid; username/id are not present.
-    const senderName =
-      event.author.username ||
-      event.author.id ||
-      event.author.member_openid ||
-      'QQ User';
+
+    // Deduplicate early — before any side effects (chatTypeMap.set, etc.)
+    // to avoid unnecessary state mutations on replayed messages.
+    if (this.isDuplicate(event.id)) return;
+
+    // Guard: if the group admin disabled active messages via QQ's
+    // permission toggle, drop the inbound message silently. QQ platform
+    // policy requires bots to stop processing when active messages are off.
+    if (this.groupActiveMsgEnabled.get(chatId) === false) {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupAll blocked: active messages disabled for ${chatId}\n`,
+      );
+      return;
+    }
+
+    // Guard: ignore messages from other bots (including our own) to
+    // prevent infinite self-reply loops.
+    if (event.author.bot) return;
 
     this.chatTypeMap.set(chatId, 'group');
 
@@ -1263,7 +1353,9 @@ export class QQChannel extends ChannelBase {
     if (policy === 'log') return;
 
     if (policy === 'keyword') {
-      const triggers = this.qqConfig.keywordTriggers ?? [];
+      const triggers = (this.qqConfig.keywordTriggers ?? []).filter(
+        (kw) => kw.length > 0,
+      );
       if (triggers.length === 0) return;
       const lower = content.toLowerCase();
       const matched = triggers.some((kw) => lower.includes(kw.toLowerCase()));
@@ -1272,6 +1364,20 @@ export class QQChannel extends ChannelBase {
 
     // policy === 'all' or keyword matched → forward to LLM
 
+    // Group messages use member_openid; username/id are not present.
+    const senderName =
+      event.author.username ||
+      event.author.id ||
+      event.author.member_openid ||
+      'QQ User';
+    // Sanitize: strip [ ] so a crafted display name cannot spoof the
+    // [atMention=...] protocol marker.
+    const safeName = senderName.replace(/[[\]]/g, '');
+
+    // Strip <@OPENID> tags for empty check and slash detection, but keep
+    // the raw content (with tags) in the text passed to the LLM — the model
+    // needs the <@OPENID> syntax to correctly @mention other group members
+    // in its replies.
     const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
     if (!cleanText) return;
 
@@ -1279,11 +1385,13 @@ export class QQChannel extends ChannelBase {
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
     const isSlash = isAtBot && cleanText.startsWith('/');
 
+    // Use raw content (with <@OPENID> mention tags) so the LLM sees the
+    // actual @mention format. The system prompt teaches the model to use
+    // <@OPENID> for @mentions; stripping tags would remove the examples
+    // the model needs to learn the correct format from.
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] ${isAtBot ? '' : '[可选回复] '}[${senderName}]: ${cleanText}`;
-
-    if (this.isDuplicate(event.id)) return;
+      : `[atMention=${isAtBot}] [${safeName}]: ${content}`;
 
     this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
     this.saveQQState();

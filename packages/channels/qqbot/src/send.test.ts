@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { isValidChatId, hasMarkdownSyntax } from './QQChannel.js';
+import { isValidChatId } from './QQChannel.js';
 
 const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
   mockSendQQMessage: vi.fn(),
@@ -113,66 +113,6 @@ describe('isValidChatId', () => {
 
   it('rejects IDs with dots', () => {
     expect(isValidChatId('abc.def')).toBe(false);
-  });
-});
-
-describe('hasMarkdownSyntax', () => {
-  it('detects headings', () => {
-    expect(hasMarkdownSyntax('# Title')).toBe(true);
-    expect(hasMarkdownSyntax('## Subtitle')).toBe(true);
-    expect(hasMarkdownSyntax('###### Deep heading')).toBe(true);
-  });
-
-  it('detects code blocks', () => {
-    expect(hasMarkdownSyntax('```js\ncode\n```')).toBe(true);
-  });
-
-  it('detects bold (double asterisk)', () => {
-    expect(hasMarkdownSyntax('**bold**')).toBe(true);
-  });
-
-  it('detects bold (double underscore)', () => {
-    expect(hasMarkdownSyntax('__bold__')).toBe(true);
-  });
-
-  it('detects strikethrough', () => {
-    expect(hasMarkdownSyntax('~~strikethrough~~')).toBe(true);
-  });
-
-  it('detects inline code', () => {
-    expect(hasMarkdownSyntax('use `code` here')).toBe(true);
-  });
-
-  it('detects links', () => {
-    expect(hasMarkdownSyntax('[text](url)')).toBe(true);
-  });
-
-  it('detects unordered list markers', () => {
-    expect(hasMarkdownSyntax('- item')).toBe(true);
-    expect(hasMarkdownSyntax('* item')).toBe(true);
-    expect(hasMarkdownSyntax('+ item')).toBe(true);
-  });
-
-  it('detects ordered list markers', () => {
-    expect(hasMarkdownSyntax('1. first')).toBe(true);
-    expect(hasMarkdownSyntax('123. item')).toBe(true);
-  });
-
-  it('returns false for plain text', () => {
-    expect(hasMarkdownSyntax('hello world')).toBe(false);
-    expect(hasMarkdownSyntax('no special chars here')).toBe(false);
-  });
-
-  it('returns false for text with single asterisks (not list marker at line start)', () => {
-    expect(hasMarkdownSyntax('this is *not* italic in this regex')).toBe(false);
-  });
-
-  it('false positive: "- temperature" triggers list pattern', () => {
-    expect(hasMarkdownSyntax('- temperature: 5°C')).toBe(true);
-  });
-
-  it('false positive: "1. first thing" at line start triggers ordered-list pattern', () => {
-    expect(hasMarkdownSyntax('1. first thing in sentence')).toBe(true);
   });
 });
 

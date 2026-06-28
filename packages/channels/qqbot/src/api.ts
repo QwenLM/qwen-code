@@ -37,7 +37,7 @@ export async function fetchAccessToken(
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     throw new Error(
-      `QQ Bot token request failed (HTTP ${resp.status}): ${body}`,
+      `QQ Bot token request failed (HTTP ${resp.status}): ${body.slice(0, 80)}`,
     );
   }
 
@@ -76,6 +76,14 @@ export async function fetchGatewayUrl(
   const data = (await resp.json()) as { url?: string };
   if (!data['url']) {
     throw new Error('QQ Bot gateway response missing WebSocket URL');
+  }
+  // Validate protocol to avoid routing the access token to a
+  // compromised or misconfigured endpoint.
+  const parsed = new URL(data['url']);
+  if (!['wss:', 'ws:'].includes(parsed.protocol)) {
+    throw new Error(
+      `QQ Bot gateway URL has invalid protocol: ${parsed.protocol}`,
+    );
   }
   return data['url'];
 }

@@ -18,6 +18,7 @@ export const OpCode = {
 export const Intent = {
   C2C_MESSAGE: 1 << 12, // C2C 消息
   GROUP_AT_MESSAGE: 1 << 25, // 群聊 @ 消息事件
+  GROUP_MESSAGE: 1 << 26, // 群聊全量消息事件 (GROUP_MESSAGE_CREATE)
 } as const;
 
 export interface QQMessageEvent {
