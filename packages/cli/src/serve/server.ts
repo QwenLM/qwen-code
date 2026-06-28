@@ -27,6 +27,11 @@ import { createWorkspaceProvidersStatusProvider } from './workspace-providers-st
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
+  ClientMcpSenderRegistry,
+  createClientMcpServerProvider,
+} from './acp-http/client-mcp-sender-registry.js';
+import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
+import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   type AcpSessionBridge,
@@ -218,6 +223,17 @@ export interface ServeAppDeps {
       value: unknown;
     }>,
   ) => Promise<void>;
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
+   * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
+   * child's `client_mcp/message` ext-method. `runQwenServe` constructs ONE and
+   * passes the SAME instance here AND to its `createAcpSessionBridge` call (as
+   * `clientMcpSender: registry.lookup`) so the bridge that answers the child
+   * and the WS provider that registers senders agree. When omitted (the
+   * standalone `createServeApp` path with no injected bridge), `createServeApp`
+   * builds its own registry and wires it into the bridge it creates.
+   */
+  clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
 }
 
@@ -292,6 +308,34 @@ export function createServeApp(
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
     opts.enableSessionShell === true && tokenConfigured;
+  // Reverse tool channel (issue #5626, Phase 2). Process-scoped registry that
+  // bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
+  // child's `client_mcp/message` ext-method. Prefer the registry `runQwenServe`
+  // already wired into its injected bridge (`deps.clientMcpSenderRegistry`) so
+  // the bridge that answers the child and the WS provider share ONE map.
+  // Standalone `createServeApp` (no injected bridge) builds its own and wires
+  // it into the bridge it creates below. Inert until a WS client sends
+  // `mcp_register` (gated by `clientMcpOverWs`).
+  // Guard the split-brain case: an injected `deps.bridge` was already wired to
+  // its own sender, so building a fresh registry here would leave the bridge
+  // and this registry pointing at different maps. A caller injecting the bridge
+  // must inject the matching registry too. Only enforced when `clientMcpOverWs`
+  // is active — that's the only path that processes `mcp_*` frames, so without
+  // it the registry is inert and a mismatch can't manifest (and the vast
+  // majority of tests inject a fake bridge without ever touching client-MCP).
+  if (
+    opts.clientMcpOverWs === true &&
+    deps.bridge &&
+    !deps.clientMcpSenderRegistry
+  ) {
+    throw new Error(
+      'createServeApp: deps.bridge requires deps.clientMcpSenderRegistry ' +
+        'when clientMcpOverWs is enabled (the bridge is already wired to its ' +
+        'own sender; a fresh registry here would be an orphan).',
+    );
+  }
+  const clientMcpSenderRegistry =
+    deps.clientMcpSenderRegistry ?? new ClientMcpSenderRegistry();
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
       opts,
@@ -316,6 +360,9 @@ export function createServeApp(
       // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
       // readTextFile pick up trust / TOCTOU / audit.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      // Reverse tool channel: answer the child's `client_mcp/message`
+      // ext-method by reaching the WS connection that hosts the named server.
+      clientMcpSender: clientMcpSenderRegistry.lookup,
     });
 
   installSelfOriginStripMiddleware(app, getPort);
@@ -437,8 +484,20 @@ export function createServeApp(
   // opts.serveWebShell=false to opt out.
   const webShellDir =
     opts.serveWebShell !== false ? deps.webShellDir : undefined;
+  // Extension origins (chrome-extension://…) explicitly allowed via
+  // --allow-origin may frame the Web Shell so the extension can host the UI in
+  // a Chrome side panel (issue #5626). All other origins still get
+  // frame-ancestors 'none' + X-Frame-Options: DENY.
+  const webShellFrameAncestors =
+    opts.allowOrigins && opts.allowOrigins.length > 0
+      ? [...parseAllowOriginPatterns(opts.allowOrigins).origins].filter(
+          (o) =>
+            o.startsWith('chrome-extension://') ||
+            o.startsWith('moz-extension://'),
+        )
+      : [];
   if (webShellDir) {
-    mountWebShellAssets(app, webShellDir);
+    mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
 
   app.use(bearerAuth(opts.token));
@@ -469,6 +528,12 @@ export function createServeApp(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   const acpHandleRef: { current?: AcpHttpHandle } = {};
+
+  // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
+  // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
+  // both ends connect (gated by `cdpTunnelOverWs`).
+  const cdpTunnelRegistry =
+    opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
 
   registerDaemonStatusRoutes(app, {
     opts,
@@ -707,8 +772,35 @@ export function createServeApp(
     fsFactory,
     deviceFlowRegistry,
     token: opts.token,
+    // Mirror the REST CORS allowlist onto the WS CSRF wall so an
+    // explicitly permitted origin (e.g. the extension's
+    // `chrome-extension://<id>`) can open the reverse tool channel.
+    allowedOrigins:
+      opts.allowOrigins && opts.allowOrigins.length > 0
+        ? parseAllowOriginPatterns(opts.allowOrigins)
+        : undefined,
     sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
+    clientMcpOverWs: opts.clientMcpOverWs === true,
+    // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
+    // on `mcp_register` it records the WS registrar's sender in the shared
+    // registry and adds an SDK-type runtime MCP server in the ACP child
+    // (originator = the connection id). Only meaningful when
+    // `clientMcpOverWs` is on; the WS layer never builds a provider otherwise.
+    ...(opts.clientMcpOverWs === true
+      ? {
+          clientMcpProviderFactory: (connectionId: string) =>
+            createClientMcpServerProvider(
+              clientMcpSenderRegistry,
+              bridge,
+              connectionId,
+            ),
+        }
+      : {}),
+    // Plan C CDP tunnel (issue #5626): the `/cdp` branch + `cdp_*` routing
+    // activate only when the flag is on and a registry is supplied.
+    cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
+    ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.
@@ -729,7 +821,7 @@ export function createServeApp(
   // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
   // 200 shell out of an authed route.
   if (webShellDir) {
-    mountWebShellSpaFallback(app, webShellDir);
+    mountWebShellSpaFallback(app, webShellDir, webShellFrameAncestors);
   }
 
   installFinalErrorHandler(app);

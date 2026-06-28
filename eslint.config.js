@@ -221,6 +221,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
+      // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
+      'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
     ],
     languageOptions: {
       globals: {
@@ -267,6 +269,13 @@ export default tseslint.config(
   // WebUI package - UI component library with Storybook
   {
     files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
+    rules: { 'no-console': 'off' },
+  },
+  // Chrome extension (chrome-extension) - the MV3 background service
+  // worker and content scripts run in the browser with no stdio; console is
+  // the only logging / debugging channel available there.
+  {
+    files: ['packages/chrome-extension/**/*.ts', 'packages/chrome-extension/**/*.tsx'],
     rules: { 'no-console': 'off' },
   },
   // Specific CLI files that intentionally wrap console usage

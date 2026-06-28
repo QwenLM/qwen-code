@@ -366,4 +366,38 @@ export interface BridgeOptions {
    * Default: 1_800_000 (30 minutes). `0` or `Infinity` disables.
    */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Looks up the
+   * `sendSdkMcpMessage`-shaped sender for a client-hosted MCP server by its
+   * advertised `server` name, returning `undefined` when no client currently
+   * hosts it.
+   *
+   * The `qwen --acp` child binds its session `McpClientManager`'s
+   * `sendSdkMcpMessage` to a `qwen/control/client_mcp/message` ext-method
+   * (child → parent). `BridgeClient.extMethod` answers that method by calling
+   * THIS lookup to reach the per-WS-connection `ClientMcpRegistrar` that
+   * carries the JSON-RPC frame down the daemon WS to the extension and returns
+   * the correlated response.
+   *
+   * Backed by a process-scoped registry the serve layer populates on
+   * `mcp_register` and clears on `mcp_unregister` / WS close (see
+   * `cli/src/serve/acp-http/client-mcp-sender-registry.ts`). When omitted
+   * (tests, Mode A consumers, channels / IDE companion), the child never
+   * receives an SDK MCP runtime server, so the method is never called.
+   */
+  clientMcpSender?: ClientMcpMessageSender;
 }
+
+/**
+ * Looks up the JSON-RPC sender for a client-hosted MCP server by name. Returns
+ * `undefined` when no client currently advertises `serverName`. The returned
+ * callback delivers `payload` to the client-hosted server and resolves with the
+ * correlated JSON-RPC response. `payload` is typed `unknown` to keep this
+ * package free of an MCP-SDK dependency; the serve layer passes a
+ * `JSONRPCMessage`.
+ */
+export type ClientMcpMessageSender = (
+  serverName: string,
+) =>
+  | ((payload: unknown) => Promise<unknown>)
+  | undefined;

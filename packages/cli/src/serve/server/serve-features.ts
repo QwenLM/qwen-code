@@ -80,6 +80,8 @@ export function createServeFeatures(
         sessionShellCommandEnabled,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
+        clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
+        cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
         // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
         // on). A configured token no longer suppresses it — the browser carries

@@ -3715,6 +3715,7 @@ describe('ACP WebSocket transport security', () => {
   function startServer(
     opts: {
       token?: string;
+      allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
     } = {},
   ) {
@@ -3727,14 +3728,16 @@ describe('ACP WebSocket transport security', () => {
         workspace: fakeWorkspace,
         enabled: true,
         token: opts.token,
+        allowedOrigins: opts.allowedOrigins,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
       });
-      server = app.listen(0, '127.0.0.1', () => {
-        port = (server.address() as AddressInfo).port;
-        handle?.attachServer(server);
+      const listeningServer = app.listen(0, '127.0.0.1', () => {
+        port = (listeningServer.address() as AddressInfo).port;
+        handle?.attachServer(listeningServer);
         resolve();
       });
+      server = listeningServer;
     });
   }
 
@@ -3758,9 +3761,10 @@ describe('ACP WebSocket transport security', () => {
   function wsConnectRaw(
     host: string,
     origin?: string,
+    extraHeaders: Record<string, string> = {},
   ): Promise<{ code: number }> {
     return new Promise((resolve) => {
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { ...extraHeaders };
       if (origin) headers['Origin'] = origin;
       const ws = new WebSocket(`ws://${host}:${port}/acp`, {
         headers,
@@ -3799,9 +3803,42 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(403);
   });
 
-  it('allows WS upgrade with loopback Origin header', async () => {
+  it("rejects cross-origin WS upgrade even when allow-origin '*' is configured", async () => {
+    await startServer({
+      token: 'secret-token-123',
+      allowedOrigins: { allowAny: true, origins: new Set() },
+    });
+    const result = await wsConnectRaw('127.0.0.1', 'https://evil.com', {
+      Authorization: 'Bearer secret-token-123',
+    });
+    expect(result.code).toBe(403);
+  });
+
+  it('allows WS upgrade from an explicitly allowlisted extension origin', async () => {
+    await startServer({
+      token: 'secret-token-123',
+      allowedOrigins: {
+        allowAny: false,
+        origins: new Set(['chrome-extension://abcdefghijklmnop']),
+      },
+    });
+    const result = await wsConnectRaw(
+      '127.0.0.1',
+      'chrome-extension://abcdefghijklmnop',
+      { Authorization: 'Bearer secret-token-123' },
+    );
+    expect(result.code).toBe(101);
+  });
+
+  it('rejects WS upgrade with a loopback Origin header on a different port', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'http://localhost:3000');
+    expect(result.code).toBe(403);
+  });
+
+  it('allows WS upgrade with a loopback Origin header on the daemon port', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', `http://localhost:${port}`);
     expect(result.code).toBe(101);
   });
 
