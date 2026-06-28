@@ -246,6 +246,13 @@ export interface CompressOptions {
    * first, hook text last (matches claude-code mergeHookInstructions).
    */
   customInstructions?: string;
+  /**
+   * Output tokens reserved by the model (e.g. max_tokens / escalated limit).
+   * When provided, the cheap-gate subtracts this from the context window
+   * before computing thresholds so auto-compression fires based on the
+   * real available input budget rather than the full window.
+   */
+  reservedOutputTokens?: number;
 }
 
 /**
@@ -349,9 +356,11 @@ export class ChatCompressionService {
     }
 
     if (!force) {
-      const contextLimit =
+      const rawContextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
+      const contextLimit =
+        Math.max(0, rawContextLimit - (opts.reservedOutputTokens ?? 0));
       const { auto } = computeThresholds(
         contextLimit,
         config.getAutoCompactThreshold(),
