@@ -227,7 +227,7 @@ export class LoopDetectionService {
         // to avoid firing on a duplicated replay — e.g. 3 identical calls +
         // Retry + 3 more would otherwise hit the global-duplicate threshold of
         // 6. The always-on guards reset their own counters in
-        // checkAlwaysOnSafeties' Retry branch (cap rollback + consecutive
+        // checkAlwaysOnSafeties' Retry branch (cap rollback + always-on
         // streak reset).
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
@@ -404,8 +404,41 @@ export class LoopDetectionService {
       if (!match) {
         return false;
       }
-      return match[1]?.toLowerCase() !== 'diff' || !/\s--\s+\S/.test(segment);
+      return (
+        match[1]?.toLowerCase() !== 'diff' ||
+        this.isOverviewGitDiff(segment.slice(match[0].length))
+      );
     });
+  }
+
+  private isOverviewGitDiff(args: string): boolean {
+    const trimmedArgs = args.trim();
+    if (!trimmedArgs) {
+      return true;
+    }
+
+    const tokens = trimmedArgs.split(/\s+/);
+    const pathspecSeparatorIndex = tokens.indexOf('--');
+    if (
+      pathspecSeparatorIndex !== -1 &&
+      pathspecSeparatorIndex < tokens.length - 1
+    ) {
+      return false;
+    }
+
+    return tokens.every(
+      (token) => token.startsWith('-') || this.isGitRevisionToken(token),
+    );
+  }
+
+  private isGitRevisionToken(token: string): boolean {
+    return (
+      token === 'HEAD' ||
+      token === '@' ||
+      /^(?:HEAD|@)(?:[~^]\d*)+$/.test(token) ||
+      /^[0-9a-f]{7,40}$/i.test(token) ||
+      /^[^\s]+\.{2,3}[^\s]+$/.test(token)
+    );
   }
 
   /**

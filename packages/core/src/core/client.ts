@@ -2143,9 +2143,10 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
-        // Always-on safety checks (consecutive-identical tool-call guard +
-        // per-turn tool-call cap). These fire before the skipLoopDetection
-        // gate so they cannot be bypassed by configuration.
+        // Always-on safety checks (consecutive-identical tool-call guard,
+        // shell inspection stagnation, and per-turn tool-call cap). These fire
+        // before the skipLoopDetection gate so they cannot be bypassed by
+        // configuration.
         const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
         if (alwaysOnLoop) {
           // Drop every tool call collected before the guard fired so the run

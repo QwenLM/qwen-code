@@ -356,6 +356,36 @@ describe('LoopDetectionService', () => {
         }),
       );
     });
+
+    it('does not halt file-specific git diff review commands without -- separator', () => {
+      const commands = [
+        'git status --short',
+        'git diff --stat',
+        'git diff src/a.ts',
+        'git diff src/b.ts',
+        'git diff src/c.ts',
+        'git diff src/d.ts',
+        'git diff src/e.ts',
+        'git diff src/f.ts',
+      ];
+
+      for (const command of commands) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command,
+              description: 'Inspect repository changes',
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'shell_command_stagnation',
+        }),
+      );
+    });
   });
 
   describe('Content Loop Detection', () => {
