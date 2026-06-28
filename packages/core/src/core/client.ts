@@ -466,14 +466,14 @@ export class GeminiClient {
    *     one and the new one — and the model would see context the user
    *     thought had been undone.
    */
-  stripOrphanedUserEntriesFromHistory() {
+  stripOrphanedUserEntriesFromHistory(): Content[] {
     const chat = this.getChat();
     const before = chat.getHistoryLength();
-    chat.stripOrphanedUserEntriesFromHistory();
+    const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
     const after = chat.getHistoryLength();
     if (after >= before) {
       // Nothing to strip — leave caches and IDE context alone.
-      return;
+      return strippedEntries;
     }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
@@ -490,6 +490,7 @@ export class GeminiClient {
     // entirely or send only a diff against a now-removed baseline. Match
     // the invalidation `setHistory()` / `truncateHistory()` already do.
     this.forceFullIdeContext = true;
+    return strippedEntries;
   }
 
   /**
@@ -1650,9 +1651,49 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    let strippedRetryEntries: Content[] = [];
+    // Snapshot of GeminiChat's user-content push counter, taken right after the
+    // strip. The Retry's re-submitted content is the first thing the send
+    // pushes, so if the counter advances at all that content landed.
+    let pushCountAfterStrip = 0;
+    const currentPushCount = () =>
+      this.getChat().getUserContentPushCount?.() ?? 0;
+
+    const restoreStrippedRetryEntries = () => {
+      if (strippedRetryEntries.length === 0) {
+        return;
+      }
+      // `chat.sendMessageStream` pushes the re-submitted user content back into
+      // history before the API call. Restore the stripped entries only when
+      // that push never landed (the send threw before pushing, or the push was
+      // rolled back on a setup error) — otherwise re-adding would duplicate it.
+      //
+      // Gate on the push counter, not on history length: auto-compression
+      // inside `sendMessageStream` runs BEFORE the push and shrinks history
+      // independently of it, so a length comparison can read "history didn't
+      // grow" even after a successful push and duplicate the prompt. The counter
+      // only advances on a push that survived (it's decremented if the push is
+      // rolled back), so it is invariant under compression.
+      const pushCountNow = currentPushCount();
+      if (pushCountNow <= pushCountAfterStrip) {
+        // Diagnostic: restoring means the send never pushed the re-submitted
+        // content. If the counter were ever wrong, this line is the anchor for
+        // a silent duplicate/loss.
+        debugLogger.info('[Retry] restoring stripped orphan entries', {
+          entries: strippedRetryEntries.length,
+          pushCountAfterStrip,
+          pushCountNow,
+        });
+        for (const entry of strippedRetryEntries) {
+          this.getChat().addHistory(entry);
+        }
+      }
+      strippedRetryEntries = [];
+    };
 
     if (messageType === SendMessageType.Retry) {
-      this.stripOrphanedUserEntriesFromHistory();
+      strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
+      pushCountAfterStrip = currentPushCount();
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -2533,6 +2574,7 @@ export class GeminiClient {
       normalCompletion = true;
       return turn;
     } finally {
+      restoreStrippedRetryEntries();
       // Belt-and-suspenders: abort the prefetch on any exit other than the
       // bottom-of-try `return turn`. Catches uncaught exceptions and guards
       // against future early-return sites that forget to call cancel.

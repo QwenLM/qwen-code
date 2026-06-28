@@ -656,6 +656,12 @@ const PERSIST_TIMEOUT_MS = 5_000;
 const MCP_RESTART_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
+// Trusted continuation marker. `sendPrompt` strips it from every caller and
+// re-arms it only for the trusted `continueSession` dispatch (the `isContinue`
+// flag), so an external `POST /session/:id/prompt` can never smuggle it in to
+// trigger a continuation that skips `continueLastTurn()`'s accept/reject
+// pre-check. Mirrors how `DAEMON_RETRY_META_KEY` is stripped and re-armed.
+const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -2560,7 +2566,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   startSessionReaper();
 
-  return {
+  const bridgeApi: AcpSessionBridge = {
     getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot {
       return {
         limits: {
@@ -2896,6 +2902,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   (req as unknown as { retry?: unknown }).retry === true;
                 const isRetry = requestedRetry && entry.retryAllowed;
                 entry.retryAllowed = false;
+                // Trusted continuation: only `continueSession` sets this on the
+                // context. It re-arms the continuation meta key that the strip
+                // below removes from untrusted callers (see IDX-7 / the
+                // DAEMON_CONTINUE_META_KEY note), so the continuation runs
+                // through this tracked admission path instead of an untracked
+                // internal agent prompt.
+                const isContinue = context?.continue === true;
                 const promptRequest = (() => {
                   const copy = {
                     ...normalized,
@@ -2906,8 +2919,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       ? { ...copy._meta }
                       : {};
                   delete meta[DAEMON_RETRY_META_KEY];
+                  // External prompt callers cannot self-trigger a continuation;
+                  // only `continueSession` (via the trusted `isContinue` flag
+                  // below) re-arms it after this strip.
+                  delete meta[DAEMON_CONTINUE_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
+                  }
+                  if (isContinue) {
+                    meta[DAEMON_CONTINUE_META_KEY] = true;
                   }
                   if (Object.keys(meta).length > 0) {
                     copy._meta = meta;
@@ -2948,7 +2968,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // Retry: skip echo — the original user_message_chunk is already
                   // in the transcript from the first attempt.
                   entry.cancelBroadcast = false;
-                  if (!isRetry) {
+                  // Continuations carry no user prompt to echo (empty `prompt`);
+                  // the original user_message_chunk is already in the transcript.
+                  if (!isRetry && !isContinue) {
                     echoPromptToSessionBus(
                       entry,
                       promptRequest,
@@ -3928,6 +3950,74 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionGoalClear,
       );
+    },
+
+    async continueSession(sessionId, context) {
+      // Validate the originator up-front, mirroring POST /session/:id/prompt, so
+      // an unknown client id (or a session that vanished) surfaces as an error
+      // to the caller instead of a misleading accepted:true whose continuation
+      // is then silently dropped at admission.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+
+      // Accept/reject pre-check: the agent classifies the last turn (and rejects
+      // when one is already in flight) without firing anything.
+      const decision = await requestSessionStatus<{
+        accepted: boolean;
+        interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
+
+      if (!decision.accepted) {
+        return decision;
+      }
+
+      // Accepted → drive the real turn through the normal prompt-admission path
+      // (so pendingPromptCount / promptActive / originator are tracked and
+      // turn-complete is broadcast; the agent's Session.prompt() runs it off the
+      // trusted continue meta re-armed by `isContinue`). Capture a replay cursor
+      // + correlation id BEFORE dispatch — mirroring POST /session/:id/prompt —
+      // so a client attaching the SSE stream afterwards can replay missed events
+      // and correlate turn_complete / turn_error with this continuation.
+      const liveEntry = byId.get(sessionId);
+      if (!liveEntry) throw new SessionNotFoundError(sessionId);
+      const lastEventId = liveEntry.events.lastEventId;
+      const promptId = context?.promptId;
+
+      // Admit synchronously: `sendPrompt` throws synchronously for queue-full /
+      // pre-aborted, so an admission failure propagates out of here and the
+      // caller gets an error instead of a misleading accepted:true whose
+      // continuation was never queued. Only failures AFTER the turn is admitted
+      // (it then runs async) reach the `.catch` below — those are logged, since
+      // the ack already went out and the turn's terminal event covers clients.
+      // No caller signal: a continuation is cancelled via the cancelSession
+      // route (entry.connection.cancel), not a per-dispatch AbortController.
+      const promptPromise = bridgeApi.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [] } as Parameters<
+          AcpSessionBridge['sendPrompt']
+        >[1],
+        undefined,
+        {
+          ...(context?.clientId !== undefined
+            ? { clientId: context.clientId }
+            : {}),
+          ...(promptId !== undefined ? { promptId } : {}),
+          continue: true,
+        },
+      );
+      promptPromise.catch((err) => {
+        teeServeDebugLine(
+          `continueSession: continuation turn failed for ${sessionId}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+
+      return {
+        ...decision,
+        ...(promptId !== undefined ? { promptId } : {}),
+        lastEventId,
+      };
     },
 
     async getSessionStatsStatus(sessionId) {
@@ -5230,6 +5320,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
   };
+
+  return bridgeApi;
 }
 
 /**

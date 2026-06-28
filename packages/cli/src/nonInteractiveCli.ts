@@ -26,11 +26,15 @@ import {
   parseAndFormatApiError,
   createDebugLogger,
   SendMessageType,
+  buildSyntheticToolResponseParts,
+  detectTurnInterruption,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
   restoreWorktreeContext,
   TeamEventType,
   ApprovalMode,
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
+  isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
 } from '@qwen-code/qwen-code-core';
@@ -89,6 +93,7 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
     ? SUPPRESSED_OUTPUT_SUCCESS
     : SUPPRESSED_OUTPUT_RETRY;
 }
+
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -96,6 +101,8 @@ import {
   createToolProgressHandler,
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
+  buildInitialSystemReminders,
+  insertAfterFunctionResponses,
 } from './utils/nonInteractiveHelpers.js';
 
 // Human-readable labels for the detectors that can fire mid-stream.
@@ -212,6 +219,16 @@ export interface RunNonInteractiveOptions {
   notificationDisplayText?: string;
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
+  onResultEmitted?: () => void;
+  /**
+   * Continue the most recent unfinished turn from chat history instead of
+   * submitting `input` (which is ignored). No new user message enters the
+   * transcript: an orphaned trailing user entry is re-submitted with Retry
+   * semantics, and dangling tool calls are closed with synthesized error
+   * functionResponses sent as a ToolResult. When the last turn ended
+   * cleanly the run emits a no-op result and exits 0.
+   */
+  continueInterrupted?: boolean;
 }
 
 /**
@@ -239,6 +256,16 @@ export async function runNonInteractive(
     } else {
       adapter = new JsonOutputAdapter(config);
     }
+    const emitResult = (
+      result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
+    ) => {
+      // Fire the callback only after a successful emit. The continue caller
+      // (session.ts) uses it to mark the result as delivered and swallow any
+      // later error; if emitResult itself throws, the flag must stay unset so
+      // the error still surfaces instead of losing both result and error.
+      adapter.emitResult(result);
+      options.onResultEmitted?.();
+    };
 
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
@@ -455,6 +482,10 @@ export async function runNonInteractive(
       }
     };
 
+    // First-turn SendMessageType override for continuation turns; null means
+    // the regular options.sendMessageType / UserQuery selection applies.
+    let continueSendType: SendMessageType | null = null;
+
     try {
       process.stdout.on('error', stdoutErrorHandler);
 
@@ -482,6 +513,65 @@ export async function runNonInteractive(
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
+
+      if (options.continueInterrupted) {
+        // Read the full history, not a bounded tail: the Retry send path in
+        // client.ts strips the ENTIRE trailing user run, so detection must
+        // re-submit exactly that run or the oldest orphans get dropped. This
+        // runs once per (rare) continue request, so the full clone is fine.
+        const detection = detectTurnInterruption(
+          geminiClient.getChat().getHistory(),
+        );
+        debugLogger.info('[runNonInteractive] continueInterrupted detection', {
+          kind: detection.kind,
+          partsCount:
+            detection.kind === 'interrupted_prompt'
+              ? detection.parts.length
+              : 0,
+          danglingCallCount:
+            detection.kind === 'interrupted_turn'
+              ? detection.danglingCalls.length
+              : 0,
+        });
+        if (detection.kind === 'none') {
+          await emitNonInteractiveFinalMessage({
+            message: 'No interrupted turn to continue.',
+            isError: false,
+            adapter,
+            config,
+            startTimeMs: startTime,
+          });
+          return 0;
+        }
+        if (detection.kind === 'interrupted_prompt') {
+          // Re-submit the orphaned user content under Retry semantics. The
+          // Retry send path strips the orphaned original from history and
+          // restores it if the send never starts, so history is neither
+          // duplicated nor lost — no separate strip/restore needed here.
+          initialPartList = detection.parts;
+          continueSendType = SendMessageType.Retry;
+        } else {
+          initialPartList = buildSyntheticToolResponseParts(
+            detection.danglingCalls,
+            ORPHAN_TOOL_USE_REPAIR_REASON,
+          );
+          continueSendType = SendMessageType.ToolResult;
+        }
+
+        const reminderParts = buildInitialSystemReminders(config);
+        if (reminderParts.length > 0 && initialPartList) {
+          const continuationParts = normalizePartList(initialPartList);
+          const hasSystemReminderPart = continuationParts.some((part) =>
+            isSystemReminderContent({ role: 'user', parts: [part] }),
+          );
+          if (!hasSystemReminderPart) {
+            initialPartList = insertAfterFunctionResponses(
+              continuationParts,
+              reminderParts,
+            );
+          }
+        }
+      }
 
       if (!initialPartList) {
         let slashHandled = false;
@@ -576,13 +666,21 @@ export async function runNonInteractive(
           : [reminderPart, existing];
       };
 
-      const startupNotice = config.consumePendingStartupWorktreeNotice();
+      // Continuation turns must not prepend reminder text: a ToolResult
+      // payload's functionResponse parts have to stay at the HEAD of the
+      // user message or Anthropic-compatible backends reject the pairing.
+      const startupNotice = options.continueInterrupted
+        ? null
+        : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
         initialPartList = withReminder(initialPartList, startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (config.getResumedSessionData()) {
+      } else if (
+        !options.continueInterrupted &&
+        config.getResumedSessionData()
+      ) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -741,7 +839,7 @@ export async function runNonInteractive(
           outputFormat === OutputFormat.JSON
             ? uiTelemetryService.getMetrics()
             : undefined;
-        adapter.emitResult({
+        emitResult({
           isError: false,
           durationMs: Date.now() - startTime,
           apiDurationMs: totalApiDurationMs,
@@ -1135,7 +1233,10 @@ export async function runNonInteractive(
 
         let sendType: SendMessageType;
         if (isFirstTurn) {
-          sendType = options.sendMessageType ?? SendMessageType.UserQuery;
+          sendType =
+            continueSendType ??
+            options.sendMessageType ??
+            SendMessageType.UserQuery;
         } else if (isTeammateTurn) {
           sendType = SendMessageType.Teammate;
         } else {
@@ -1697,7 +1798,7 @@ export async function runNonInteractive(
             const errorMessage =
               `Model produced plain text instead of calling the structured_output tool as required by --json-schema after ${turnCount} turn(s).` +
               previewSuffix;
-            adapter.emitResult({
+            emitResult({
               isError: true,
               durationMs: Date.now() - startTime,
               apiDurationMs: totalApiDurationMs,
@@ -1709,7 +1810,7 @@ export async function runNonInteractive(
             return 1;
           }
 
-          adapter.emitResult({
+          emitResult({
             isError: false,
             durationMs: Date.now() - startTime,
             apiDurationMs: totalApiDurationMs,
@@ -1778,7 +1879,7 @@ export async function runNonInteractive(
         // contract — precisely when stdout is in trouble. Best-effort emit
         // and continue to the exit handler.
         try {
-          adapter.emitResult({
+          emitResult({
             isError: true,
             durationMs: Date.now() - startTime,
             apiDurationMs: totalApiDurationMs,

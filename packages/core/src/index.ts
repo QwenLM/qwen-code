@@ -71,6 +71,7 @@ export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
+export * from './core/turn-interruption.js';
 
 // ============================================================================
 // Tools

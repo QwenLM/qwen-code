@@ -423,6 +423,10 @@ interface FakeBridgeOpts {
   clearSessionGoalImpl?: (
     sessionId: string,
   ) => Promise<{ cleared: boolean; condition?: string }>;
+  continueSessionImpl?: (sessionId: string) => Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  }>;
   sessionHooksImpl?: (sessionId: string) => Promise<ServeSessionHooksStatus>;
   setModelImpl?: (
     sessionId: string,
@@ -605,6 +609,8 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
   clearSessionGoalCalls: string[];
+  continueSessionCalls: string[];
+  continueSessionContexts: Array<BridgeClientRequestContext | undefined>;
   sessionHooksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
@@ -713,6 +719,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionLspCalls: string[] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
+  const continueSessionCalls: string[] = [];
+  const continueSessionContexts: Array<BridgeClientRequestContext | undefined> =
+    [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
@@ -947,6 +956,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
     opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
+  const continueSessionImpl =
+    opts.continueSessionImpl ??
+    (async () => ({ accepted: false, interruption: 'none' as const }));
   const sessionHooksImpl =
     opts.sessionHooksImpl ??
     (async (sessionId: string) => ({
@@ -1117,6 +1129,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionLspCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
+    continueSessionCalls,
+    continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
     setLanguageCalls,
@@ -1330,6 +1344,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
       return clearSessionGoalImpl(sessionId);
+    },
+    async continueSession(sessionId, context) {
+      continueSessionCalls.push(sessionId);
+      continueSessionContexts.push(context);
+      return continueSessionImpl(sessionId);
     },
     async getSessionHooksStatus(sessionId) {
       sessionHooksCalls.push(sessionId);
@@ -4854,6 +4873,85 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cleared: false });
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+    });
+
+    it('continues a session through the bridge', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async () => ({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      expect(bridge.continueSessionCalls).toEqual(['s-1']);
+    });
+
+    it('forwards X-Qwen-Client-Id to continueSession', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async () => ({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-xyz');
+
+      expect(res.status).toBe(200);
+      // The originator + a generated promptId must reach the bridge so the
+      // continuation turn is attributed and correlated like POST /prompt.
+      expect(bridge.continueSessionContexts).toHaveLength(1);
+      expect(bridge.continueSessionContexts[0]).toMatchObject({
+        clientId: 'client-xyz',
+      });
+      expect(typeof bridge.continueSessionContexts[0]?.promptId).toBe('string');
+    });
+
+    it('maps session continue bridge errors', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/missing/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
     });
   });
 

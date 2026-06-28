@@ -21,6 +21,7 @@ import {
   FatalInputError,
   ApprovalMode,
   SendMessageType,
+  SYSTEM_REMINDER_OPEN,
   LoopType,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
@@ -99,10 +100,12 @@ describe('runNonInteractive', () => {
     sendMessageStream: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
+    stripOrphanedUserEntriesFromHistory: Mock;
     getHistoryFunctionResponseIds: Mock;
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
   };
+  let mockGetDebugResponses: Mock;
 
   beforeEach(async () => {
     // Reset module-level state from any prior test in this file. Without
@@ -113,6 +116,7 @@ describe('runNonInteractive', () => {
 
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
+    mockGetDebugResponses = vi.fn().mockReturnValue([]);
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
     );
@@ -157,6 +161,7 @@ describe('runNonInteractive', () => {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
+      stripOrphanedUserEntriesFromHistory: vi.fn(),
       getChatRecordingService: vi.fn(() => ({
         initialize: vi.fn(),
         recordMessage: vi.fn(),
@@ -343,6 +348,182 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  describe('continueInterrupted', () => {
+    it('re-submits an orphaned trailing user prompt with Retry semantics', async () => {
+      setupMetricsMock();
+      // The orphan strip + restore is owned by the Retry send path in
+      // client.ts (covered by client.test.ts); here we only assert the
+      // continuation hands off to that path with Retry semantics.
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c1', {
+        continueInterrupted: true,
+      });
+
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+        [{ text: 'do the thing' }],
+        expect.any(AbortSignal),
+        'prompt-c1',
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+    });
+
+    it('adds plan mode reminders to an interrupted prompt replay', async () => {
+      setupMetricsMock();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plan', {
+        continueInterrupted: true,
+      });
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      expect(request).toEqual([
+        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+        { text: 'do the thing' },
+      ]);
+    });
+
+    it('closes dangling tool calls with synthesized ToolResult parts', async () => {
+      setupMetricsMock();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+          },
+        ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c2', {
+        continueInterrupted: true,
+      });
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(request).toEqual([
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { error: expect.stringContaining('not recorded') },
+          },
+        },
+      ]);
+    });
+
+    it('adds plan mode reminders to a continued tool result without moving function responses', async () => {
+      setupMetricsMock();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+          },
+        ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c-tool-plan',
+        {
+          continueInterrupted: true,
+        },
+      );
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(request).toEqual([
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { error: expect.stringContaining('not recorded') },
+          },
+        },
+        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+      ]);
+    });
+
+    it('is a no-op when the last turn ended cleanly', async () => {
+      setupMetricsMock();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
+      }));
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c3', {
+        continueInterrupted: true,
+      });
+
+      expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    });
   });
 
   it('on EPIPE, destroys stdout and returns normally instead of process.exit', async () => {
