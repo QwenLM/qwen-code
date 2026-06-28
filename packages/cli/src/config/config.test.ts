@@ -281,6 +281,16 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('parses --insecure as a boolean flag (default false)', async () => {
+    process.argv = ['node', 'script.js'];
+    const defaultArgv = await parseArguments();
+    expect(defaultArgv.insecure).toBe(false);
+
+    process.argv = ['node', 'script.js', '--insecure'];
+    const argv = await parseArguments();
+    expect(argv.insecure).toBe(true);
+  });
+
   it('rejects --json-schema combined with --acp', async () => {
     // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
     // the synthetic structured_output terminal contract. The yargs check

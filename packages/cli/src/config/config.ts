@@ -165,6 +165,7 @@ export interface CliArgs {
   openaiBaseUrl: string | undefined;
   openaiLoggingDir: string | undefined;
   proxy: string | undefined;
+  insecure?: boolean | undefined;
   includeDirectories: string[] | undefined;
   screenReader: boolean | undefined;
   inputFormat?: string | undefined;
@@ -620,6 +621,12 @@ export async function parseArguments(): Promise<CliArgs> {
       'proxy',
       'Use the "proxy" setting in settings.json instead. This flag will be removed in a future version.',
     )
+    .option('insecure', {
+      type: 'boolean',
+      description:
+        'Skip TLS certificate verification for API connections (for self-signed certs in trusted/lab environments). Equivalent to setting QWEN_TLS_INSECURE=1. WARNING: removes protection against man-in-the-middle attacks.',
+      default: false,
+    })
     .option('chat-recording', {
       type: 'boolean',
       description:
@@ -1396,6 +1403,14 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
+
+  // Surface `--insecure` as an env var so it reaches the undici dispatcher
+  // layer (which controls TLS verification) without threading a flag through
+  // every content generator and the preconnect path. Resolution there ORs this
+  // with QWEN_TLS_INSECURE / NODE_TLS_REJECT_UNAUTHORIZED=0.
+  if (argv.insecure) {
+    process.env['QWEN_TLS_INSECURE'] = '1';
+  }
 
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
   // is auto-detected inside getRuntimeBaseDir() at each call site).
