@@ -1672,7 +1672,16 @@ export class GeminiClient {
       // grow" even after a successful push and duplicate the prompt. The counter
       // only advances on a push that survived (it's decremented if the push is
       // rolled back), so it is invariant under compression.
-      if (currentPushCount() <= pushCountAfterStrip) {
+      const pushCountNow = currentPushCount();
+      if (pushCountNow <= pushCountAfterStrip) {
+        // Diagnostic: restoring means the send never pushed the re-submitted
+        // content. If the counter were ever wrong, this line is the anchor for
+        // a silent duplicate/loss.
+        debugLogger.info('[Retry] restoring stripped orphan entries', {
+          entries: strippedRetryEntries.length,
+          pushCountAfterStrip,
+          pushCountNow,
+        });
         for (const entry of strippedRetryEntries) {
           this.getChat().addHistory(entry);
         }
