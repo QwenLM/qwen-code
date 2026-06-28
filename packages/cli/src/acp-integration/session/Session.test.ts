@@ -461,7 +461,9 @@ describe('Session', () => {
           ],
         },
       ]);
-      vi.spyOn(session, 'prompt').mockResolvedValue({ stopReason: 'end_turn' });
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
 
       const result = await session.continueLastTurn();
 
@@ -469,6 +471,10 @@ describe('Session', () => {
         accepted: true,
         interruption: 'interrupted_turn',
       });
+      // continueLastTurn is decision-only for interrupted_turn too — the bridge
+      // drives the turn, so the agent must not fire its own prompt() here.
+      await Promise.resolve();
+      expect(promptSpy).not.toHaveBeenCalled();
     });
 
     it('rejects when the gemini client is not initialized', async () => {
@@ -507,6 +513,43 @@ describe('Session', () => {
       expect(result).toEqual({ stopReason: 'max_tokens' });
       // The orphan was stripped before the send; on a non-cancelled failure the
       // full message must be preserved back into history, not dropped.
+      expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'unanswered' }),
+          ]),
+        }),
+      );
+    });
+
+    it('restores the orphaned turn when a continuation send throws (no data loss)', async () => {
+      // Same data-loss window as above, but the send THROWS instead of
+      // returning a graceful null stream — the path #preserveUnsentMessageHistory
+      // misses. The catch must restore the stripped orphan.
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      // No token limit, so we reach the send; the send then throws.
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(0);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValue(new Error('send blew up'));
+
+      const continueRequest = {
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0];
+
+      await expect(session.prompt(continueRequest)).rejects.toThrow(
+        'send blew up',
+      );
+
       expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
       expect(mockChat.addHistory).toHaveBeenCalledWith(
         expect.objectContaining({

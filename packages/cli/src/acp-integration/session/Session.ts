@@ -1381,6 +1381,12 @@ export class Session implements SessionContext {
                 DAEMON_CONTINUE_META_KEY
               ] === true;
             let continuationParts: Part[] | null = null;
+            // For an `interrupted_prompt` continuation we strip the orphaned
+            // user run from history before re-sending it. If the send then
+            // throws before re-pushing it, the orphan would be permanently lost
+            // — so hold it (and a push-count snapshot) to restore on that path.
+            let strippedOrphanEntries: Content[] | null = null;
+            let orphanPushCountSnapshot = 0;
             if (isContinue) {
               const detection = detectTurnInterruption(
                 this.#getCurrentChat().getHistory(),
@@ -1392,10 +1398,24 @@ export class Session implements SessionContext {
                 debugLogger.warn(
                   `[Session] continue ${promptId}: no interrupted turn on re-detection, nothing to continue`,
                 );
+                // This early return sits before the send-loop try/finally that
+                // emits conversation_finished, so emit it here too — otherwise a
+                // no-op continuation silently drops turn-level telemetry.
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
                 return { stopReason: 'end_turn' };
               }
               if (detection.kind === 'interrupted_prompt') {
-                this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+                strippedOrphanEntries =
+                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
+                  null;
+                orphanPushCountSnapshot =
+                  this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = detection.parts;
               } else {
                 continuationParts = buildSyntheticToolResponseParts(
@@ -1655,6 +1675,23 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
+                  // Restore the stripped orphan if the send threw before
+                  // re-pushing it (the null-stream path above already preserves;
+                  // an exception bypasses it). Gate on the push counter — like
+                  // the core Retry restore in client.ts — so we only restore
+                  // when the content never landed (a later tool-loop send
+                  // throwing leaves the counter advanced → no double-restore).
+                  if (
+                    strippedOrphanEntries &&
+                    (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
+                      orphanPushCountSnapshot
+                  ) {
+                    for (const entry of strippedOrphanEntries) {
+                      this.#getCurrentChat().addHistory(entry);
+                    }
+                    strippedOrphanEntries = null;
+                  }
+
                   // Only explicit user cancellation maps to a normal
                   // cancelled turn. Other aborts/errors should surface so
                   // infra failures are not hidden as successful cancels.
