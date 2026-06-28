@@ -223,7 +223,7 @@ auth provider when one is available.
 The SDK also exports `packages/sdk-typescript/src/daemon/ui/`, a host-neutral
 set of primitives that turn daemon events into transcript blocks:
 
-- `normalizeDaemonEvent(evt)` maps the 43 known daemon wire events into 37 UI-friendly `DaemonUiEventType` values; unmodeled or malformed events normalize to `debug`.
+- `normalizeDaemonEvent(evt)` maps the 47 known daemon wire events into 42 UI-friendly `DaemonUiEventType` values; unmodeled or malformed events normalize to `debug`.
 - `createDaemonTranscriptState()` plus `reduceDaemonTranscriptEvents(state, events)` projects UI events into `DaemonTranscriptBlock[]`.
 - `createDaemonTranscriptStore()` wraps subscribe / dispatch.
 - `render.ts` / `terminal.ts` provide HTML and terminal baseline renderers, while `toolPreview.ts` produces tool-call summaries.
@@ -238,6 +238,104 @@ the legacy `DaemonTuiAdapter`.
 
 The subpackage is exported from the `@qwen-code/sdk/daemon` subpath. Existing
 code that does `import { DaemonClient }` is unaffected.
+
+## `Last-Event-ID` Reconnect with the SDK
+
+### Automatic Tracking via `DaemonSessionClient`
+
+`DaemonSessionClient` tracks `lastSeenEventId` internally. Each yielded event with a numeric `id` bumps the cursor. Subsequent `events()` calls automatically pass the tracked id as `Last-Event-ID`, so reconnect-with-replay works without extra caller state:
+
+```ts
+import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk/daemon';
+
+const client = new DaemonClient({ baseUrl: 'http://127.0.0.1:4170', token });
+const session = await DaemonSessionClient.createOrAttach(client);
+
+// First subscription — starts live (or from ring start for new sessions).
+for await (const event of session.events()) {
+  console.log(event.type, event.id);
+  // session.lastEventId is bumped on each id-bearing frame.
+  if (shouldStop(event)) break;
+}
+
+// Reconnect — automatically sends Last-Event-ID: <last seen id>.
+// The daemon replays missed events from the ring, then goes live.
+for await (const event of session.events()) {
+  // Replay frames arrive first, then a synthetic `replay_complete`,
+  // then live events.
+  handleEvent(event);
+}
+```
+
+### Manual Reconnect with `DaemonClient`
+
+For lower-level control, use `DaemonClient.subscribeEvents` directly and manage the cursor yourself:
+
+```ts
+const client = new DaemonClient({ baseUrl: 'http://127.0.0.1:4170', token });
+
+let cursor: number | undefined; // undefined = live-only on first connect
+
+async function* subscribe(sessionId: string, signal: AbortSignal) {
+  for await (const event of client.subscribeEvents(sessionId, {
+    lastEventId: cursor,
+    signal,
+  })) {
+    // Only id-bearing frames advance the cursor.
+    if (event.id !== undefined) {
+      cursor = event.id;
+    }
+    // Handle ring-eviction gap.
+    if (event.type === 'state_resync_required') {
+      // State is stale — reload full session state.
+      await client.loadSession(sessionId);
+      continue;
+    }
+    yield event;
+  }
+}
+```
+
+### Reconnect with Retry Loop
+
+The SDK does **not** auto-retry on network failure. Implement a retry loop around `events()`:
+
+```ts
+async function resilientSubscribe(session: DaemonSessionClient) {
+  const MAX_RETRIES = 10;
+  const BASE_DELAY_MS = 1000;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      // `resume: true` (default) passes the tracked lastSeenEventId.
+      for await (const event of session.events()) {
+        attempt = 0; // reset on successful event
+        handleEvent(event);
+      }
+      break; // clean stream end
+    } catch (err) {
+      const delay = BASE_DELAY_MS * 2 ** Math.min(attempt, 5);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+```
+
+On reconnect the daemon replays events with `id > lastSeenEventId` from its bounded ring (default 8000 events). If the gap exceeds the ring, a `state_resync_required` frame signals the client to call `loadSession` for a full state rebuild.
+
+### Seeding `lastEventId` at Construction
+
+Callers that persist the cursor across process restarts can seed it:
+
+```ts
+const session = new DaemonSessionClient({
+  client,
+  session: { sessionId, workspaceCwd, attached: true },
+  lastEventId: persistedCursor, // resume from persisted position
+});
+```
+
+The value must be a finite, non-negative integer (validated at construction). Invalid values throw.
 
 ## Configuration
 

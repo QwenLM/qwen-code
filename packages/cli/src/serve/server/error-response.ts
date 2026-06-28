@@ -15,6 +15,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
   CancelSentinelCollisionError,
+  CdWhilePromptActiveError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidRewindTargetError,
@@ -214,6 +215,14 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'branch_while_prompt_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof CdWhilePromptActiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'cd_while_prompt_active',
       sessionId: err.sessionId,
     });
     return;
@@ -424,6 +433,31 @@ export function sendBridgeError(
         res.status(503).json({
           error: errorMessage(err),
           code: 'acp_channel_unavailable',
+        });
+        return;
+      }
+      if (kind === 'restrictive_sandbox') {
+        res.status(403).json({
+          error: errorMessage(err),
+          code: 'restrictive_sandbox',
+        });
+        return;
+      }
+      if (kind === 'directory_not_found') {
+        const d = data as { path?: string };
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'directory_not_found',
+          path: d.path,
+        });
+        return;
+      }
+      if (kind === 'directory_not_trusted') {
+        const d = data as { path?: string };
+        res.status(403).json({
+          error: errorMessage(err),
+          code: 'directory_not_trusted',
+          path: d.path,
         });
         return;
       }

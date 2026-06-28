@@ -873,6 +873,46 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
     });
 
+    it('fails closed (throws) for an unregistered model when failClosed is set', async () => {
+      getResolvedModel.mockReturnValue(undefined); // not registered anywhere
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await expect(
+        c.resolveForModel('ghost-model', { failClosed: true }),
+      ).rejects.toThrow(/not registered/i);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('fails closed (throws) when generator creation fails and failClosed is set', async () => {
+      getResolvedModel.mockImplementation((authType: string, model: string) =>
+        authType === AuthType.USE_ANTHROPIC && model === fastModel
+          ? {
+              authType: AuthType.USE_ANTHROPIC,
+              envKey: 'ANTHROPIC_API_KEY',
+              baseUrl: 'https://api.anthropic.com',
+            }
+          : undefined,
+      );
+      mockCreateContentGenerator.mockRejectedValue(
+        new Error('missing credential'),
+      );
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await expect(
+        c.resolveForModel(fastModel, { failClosed: true }),
+      ).rejects.toThrow(/missing credential/i);
+    });
+
+    it('falls back to the main generator for an unregistered model when failClosed is not set', async () => {
+      getResolvedModel.mockReturnValue(undefined);
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel('ghost-model');
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
     it('streams through a per-model generator resolved by model (compression path)', async () => {
       // chatCompressionService passes both `model` and `stream: true`, so the
       // streaming branch must run on the resolveForModel-selected generator,

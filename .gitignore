@@ -46,6 +46,10 @@ package-lock.json
 .qwen/pending-skills/
 !.qwen/agents/
 !.qwen/agents/**
+# Team memory (memory.enableTeamMemory) is shared with collaborators THROUGH
+# git, so it must be tracked despite the `.qwen/*` ignore above.
+!.qwen/team-memory/
+!.qwen/team-memory/**
 
 # OS metadata
 .DS_Store
@@ -105,6 +109,9 @@ packages/core/src/utils/filesearch/fzfWorker.js
 # storybook
 *storybook.log
 storybook-static
+
+# test
+coverage/
 
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs

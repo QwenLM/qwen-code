@@ -53,6 +53,7 @@ import {
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
+  EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -276,7 +277,9 @@ export function logToolOutputTruncated(
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
-    'event.name': 'tool_output_truncated',
+    // event class's `eventName` (short, no prefix) leaks via spread — override with
+    // full namespaced constant for OTel compliance. Same pattern as other event loggers.
+    'event.name': EVENT_TOOL_OUTPUT_TRUNCATED,
     'event.timestamp': new Date().toISOString(),
   };
 

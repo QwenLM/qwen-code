@@ -1086,6 +1086,7 @@ export function DaemonSessionProvider({
                 status: 'disconnected',
                 sessionId: undefined,
                 error: message,
+                catchingUp: undefined,
               }));
               return;
             }
@@ -1127,6 +1128,7 @@ export function DaemonSessionProvider({
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
+            catchingUp: undefined,
           }));
           return;
         }
@@ -1152,6 +1154,7 @@ export function DaemonSessionProvider({
       const session = sessionRef.current;
       disposed = true;
       abort.abort();
+      hasCurrentSessionActivePromptRef.current = () => false;
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       if (pendingSessionLoadRef.current) {
@@ -1252,6 +1255,9 @@ export function DaemonSessionProvider({
         passiveAssistantDoneTimerRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
+        resetCurrentSessionActivePrompt: () => {
+          hasCurrentSessionActivePromptRef.current = () => false;
+        },
         getCreateSessionRequest: () => ({
           ...createSessionRequestRef.current,
           sessionScope: 'thread',

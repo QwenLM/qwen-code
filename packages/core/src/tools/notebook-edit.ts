@@ -58,6 +58,7 @@ import type {
 } from './modifiable-tool.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 
 const debugLogger = createDebugLogger('NOTEBOOK_EDIT');
 
@@ -576,6 +577,25 @@ class NotebookEditInvocation extends BaseToolInvocation<
       };
     }
 
+    // Scan the serialized notebook that will hit disk: a notebook under
+    // .qwen/team-memory/ could otherwise carry credentials past the guard
+    // that write-file.ts/edit.ts enforce. Block before any disk side effects.
+    const teamMemoryError = checkTeamMemorySecrets(
+      this.params.notebook_path,
+      prepared.updatedContent,
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return {
+        llmContent: `[ERROR: ${teamMemoryError}]`,
+        returnDisplay: teamMemoryError,
+        error: {
+          message: teamMemoryError,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
+
     try {
       try {
         await this.config
@@ -795,6 +815,21 @@ export class NotebookEditTool
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.notebook_path)) {
       return `File path '${params.notebook_path}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.notebook_path)} pattern(s).`;
+    }
+
+    // Scan the cell source at validate time too — for parity with edit/write-file
+    // — so a team-memory write carrying a secret is rejected before scheduling.
+    // execute() still scans the full serialized notebook, which catches secrets
+    // split across cells that this single-cell check cannot.
+    if (typeof params.new_source === 'string') {
+      const teamMemoryError = checkTeamMemorySecrets(
+        params.notebook_path,
+        params.new_source,
+        this.config.getProjectRoot(),
+      );
+      if (teamMemoryError) {
+        return teamMemoryError;
+      }
     }
 
     return null;

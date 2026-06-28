@@ -71,6 +71,7 @@ export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
+export * from './core/turn-interruption.js';
 
 // ============================================================================
 // Tools
@@ -110,6 +111,7 @@ export * from './tools/mcp-tool.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
+export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
@@ -510,6 +512,7 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
+export { buildContextUsage } from './hooks/context-usage.js';
 
 // ============================================================================
 // Goals (/goal command runtime)

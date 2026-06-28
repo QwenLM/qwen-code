@@ -71,7 +71,7 @@ import {
   type ServeWorkspaceAgentDetail,
   type ServeWorkspaceAgentSummary,
   type ServeWorkspaceAgentsStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 
 /**
  * Workspace subagent CRUD routes.

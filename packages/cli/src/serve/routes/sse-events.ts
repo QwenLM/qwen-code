@@ -12,7 +12,7 @@ import type { DaemonLogger } from '../daemon-logger.js';
 import {
   SubscriberLimitExceededError,
   type BridgeEvent,
-} from '../event-bus.js';
+} from '@qwen-code/acp-bridge/eventBus';
 import {
   errorMessage,
   type SendBridgeError,
@@ -325,10 +325,10 @@ export function registerSseEventsRoutes(
         if (res.writableEnded) return;
         const idleForMs = Date.now() - lastWriteAt;
         if (idleForMs < writerIdleTimeoutMsValue) return;
-        // Reuse the existing `client_evicted` taxonomy from
-        // `event-bus.ts` so SDK reducers branch on the same frame type
-        // they already handle for queue-overflow eviction; the new
-        // `reason` slot is the differentiator. Write DIRECTLY here
+        // Reuse the existing `client_evicted` taxonomy from the bridge event
+        // bus so SDK reducers branch on the same frame type they already
+        // handle for queue-overflow eviction; the new `reason` slot is the
+        // differentiator. Write DIRECTLY here
         // (bypassing `writeWithBackpressure`) because the chain may
         // already be stuck on a `drain` that will never come — which
         // is the exact scenario this timer exists to catch. If the

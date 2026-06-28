@@ -1,0 +1,31 @@
+diff --git a/node_modules/chrome-devtools-mcp/build/src/McpContext.js b/node_modules/chrome-devtools-mcp/build/src/McpContext.js
+index 6fce02e..15d221d 100644
+--- a/node_modules/chrome-devtools-mcp/build/src/McpContext.js
++++ b/node_modules/chrome-devtools-mcp/build/src/McpContext.js
+@@ -78,8 +78,24 @@ export class McpContext {
+         const workers = await this.createExtensionServiceWorkersSnapshot();
+         await this.#networkCollector.init(pages);
+         await this.#consoleCollector.init(pages);
+-        await this.#devtoolsUniverseManager.init(pages);
+-        await this.#serviceWorkerConsoleCollector.init(workers);
++        // qwen-code Plan C CDP tunnel (#5626): these two collectors call
++        // page.createCDPSession() -> Target.attachToTarget, which a
++        // chrome.debugger-backed CDP endpoint rejects with -32000 'Not allowed'
++        // (Puppeteer #13251). Making each non-fatal lets the server start so the
++        // page-level tools work; only performance_* / service-worker console
++        // (which need the extra session) degrade.
++        try {
++            await this.#devtoolsUniverseManager.init(pages);
++        }
++        catch (error) {
++            console.error('[qwen-code patch] devtoolsUniverseManager.init skipped:', error?.message ?? error);
++        }
++        try {
++            await this.#serviceWorkerConsoleCollector.init(workers);
++        }
++        catch (error) {
++            console.error('[qwen-code patch] serviceWorkerConsoleCollector.init skipped:', error?.message ?? error);
++        }
+     }
+     dispose() {
+         this.#networkCollector.dispose();

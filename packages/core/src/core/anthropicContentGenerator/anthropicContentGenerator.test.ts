@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   CountTokensParameters,
@@ -1099,6 +1100,94 @@ describe('AnthropicContentGenerator', () => {
       ).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
     });
 
+    it('does not leak abort listeners onto the caller signal across non-streaming requests', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+
+      // Reproduce the SDK leak (see the generateContentStream test): the client
+      // registers a non-removed 'abort' listener on whatever signal it gets.
+      anthropicState.createImpl.mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          opts.signal?.addEventListener('abort', () => {});
+          return {
+            id: 'anthropic-1',
+            model: 'claude-test',
+            content: [{ type: 'text', text: 'Hello' }],
+          };
+        },
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const callerAc = new AbortController();
+      for (let i = 0; i < 5; i++) {
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+          config: { abortSignal: callerAc.signal },
+        } as unknown as GenerateContentParameters);
+      }
+
+      expect(getEventListeners(callerAc.signal, 'abort')).toHaveLength(0);
+      const passedSignal = (
+        anthropicState.lastCreateArgs?.[1] as { signal?: AbortSignal }
+      )?.signal;
+      expect(passedSignal).toBeDefined();
+      expect(passedSignal).not.toBe(callerAc.signal);
+    });
+
+    it('propagates a caller abort to the per-request child signal', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+
+      const callerAc = new AbortController();
+      let capturedSignal: AbortSignal | undefined;
+      anthropicState.createImpl.mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          capturedSignal = opts.signal;
+          // The caller aborts while the request is in flight.
+          callerAc.abort();
+          return {
+            id: 'anthropic-1',
+            model: 'claude-test',
+            content: [{ type: 'text', text: 'hi' }],
+          };
+        },
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+        config: { abortSignal: callerAc.signal },
+      } as unknown as GenerateContentParameters);
+
+      // The SDK is handed a child, and the caller's abort still reaches it, so
+      // cancellation behaviour is preserved.
+      expect(capturedSignal).toBeDefined();
+      expect(capturedSignal).not.toBe(callerAc.signal);
+      expect(capturedSignal!.aborted).toBe(true);
+    });
+
     it('builds request with config sampling params (config overrides request) and thinking budget', async () => {
       const { AnthropicContentConverter } = await importConverter();
       const { AnthropicContentGenerator } = await importGenerator();
@@ -1161,7 +1250,11 @@ describe('AnthropicContentGenerator', () => {
       const [anthropicRequest, options] =
         anthropicState.lastCreateArgs as AnthropicCreateArgs;
 
-      expect(options?.signal).toBe(abortController.signal);
+      // The generator wraps the caller's signal in a per-request child to
+      // isolate the SDK's abort-listener leak, so the SDK sees the child rather
+      // than the caller's signal.
+      expect(options?.signal).toBeDefined();
+      expect(options?.signal).not.toBe(abortController.signal);
 
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
@@ -1597,7 +1690,7 @@ describe('AnthropicContentGenerator', () => {
         );
       });
 
-      it('uses conservative default when max_tokens is not explicitly configured', async () => {
+      it('uses model default when max_tokens is not explicitly configured', async () => {
         const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue({
           id: 'anthropic-1',
@@ -1625,7 +1718,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 8000 }),
+          expect.objectContaining({ max_tokens: 65536 }),
         );
       });
 
@@ -1660,7 +1753,7 @@ describe('AnthropicContentGenerator', () => {
           const [anthropicRequest] =
             anthropicState.lastCreateArgs as AnthropicCreateArgs;
           expect(anthropicRequest).toEqual(
-            expect.objectContaining({ max_tokens: 8000 }),
+            expect.objectContaining({ max_tokens: 65536 }),
           );
         }
       });
@@ -1759,7 +1852,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 8000 }),
+          expect.objectContaining({ max_tokens: 65536 }),
         );
       });
     });
@@ -2256,6 +2349,71 @@ describe('AnthropicContentGenerator', () => {
           contents: 'Hello',
         } as unknown as GenerateContentParameters),
       ).rejects.toThrow('407 via http://<redacted>@proxy.local');
+    });
+
+    it('does not leak abort listeners onto the caller signal across streamed requests', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+
+      // Reproduce the Anthropic SDK's listener leak: core.mjs fetchWithTimeout
+      // registers an 'abort' listener on whatever signal it is handed and never
+      // removes it. Whichever signal the generator passes to the client is
+      // where that listener accumulates.
+      anthropicState.createImpl.mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          opts.signal?.addEventListener('abort', () => {});
+          return (async function* () {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: { type: 'text' },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'text_delta', text: 'Hello' },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+          })();
+        },
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      // A single long-lived caller signal reused across many requests, as a
+      // session/turn-scoped AbortController would be.
+      const callerAc = new AbortController();
+
+      for (let i = 0; i < 5; i++) {
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+          config: { abortSignal: callerAc.signal },
+        } as unknown as GenerateContentParameters);
+        for await (const _chunk of stream) {
+          // drain
+        }
+      }
+
+      // The SDK's per-request listeners must land on short-lived child signals
+      // (aborted once the stream drains), not pile up on the caller's signal.
+      expect(getEventListeners(callerAc.signal, 'abort')).toHaveLength(0);
+
+      // And the generator must not hand the caller signal straight to the SDK.
+      const passedSignal = (
+        anthropicState.lastCreateArgs?.[1] as { signal?: AbortSignal }
+      )?.signal;
+      expect(passedSignal).toBeDefined();
+      expect(passedSignal).not.toBe(callerAc.signal);
     });
 
     it('redacts proxy credentials from stream iteration errors', async () => {

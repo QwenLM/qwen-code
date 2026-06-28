@@ -173,6 +173,7 @@ describe('GeminiChat', async () => {
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi
         .fn()
@@ -369,6 +370,35 @@ describe('GeminiChat', async () => {
         'Qwen Code is streaming a model response',
       );
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('increments the user-content push counter once per surviving send', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'done' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const before = chat.getUserContentPushCount();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-id-push-count',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      // The user content landed exactly once, so the counter advanced by one —
+      // this is the signal the Retry strip/restore in client.ts gates on.
+      expect(chat.getUserContentPushCount()).toBe(before + 1);
     });
 
     it('releases the sleep inhibitor when the stream errors', async () => {
@@ -6056,11 +6086,14 @@ describe('GeminiChat', async () => {
         { role: 'user', parts: [{ text: 'orphaned message' }] },
       ]);
 
-      chat.stripOrphanedUserEntriesFromHistory();
+      const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
 
       expect(chat.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'first message' }] },
         { role: 'model', parts: [{ text: 'first response' }] },
+      ]);
+      expect(strippedEntries).toEqual([
+        { role: 'user', parts: [{ text: 'orphaned message' }] },
       ]);
     });
 
@@ -6085,13 +6118,27 @@ describe('GeminiChat', async () => {
         },
       ]);
 
-      chat.stripOrphanedUserEntriesFromHistory();
+      const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
 
       expect(chat.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'query' }] },
         {
           role: 'model',
           parts: [{ functionCall: { name: 'tool', args: {} } }],
+        },
+      ]);
+      expect(strippedEntries).toEqual([
+        { role: 'user', parts: [{ text: 'IDE context' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'tool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
         },
       ]);
     });
