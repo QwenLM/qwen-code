@@ -178,12 +178,13 @@ export class LoopDetectionService {
 
   /**
    * Convenience aggregate that runs every tier in order: the always-on
-   * safeties (consecutive-identical guard + per-turn cap) followed by the
-   * opt-in heuristics. Intended as a single "check everything" entry point for
-   * unit tests. Production code (client.ts) intentionally calls the tiers
-   * separately so the `skipLoopDetection` gate can sit between them — a new
-   * guard added here will NOT take effect in production unless it is also
-   * wired into checkAlwaysOnSafeties or addAndCheckHeuristicLoops.
+   * safeties (consecutive-identical guard, shell inspection-command
+   * stagnation guard, and per-turn cap) followed by the opt-in heuristics.
+   * Intended as a single "check everything" entry point for unit tests.
+   * Production code (client.ts) intentionally calls the tiers separately so
+   * the `skipLoopDetection` gate can sit between them — a new guard added here
+   * will NOT take effect in production unless it is also wired into
+   * checkAlwaysOnSafeties or addAndCheckHeuristicLoops.
    * @param event - The stream event to process
    * @returns true if any tier detects a loop, false otherwise
    */

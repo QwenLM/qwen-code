@@ -2176,9 +2176,10 @@ export class GeminiClient {
         // interruptions. Only the historically false-positive-prone heuristics
         // (content/thought repetition, read-file and action stagnation,
         // global-duplicate and alternating tool-call patterns) sit behind this
-        // flag. The precise consecutive-identical guard and the per-turn cap
-        // run unconditionally in checkAlwaysOnSafeties above, so the documented
-        // escape hatch only relaxes the heuristics (see nonInteractiveCli.ts).
+        // flag. The precise consecutive-identical guard, shell inspection
+        // stagnation guard, and per-turn cap run unconditionally in
+        // checkAlwaysOnSafeties above, so the documented escape hatch only
+        // relaxes the heuristics (see nonInteractiveCli.ts).
         const skipLoopDetection = this.config.getSkipLoopDetection();
         const heuristicLoop =
           !skipLoopDetection &&
