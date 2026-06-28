@@ -306,6 +306,26 @@ describe('LoopDetectionService', () => {
         LoopType.SHELL_COMMAND_STAGNATION,
       );
     });
+
+    it('does not bucket compound commands that also write to the repository', () => {
+      // Each chain stages and commits real work; the embedded `git status` must
+      // not classify the whole command as stagnant read-only inspection. Vary
+      // the path so the consecutive-identical guard never fires, isolating the
+      // shell-stagnation guard under test.
+      for (let i = 0; i < SHELL_COMMAND_STAGNATION_THRESHOLD; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('run_shell_command', {
+              command: `git add file-${i}.txt && git status --short && git commit -m progress-${i}`,
+              description: 'Stage, inspect, and commit progress',
+            }),
+          ),
+        ).toBe(false);
+      }
+      expect(service.getLastLoopType()).not.toBe(
+        LoopType.SHELL_COMMAND_STAGNATION,
+      );
+    });
   });
 
   describe('Content Loop Detection', () => {

@@ -384,8 +384,23 @@ export class LoopDetectionService {
   }
 
   private isGitInspectionCommand(command: string): boolean {
-    return /(?:^|[;&|]\s*)git(?:\s+(?:-C\s+\S+|--no-pager))*\s+(?:status|diff|ls-files)\b/i.test(
-      command,
+    // Only classify a command as read-only inspection when *every* segment of
+    // the shell chain is a git status/diff/ls-files. A chain that also stages,
+    // commits, or runs another tool (e.g. `git add . && git status`) is making
+    // progress, so it must not share the stagnation bucket and trip a false
+    // halt. Failing open (treating mixed chains as non-inspection) is the safe
+    // direction for an always-on guard.
+    const segments = command
+      .split(/&&|\|\||[;&|]/)
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length === 0) {
+      return false;
+    }
+    return segments.every((segment) =>
+      /^git(?:\s+(?:-C\s+\S+|--no-pager))*\s+(?:status|diff|ls-files)\b/i.test(
+        segment,
+      ),
     );
   }
 
