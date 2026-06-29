@@ -56,6 +56,13 @@ describe('getErrorMessage cause unwrapping', () => {
   it('stringifies plain objects without a message', () => {
     expect(getErrorMessage({ code: -32603 })).toBe('{"code":-32603}');
   });
+
+  it('bounds stringified plain objects without a message', () => {
+    const message = getErrorMessage({ detail: 'x'.repeat(2000) });
+
+    expect(message.length).toBeLessThanOrEqual(1000);
+    expect(message).toContain('"detail"');
+  });
 });
 
 describe('isAbortError', () => {

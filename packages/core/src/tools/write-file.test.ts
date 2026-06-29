@@ -846,6 +846,27 @@ describe('WriteFileTool', () => {
         'Error writing to file: Generic write error',
       );
     });
+
+    it('should surface plain object write error messages without object stringification', async () => {
+      const filePath = path.join(rootDir, 'plain_object_error_file.txt');
+      const content = 'test content';
+
+      vi.restoreAllMocks();
+
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce({
+        message: 'Plain object write error',
+      });
+
+      const params = { file_path: filePath, content };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      expect(result.llmContent).toContain(
+        'Error writing to file: Plain object write error',
+      );
+      expect(result.llmContent).not.toContain('[object Object]');
+    });
   });
 
   describe('BOM preservation (Issue #1672)', () => {

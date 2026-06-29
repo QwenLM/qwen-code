@@ -35,7 +35,7 @@ interface AcpFileSystemServiceOptions {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function getErrorCode(error: unknown): unknown {
@@ -43,8 +43,8 @@ function getErrorCode(error: unknown): unknown {
     return error.code;
   }
 
-  if (typeof error === 'object' && error !== null && 'code' in error) {
-    return (error as { code?: unknown }).code;
+  if (isRecord(error)) {
+    return error['code'];
   }
 
   return undefined;
@@ -55,13 +55,10 @@ function getErrorData(error: unknown): Record<string, unknown> | undefined {
   return isRecord(data) ? data : undefined;
 }
 
-function getErrorKind(error: unknown): unknown {
+function getErrorKind(error: unknown): string | undefined {
   const data = getErrorData(error);
   if (data && typeof data['errorKind'] === 'string') {
     return data['errorKind'];
-  }
-  if (isRecord(error) && typeof error['errorKind'] === 'string') {
-    return error['errorKind'];
   }
   return undefined;
 }

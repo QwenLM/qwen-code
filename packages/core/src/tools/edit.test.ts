@@ -1100,6 +1100,29 @@ describe('EditTool', () => {
       const result = await invocation.execute(new AbortController().signal);
       expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
     });
+
+    it('should surface plain object write error messages without object stringification', async () => {
+      fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
+
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce({
+        message: 'Plain object edit error',
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      expect(result.llmContent).toContain(
+        'Error executing edit: Plain object edit error',
+      );
+      expect(result.llmContent).not.toContain('[object Object]');
+    });
   });
 
   describe('getDescription', () => {

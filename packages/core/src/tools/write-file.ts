@@ -615,7 +615,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       } else if (error instanceof Error) {
         errorMsg = `Error writing to file: ${error.message}`;
       } else {
-        errorMsg = `Error writing to file: ${String(error)}`;
+        errorMsg = `Error writing to file: ${getErrorMessage(error)}`;
       }
 
       return {
@@ -689,9 +689,9 @@ The user has the ability to modify \`content\`. If modified, this will be stated
         }
       }
     } catch (statError: unknown) {
-      return `Error accessing path properties for validation: ${filePath}. Reason: ${
-        statError instanceof Error ? statError.message : String(statError)
-      }`;
+      return `Error accessing path properties for validation: ${filePath}. Reason: ${getErrorMessage(
+        statError,
+      )}`;
     }
 
     const teamMemoryError = checkTeamMemorySecrets(

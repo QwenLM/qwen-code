@@ -161,6 +161,51 @@ describe('AcpFileSystemService', () => {
       expect(String(err)).not.toContain('[object Object]');
     });
 
+    it('preserves stack traces from plain object ACP errors', async () => {
+      const otherError = {
+        code: INTERNAL_ERROR_CODE,
+        message: 'Internal error',
+        stack: 'Original ACP stack',
+      };
+      const client = {
+        readTextFile: vi.fn().mockRejectedValue(otherError),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-2b-stack',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      const err = await svc
+        .readTextFile({ path: '/some/file.txt' })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).stack).toBe('Original ACP stack');
+    });
+
+    it('does not copy array entries onto normalized ACP errors', async () => {
+      const client = {
+        readTextFile: vi.fn().mockRejectedValue(['Internal error']),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-2b-array',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      const err = await svc
+        .readTextFile({ path: '/some/file.txt' })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect(Object.prototype.hasOwnProperty.call(err, '0')).toBe(false);
+    });
+
     it('falls back to local reads for allowed local roots when ACP rejects them as outside the workspace', async () => {
       await withTempRoot(async (tempRoot) => {
         const skillRoot = path.join(tempRoot, 'skills');
@@ -197,6 +242,41 @@ describe('AcpFileSystemService', () => {
           _meta: { bom: false, encoding: 'utf-8' },
         });
         expect(fallback.readTextFile).toHaveBeenCalledWith({ path: filePath });
+      });
+    });
+
+    it('does not use top-level errorKind fields for local read fallback', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const localRoot = path.join(tempRoot, 'skills');
+        const filePath = path.join(localRoot, 'instructions.md');
+        await fs.mkdir(localRoot, { recursive: true });
+        await fs.writeFile(filePath, 'instructions', 'utf8');
+
+        const topLevelErrorKindError = {
+          code: INTERNAL_ERROR_CODE,
+          message: `top-level errorKind only: ${filePath}`,
+          errorKind: 'path_outside_workspace',
+        };
+        const client = {
+          readTextFile: vi.fn().mockRejectedValue(topLevelErrorKindError),
+        } as unknown as AgentSideConnection;
+        const fallback = createFallback();
+
+        const svc = new AcpFileSystemService(
+          client,
+          'session-2c-top-level-kind',
+          { readTextFile: true, writeTextFile: true },
+          fallback,
+          { localReadRoots: [localRoot] },
+        );
+
+        await expect(
+          svc.readTextFile({ path: filePath }),
+        ).rejects.toMatchObject({
+          code: INTERNAL_ERROR_CODE,
+          message: `top-level errorKind only: ${filePath}`,
+        });
+        expect(fallback.readTextFile).not.toHaveBeenCalled();
       });
     });
 

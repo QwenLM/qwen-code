@@ -10,6 +10,8 @@ interface GaxiosError {
   };
 }
 
+const MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH = 1000;
+
 export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
@@ -80,6 +82,13 @@ function describeSingleError(err: unknown): string | undefined {
   return str && str !== '[object Object]' ? str : undefined;
 }
 
+function truncateStringifiedErrorMessage(message: string): string {
+  if (message.length <= MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH) {
+    return message;
+  }
+  return `${message.slice(0, MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH - 3)}...`;
+}
+
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     const detail = describeErrorCause(error.cause);
@@ -94,7 +103,10 @@ export function getErrorMessage(error: unknown): string {
       return message;
     }
     try {
-      return JSON.stringify(error) ?? String(error);
+      const serialized = JSON.stringify(error);
+      return serialized
+        ? truncateStringifiedErrorMessage(serialized)
+        : String(error);
     } catch {
       return String(error);
     }
