@@ -2818,11 +2818,13 @@ export class Session implements SessionContext {
                   `loop tick: mode=${loopMode ?? autonomousMode} delivery=${
                     loopTick.full
                       ? 'full'
-                      : loopTick.autonomous
-                        ? 'autonomous-tick'
-                        : loopTick.sourceLabel
-                          ? 'reminder'
-                          : 'absent'
+                      : loopTick.transientError
+                        ? 'transient-error'
+                        : loopTick.autonomous
+                          ? 'autonomous-tick'
+                          : loopTick.sourceLabel
+                            ? 'reminder'
+                            : 'absent'
                   } source=${loopTick.sourceLabel ?? 'none'} autonomous=${
                     loopTick.autonomous ?? false
                   } transient=${loopTick.transientError ?? false}`,

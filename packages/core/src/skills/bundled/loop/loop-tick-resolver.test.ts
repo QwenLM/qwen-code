@@ -340,6 +340,10 @@ describe('LoopTickResolver', () => {
     expect(dynTick.modelText).toContain(
       '# /loop tick — loop.md absent (dynamic pacing)\n',
     );
+    expect(dynTick.modelText).toContain(
+      'You scheduled this tick via LoopWakeup',
+    );
+    expect(dynTick.modelText).toContain('at the end of this turn');
     // The absent dynamic tail names the re-arm sentinel by interpolating the
     // constant — asserting against LOOP_SENTINEL_DYNAMIC catches a future rename
     // drift between the constant and the user-facing instruction.
@@ -431,6 +435,22 @@ describe('LoopTickResolver', () => {
 
     const next = await resolver.resolve('dynamic');
     expect(next.full).toBe(true);
+  });
+
+  it('keeps the autonomous marker through a transient-error tick', async () => {
+    expect(resolver.resolveAutonomous('dynamic').full).toBe(true);
+    resolver.markDelivered();
+
+    const transient = resolver.buildTransientErrorTick('dynamic', true, 'EIO');
+    expect(transient.full).toBe(false);
+    expect(transient.transientError).toBe(true);
+    resolver.markDelivered();
+
+    const absent = await resolver.resolve('dynamic');
+    expect(absent.full).toBe(false);
+    expect(absent.autonomous).toBe(true);
+    expect(absent.modelText).not.toContain('# Autonomous loop check');
+    expect(absent.modelText).toContain('loop.md is not currently present');
   });
 
   it('names the real home loop.md in the absent reminder (QWEN_HOME-aware, not a hardcoded ~/.qwen)', async () => {

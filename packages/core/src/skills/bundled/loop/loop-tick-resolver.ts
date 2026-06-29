@@ -176,8 +176,11 @@ export function detectAutonomousSentinel(prompt: string): LoopMode | null {
 // Shared self-paced re-arm instruction; the loop.md and autonomous dynamic ticks
 // differ only in the sentinel the model re-arms with, so build both from one
 // template to keep them in lockstep.
-const keepAliveRearm = (sentinel: string): string =>
-  `You scheduled this tick via LoopWakeup (not a recurring cron). To keep the loop alive, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel \`${sentinel}\` — otherwise the loop ends after this tick.`;
+const keepAliveRearm = (
+  sentinel: string,
+  reason = 'To keep the loop alive',
+): string =>
+  `You scheduled this tick via LoopWakeup (not a recurring cron). ${reason}, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel \`${sentinel}\` — otherwise the loop ends after this tick.`;
 
 // Re-arm guidance for a pure autonomous tick (cron reuses the loop.md pacing;
 // dynamic re-arms with the autonomous sentinel).
@@ -191,7 +194,10 @@ const AUTONOMOUS_REARM: Record<LoopMode, string> = {
 // is picked up on the next fire.
 const ABSENT_AUTONOMOUS_REARM: Record<LoopMode, string> = {
   cron: PACING_SUFFIX.cron,
-  dynamic: `To pick up loop.md if it is recreated, call LoopWakeup again with prompt set to the literal sentinel \`${LOOP_SENTINEL_DYNAMIC}\` — otherwise the loop ends after this tick.`,
+  dynamic: keepAliveRearm(
+    LOOP_SENTINEL_DYNAMIC,
+    'To pick up loop.md if it is recreated',
+  ),
 };
 
 /** The short tick text for a pure autonomous fire (no loop.md). The full
@@ -353,7 +359,9 @@ export class LoopTickResolver {
    * routes here — it converges on the autonomous preamble in resolve(). */
   #noOpTick(modelText: string, transientError = false): LoopTickResult {
     this.#pendingContent = null;
-    this.#lastContent = null;
+    if (this.#lastContent !== AUTONOMOUS_PREAMBLE_MARKER) {
+      this.#lastContent = null;
+    }
     return { modelText, full: false, transientError };
   }
 

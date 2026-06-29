@@ -35,6 +35,7 @@ import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
@@ -45,7 +46,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     createDebugLogger: () => ({
-      debug: vi.fn(),
+      debug: debugLoggerDebugSpy,
       info: vi.fn(),
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
@@ -5581,6 +5582,7 @@ describe('Session', () => {
         // the dynamic re-arm instruction, so the model re-arms and the loop
         // survives. Mutation guard: drop the `dynamic` branch (always throw) and a
         // `[loop error]` surfaces while no tick reaches the model.
+        debugLoggerDebugSpy.mockClear();
         debugLoggerWarnSpy.mockClear();
         const eio = Object.assign(new Error('EIO: i/o error, read'), {
           code: 'EIO',
@@ -5657,6 +5659,9 @@ describe('Session', () => {
           expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
             'loop.md sentinel resolution failed (mode=dynamic, code=EIO) — check .qwen/loop.md permissions/IO',
             eio,
+          );
+          expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+            expect.stringContaining('delivery=transient-error'),
           );
         } finally {
           resolveSpy.mockRestore();
