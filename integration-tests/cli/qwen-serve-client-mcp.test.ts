@@ -58,7 +58,12 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 // platform-agnostic, but daemon SIGTERM teardown is cleaner on POSIX. Keep it
 // running everywhere `ws` works.
 const SKIP = process.platform === 'win32';
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+const SKIP_PROMPTED_MODEL_TEST = Boolean(
+  SANDBOX_MODE && SANDBOX_MODE !== 'false' && SANDBOX_MODE !== '0',
+);
 const describeMaybe = SKIP ? describe.skip : describe;
+const itPromptedModelMaybe = SKIP_PROMPTED_MODEL_TEST ? it.skip : it;
 
 let daemon: ChildProcess;
 let port = 0;
@@ -417,7 +422,9 @@ describeMaybe('qwen serve — reverse tool channel (client-hosted MCP over WS)',
   //
   // This test does session/new THEN mcp_register (the "register after a session
   // already exists" timing), exercising the fan-out path specifically.
-  it('drives a model→agent tools/call of chrome_read_page over the reverse WS channel and consumes the result', async () => {
+  // Under container sandboxing, the ACP child cannot reach the host-loopback
+  // fake model server used below; keep the discovery-only test running there.
+  itPromptedModelMaybe('drives a model→agent tools/call of chrome_read_page over the reverse WS channel and consumes the result', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
     });

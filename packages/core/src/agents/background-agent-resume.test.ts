@@ -1028,7 +1028,8 @@ describe('BackgroundAgentResumeService', () => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
     const provider = subagent.setExternalMessageProvider.mock.calls[0]?.[0] as
-      (() => string[]) | undefined;
+      | (() => string[])
+      | undefined;
     expect(provider).toBeDefined();
     expect(provider?.()).toEqual(['second message']);
   });
@@ -1378,7 +1379,8 @@ describe('BackgroundAgentResumeService', () => {
     const executeCall = execute.mock.calls[0];
     expect(executeCall).toBeDefined();
     const contextArg = executeCall?.[0] as
-      { get(key: string): unknown } | undefined;
+      | { get(key: string): unknown }
+      | undefined;
     expect(contextArg).toBeDefined();
     if (!contextArg) {
       throw new Error('Expected resume execute context');
@@ -1781,7 +1783,8 @@ describe('BackgroundAgentResumeService', () => {
     const execute = vi.fn(
       async (context: { get: (key: string) => unknown }) => {
         const override = context.get('initial_messages_override') as
-          Array<{ parts?: Array<{ text?: string }> }> | undefined;
+          | Array<{ parts?: Array<{ text?: string }> }>
+          | undefined;
         expect(override).toBeUndefined();
         expect(context.get('task_prompt')).toBe('continue work');
       },

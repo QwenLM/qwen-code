@@ -325,7 +325,8 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
         'fork' &&
       typeof (
         launchPromptRecord?.systemPayload as
-          NotificationRecordPayload | undefined
+          | NotificationRecordPayload
+          | undefined
       )?.displayText === 'string'
         ? {
             history: structuredClone(
@@ -699,7 +700,7 @@ export class BackgroundAgentResumeService {
       // definition would silently auto-deny calls the fresh launch bubbles.
       const shouldBubble = Boolean(
         target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
-        this.config.isInteractive(),
+          this.config.isInteractive(),
       );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;

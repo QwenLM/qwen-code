@@ -860,7 +860,8 @@ export class BackgroundTaskRegistry {
    */
   reset(): void {
     const firstEntry = this.agents.values().next().value as
-      AgentTask | undefined;
+      | AgentTask
+      | undefined;
     if (!firstEntry) return;
     for (const entry of this.agents.values()) {
       // Defensive: callers (session switch via /resume, /clear) gate on

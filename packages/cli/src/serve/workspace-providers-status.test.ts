@@ -158,6 +158,30 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it('filters fastOnly and voiceOnly models from the workspace provider catalog', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      modelProviders: {
+        openai: [
+          { id: 'main-model', name: 'Main Model' },
+          { id: 'fast-model', name: 'Fast Model', fastOnly: true },
+          { id: 'voice-model', name: 'Voice Model', voiceOnly: true },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const modelIds = result.providers.flatMap((p) =>
+      p.models.map((m) => m.modelId),
+    );
+
+    expect(modelIds).toContain('main-model(openai)');
+    expect(modelIds).not.toContain('fast-model(openai)');
+    expect(modelIds).not.toContain('voice-model(openai)');
+  });
+
   it('reports custom providerProtocol models under their resolved auth type', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

@@ -21,11 +21,11 @@ export const isAgentExecutionRawOutput = (
 ): value is AgentExecutionRawOutput =>
   Boolean(
     value &&
-    typeof value === 'object' &&
-    'type' in value &&
-    (value as { type?: unknown }).type === 'task_execution' &&
-    'taskDescription' in value &&
-    'status' in value,
+      typeof value === 'object' &&
+      'type' in value &&
+      (value as { type?: unknown }).type === 'task_execution' &&
+      'taskDescription' in value &&
+      'status' in value,
   );
 
 export const isAgentExecutionToolCall = (

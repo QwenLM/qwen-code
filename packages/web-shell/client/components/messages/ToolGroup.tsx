@@ -396,7 +396,8 @@ function getAgentDisplayInfo(
     0;
 
   const stats = taskExec?.['executionSummary'] as
-    Record<string, unknown> | undefined;
+    | Record<string, unknown>
+    | undefined;
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDurationMs(stats['totalDurationMs'])

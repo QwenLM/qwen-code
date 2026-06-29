@@ -13,10 +13,11 @@ import {
   sanitizeLogText,
 } from './sanitize.js';
 import type {
-  AcpBridge,
   AvailableCommand,
+  ChannelAgentBridge,
+  SessionDiedEvent,
   ToolCallEvent,
-} from './AcpBridge.js';
+} from './ChannelAgentBridge.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -31,6 +32,11 @@ export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  /**
+   * Set when a channel owns a supplied router and should consume bridge
+   * events directly.
+   */
+  registerBridgeEvents?: boolean;
 }
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
@@ -85,7 +91,7 @@ interface AgentCommandsProvider {
 
 export abstract class ChannelBase {
   protected config: ChannelConfig;
-  protected bridge: AcpBridge;
+  protected bridge: ChannelAgentBridge;
   protected groupGate: GroupGate;
   protected gate: SenderGate;
   protected router: SessionRouter;
@@ -96,6 +102,7 @@ export abstract class ChannelBase {
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
+  private readonly registerBridgeEvents: boolean;
   /**
    * Per-session generation, bumped by /clear. A queued followup turn captures the
    * generation when it enqueues and bails if /clear bumped it before the turn ran,
@@ -110,11 +117,22 @@ export abstract class ChannelBase {
     string,
     Array<{ text: string; envelope: Envelope }>
   > = new Map();
+  private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
+    const target = this.router.getTarget(event.sessionId);
+    if (target) {
+      this.onToolCall(target.chatId, event);
+    }
+  };
+  private readonly bridgeSessionDiedListener = (
+    event: SessionDiedEvent,
+  ): void => {
+    this.onSessionDied(event.sessionId);
+  };
 
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     this.name = name;
@@ -137,15 +155,12 @@ export abstract class ChannelBase {
 
     this.registerSharedCommands();
 
-    // When running standalone (no gateway), register toolCall listener directly.
+    // When running standalone, register bridge listeners directly.
     // In gateway mode, the ChannelManager dispatches events instead.
-    if (!options?.router) {
-      bridge.on('toolCall', (event: ToolCallEvent) => {
-        const target = this.router.getTarget(event.sessionId);
-        if (target) {
-          this.onToolCall(target.chatId, event);
-        }
-      });
+    this.registerBridgeEvents =
+      options?.registerBridgeEvents ?? !options?.router;
+    if (this.registerBridgeEvents) {
+      this.attachBridgeEvents(bridge);
     }
   }
 
@@ -154,11 +169,33 @@ export abstract class ChannelBase {
   abstract disconnect(): void;
 
   /** Replace the bridge instance (used after crash recovery restart). */
-  setBridge(bridge: AcpBridge): void {
+  setBridge(bridge: ChannelAgentBridge): void {
+    if (this.registerBridgeEvents) {
+      this.detachBridgeEvents(this.bridge);
+    }
+    this.router.setBridge(bridge);
     this.bridge = bridge;
+    if (this.registerBridgeEvents) {
+      this.attachBridgeEvents(bridge);
+    }
   }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
+
+  onSessionDied(sessionId: string): void {
+    this.router.removeSessionId(sessionId);
+    this.instructedSessions.delete(sessionId);
+  }
+
+  private attachBridgeEvents(bridge: ChannelAgentBridge): void {
+    bridge.on('toolCall', this.bridgeToolCallListener);
+    bridge.on('sessionDied', this.bridgeSessionDiedListener);
+  }
+
+  private detachBridgeEvents(bridge: ChannelAgentBridge): void {
+    bridge.off('toolCall', this.bridgeToolCallListener);
+    bridge.off('sessionDied', this.bridgeSessionDiedListener);
+  }
 
   /**
    * Called when a prompt actually begins processing (inside the session queue).
@@ -834,16 +871,10 @@ export abstract class ChannelBase {
     // above, before the session was resolved.
     if (bangText.startsWith('!')) {
       const cmd = bangText.slice(1).trim();
-      const bridgeShellCommand = (
-        this.bridge as unknown as Record<string, unknown>
-      )['shellCommand'];
-      if (cmd && typeof bridgeShellCommand === 'function') {
+      const bridgeShellCommand = this.bridge.shellCommand;
+      if (cmd && bridgeShellCommand) {
         try {
-          const result = (await bridgeShellCommand(sessionId, cmd)) as {
-            exitCode: number | null;
-            output: string;
-            aborted: boolean;
-          };
+          const result = await this.bridge.shellCommand!(sessionId, cmd);
           const longestRun = Math.max(
             0,
             ...Array.from(
@@ -1145,10 +1176,11 @@ export abstract class ChannelBase {
           streamer?.push(chunk);
         }
       };
-      this.bridge.on('textChunk', onChunk);
+      const promptBridge = this.bridge;
+      promptBridge.on('textChunk', onChunk);
 
       try {
-        const response = await this.bridge.prompt(sessionId, promptText, {
+        const response = await promptBridge.prompt(sessionId, promptText, {
           imageBase64,
           imageMimeType,
         });
@@ -1166,7 +1198,7 @@ export abstract class ChannelBase {
           }
         }
       } finally {
-        this.bridge.off('textChunk', onChunk);
+        promptBridge.off('textChunk', onChunk);
         streamer?.stop();
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
