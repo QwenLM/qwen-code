@@ -242,13 +242,17 @@ describe('ConnectionRegistry.getSnapshot', () => {
     // irreplaceable replies exceed the soft cap (they're bounded by real
     // in-flight RPC count, not a content flood). Every reply must survive.
     const registry = new ConnectionRegistry();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     try {
       const conn = registry.create(true);
       if (!conn) return;
       conn.ownSession('sess-1');
       conn.getOrCreateSession('sess-1');
 
-      // Far past the 256 cap, ALL id-less replies (no id-bearing frames).
+      // Far past the 256 soft cap but under the 1024 hard cap: ALL id-less
+      // replies (no id-bearing frames).
       const N = 300;
       for (let i = 0; i < N; i++) conn.sendSessionReply('sess-1', { reply: i });
 
@@ -260,7 +264,54 @@ describe('ConnectionRegistry.getSnapshot', () => {
         .filter((v) => typeof v === 'number');
       expect(replyIds).toHaveLength(N);
       expect(new Set(replyIds).size).toBe(N); // all distinct, none lost
+
+      // The soft-cap warning is the operator's only signal it was exceeded —
+      // assert it fired (exactly once, at the transition, not per push).
+      const softCapLogs = stderr.mock.calls.filter((c) =>
+        String(c[0]).includes('pre-attach buffer over soft cap'),
+      );
+      expect(softCapLogs).toHaveLength(1);
     } finally {
+      stderr.mockRestore();
+      registry.dispose();
+    }
+  });
+
+  it('enforces a HARD ceiling on all-id-less buffer growth (defense-in-depth) — drops oldest and logs loudly past 4× the soft cap', () => {
+    // The soft cap never drops id-less replies, but an UNBOUNDED heap is worse
+    // than a hung caller — so past the 1024 hard cap pushCapped drops the oldest
+    // id-less reply and logs loudly. Bounds a pathological / buggy producer.
+    const registry = new ConnectionRegistry();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const N = 1100; // past the 1024 hard cap
+      for (let i = 0; i < N; i++) conn.sendSessionReply('sess-1', { reply: i });
+
+      const s = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s, new AbortController());
+      const replyIds = s.sent
+        .map((x) => (x.message as { reply?: number }).reply)
+        .filter((v): v is number => typeof v === 'number');
+
+      // Buffer bounded at the hard cap (1024); the OLDEST were dropped, so the
+      // most-recent survive.
+      expect(replyIds).toHaveLength(1024);
+      expect(replyIds).toContain(N - 1); // newest kept
+      expect(replyIds).not.toContain(0); // oldest dropped
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('HARD buffer cap breached'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderr.mockRestore();
       registry.dispose();
     }
   });

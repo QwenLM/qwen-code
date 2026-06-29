@@ -17,6 +17,18 @@ import type { TransportStream } from './transport-stream.js';
  */
 const MAX_BUFFERED_FRAMES = 256;
 
+/**
+ * Defense-in-depth hard ceiling for the degenerate all-id-less buffer case.
+ * Id-less deferred replies are never evicted at the soft cap (dropping one
+ * hangs its caller), and they're bounded in practice by the number of in-flight
+ * session RPCs — but that invariant is convention, not enforced by the type
+ * system or call sites. So a future id-less producer that ISN'T RPC-bounded, or
+ * a buggy client, can't grow the buffer without limit: past this hard cap we
+ * drop the oldest id-less reply and log loudly (its caller may hang, but an
+ * unbounded daemon heap is worse). 4× the soft cap.
+ */
+const HARD_BUFFERED_FRAMES_CAP = MAX_BUFFERED_FRAMES * 4;
+
 /** Default cap on concurrent live connections (mirrors a bounded resource). */
 const DEFAULT_MAX_CONNECTIONS = 64;
 
@@ -781,18 +793,28 @@ function pushCapped<T>(
     const replayable = getId ? buf.findIndex((e) => getId(e) !== undefined) : 0;
     if (replayable === -1) {
       // Degenerate case: the buffer is ENTIRELY id-less deferred replies, so
-      // there is nothing replaceable to evict. Dropping one here would silently
-      // hang its caller (the exact failure this guard exists to prevent), so we
-      // do NOT drop — we let the id-less replies exceed the soft cap and append.
-      // The cap is a memory bound against a CONTENT flood (id-bearing frames);
-      // id-less replies are naturally bounded by the number of in-flight
-      // session RPCs the client actually issued (tiny, client-controlled), not
-      // by an unbounded stream, so this can't run away in practice. Log once so
-      // an operator can see the buffer is over the soft cap on replies.
-      writeStderrLine(
-        `qwen serve: /acp pre-attach buffer over soft cap (${label}) with ` +
-          `${buf.length + 1} id-less replies — not dropping (irreplaceable)`,
-      );
+      // there is nothing replaceable to evict. Dropping one would silently hang
+      // its caller (the exact failure this guard prevents), so we do NOT drop at
+      // the soft cap — id-less replies are bounded in practice by in-flight RPC
+      // count. But enforce a HARD ceiling as defense-in-depth: past it, an
+      // unbounded daemon heap is the worse failure, so drop the oldest and log
+      // loudly.
+      if (buf.length >= HARD_BUFFERED_FRAMES_CAP) {
+        buf.shift();
+        writeStderrLine(
+          `qwen serve: /acp HARD buffer cap breached (${label}) — dropping ` +
+            `oldest id-less reply (its caller may hang); buffer was ${
+              buf.length + 1
+            }`,
+        );
+      } else if (buf.length === MAX_BUFFERED_FRAMES) {
+        // Log ONCE, at the soft-cap transition — not on every subsequent push,
+        // which would scale linearly with the over-cap depth.
+        writeStderrLine(
+          `qwen serve: /acp pre-attach buffer over soft cap (${label}) — ` +
+            `id-less replies are irreplaceable, not dropping`,
+        );
+      }
     } else {
       const [dropped] = buf.splice(replayable, 1);
       const droppedId = getId?.(dropped);
