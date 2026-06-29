@@ -1598,7 +1598,11 @@ export class FeishuChannel extends ChannelBase {
   private countFences(text: string): number {
     let count = 0;
     for (const line of text.split('\n')) {
-      if ((line.match(/```/g) || []).length % 2 === 1) count++;
+      // Count triple-backtick sequences, ignoring inline code spans
+      // (single backticks). Match ``` that are not preceded/followed by
+      // another backtick.
+      const matches = line.match(/(?<!`)```(?!`)/g);
+      if (matches && matches.length % 2 === 1) count++;
     }
     return count;
   }
@@ -1606,6 +1610,7 @@ export class FeishuChannel extends ChannelBase {
   /**
    * Strip markdown tables from text while preserving code-fenced blocks.
    * Collapses consecutive table rows into a single replacement line.
+   * Handles multiline cells (cells that span multiple lines within a table row).
    */
   private stripTables(text: string, replacement: string): string {
     const lines = text.split('\n');
@@ -1613,7 +1618,7 @@ export class FeishuChannel extends ChannelBase {
     let prevWasTable = false;
     const result: string[] = [];
     for (const line of lines) {
-      if ((line.match(/```/g) || []).length % 2 === 1) {
+      if ((line.match(/(?<!`)```(?!`)/g) || []).length % 2 === 1) {
         inCode = !inCode;
       }
       if (inCode) {
@@ -1738,6 +1743,27 @@ export class FeishuChannel extends ChannelBase {
       };
 
       const processMessage = async () => {
+        // Check gating before populating auxiliary maps — if the message
+        // will be rejected, we avoid leaking map entries that would otherwise
+        // persist until the stale timer cleans them up.
+        const groupResult = this.groupGate.check(envelope);
+        if (!groupResult.allowed) {
+          this.msgToQuestion.delete(msgId);
+          this.msgToSenderName.delete(msgId);
+          this.msgToSenderId.delete(msgId);
+          return;
+        }
+        const senderResult = this.gate.check(
+          envelope.senderId,
+          envelope.senderName,
+        );
+        if (!senderResult.allowed) {
+          this.msgToQuestion.delete(msgId);
+          this.msgToSenderName.delete(msgId);
+          this.msgToSenderId.delete(msgId);
+          return;
+        }
+
         // If this message is a reply/quote, fetch the quoted content as context
         if (msg.parent_id) {
           const { content: quotedContent, isFromBot } =
@@ -1953,6 +1979,10 @@ export class FeishuChannel extends ChannelBase {
                   if (typeof userName === 'string' && userName) {
                     parts.push(`@${userName}`);
                   }
+                } else if (node.tag) {
+                  process.stderr.write(
+                    `[Feishu:${this.name}] extractContent: unhandled post tag "${node.tag}" in message ${msgId}\n`,
+                  );
                 }
               }
               lines.push(parts.join(''));

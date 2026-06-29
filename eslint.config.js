@@ -130,6 +130,7 @@ export default tseslint.config(
             'msw/node',
             '**/generated/**',
             '**/internal/**',
+            '@qwen-code/acp-bridge/**',
             './styles/tailwind.css',
             './styles/App.css',
             './styles/style.css'

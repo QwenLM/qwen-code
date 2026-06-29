@@ -378,6 +378,8 @@ export class DaemonClient {
   private readonly fetchTimeoutMs: number;
   private readonly promptLimit: number;
   private readonly promptCounts: Record<string, number> = Object.create(null);
+  private promptCountTimestamps: Record<string, number> = Object.create(null);
+  private static readonly PROMPT_COUNTS_MAX_SIZE = 1000;
   /**
    * Pluggable transport layer. Defaults to `RestSseTransport` when
    * no explicit transport is supplied — preserving the pre-abstraction
@@ -440,12 +442,26 @@ export class DaemonClient {
       throw new DaemonPendingPromptLimitError(sessionId, limit, pendingCount);
     }
     promptCounts[sessionId] = pendingCount + 1;
+    this.promptCountTimestamps[sessionId] = Date.now();
+    // Evict oldest entries if the map exceeds the size cap.
+    const keys = Object.keys(promptCounts);
+    if (keys.length > DaemonClient.PROMPT_COUNTS_MAX_SIZE) {
+      const oldest = keys.reduce((a, b) =>
+        (this.promptCountTimestamps[a] ?? 0) <
+        (this.promptCountTimestamps[b] ?? 0)
+          ? a
+          : b,
+      );
+      delete promptCounts[oldest];
+      delete this.promptCountTimestamps[oldest];
+    }
     let released: boolean | undefined;
     return () => {
       if (released) return;
       released = true;
       if ((promptCounts[sessionId] ?? 0) <= 1) {
         delete promptCounts[sessionId];
+        delete this.promptCountTimestamps[sessionId];
       } else {
         --promptCounts[sessionId]!;
       }

@@ -126,6 +126,7 @@ export function detectImageMime(data: Buffer): string {
 export function validateImagePath(
   imagePath: string,
   workspaceDirs: string[] = [],
+  fileBuffer?: Buffer,
 ): string {
   const resolved = resolve(imagePath);
   const ext = extname(resolved).toLowerCase();
@@ -169,29 +170,35 @@ export function validateImagePath(
     );
   }
 
-  // Verify magic bytes match the extension (read only first 16 bytes to
-  // avoid TOCTOU double-read — sendImage reads the full file later).
-  let fd: number | undefined;
-  try {
-    fd = openSync(real, 'r');
-    const head = Buffer.alloc(16);
-    const bytesRead = readSync(fd, head, 0, 16, 0);
-    const mime = detectImageMime(head.slice(0, bytesRead));
-    const extToExpectedMime: Record<string, string> = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-    };
-    const expected = extToExpectedMime[ext];
-    if (mime !== expected) {
-      throw new Error(
-        `Image type mismatch: ext=${ext} expects ${expected} but got ${mime}`,
-      );
+  // Verify magic bytes match the extension. Use the pre-read buffer if
+  // provided (avoids double-read); otherwise read just the first 16 bytes.
+  let head: Buffer;
+  if (fileBuffer) {
+    head = fileBuffer.subarray(0, 16);
+  } else {
+    let fd: number | undefined;
+    try {
+      fd = openSync(real, 'r');
+      head = Buffer.alloc(16);
+      const bytesRead = readSync(fd, head, 0, 16, 0);
+      head = head.subarray(0, bytesRead);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
-  } finally {
-    if (fd !== undefined) closeSync(fd);
+  }
+  const mime = detectImageMime(head);
+  const extToExpectedMime: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+  };
+  const expected = extToExpectedMime[ext];
+  if (mime !== expected) {
+    throw new Error(
+      `Image type mismatch: ext=${ext} expects ${expected} but got ${mime}`,
+    );
   }
 
   return real;
@@ -238,10 +245,10 @@ export async function sendImage(params: {
   const { to, imagePath, baseUrl, token, contextToken, workspaceDirs } = params;
 
   // Step 1 (security): validate and resolve the image path
-  const resolvedPath = validateImagePath(imagePath, workspaceDirs);
+  const fileBuffer = readFileSync(imagePath);
+  validateImagePath(imagePath, workspaceDirs, fileBuffer);
 
-  // Step 1 (continued): read file, compute metadata + generate random identifiers
-  const fileBuffer = readFileSync(resolvedPath);
+  // Step 1 (continued): compute metadata + generate random identifiers
   const rawsize = fileBuffer.length;
   const rawfilemd5 = computeMd5(fileBuffer);
 

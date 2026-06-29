@@ -42,6 +42,11 @@ export class TelegramChannel extends ChannelBase {
     return `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
   }
 
+  /** Like getFileUrl but with the bot token redacted for safe logging. */
+  private getRedactedFileUrl(filePath: string): string {
+    return `https://api.telegram.org/file/bot<redacted>/${filePath}`;
+  }
+
   async connect(): Promise<void> {
     const botInfo = await this.bot.api.getMe();
     this.botId = botInfo.id;

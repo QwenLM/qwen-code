@@ -87,12 +87,14 @@ export async function negotiateTransport(
       const wsUrl = baseUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
       const transport = new AcpWsTransport(wsUrl + '/acp', token);
       // Probe: try to connect with a timeout.
-      const probeTimer = setTimeout(() => {
-        /* timeout — handled by race */
-      }, probeTimeoutMs);
+      const ctrl = new AbortController();
+      const probeTimer = setTimeout(() => ctrl.abort(), probeTimeoutMs);
       try {
         const probeRes = await Promise.race([
-          transport.fetch(`${baseUrl}/capabilities`, { method: 'GET' }),
+          transport.fetch(`${baseUrl}/capabilities`, {
+            method: 'GET',
+            signal: ctrl.signal,
+          }),
           new Promise<null>((resolve) =>
             setTimeout(() => resolve(null), probeTimeoutMs),
           ),
@@ -109,7 +111,7 @@ export async function negotiateTransport(
         }
       } catch {
         clearTimeout(probeTimer);
-        // WS probe failed — dispose and try next.
+        // WS probe failed or was aborted — dispose and try next.
         try {
           transport.dispose();
         } catch {

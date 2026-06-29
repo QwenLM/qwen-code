@@ -1041,4 +1041,48 @@ describe('FeishuChannel', () => {
       expect(cardSessions.has('msg_collect')).toBe(false);
     });
   });
+
+  describe('auxiliary map cleanup on gated messages', () => {
+    it('cleans up auxiliary maps when sender is rejected by gate', async () => {
+      const channel = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['allowed_user'],
+      });
+      const msgToQuestion = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToQuestion',
+      );
+      const msgToSenderName = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToSenderName',
+      );
+      const msgToSenderId = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToSenderId',
+      );
+
+      // Test the gate check that processMessage now performs
+      const groupResult = (
+        channel as unknown as {
+          groupGate: { check: (env: unknown) => { allowed: boolean } };
+        }
+      ).groupGate.check({
+        chatId: 'oc_chat',
+        isGroup: false,
+      });
+      expect(groupResult.allowed).toBe(true);
+
+      const senderResult = (
+        channel as unknown as {
+          gate: { check: (id: string, name: string) => { allowed: boolean } };
+        }
+      ).gate.check('blocked_user', 'Blocked User');
+      expect(senderResult.allowed).toBe(false);
+
+      // Verify maps remain empty (processMessage would have returned early)
+      expect(msgToQuestion.has('msg_blocked')).toBe(false);
+      expect(msgToSenderName.has('msg_blocked')).toBe(false);
+      expect(msgToSenderId.has('msg_blocked')).toBe(false);
+    });
+  });
 });

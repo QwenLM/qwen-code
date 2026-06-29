@@ -369,6 +369,8 @@ export class DingtalkChannel extends ChannelBase {
           text += part.text;
         } else if (partType === 'picture' && part.downloadCode) {
           codes.push(part.downloadCode);
+        } else if (partType === 'at' && part.atName) {
+          text += `@${part.atName}`;
         }
       }
       return {

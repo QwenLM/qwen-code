@@ -24,7 +24,7 @@ function isTableSeparator(line: string): boolean {
 
 function isTableRow(line: string): boolean {
   const trimmed = line.trim();
-  return trimmed.includes('|') && !trimmed.startsWith('```');
+  return /^\|.*\|$/.test(trimmed) && !trimmed.startsWith('```');
 }
 
 function parseTableRow(line: string): string[] {
