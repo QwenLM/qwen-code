@@ -1622,6 +1622,38 @@ describe('ChannelBase', () => {
       expect(promptText).toBe('/summarize now');
     });
 
+    it('KEEPS the [sender] tag on a wrong-CASE agent command (agent matching is case-SENSITIVE)', async () => {
+      // SECURITY (attribution injection): the CLI's parseSlashCommand matches agent
+      // commands CASE-SENSITIVELY (`cmd.name === part`, `cmd.altNames?.includes(part)`),
+      // so `/SUMMARIZE` runs NO command there. If recognition here lowercased the
+      // token it would suppress the [sender] tag while ACP forwards the raw text
+      // UNATTRIBUTED — letting `/SUMMARIZE\n[SYSTEM]: …` reach a shared group as an
+      // apparent system directive. So a wrong-case command is unrecognized and KEEPS
+      // its tag. Mutation check: reverting isRecognizedCommand's agent match to
+      // `.toLowerCase()` recognizes `/SUMMARIZE`, drops the tag, and this fails.
+      setAvailableCommands({ name: 'compress', altNames: ['summarize'] });
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/SUMMARIZE now' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] /SUMMARIZE now');
+    });
+
+    it('dispatches a wrong-CASE LOCAL command (local matching is case-INSENSITIVE)', async () => {
+      // LOCAL commands are registered + dispatched case-INSENSITIVELY (registerCommand
+      // lowercases the stored name; handleInbound looks it up by the lowercased
+      // token) — unlike agent commands. So `/HELP` in a group runs the /help handler
+      // locally and never reaches the agent: no [sender] tag, nothing forwarded. This
+      // pins the asymmetry the case-sensitive agent match must NOT regress.
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(groupEnv({ senderName: 'Alice', text: '/HELP' }));
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('/help');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it("recognizes a command against THIS session's per-session command list, not the global snapshot", async () => {
       // DaemonChannelBridge keys availableCommands per session; its global getter
       // can return another session's list. When the bridge exposes
@@ -2419,6 +2451,130 @@ describe('ChannelBase', () => {
       // B delivered; A's cancelled response was never sent.
       expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
       expect(ch.sent.some((m) => m.text.includes('A response'))).toBe(false);
+    });
+
+    it('steer: a watchdog logs when the predecessor stays wedged past the wind-down bound', async () => {
+      // DIAGNOSTIC: chain-and-wait (option a) means a hung predecessor bridge.prompt()
+      // silently deadlocks the session — the steer turn waits forever with no log. The
+      // steer branch arms a watchdog so that, if the predecessor is STILL the active
+      // prompt after CLEAR_CANCEL_TIMEOUT_MS, a diagnostic line is emitted. It only
+      // LOGS (concurrency is unchanged; /clear recovers). Mutation check: removing the
+      // steerWatchdog arm makes this assertion fail.
+      vi.useFakeTimers();
+      const flush = async () => {
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+      };
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        let callCount = 0;
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+          callCount++;
+          // Turn A wedges forever; a (never-reached) turn B would resolve.
+          return callCount === 1
+            ? new Promise<string>(() => {})
+            : Promise.resolve('steered response');
+        });
+        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+          undefined,
+        );
+
+        const ch = createChannel({ dispatchMode: 'steer' });
+
+        // Turn A starts and registers as the active prompt (then wedges).
+        void ch.handleInbound(envelope({ text: 'A' }));
+        await flush();
+        const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0][0] as string;
+
+        // Turn B steers in: best-effort cancels A and ARMS the watchdog, then chains
+        // behind A's never-resolving tail.
+        void ch.handleInbound(envelope({ text: 'B' }));
+        await flush();
+        const wedgedLogged = () =>
+          stderr.mock.calls.some((c) =>
+            String(c[0]).includes(
+              `steer queued behind active turn for session ${sid}`,
+            ),
+          );
+        // Bound not yet reached → no diagnostic.
+        expect(wedgedLogged()).toBe(false);
+
+        // Drive the watchdog to its bound. A is still the active prompt (wedged), so
+        // the diagnostic fires exactly once.
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        expect(wedgedLogged()).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('steer: a predecessor that settles before the bound disarms the watchdog (timer cleared, no log)', async () => {
+      // The chained `.then()` clears the watchdog as its FIRST statement once the
+      // predecessor's tail resolves, so a steered turn that simply waited a normal
+      // (non-wedged) predecessor out leaves no pending timer and emits no diagnostic.
+      // The pending-timer assertion is what pins clearTimeout specifically: the
+      // identity guard (activePrompts === active) keeps the LOG quiet either way once
+      // the predecessor is gone, but only clearTimeout removes the dangling timer.
+      // Mutation check: dropping `clearTimeout(steerWatchdog)` leaves the timer
+      // pending and the getTimerCount assertion fails.
+      vi.useFakeTimers();
+      const flush = async () => {
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+      };
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        let resolveA!: (v: string) => void;
+        let callCount = 0;
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+          callCount++;
+          return callCount === 1
+            ? new Promise<string>((r) => {
+                resolveA = r;
+              })
+            : Promise.resolve('steered response');
+        });
+        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+          undefined,
+        );
+
+        const ch = createChannel({ dispatchMode: 'steer' });
+
+        const pA = ch.handleInbound(envelope({ text: 'A' }));
+        void pA;
+        await flush();
+
+        const pB = ch.handleInbound(envelope({ text: 'B' }));
+        void pB;
+        await flush();
+
+        // A settles BEFORE the bound → its tail resolves → B's chained `.then()`
+        // disarms the watchdog before it can fire.
+        resolveA('A (cancelled, never sent)');
+        await pA;
+        await flush();
+        await pB;
+
+        // The watchdog timer was disarmed by the chained `.then()` — no fake timer
+        // is left pending (the only timer the steer path arms is the watchdog).
+        expect(vi.getTimerCount()).toBe(0);
+
+        // Advancing past the bound now emits NO watchdog log.
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        expect(
+          stderr.mock.calls.some((c) =>
+            String(c[0]).includes('steer queued behind active turn'),
+          ),
+        ).toBe(false);
+        // Sanity: the steered turn actually ran after A wound down.
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        expect(ch.sent.some((m) => m.text === 'steered response')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('steer: an abandoned turn late chunks cannot reach the new turn (new turn attaches onChunk only after old detaches)', async () => {

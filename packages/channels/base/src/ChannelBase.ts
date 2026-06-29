@@ -591,9 +591,14 @@ export abstract class ChannelBase {
 
   /**
    * Parse a slash command from message text.
-   * Returns { command, args } or null if not a slash command.
+   * Returns { command, raw, args } or null if not a slash command. `command` is
+   * lowercased for case-insensitive LOCAL dispatch (registerCommand lowercases the
+   * names it stores); `raw` keeps the typed case so agent-command matching can be
+   * CASE-SENSITIVE, mirroring the CLI's parseSlashCommand (`cmd.name === part`).
    */
-  private parseCommand(text: string): { command: string; args: string } | null {
+  private parseCommand(
+    text: string,
+  ): { command: string; raw: string; args: string } | null {
     // Trim first so a leading-whitespace slash command (common from IME /
     // copy-paste, e.g. " /help") parses, and so this agrees with isSlashCommand
     // (which already trims). Otherwise isSlashCommand suppresses the [sender] tag
@@ -606,7 +611,11 @@ export abstract class ChannelBase {
     // (charset shared with isSlashCommand via PARSE_COMMAND_RE).
     const match = trimmed.match(PARSE_COMMAND_RE);
     if (!match) return null;
-    return { command: match[1].toLowerCase(), args: match[2].trim() };
+    return {
+      command: match[1].toLowerCase(),
+      raw: match[1],
+      args: match[2].trim(),
+    };
   }
 
   /**
@@ -666,12 +675,20 @@ export abstract class ChannelBase {
   private isRecognizedCommand(text: string, sessionId: string): boolean {
     const parsed = this.parseCommand(text);
     if (!parsed) return false;
+    // LOCAL commands dispatch CASE-INSENSITIVELY: registerCommand lowercases the
+    // stored name and handleInbound looks it up by the lowercased token, so mirror
+    // that here with the lowercased `command`.
     if (this.commands.has(parsed.command)) return true;
+    // AGENT commands match CASE-SENSITIVELY, mirroring the CLI's parseSlashCommand
+    // (`cmd.name === part`, `cmd.altNames?.includes(part)`). A wrong-case token like
+    // `/SUMMARIZE` runs NO command there; recognizing it here would suppress the
+    // [sender] tag while ACP forwards the raw text UNATTRIBUTED — reopening the
+    // injection. So match the typed-case `raw` and let a wrong-case command stay
+    // unrecognized → attributed.
     return this.getAgentCommandsForSession(sessionId).some(
       (cmd) =>
-        cmd.name.toLowerCase() === parsed.command ||
-        (cmd.altNames?.some((alt) => alt.toLowerCase() === parsed.command) ??
-          false),
+        cmd.name === parsed.raw ||
+        (cmd.altNames?.includes(parsed.raw) ?? false),
     );
   }
 
@@ -905,6 +922,14 @@ export abstract class ChannelBase {
 
     const active = this.activePrompts.get(sessionId);
 
+    // Diagnostic watchdog for a steered turn that chains behind a wedged
+    // predecessor. Chain-and-wait (option a) means a hung predecessor bridge.prompt()
+    // silently deadlocks this session with no log; this surfaces that. Armed only in
+    // the steer branch, disarmed as the first statement of the chained `.then()` once
+    // the predecessor's tail resolves. Diagnostic-only — it does NOT touch the
+    // chain-and-wait concurrency invariant.
+    let steerWatchdog: ReturnType<typeof setTimeout> | undefined;
+
     if (active) {
       // A prompt is already running for this session
       switch (mode) {
@@ -967,6 +992,20 @@ export abstract class ChannelBase {
               `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
             );
           });
+          // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
+          // after the wind-down bound, this steered turn is wedged behind a hung
+          // bridge.prompt() — surface it (the chained `.then()` clears it once the
+          // predecessor settles). This only LOGS; it does not start a replacement or
+          // change concurrency. /clear is the recovery path. unref so a pending timer
+          // never keeps the process alive.
+          steerWatchdog = setTimeout(() => {
+            if (this.activePrompts.get(sessionId) === active) {
+              process.stderr.write(
+                `[${this.name}] steer queued behind active turn for session ${sessionId}: still waiting after ${CLEAR_CANCEL_TIMEOUT_MS}ms (use /clear to recover)\n`,
+              );
+            }
+          }, CLEAR_CANCEL_TIMEOUT_MS);
+          steerWatchdog.unref?.();
           // Prepend a cancellation note so the agent understands context.
           promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
           break;
@@ -997,6 +1036,10 @@ export abstract class ChannelBase {
     const generation = this.sessionGenerations.get(sessionId) ?? 0;
     const useBlockStreaming = this.config.blockStreaming === 'on';
     const current = prev.then(async () => {
+      // Disarm the steer watchdog: the predecessor's tail has resolved, so this
+      // chained turn is no longer wedged behind it. No-op when unarmed (the timer is
+      // only set on the steer path).
+      clearTimeout(steerWatchdog);
       // A /clear (or reset/new) while we were queued bumps the generation; the
       // captured session is cleared, so don't run the prompt against it.
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
@@ -1087,10 +1130,16 @@ export abstract class ChannelBase {
         // working reaction, finalize the card). Run it UNLESS this turn was a
         // /clear eviction (clearEvicted): /clear already ran this turn's onPromptEnd
         // at clear-time, and a turn the user started after the clear may now own the
-        // chat-scoped indicator, so re-running cleanup here would clobber it. A
-        // still-current turn (normal completion — which now includes every steered
-        // turn) always cleans up.
-        if (stillCurrent || !promptState.clearEvicted) {
+        // chat-scoped indicator, so re-running cleanup here would clobber it.
+        // Invariant: clearEvicted is set ONLY by /clear's eviction, which then
+        // UNCONDITIONALLY deletes activePrompts[sessionId] (its try/catch around the
+        // clear-time onPromptEnd guarantees the purge runs even if that throws), and
+        // no turn ever re-inserts THIS promptState object — so clearEvicted ⟹ NOT
+        // stillCurrent. Hence `stillCurrent || !clearEvicted` reduces to
+        // `!clearEvicted` (the `stillCurrent && clearEvicted` case is unreachable).
+        // Steer no longer evicts (it chains and waits), so a steered turn is always
+        // stillCurrent on completion.
+        if (!promptState.clearEvicted) {
           this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
         }
         if (stillCurrent) {
