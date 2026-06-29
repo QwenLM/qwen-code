@@ -2,9 +2,14 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Buffer } from 'node:buffer';
 import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
-import { ChannelBase, sanitizeSenderName } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  sanitizeLogText,
+  sanitizeSenderName,
+} from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
 import type {
@@ -76,6 +81,13 @@ const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 
+type DingTalkClientInternals = DWClient & {
+  onDownStream(data: unknown): void;
+  onSystem(message: DWClientDownStream): void;
+  onEvent(message: DWClientDownStream): void;
+  onCallback(message: DWClientDownStream): void;
+};
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private seenMessages: Map<string, number> = new Map();
@@ -101,6 +113,78 @@ export class DingtalkChannel extends ChannelBase {
       clientId: config.clientId,
       clientSecret: config.clientSecret,
     });
+    this.installStructuredDownstreamHandler();
+  }
+
+  private installStructuredDownstreamHandler(): void {
+    const client = this.client as DingTalkClientInternals;
+    client.onDownStream = (raw: unknown) => {
+      this.onDownStream(raw, client);
+    };
+  }
+
+  private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
+    const decoded = this.decodeDownStream(raw);
+    let msg: DWClientDownStream;
+    try {
+      msg = JSON.parse(decoded.text) as DWClientDownStream;
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Failed to parse downstream: ${err}\n`,
+      );
+      return;
+    }
+
+    process.stderr.write(
+      `[DingTalk:${this.name}] downstream type=${sanitizeLogText(
+        msg.type || '',
+        40,
+      )} topic=${sanitizeLogText(
+        msg.headers?.topic || '',
+        80,
+      )} messageId=${sanitizeLogText(
+        msg.headers?.messageId || '',
+        80,
+      )} bytes=${decoded.bytes}\n`,
+    );
+
+    switch (msg.type) {
+      case 'SYSTEM':
+        client.onSystem(msg);
+        break;
+      case 'EVENT':
+        client.onEvent(msg);
+        break;
+      case 'CALLBACK':
+        client.onCallback(msg);
+        break;
+      default:
+        process.stderr.write(
+          `[DingTalk:${this.name}] Ignoring downstream type ${sanitizeLogText(
+            msg.type || 'unknown',
+            40,
+          )}.\n`,
+        );
+    }
+  }
+
+  private decodeDownStream(raw: unknown): { text: string; bytes: number } {
+    if (typeof raw === 'string') {
+      return { text: raw, bytes: Buffer.byteLength(raw) };
+    }
+    if (Buffer.isBuffer(raw)) {
+      return { text: raw.toString('utf8'), bytes: raw.length };
+    }
+    if (raw instanceof Uint8Array) {
+      return { text: Buffer.from(raw).toString('utf8'), bytes: raw.byteLength };
+    }
+    if (raw instanceof ArrayBuffer) {
+      return {
+        text: Buffer.from(raw).toString('utf8'),
+        bytes: raw.byteLength,
+      };
+    }
+    return { text: String(raw), bytes: Buffer.byteLength(String(raw)) };
   }
 
   async connect(): Promise<void> {
@@ -516,6 +600,7 @@ export class DingtalkChannel extends ChannelBase {
       const isGroup = data.conversationType === '2';
       const sessionWebhook = data.sessionWebhook;
       const conversationId = data.conversationId;
+      const isMentioned = Boolean(data.isInAtList);
 
       if (!sessionWebhook) {
         process.stderr.write(
@@ -546,7 +631,21 @@ export class DingtalkChannel extends ChannelBase {
         this.webhooks.set(conversationId, sessionWebhook);
       }
 
-      const isMentioned = Boolean(data.isInAtList);
+      process.stderr.write(
+        `[DingTalk:${this.name}] message msgId=${sanitizeLogText(
+          msgId || 'unknown',
+          80,
+        )} conversationId=${sanitizeLogText(
+          conversationId || '',
+          120,
+        )} isGroup=${isGroup} isMentioned=${isMentioned} senderNick=${sanitizeLogText(
+          data.senderNick || '',
+          80,
+        )} senderStaffId=${sanitizeLogText(
+          data.senderStaffId || '',
+          80,
+        )} senderId=${sanitizeLogText(data.senderId || '', 80)}\n`,
+      );
 
       // Extract text and media info from message
       const content = this.extractContent(data);
@@ -566,11 +665,13 @@ export class DingtalkChannel extends ChannelBase {
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
       const envelopeText = isMentioned ? cleanText : cleanText || content.text;
+      const senderId = data.senderStaffId || data.senderId || '';
+      const senderName = data.senderNick || senderId || 'Unknown';
 
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: data.senderStaffId || data.senderId || '',
-        senderName: data.senderNick || 'Unknown',
+        senderId,
+        senderName,
         chatId,
         text: envelopeText,
         isGroup,
