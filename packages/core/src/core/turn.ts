@@ -6,6 +6,7 @@
 
 import {
   FinishReason,
+  type Content,
   type Part,
   type PartListUnion,
   type GenerateContentResponse,
@@ -36,6 +37,8 @@ import {
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+
+const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -121,6 +124,33 @@ export interface ToolCallResponseInfo {
   errorType: ToolErrorType | undefined;
   contentLength?: number;
   modelOverride?: string;
+}
+
+function countRequestParts(req: PartListUnion): number {
+  if (Array.isArray(req)) return req.length;
+  return 1;
+}
+
+function summarizeHistoryEntry(content: Content): {
+  role: string | undefined;
+  partCount: number;
+} {
+  return {
+    role: content.role,
+    partCount: content.parts?.length ?? 0,
+  };
+}
+
+function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
+  return {
+    history: {
+      length: chat.getHistoryLength(),
+      tail: chat
+        .getHistoryTailShallow(ERROR_REPORT_HISTORY_TAIL_COUNT, true)
+        .map(summarizeHistoryEntry),
+    },
+    request: { partCount: countRequestParts(req) },
+  };
 }
 
 function duplicateProviderToolCallMessage(providerCallId: string): string {
@@ -260,9 +290,7 @@ export enum CompressionStatus {
  * limit". Undefined on NOOP / failure paths and for callers that don't set it.
  */
 export type CompactionTriggerReason =
-  | 'token_limit'
-  | 'image_overflow'
-  | 'manual';
+  'token_limit' | 'image_overflow' | 'manual';
 
 export interface ChatCompressionInfo {
   originalTokenCount: number;
@@ -495,7 +523,7 @@ export class Turn {
         throw error;
       }
 
-      const contextForReport = [...this.chat.getHistory(/*curated*/ true), req];
+      const contextForReport = buildApiErrorReportContext(this.chat, req);
       await reportError(
         error,
         'Error when talking to API',

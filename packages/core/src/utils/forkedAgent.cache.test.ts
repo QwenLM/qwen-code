@@ -11,7 +11,7 @@ import {
   clearCacheSafeParams,
   runForkedAgent,
 } from './forkedAgent.js';
-import type { GenerateContentConfig } from '@google/genai';
+import type { Content, GenerateContentConfig } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
@@ -86,6 +86,28 @@ describe('CacheSafeParams', () => {
         functionDeclarations: unknown[];
       }>;
       expect(savedTools[0].functionDeclarations).toHaveLength(1);
+    });
+
+    it('shallow copies history arrays without cloning entries', () => {
+      const historyEntry: Content = {
+        role: 'user',
+        parts: [{ text: 'large history entry' }],
+      };
+      const history: Content[] = [historyEntry];
+
+      saveCacheSafeParams({}, history, 'model');
+      history.push({ role: 'model', parts: [{ text: 'late mutation' }] });
+
+      const params = getCacheSafeParams();
+      expect(params!.history).toHaveLength(1);
+      expect(params!.history).not.toBe(history);
+      expect(params!.history[0]).toBe(historyEntry);
+
+      params!.history.push({
+        role: 'model',
+        parts: [{ text: 'returned mutation' }],
+      });
+      expect(getCacheSafeParams()!.history).toHaveLength(1);
     });
   });
 
@@ -238,7 +260,6 @@ describe('runForkedAgent (cache path)', () => {
     expect(ctorArgs[4]).toBeUndefined(); // telemetryService
 
     // Verify sendMessageStream was called
-    expect(mockSendMessageStream).toHaveBeenCalledOnce();
     expect(capturedParams).not.toBeNull();
 
     // KEY ASSERTION: per-request config must have tools: [] to prevent
@@ -248,7 +269,7 @@ describe('runForkedAgent (cache path)', () => {
     expect(sendParams.config!.tools).toEqual([]);
 
     // Verify prompt_id is 'forked_query' and message is passed correctly
-    expect(mockSendMessageStream).toHaveBeenCalledWith(
+    expect(mockSendMessageStream).toHaveBeenCalledExactlyOnceWith(
       'test-model',
       expect.objectContaining({
         message: [{ text: 'suggest something' }],

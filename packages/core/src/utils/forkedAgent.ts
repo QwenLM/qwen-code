@@ -102,7 +102,7 @@ export function saveCacheSafeParams(
 
   currentCacheSafeParams = {
     generationConfig: structuredClone(generationConfig),
-    history,
+    history: [...history],
     model,
     version: currentVersion,
   };
@@ -112,9 +112,13 @@ export function saveCacheSafeParams(
  * Get the current cache-safe params, or null if not yet captured.
  */
 export function getCacheSafeParams(): CacheSafeParams | null {
-  return currentCacheSafeParams
-    ? structuredClone(currentCacheSafeParams)
-    : null;
+  if (!currentCacheSafeParams) return null;
+  return {
+    generationConfig: structuredClone(currentCacheSafeParams.generationConfig),
+    history: [...currentCacheSafeParams.history],
+    model: currentCacheSafeParams.model,
+    version: currentCacheSafeParams.version,
+  };
 }
 
 /**
