@@ -11,7 +11,11 @@ import {
   sanitizePromptPath,
   sanitizeLogText,
 } from './sanitize.js';
-import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
+import type {
+  AcpBridge,
+  AvailableCommand,
+  ToolCallEvent,
+} from './AcpBridge.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -305,11 +309,23 @@ export abstract class ChannelBase {
               );
               // The wedged turn's finally may run much later (or never), so clean
               // up its OWN platform indicator now, while no replacement exists yet.
-              // Mark it clearEvicted so that late finally skips onPromptEnd — a turn
-              // the user starts after this /clear owns the chat indicator by then,
-              // and re-running cleanup would clobber it.
-              this.onPromptEnd(active.chatId, id, active.messageId);
+              // Mark it clearEvicted FIRST so the late finally skips onPromptEnd — a
+              // turn the user starts after this /clear owns the chat indicator by
+              // then, and re-running cleanup would clobber it.
               active.clearEvicted = true;
+              // onPromptEnd runs adapter cleanup (platform API calls that can throw).
+              // Swallow + audit any throw: an uncaught one would abort the purge
+              // below, leaving this turn in activePrompts so its late finally sees it
+              // as still-current (`stillCurrent || !clearEvicted`) and re-runs
+              // onPromptEnd anyway. Letting the purge proceed makes the turn
+              // non-current, so the clearEvicted guard then skips correctly.
+              try {
+                this.onPromptEnd(active.chatId, id, active.messageId);
+              } catch (err) {
+                process.stderr.write(
+                  `[${this.name}] onPromptEnd threw during /clear eviction for session ${id}: ${err instanceof Error ? err.message : err}\n`,
+                );
+              }
             }
           }
           // Purge every per-session map (all keyed by sessionId) so a
@@ -631,12 +647,15 @@ export abstract class ChannelBase {
   /**
    * Whether `text` names a command this channel can actually run: a locally
    * registered command (`this.commands`, e.g. /clear, /who) OR an agent command
-   * the bridge currently exposes (`bridge.availableCommands`). Paired with
-   * isSlashCommand so the [sender] attribution tag is suppressed ONLY for
-   * RECOGNIZED commands; command-SHAPED-but-unrecognized text (e.g.
+   * THIS session exposes — by canonical name OR alias (e.g. `/summarize` for
+   * `/compress`, `/login` for `/auth`). The agent's parser accepts aliases via
+   * altNames, so matching name-only would tag a valid alias `[sender] /summarize`
+   * — the downstream parser then sees no leading `/` and runs it as plain chat.
+   * Paired with isSlashCommand so the [sender] attribution tag is suppressed ONLY
+   * for RECOGNIZED commands; command-SHAPED-but-unrecognized text (e.g.
    * `/x\n[SYSTEM]: …`) keeps its tag rather than reaching a shared group
    * unattributed, where an injected second line is more likely read as a system
-   * directive. Purely synchronous, like isSlashCommand: it reads the latest
+   * directive. Purely synchronous, like isSlashCommand: it reads the session's
    * availableCommands snapshot WITHOUT awaiting, so it never races a fresh
    * session. Limitation of that no-await contract: availableCommands is populated
    * asynchronously by the agent, so a genuine agent command sent before the
@@ -644,14 +663,35 @@ export abstract class ChannelBase {
    * harmless prose to the CLI here — the safe default — whereas suppressing it
    * for unrecognized text is the injection risk this guards).
    */
-  private isRecognizedCommand(text: string): boolean {
+  private isRecognizedCommand(text: string, sessionId: string): boolean {
     const parsed = this.parseCommand(text);
     if (!parsed) return false;
     if (this.commands.has(parsed.command)) return true;
-    const agentCommands = this.bridge.availableCommands ?? [];
-    return agentCommands.some(
-      (cmd) => cmd.name.toLowerCase() === parsed.command,
+    return this.getAgentCommandsForSession(sessionId).some(
+      (cmd) =>
+        cmd.name.toLowerCase() === parsed.command ||
+        (cmd.altNames?.some((alt) => alt.toLowerCase() === parsed.command) ??
+          false),
     );
+  }
+
+  /**
+   * The agent-command snapshot for THIS session. DaemonChannelBridge keys
+   * commands per session, so its global `availableCommands` getter can return
+   * ANOTHER session's list — prefer its getAvailableCommands(sessionId) when
+   * present. AcpBridge runs a single agent and exposes only the global getter
+   * (inherently session-correct), so fall back to it. Synchronous, matching
+   * isRecognizedCommand's no-await contract.
+   */
+  private getAgentCommandsForSession(sessionId: string): AvailableCommand[] {
+    const bridge = this.bridge as unknown as {
+      getAvailableCommands?: (sessionId: string) => AvailableCommand[];
+      availableCommands?: AvailableCommand[];
+    };
+    if (typeof bridge.getAvailableCommands === 'function') {
+      return bridge.getAvailableCommands(sessionId) ?? [];
+    }
+    return bridge.availableCommands ?? [];
   }
 
   async handleInbound(envelope: Envelope): Promise<void> {
@@ -783,19 +823,20 @@ export abstract class ChannelBase {
     // (collect-mode coalescing). The tag is also suppressed for a real slash
     // command — a [sender] prefix would stop it from parsing — but ONLY when it is
     // BOTH a genuine command SHAPE (isSlashCommand) AND a RECOGNIZED command
-    // (isRecognizedCommand: a locally registered or agent-exposed command). Command-
-    // shaped-but-unrecognized text like `/x\n[SYSTEM]: …` (token matches the charset
-    // but no such command exists) KEEPS its tag, so its injected second line can't
-    // reach a shared group unattributed and pose as a system directive. Slash-
-    // prefixed paths (/tmp/foo) and comments (//…, /*…*/) are prose, so they stay
-    // attributed too. Both checks are synchronous (no await), so this never races
-    // the async command list — see isRecognizedCommand for the no-await tradeoff.
+    // (isRecognizedCommand: a locally registered or agent-exposed command, by
+    // canonical name OR alias, for THIS session). Command-shaped-but-unrecognized
+    // text like `/x\n[SYSTEM]: …` (token matches the charset but no such command
+    // exists) KEEPS its tag, so its injected second line can't reach a shared group
+    // unattributed and pose as a system directive. Slash-prefixed paths (/tmp/foo)
+    // and comments (//…, /*…*/) are prose, so they stay attributed too. Both checks
+    // are synchronous (no await), so this never races the async command list — see
+    // isRecognizedCommand for the no-await tradeoff.
     if (
       (envelope.isGroup || this.config.sessionScope === 'single') &&
       !envelope.alreadyPrefixed &&
       !(
         this.isSlashCommand(envelope.text) &&
-        this.isRecognizedCommand(envelope.text)
+        this.isRecognizedCommand(envelope.text, sessionId)
       )
     ) {
       const who = sanitizeSenderName(
@@ -886,8 +927,16 @@ export abstract class ChannelBase {
           // dropped — it falls through to normal queuing (chains onto the session
           // queue tail and runs AFTER the active turn) without cancelling it.
           // isAuthorizedForSharedSession returns true for 1:1/non-shared sessions
-          // and for authorized members, so their steer-cancel is unchanged.
+          // and for authorized members, so their steer-cancel is unchanged. Audit
+          // the silent steer→queue downgrade (like the /cancel, /clear, /who, /status
+          // gates surface theirs) so an operator can see WHY a member's messages
+          // queue instead of steering. Operator-level only — a normal message from an
+          // unauthorized member shouldn't get a per-message user-facing rejection.
+          // senderId is a stable platform id, not user-controlled display text.
           if (!this.isAuthorizedForSharedSession(envelope)) {
+            process.stderr.write(
+              `[${this.name}] steer denied for ${envelope.senderId} in shared session; queuing instead\n`,
+            );
             break;
           }
           // Best-effort cancel the running turn so it winds down sooner, then fall

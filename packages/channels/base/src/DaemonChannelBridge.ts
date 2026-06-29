@@ -4,6 +4,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import type { AvailableCommand, ToolCallEvent } from './AcpBridge.js';
+import { readAvailableCommandAltNames } from './AcpBridge.js';
 import type { SessionScope } from './types.js';
 
 const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
@@ -535,8 +536,12 @@ export class DaemonChannelBridge extends EventEmitter {
       }
       case 'available_commands_update': {
         if (Array.isArray(update['availableCommands'])) {
-          const commands =
-            update['availableCommands'].filter(isAvailableCommand);
+          const commands = update['availableCommands']
+            .filter(isAvailableCommand)
+            .map((cmd) => {
+              const altNames = readAvailableCommandAltNames(cmd);
+              return altNames ? { ...cmd, altNames } : cmd;
+            });
           this.availableCommandsBySession.set(sessionId, commands);
           this.latestAvailableCommandsSessionId = sessionId;
         } else {

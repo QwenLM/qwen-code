@@ -1564,16 +1564,32 @@ describe('ChannelBase', () => {
       expect(promptText).toBe('[Alice] ship it');
     });
 
-    /** Set the bridge's synchronous availableCommands snapshot (agent commands). */
-    function setAvailableCommands(...names: string[]): void {
+    /**
+     * Set the bridge's synchronous availableCommands snapshot (agent commands).
+     * Pass a bare name, or `{ name, altNames }` to attach aliases.
+     */
+    function setAvailableCommands(
+      ...entries: Array<string | { name: string; altNames?: string[] }>
+    ): void {
       (
         bridge as unknown as {
-          availableCommands: Array<{ name: string; description: string }>;
+          availableCommands: Array<{
+            name: string;
+            description: string;
+            altNames?: string[];
+          }>;
         }
-      ).availableCommands = names.map((name) => ({
-        name,
-        description: `${name} command`,
-      }));
+      ).availableCommands = entries.map((entry) => {
+        const { name, altNames } =
+          typeof entry === 'string'
+            ? { name: entry, altNames: undefined }
+            : entry;
+        return {
+          name,
+          description: `${name} command`,
+          ...(altNames ? { altNames } : {}),
+        };
+      });
     }
 
     it('does not prefix a recognized agent command (in availableCommands)', async () => {
@@ -1588,6 +1604,48 @@ describe('ChannelBase', () => {
       const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
       expect(promptText).toBe('/compress now');
+    });
+
+    it('does not prefix a recognized command ALIAS (matched via altNames)', async () => {
+      // The agent's parser accepts aliases (e.g. /summarize for /compress) via
+      // altNames, so a forwarded alias must skip the [sender] tag too — tagging it
+      // `[Alice] /summarize` would make the downstream parser see no leading `/`
+      // and run it as plain chat instead of executing. Mutation check: reverting
+      // isRecognizedCommand to name-only matching re-adds the tag and this fails.
+      setAvailableCommands({ name: 'compress', altNames: ['summarize'] });
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/summarize now' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('/summarize now');
+    });
+
+    it("recognizes a command against THIS session's per-session command list, not the global snapshot", async () => {
+      // DaemonChannelBridge keys availableCommands per session; its global getter
+      // can return another session's list. When the bridge exposes
+      // getAvailableCommands(sessionId), recognition must use it. Here the global
+      // snapshot is EMPTY but the per-session list has the alias — so the command is
+      // recognized (no tag) only if the per-session getter is consulted.
+      setAvailableCommands(); // global snapshot empty
+      const getAvailableCommands = vi.fn(() => [
+        { name: 'compress', description: 'compress', altNames: ['summarize'] },
+      ]);
+      (
+        bridge as unknown as {
+          getAvailableCommands: (sessionId: string) => unknown;
+        }
+      ).getAvailableCommands = getAvailableCommands;
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: '/summarize now' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('/summarize now');
+      // The per-session getter was consulted with the resolved sessionId.
+      expect(getAvailableCommands).toHaveBeenCalledWith(expect.any(String));
     });
 
     it('prefixes a command-shaped message the agent has not yet exposed (sync snapshot, no race)', async () => {
@@ -2521,6 +2579,66 @@ describe('ChannelBase', () => {
       expect(intruderText).not.toContain('previous request has been cancelled');
     });
 
+    it('steer: audit-logs the denied steer→queue downgrade for an unauthorized member', async () => {
+      // OBSERVABILITY: the steer auth gate downgrades steer→queue SILENTLY, unlike
+      // the /cancel, /clear, /who, /status gates which reply. An operator seeing a
+      // member's messages queue instead of steer has no signal why — so the denial
+      // is audited to stderr (no user-facing reply: a normal message shouldn't get
+      // a per-message rejection). Mutation check: removing the stderr.write here
+      // makes this fail.
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        let resolveBoss!: (v: string) => void;
+        const bossPrompt = new Promise<string>((r) => {
+          resolveBoss = r;
+        });
+        let callCount = 0;
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+          callCount++;
+          return callCount === 1
+            ? bossPrompt
+            : Promise.resolve('intruder response');
+        });
+
+        const ch = createChannel({
+          sessionScope: 'thread',
+          groupPolicy: 'open',
+          allowedUsers: ['boss'],
+          dispatchMode: 'steer',
+        });
+        const g = (over: Partial<Envelope>): Envelope =>
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'g1',
+            threadId: 't1',
+            ...over,
+          });
+
+        const pBoss = ch.handleInbound(
+          g({ senderId: 'boss', text: 'boss task' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        const pIntruder = ch.handleInbound(
+          g({ senderId: 'intruder', text: 'intruder msg' }),
+        );
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+
+        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('steer denied for intruder');
+        expect(logged).toContain('queuing instead');
+
+        resolveBoss('boss response');
+        await pBoss;
+        await pIntruder;
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('steer: an AUTHORIZED member can still steer-cancel another member’s turn', async () => {
       // The gate must only stop UNAUTHORIZED members — an authorized member's steer
       // still cancels a running turn and re-prompts with the cancellation note.
@@ -2682,6 +2800,78 @@ describe('ChannelBase', () => {
 
         // The late finally skipped onPromptEnd (clearEvicted) — cleanup did not
         // fire a second time, so it can't clobber a turn started after the clear.
+        expect(ch.promptEnds.filter((e) => e.messageId === 'mA')).toHaveLength(
+          1,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('/clear: a throwing clear-time onPromptEnd does not abort the purge, so the late finally still skips (no double cleanup)', async () => {
+      // REGRESSION (#5888): adapters' onPromptEnd does platform cleanup (clear typing
+      // interval, finalize card) that CAN throw. If the clear-time onPromptEnd throws
+      // uncaught it aborts /clear's purge, leaving the wedged turn in activePrompts —
+      // so its late finally sees it as still-current (`stillCurrent || !clearEvicted`)
+      // and re-runs onPromptEnd, clobbering a newer turn. The fix sets clearEvicted
+      // first AND catches the throw so the purge always runs (turn becomes
+      // non-current) → the late finally skips. Mutation check: removing the try/catch
+      // around the clear-time onPromptEnd lets the throw abort the purge, and A's late
+      // finally fires onPromptEnd a SECOND time (promptEnds gains a second 'mA').
+      let resolveA!: (v: string) => void;
+      const wedgedA = new Promise<string>((r) => {
+        resolveA = r;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        () => wedgedA,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const ch = createChannel();
+      const maps = ch as unknown as { activePrompts: Map<string, unknown> };
+      // Override onPromptEnd to RECORD every call (so we can count) and THROW for
+      // turn A — modeling an adapter whose cleanup fails.
+      (
+        ch as unknown as {
+          onPromptEnd: (
+            chatId: string,
+            sessionId: string,
+            messageId?: string,
+          ) => void;
+        }
+      ).onPromptEnd = (chatId, sessionId, messageId) => {
+        ch.promptEnds.push({ chatId, sessionId, messageId });
+        if (messageId === 'mA') {
+          throw new Error('adapter onPromptEnd boom');
+        }
+      };
+
+      const pA = ch.handleInbound(envelope({ text: 'A', messageId: 'mA' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+
+      vi.useFakeTimers();
+      try {
+        // /clear evicts wedged A; the clear-time onPromptEnd throws but is caught, so
+        // /clear still completes and the purge runs (A removed from activePrompts).
+        const pClear = ch.handleInbound(envelope({ text: '/clear' }));
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        await pClear;
+        expect(ch.sent.some((m) => m.text.includes('Session cleared'))).toBe(
+          true,
+        );
+        expect(maps.activePrompts.has(sid)).toBe(false);
+        expect(ch.promptEnds.filter((e) => e.messageId === 'mA')).toHaveLength(
+          1,
+        );
+
+        // A's wedged prompt settles late and runs A's finally. A is clearEvicted and
+        // no longer current, so the finally SKIPS onPromptEnd — no second 'mA'.
+        resolveA('late response from A');
+        await pA;
         expect(ch.promptEnds.filter((e) => e.messageId === 'mA')).toHaveLength(
           1,
         );

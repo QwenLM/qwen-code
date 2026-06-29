@@ -969,6 +969,54 @@ describe('Session', () => {
       });
     });
 
+    it('forwards command aliases as _meta.altNames (and omits the key when there are none)', async () => {
+      // A channel consumer only sees this wire snapshot, not the command registry,
+      // so aliases must travel in _meta (ACP's extension point) for it to recognize
+      // an aliased command. Omitted when absent so non-aliased entries stay
+      // byte-identical.
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'compress',
+          description: 'Compress context',
+          altNames: ['summarize'],
+          kind: CommandKind.BUILT_IN,
+        },
+        {
+          name: 'help',
+          description: 'Show help',
+          kind: CommandKind.BUILT_IN,
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              expect.objectContaining({
+                name: 'compress',
+                _meta: expect.objectContaining({ altNames: ['summarize'] }),
+              }),
+              expect.objectContaining({ name: 'help' }),
+            ],
+          }),
+        }),
+      );
+      // The alias-free command carries no altNames key.
+      const call = (
+        mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+      ).mock.calls.at(-1)![0] as {
+        update: {
+          availableCommands: Array<{ _meta?: Record<string, unknown> }>;
+        };
+      };
+      expect(call.update.availableCommands[1]._meta).not.toHaveProperty(
+        'altNames',
+      );
+    });
+
     it('sets input for built-in commands with subCommands', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
