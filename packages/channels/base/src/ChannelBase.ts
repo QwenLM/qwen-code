@@ -8,6 +8,7 @@ import { SessionRouter } from './SessionRouter.js';
 import {
   sanitizeSenderName,
   sanitizeQuotedText,
+  sanitizePromptText,
   sanitizePromptPath,
   sanitizeLogText,
 } from './sanitize.js';
@@ -490,7 +491,15 @@ export abstract class ChannelBase {
         }
       }
 
-      const agentCommands = this.bridge.availableCommands;
+      const sessionId = this.router.getSession(
+        this.name,
+        envelope.senderId,
+        envelope.chatId,
+        envelope.threadId,
+      );
+      const agentCommands = sessionId
+        ? this.getAgentCommandsForSession(sessionId)
+        : this.bridge.availableCommands;
       if (agentCommands.length > 0) {
         lines.push('', 'Agent commands (forwarded to Qwen Code):');
         for (const cmd of agentCommands) {
@@ -576,6 +585,20 @@ export abstract class ChannelBase {
     return authorized.length === 0 || authorized.includes(envelope.senderId);
   }
 
+  private stopActiveStreaming(
+    active: ActivePrompt,
+    sessionId: string,
+    reason: string,
+  ): void {
+    try {
+      active.stopStreaming?.();
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] stopStreaming threw during ${reason} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
   /**
    * Cancel the active turn and wait (bounded) for it to wind down. Stops the
    * BlockStreamer so buffered text can't leak via the idle timer, then fires a
@@ -592,7 +615,7 @@ export abstract class ChannelBase {
     sessionId: string,
   ): Promise<boolean> {
     active.cancelled = true;
-    active.stopStreaming?.();
+    this.stopActiveStreaming(active, sessionId, 'cancel');
     // Fire-and-forget, but LOG the IPC failure: a swallowed reason leaves a
     // wedged turn undiagnosable (operator sees only the wind-down timeout below
     // with no cause).
@@ -767,7 +790,8 @@ export abstract class ChannelBase {
     // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    if (envelope.text.startsWith('!')) {
+    const bangText = envelope.text.trimStart();
+    if (bangText.startsWith('!')) {
       if (envelope.isGroup || this.isSharedSession(envelope)) {
         // Audit a blocked host-shell attempt — a group/shared member trying `!`
         // is security-relevant, so surface it to operators. Sanitize the display
@@ -776,7 +800,7 @@ export abstract class ChannelBase {
           envelope.senderName || envelope.senderId || 'unknown',
         );
         process.stderr.write(
-          `[${this.name}] blocked ! shell command from ${who} (sender ${envelope.senderId}) in chat ${envelope.chatId}\n`,
+          `[${this.name}] blocked ! shell command from ${who} (sender ${envelope.senderId}) in chat ${sanitizeLogText(envelope.chatId, 64)}\n`,
         );
       }
       if (envelope.isGroup) {
@@ -808,8 +832,8 @@ export abstract class ChannelBase {
     // Bang (!) execution — a private 1:1 session has a single operator, so
     // direct shell execution stays allowed. Group/shared contexts were refused
     // above, before the session was resolved.
-    if (envelope.text.startsWith('!')) {
-      const cmd = envelope.text.slice(1).trim();
+    if (bangText.startsWith('!')) {
+      const cmd = bangText.slice(1).trim();
       const bridgeShellCommand = (
         this.bridge as unknown as Record<string, unknown>
       )['shellCommand'];
@@ -884,7 +908,7 @@ export abstract class ChannelBase {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
       );
-      promptText = `[${who}] ${promptText}`;
+      promptText = `[${who}] ${sanitizePromptText(promptText)}`;
     }
 
     if (envelope.referencedText) {
@@ -985,7 +1009,7 @@ export abstract class ChannelBase {
           // senderId is a stable platform id, not user-controlled display text.
           if (!this.isAuthorizedForSharedSession(envelope)) {
             process.stderr.write(
-              `[${this.name}] steer denied for ${envelope.senderId} in shared session; queuing instead\n`,
+              `[${this.name}] steer denied for ${envelope.senderId} in shared session (chat=${sanitizeLogText(envelope.chatId, 64)}); queuing instead\n`,
             );
             break;
           }
@@ -1009,7 +1033,10 @@ export abstract class ChannelBase {
           // deferred fix — it needs an API change across every adapter and is out
           // of scope for this phase (wenshao option (b)).
           active.cancelled = true;
-          active.stopStreaming?.();
+          process.stderr.write(
+            `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
+          );
+          this.stopActiveStreaming(active, sessionId, 'steer');
           // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
           // best-effort cancel that fails isn't silently invisible to operators.
           void this.bridge.cancelSession(sessionId).catch((err) => {

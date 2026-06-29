@@ -6,10 +6,12 @@
  * Unicode line/paragraph separators (U+2028/U+2029, likewise rendered as
  * newlines) and the bidirectional override/isolate controls (U+202A-U+202E,
  * U+2066-U+2069 -> trojan-source, where the visual order differs from the
- * logical byte order). ASCII C0/DEL (incl. CR/LF) are stripped by each caller.
+ * logical byte order). Also strips common zero-width format chars that make
+ * visually identical names/text compare differently. ASCII C0/DEL (incl. CR/LF)
+ * are stripped by each caller.
  */
 export const PROMPT_UNSAFE_INVISIBLES =
-  /[\u0080-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+  /[\u0080-\u009f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
 
 /**
  * Truncate to at most `max` Unicode CODE POINTS (not UTF-16 code units). A cap
@@ -64,6 +66,12 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
   // points + the single-char ellipsis, so the result stays within maxLen.
   const cp = Array.from(cleaned);
   return cp.length > maxLen ? cp.slice(0, maxLen - 1).join('') + '…' : cleaned;
+}
+
+export function sanitizePromptText(text: string): string {
+  return text
+    .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+    .replace(/^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm, '$1$2$3');
 }
 
 /**
