@@ -58,9 +58,9 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 // platform-agnostic, but daemon SIGTERM teardown is cleaner on POSIX. Keep it
 // running everywhere `ws` works.
 const SKIP = process.platform === 'win32';
-const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase();
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
 const SKIP_PROMPTED_MODEL_TEST = Boolean(
-  SANDBOX_MODE && SANDBOX_MODE !== 'false',
+  SANDBOX_MODE && SANDBOX_MODE !== 'false' && SANDBOX_MODE !== '0',
 );
 const describeMaybe = SKIP ? describe.skip : describe;
 const itPromptedModelMaybe = SKIP_PROMPTED_MODEL_TEST ? it.skip : it;

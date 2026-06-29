@@ -17,22 +17,6 @@ const YAMLLINT_VERSION = '1.35.1';
 
 const TEMP_DIR = join(tmpdir(), 'qwen-code-linters');
 
-function archiveInstaller(url, archivePath, extractCommand) {
-  return `
-      for attempt in 1 2 3 4 5; do
-        curl --fail --location --show-error --silent --retry 3 --retry-all-errors --retry-delay 2 --output "${archivePath}" "${url}" \\
-          && tar -tf "${archivePath}" >/dev/null \\
-          && break
-        rm -f "${archivePath}"
-        if [ "$attempt" -eq 5 ]; then
-          exit 1
-        fi
-        sleep "$((attempt * 2))"
-      done
-      ${extractCommand}
-    `;
-}
-
 function getPlatformArch() {
   const platform = process.platform;
   const arch = process.arch;
@@ -73,11 +57,11 @@ const platformArch = getPlatformArch();
 const LINTERS = {
   actionlint: {
     check: 'command -v actionlint',
-    installer: archiveInstaller(
-      `https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz`,
-      `${TEMP_DIR}/.actionlint.tgz`,
-      `mkdir -p "${TEMP_DIR}/actionlint" && tar -xzf "${TEMP_DIR}/.actionlint.tgz" -C "${TEMP_DIR}/actionlint"`,
-    ),
+    installer: `
+      mkdir -p "${TEMP_DIR}/actionlint"
+      curl -sSLo "${TEMP_DIR}/.actionlint.tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
+      tar -xzf "${TEMP_DIR}/.actionlint.tgz" -C "${TEMP_DIR}/actionlint"
+    `,
     run: `
       actionlint \
         -color \
@@ -89,11 +73,11 @@ const LINTERS = {
   },
   shellcheck: {
     check: 'command -v shellcheck',
-    installer: archiveInstaller(
-      `https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz`,
-      `${TEMP_DIR}/.shellcheck.txz`,
-      `mkdir -p "${TEMP_DIR}/shellcheck" && tar -xf "${TEMP_DIR}/.shellcheck.txz" -C "${TEMP_DIR}/shellcheck" --strip-components=1`,
-    ),
+    installer: `
+      mkdir -p "${TEMP_DIR}/shellcheck"
+      curl -sSLo "${TEMP_DIR}/.shellcheck.txz" "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
+      tar -xf "${TEMP_DIR}/.shellcheck.txz" -C "${TEMP_DIR}/shellcheck" --strip-components=1
+    `,
     run: `
       git ls-files | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))' | xargs file --mime-type \
         | grep "text/x-shellscript" | awk '{ print substr($1, 1, length($1)-1) }' \

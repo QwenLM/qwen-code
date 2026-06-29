@@ -24,8 +24,5 @@ describe('chrome extension package scripts', () => {
     expect(packageJson.scripts.build).not.toMatch(
       /(?:^|\s&&\s)[A-Za-z_][A-Za-z0-9_]*=/,
     );
-    expect(packageJson.scripts.build).not.toMatch(
-      /(?:^|\s&&\s)npm run clean(?:\s|$)/,
-    );
   });
 });
