@@ -90,6 +90,7 @@ import {
   formatStopHookBlockingCapWarning,
 } from '../../hooks/stopHookCap.js';
 import { ApprovalMode } from '../../config/config.js';
+import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import {
   getAgentJsonlPath,
@@ -460,17 +461,16 @@ function capturePersistedCliFlags(
  * boundary (see strip lifecycle below).
  *
  * Strip lifecycle for AUTO overrides:
- *   - parent not in AUTO, override in AUTO: this function strips the
- *     PARENT's PM (shared via prototype chain — the override cannot
- *     have its own PM without a much bigger refactor). `cleanup`
- *     restores the strip when the sub-agent finishes, but ONLY if the
- *     parent hasn't itself entered AUTO in the meantime (in which
- *     case restoring would undo the parent's own strip).
- *   - parent already in AUTO, override in AUTO: parent's
- *     `setApprovalMode` already stripped on its own entry. We don't
- *     strip again (would be a no-op anyway via sentinel) and don't
- *     restore on cleanup (lifecycle is parent-owned).
- *   - override not in AUTO: no strip, no restore.
+ *   - parent not in AUTO, override starts in AUTO: this function strips
+ *     the PARENT's PM (shared via prototype chain — the override cannot
+ *     have its own PM without a much bigger refactor).
+ *   - parent already in AUTO, override starts in AUTO: parent's
+ *     `setApprovalMode` already stripped on its own entry, so this
+ *     function does not strip again.
+ *   - override enters/leaves AUTO later: inherited `setApprovalMode`
+ *     performs the normal strip/restore transition against the shared
+ *     PM. `cleanup` only restores if the child finishes still in AUTO
+ *     while the parent is not in AUTO.
  */
 export async function createApprovalModeOverride(
   base: Config,
@@ -479,31 +479,46 @@ export async function createApprovalModeOverride(
 ): Promise<ApprovalModeOverrideHandle> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
-  override.getApprovalMode = (): ApprovalMode => mode;
+  const baseApprovalMode = base.getApprovalMode();
+  override.approvalMode = mode;
+  override.prePlanMode =
+    mode === ApprovalMode.PLAN
+      ? baseApprovalMode === ApprovalMode.PLAN
+        ? base.getPrePlanMode()
+        : baseApprovalMode
+      : undefined;
+  const basePlanGateState =
+    mode === ApprovalMode.PLAN ? base.getPlanGateState() : undefined;
+  override.planGateState = basePlanGateState
+    ? {
+        ...basePlanGateState,
+        lastFindings: [...basePlanGateState.lastFindings],
+      }
+    : undefined;
+  override.planGateEntryCounter = override.planGateState?.entryId ?? 0;
+  override.autoModeDenialState = createDenialState();
   applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
   await rebuildToolRegistryOnOverride(override as Config, base);
 
-  let cleanup: () => void = () => {};
+  const cleanup = () => {
+    if (
+      (override as Config).getApprovalMode() === ApprovalMode.AUTO &&
+      base.getApprovalMode() !== ApprovalMode.AUTO
+    ) {
+      base.getPermissionManager?.()?.restoreDangerousRules();
+    }
+  };
 
   if (mode === ApprovalMode.AUTO) {
     const baseWasAuto = base.getApprovalMode() === ApprovalMode.AUTO;
     if (!baseWasAuto) {
       // This override is bringing AUTO into a non-AUTO parent. Strip
       // dangerous allow rules so the sub-agent's classifier actually
-      // gates them, then arrange to restore on cleanup.
+      // gates them. Cleanup handles restore if the child finishes in AUTO.
       base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
-      cleanup = () => {
-        // Defensive: parent could have toggled to AUTO during the sub-
-        // agent's run. In that case parent now owns the strip lifecycle
-        // (its own `setApprovalMode(AUTO)` hook was responsible) and we
-        // must NOT restore — that would un-strip the parent's intent.
-        if (base.getApprovalMode() !== ApprovalMode.AUTO) {
-          base.getPermissionManager?.()?.restoreDangerousRules();
-        }
-      };
     }
     // baseWasAuto: parent's setApprovalMode already stripped; cleanup
-    // stays no-op since lifecycle is parent-owned.
+    // will not restore while the parent remains in AUTO.
   }
 
   return { config: override as Config, cleanup };

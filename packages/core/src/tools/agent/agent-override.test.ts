@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Config, ApprovalMode } from '../../config/config.js';
+import { isPlanModeBlocked } from '../../core/permissionFlow.js';
+import type { ToolCallConfirmationDetails } from '../tools.js';
 import {
   createApprovalModeOverride,
   hasRebuiltToolRegistry,
@@ -41,6 +43,27 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     usageStatisticsEnabled: false,
     bareMode: true,
   };
+
+  async function createParentWithRegistry(): Promise<Config> {
+    const parent = new Config(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+    return parent;
+  }
+
+  function attachFakePermissionManager(parent: Config) {
+    const stripDangerousRulesForAutoMode = vi.fn();
+    const restoreDangerousRules = vi.fn();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).permissionManager = {
+      stripDangerousRulesForAutoMode,
+      restoreDangerousRules,
+    };
+    return { stripDangerousRulesForAutoMode, restoreDangerousRules };
+  }
 
   it('returns a Config whose registry is a distinct instance from the parent', async () => {
     const parent = new Config(baseParams);
@@ -150,6 +173,131 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const boundConfig = (childEdit as any).config as Config;
     expect(boundConfig.getApprovalMode()).toBe(ApprovalMode.YOLO);
+  });
+
+  it('lets a plan-mode override leave plan mode without changing the parent', async () => {
+    const parent = await createParentWithRegistry();
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    expect(child.getApprovalMode()).toBe(ApprovalMode.PLAN);
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+
+    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+  });
+
+  it('stops plan-mode blocking exec tools after a child override exits plan mode', async () => {
+    const parent = await createParentWithRegistry();
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+
+    const execDetails = {
+      type: 'exec',
+    } as unknown as ToolCallConfirmationDetails;
+    const isPlanMode = child.getApprovalMode() === ApprovalMode.PLAN;
+
+    expect(isPlanModeBlocked(isPlanMode, false, false, execDetails)).toBe(
+      false,
+    );
+  });
+
+  it('isolates child plan state from a parent that is already in plan mode', async () => {
+    const parent = await createParentWithRegistry();
+    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.YOLO);
+    parent.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
+
+    const parentGateState = parent.getPlanGateState();
+    expect(parent.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    expect(parentGateState?.enteredByModel).toBe(true);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    expect(child.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+
+    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    expect(parent.getApprovalMode()).toBe(ApprovalMode.PLAN);
+    expect(parent.getPlanGateState()).toBe(parentGateState);
+  });
+
+  it('uses the parent current mode as pre-plan mode when a non-plan parent creates a plan child', async () => {
+    const parent = await createParentWithRegistry();
+    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.AUTO_EDIT);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    expect(child.getPrePlanMode()).toBe(ApprovalMode.AUTO_EDIT);
+  });
+
+  it('restores AUTO rules when an AUTO child finishes still in AUTO mode', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+
+    const { cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not need cleanup restore after a child leaves AUTO mode itself', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores AUTO rules when a non-AUTO child enters AUTO and finishes there', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.PLAN,
+    );
+
+    child.setApprovalMode(ApprovalMode.AUTO);
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 
   it('copies discovered tools from the parent registry without re-discovering', async () => {
