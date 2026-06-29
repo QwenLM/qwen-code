@@ -2369,8 +2369,6 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':

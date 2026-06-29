@@ -1899,8 +1899,6 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Ocultar saída da ferramenta e raciocínio para uma visualização mais limpa (alternar com Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Pressione Ctrl+O para exibir a saída completa da ferramenta',
   'Switch to plan mode or exit plan mode':

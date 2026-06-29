@@ -1904,8 +1904,6 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Ctrl+C zum Beenden)\n',
   'to view transcript': 'zum Anzeigen des Transkripts',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Ctrl+O umschalten).',
   'Press Ctrl+O to show full tool output':
     'Ctrl+O für vollständige Tool-Ausgabe drücken',
   'Switch to plan mode or exit plan mode':

@@ -1944,8 +1944,6 @@ export default {
     'Mode brut non disponible. Veuillez exécuter dans un terminal interactif.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Utilisez les flèches ↑ ↓ pour naviguer, Enter pour sélectionner, Ctrl+C pour quitter)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Masquer la sortie des outils et la réflexion pour une vue plus nette (basculer avec Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Appuyez sur Ctrl+O pour afficher la sortie complète des outils',
   'Switch to plan mode or exit plan mode':

@@ -2117,8 +2117,6 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
   'Set a goal — keep working until the condition is met':
