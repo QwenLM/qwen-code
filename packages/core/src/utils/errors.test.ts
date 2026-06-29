@@ -42,6 +42,20 @@ describe('getErrorMessage cause unwrapping', () => {
     const err = new Error('same', { cause: new Error('same') });
     expect(getErrorMessage(err)).toBe('same');
   });
+
+  it('uses the message from plain error-like objects', () => {
+    expect(
+      getErrorMessage({
+        code: -32603,
+        message: 'path escapes workspace: /root/.qwen/skills/example.md',
+        data: { errorKind: 'path_outside_workspace' },
+      }),
+    ).toBe('path escapes workspace: /root/.qwen/skills/example.md');
+  });
+
+  it('stringifies plain objects without a message', () => {
+    expect(getErrorMessage({ code: -32603 })).toBe('{"code":-32603}');
+  });
 });
 
 describe('isAbortError', () => {

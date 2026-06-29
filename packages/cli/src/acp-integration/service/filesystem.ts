@@ -16,8 +16,19 @@ import type {
   FileSystemService,
   ReadTextFileResponse,
 } from '@qwen-code/qwen-code-core';
+import { getErrorMessage } from '../../utils/errors.js';
+import path from 'node:path';
 
 const RESOURCE_NOT_FOUND_CODE = -32002;
+const PATH_OUTSIDE_WORKSPACE_KIND = 'path_outside_workspace';
+
+interface AcpFileSystemServiceOptions {
+  localReadRoots?: readonly string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
 
 function getErrorCode(error: unknown): unknown {
   if (error instanceof RequestError) {
@@ -31,6 +42,37 @@ function getErrorCode(error: unknown): unknown {
   return undefined;
 }
 
+function getErrorData(error: unknown): Record<string, unknown> | undefined {
+  const data = isRecord(error) ? error['data'] : undefined;
+  return isRecord(data) ? data : undefined;
+}
+
+function getErrorKind(error: unknown): unknown {
+  const data = getErrorData(error);
+  if (data && typeof data['errorKind'] === 'string') {
+    return data['errorKind'];
+  }
+  if (isRecord(error) && typeof error['errorKind'] === 'string') {
+    return error['errorKind'];
+  }
+  return undefined;
+}
+
+function normalizeError(error: unknown): Error {
+  if (error instanceof Error) return error;
+
+  const normalized = new Error(getErrorMessage(error)) as Error &
+    Record<string, unknown>;
+  if (isRecord(error)) {
+    for (const [key, value] of Object.entries(error)) {
+      if (key !== 'message') {
+        normalized[key] = value;
+      }
+    }
+  }
+  return normalized;
+}
+
 function createEnoentError(filePath: string): NodeJS.ErrnoException {
   const err = new Error(`File not found: ${filePath}`) as NodeJS.ErrnoException;
   err.code = 'ENOENT';
@@ -39,12 +81,25 @@ function createEnoentError(filePath: string): NodeJS.ErrnoException {
   return err;
 }
 
+function isPathWithinRoot(filePath: string, root: string): boolean {
+  if (!root.trim()) return false;
+
+  const relative = path.relative(path.resolve(root), path.resolve(filePath));
+  return (
+    relative === '' ||
+    (!relative.startsWith(`..${path.sep}`) &&
+      relative !== '..' &&
+      !path.isAbsolute(relative))
+  );
+}
+
 export class AcpFileSystemService implements FileSystemService {
   constructor(
     private readonly connection: AgentSideConnection,
     private readonly sessionId: string,
     private readonly capabilities: FileSystemCapability,
     private readonly fallback: FileSystemService,
+    private readonly options: AcpFileSystemServiceOptions = {},
   ) {}
 
   async readTextFile(
@@ -67,7 +122,14 @@ export class AcpFileSystemService implements FileSystemService {
         throw createEnoentError(params.path);
       }
 
-      throw error;
+      if (
+        getErrorKind(error) === PATH_OUTSIDE_WORKSPACE_KIND &&
+        this.isLocalReadFallbackPath(params.path)
+      ) {
+        return this.fallback.readTextFile(params);
+      }
+
+      throw normalizeError(error);
     }
 
     return response;
@@ -96,5 +158,11 @@ export class AcpFileSystemService implements FileSystemService {
 
   findFiles(fileName: string, searchPaths: readonly string[]): string[] {
     return this.fallback.findFiles(fileName, searchPaths);
+  }
+
+  private isLocalReadFallbackPath(filePath: string): boolean {
+    return (this.options.localReadRoots ?? []).some((root) =>
+      isPathWithinRoot(filePath, root),
+    );
   }
 }

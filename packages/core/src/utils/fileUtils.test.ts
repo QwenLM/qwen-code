@@ -1055,6 +1055,29 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Simulated read error');
     });
 
+    it('should surface messages from plain object text read errors', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'content');
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
+        code: -32603,
+        message:
+          'path escapes workspace: /root/.qwen/skills/dataworks-di-data-processor/instructions/interaction_norms.md',
+        data: {
+          errorKind: 'path_outside_workspace',
+          status: 400,
+        },
+      });
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        mockConfig,
+      );
+
+      expect(result.error).toContain('path escapes workspace');
+      expect(result.returnDisplay).toContain('path escapes workspace');
+      expect(result.error).not.toContain('[object Object]');
+      expect(result.returnDisplay).not.toContain('[object Object]');
+    });
+
     it('should handle read errors for image/pdf files', async () => {
       actualNodeFs.writeFileSync(testImageFilePath, 'content'); // File must exist
       mockMimeGetType.mockReturnValue('image/png');

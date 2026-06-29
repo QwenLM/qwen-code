@@ -88,6 +88,17 @@ export function getErrorMessage(error: unknown): string {
     }
     return error.message;
   }
+  if (error !== null && typeof error === 'object') {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) {
+      return message;
+    }
+    try {
+      return JSON.stringify(error) ?? String(error);
+    } catch {
+      return String(error);
+    }
+  }
   try {
     return String(error);
   } catch {

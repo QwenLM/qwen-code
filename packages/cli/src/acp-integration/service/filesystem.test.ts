@@ -8,6 +8,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { FileSystemService } from '@qwen-code/qwen-code-core';
 import { AcpFileSystemService } from './filesystem.js';
 import type { AgentSideConnection } from '@agentclientprotocol/sdk';
+import os from 'node:os';
+import path from 'node:path';
 
 const RESOURCE_NOT_FOUND_CODE = -32002;
 const INTERNAL_ERROR_CODE = -32603;
@@ -73,7 +75,7 @@ describe('AcpFileSystemService', () => {
       });
     });
 
-    it('re-throws other errors unchanged', async () => {
+    it('preserves code and message for other read errors', async () => {
       const otherError = {
         code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
@@ -95,6 +97,136 @@ describe('AcpFileSystemService', () => {
         code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
       });
+    });
+
+    it('normalizes plain object ACP errors to Error instances with the original message', async () => {
+      const otherError = {
+        code: INTERNAL_ERROR_CODE,
+        message: 'Internal error',
+      };
+      const client = {
+        readTextFile: vi.fn().mockRejectedValue(otherError),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-2b',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      const err = await svc
+        .readTextFile({ path: '/some/file.txt' })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect(err).toMatchObject({
+        code: INTERNAL_ERROR_CODE,
+        message: 'Internal error',
+      });
+      expect(String(err)).toContain('Internal error');
+      expect(String(err)).not.toContain('[object Object]');
+    });
+
+    it('falls back to local reads for allowed local roots when ACP rejects them as outside the workspace', async () => {
+      const skillRoot = path.join(os.homedir(), '.qwen', 'skills');
+      const filePath = path.join(
+        skillRoot,
+        'dataworks-di-data-processor',
+        'instructions',
+        'interaction_norms.md',
+      );
+      const pathOutsideWorkspaceError = {
+        code: INTERNAL_ERROR_CODE,
+        message: `path escapes workspace: ${filePath}`,
+        data: {
+          errorKind: 'path_outside_workspace',
+          status: 400,
+        },
+      };
+      const client = {
+        readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+      } as unknown as AgentSideConnection;
+      const fallback = createFallback();
+      (fallback.readTextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
+        content: 'skill instructions',
+        _meta: { bom: false, encoding: 'utf-8' },
+      });
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-2c',
+        { readTextFile: true, writeTextFile: true },
+        fallback,
+        { localReadRoots: [skillRoot] },
+      );
+
+      await expect(svc.readTextFile({ path: filePath })).resolves.toEqual({
+        content: 'skill instructions',
+        _meta: { bom: false, encoding: 'utf-8' },
+      });
+      expect(fallback.readTextFile).toHaveBeenCalledWith({ path: filePath });
+    });
+
+    it('does not fall back to local reads outside configured roots', async () => {
+      const localRoot = path.join(os.tmpdir(), 'acp-local-read-root');
+      const filePath = path.join(os.tmpdir(), 'outside-local-root.md');
+      const pathOutsideWorkspaceError = {
+        code: INTERNAL_ERROR_CODE,
+        message: `path escapes workspace: ${filePath}`,
+        data: {
+          errorKind: 'path_outside_workspace',
+          status: 400,
+        },
+      };
+      const client = {
+        readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+      } as unknown as AgentSideConnection;
+      const fallback = createFallback();
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-2e',
+        { readTextFile: true, writeTextFile: true },
+        fallback,
+        { localReadRoots: [localRoot] },
+      );
+
+      await expect(svc.readTextFile({ path: filePath })).rejects.toMatchObject({
+        code: INTERNAL_ERROR_CODE,
+        message: `path escapes workspace: ${filePath}`,
+      });
+      expect(fallback.readTextFile).not.toHaveBeenCalled();
+    });
+
+    it('ignores empty configured local read roots', async () => {
+      const filePath = path.join(process.cwd(), 'outside-workspace.md');
+      const pathOutsideWorkspaceError = {
+        code: INTERNAL_ERROR_CODE,
+        message: `path escapes workspace: ${filePath}`,
+        data: {
+          errorKind: 'path_outside_workspace',
+          status: 400,
+        },
+      };
+      const client = {
+        readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+      } as unknown as AgentSideConnection;
+      const fallback = createFallback();
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-2f',
+        { readTextFile: true, writeTextFile: true },
+        fallback,
+        { localReadRoots: [''] },
+      );
+
+      await expect(svc.readTextFile({ path: filePath })).rejects.toMatchObject({
+        code: INTERNAL_ERROR_CODE,
+        message: `path escapes workspace: ${filePath}`,
+      });
+      expect(fallback.readTextFile).not.toHaveBeenCalled();
     });
 
     it('uses fallback when readTextFile capability is disabled', async () => {
