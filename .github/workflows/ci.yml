@@ -247,6 +247,10 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
+      - name: 'Check serve fast-path bundle closure'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run check:serve-fast-path-bundle'
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -427,7 +431,6 @@ jobs:
           node_version: '${{ matrix.node-version }}'
           os: '${{ matrix.os }}'
           github_token: '${{ secrets.GITHUB_TOKEN }}'
-
 
   # Integration tests run only in the merge queue, not on every PR push.
   # They are the suite that previously ran *only* in the nightly Release

@@ -854,15 +854,22 @@ function VirtualizedList<T>(
     scrollbarThumbActive,
   ]);
 
+  // The host passes `containerHeight` as the *maximum* viewport height (the
+  // room available between the header and the composer). Pinning the root box
+  // to that height unconditionally left a tall empty gap below short content
+  // and pushed the composer far down the screen — the legacy <Static> path
+  // instead grows with its content. Collapse to `totalHeight` whenever the
+  // content fits so the composer sits right beneath the conversation; only
+  // when the content overflows do we clamp to `containerHeight` and let the
+  // viewport scroll. `scrollableContainerHeight` (the scroll math) still uses
+  // the full `containerHeight`, so scrolling is unaffected.
+  const rootHeight =
+    props.containerHeight !== undefined
+      ? Math.min(props.containerHeight, totalHeight)
+      : '100%';
+
   return (
-    <Box
-      ref={rootRef}
-      width="100%"
-      height={
-        props.containerHeight !== undefined ? props.containerHeight : '100%'
-      }
-      flexDirection="row"
-    >
+    <Box ref={rootRef} width="100%" height={rootHeight} flexDirection="row">
       <Box
         ref={containerRef}
         overflowY="hidden"
