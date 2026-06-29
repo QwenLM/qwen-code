@@ -36,7 +36,7 @@ const TUI_ONLY_SETTINGS = new Set([
 // `voiceModel` is `showInDialog: false` (so not in the dialog allowlist), but
 // the Web Shell `/model --voice` picker needs to read + persist it; the daemon
 // `/voice/stream` then reads it back via `loadSettings`.
-const WEB_SHELL_SETTINGS = new Set(['voiceModel']);
+const WEB_SHELL_SETTINGS = new Set(['ui.compactMode', 'voiceModel']);
 
 const VALID_WRITE_SCOPES = new Set(['workspace']);
 

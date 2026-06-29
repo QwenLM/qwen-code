@@ -2734,10 +2734,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const needsBlockingInput =
     dialogsVisible || streamingState === StreamingState.WaitingForConfirmation;
   useEffect(() => {
-    if (needsBlockingInput && isTranscriptOpenRef.current) {
+    if (needsBlockingInput && isTranscriptOpen) {
       closeTranscript();
     }
-  }, [needsBlockingInput, closeTranscript]);
+    // `isTranscriptOpen` must be a dependency (not just read via ref): if a
+    // blocking prompt is already visible when the user opens the transcript,
+    // `needsBlockingInput` doesn't change, so without this the effect wouldn't
+    // re-fire and the transcript would open over an invisible prompt.
+  }, [needsBlockingInput, isTranscriptOpen, closeTranscript]);
 
   const shouldShowStickyTodos =
     stickyTodos !== null &&

@@ -9,6 +9,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { Text } from 'ink';
 import type React from 'react';
 import { ToolGroupMessage } from './ToolGroupMessage.js';
+import { ToolMessage } from './ToolMessage.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type {
@@ -30,58 +31,60 @@ const CompactModeProvider = ({
 
 // Mock child components to isolate ToolGroupMessage behavior
 vi.mock('./ToolMessage.js', () => ({
-  ToolMessage: function MockToolMessage({
-    callId,
-    name,
-    description,
-    status,
-    emphasis,
-    resultDisplay,
-    isFocused,
-    forceShowResult,
-  }: {
-    callId: string;
-    name: string;
-    description: string;
-    status: ToolCallStatus;
-    emphasis: string;
-    resultDisplay?: unknown;
-    isFocused?: boolean;
-    forceShowResult?: boolean;
-  }) {
-    // Use the same constants as the real component
-    const statusSymbolMap: Record<ToolCallStatus, string> = {
-      [ToolCallStatus.Success]: TOOL_STATUS.SUCCESS,
-      [ToolCallStatus.Pending]: TOOL_STATUS.PENDING,
-      [ToolCallStatus.Executing]: TOOL_STATUS.EXECUTING,
-      [ToolCallStatus.Confirming]: TOOL_STATUS.CONFIRMING,
-      [ToolCallStatus.Canceled]: TOOL_STATUS.CANCELED,
-      [ToolCallStatus.Error]: TOOL_STATUS.ERROR,
-    };
-    const statusSymbol = statusSymbolMap[status] || '?';
-    if (
-      resultDisplay &&
-      typeof resultDisplay === 'object' &&
-      (resultDisplay as { type?: string }).type === 'task_execution'
-    ) {
-      // `forceShowResult` is the gate that lets `SubagentScrollbackSummary`
-      // render in compact mode — surfaced in the mock so tests can
-      // assert it was passed for terminal subagent tools.
+  ToolMessage: vi.fn(
+    ({
+      callId,
+      name,
+      description,
+      status,
+      emphasis,
+      resultDisplay,
+      isFocused,
+      forceShowResult,
+    }: {
+      callId: string;
+      name: string;
+      description: string;
+      status: ToolCallStatus;
+      emphasis: string;
+      resultDisplay?: unknown;
+      isFocused?: boolean;
+      forceShowResult?: boolean;
+    }) => {
+      // Use the same constants as the real component
+      const statusSymbolMap: Record<ToolCallStatus, string> = {
+        [ToolCallStatus.Success]: TOOL_STATUS.SUCCESS,
+        [ToolCallStatus.Pending]: TOOL_STATUS.PENDING,
+        [ToolCallStatus.Executing]: TOOL_STATUS.EXECUTING,
+        [ToolCallStatus.Confirming]: TOOL_STATUS.CONFIRMING,
+        [ToolCallStatus.Canceled]: TOOL_STATUS.CANCELED,
+        [ToolCallStatus.Error]: TOOL_STATUS.ERROR,
+      };
+      const statusSymbol = statusSymbolMap[status] || '?';
+      if (
+        resultDisplay &&
+        typeof resultDisplay === 'object' &&
+        (resultDisplay as { type?: string }).type === 'task_execution'
+      ) {
+        // `forceShowResult` is the gate that lets `SubagentScrollbackSummary`
+        // render in compact mode — surfaced in the mock so tests can
+        // assert it was passed for terminal subagent tools.
+        return (
+          <Text>
+            MockSubagent[{callId}]: focused={String(isFocused)} force=
+            {String(Boolean(forceShowResult))}
+          </Text>
+        );
+      }
+
       return (
         <Text>
-          MockSubagent[{callId}]: focused={String(isFocused)} force=
-          {String(Boolean(forceShowResult))}
+          MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
+          {forceShowResult ? ' [forceShow]' : ''}
         </Text>
       );
-    }
-
-    return (
-      <Text>
-        MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
-        {forceShowResult ? ' [forceShow]' : ''}
-      </Text>
-    );
-  },
+    },
+  ),
 }));
 
 vi.mock('./ToolConfirmationMessage.js', () => ({
@@ -610,6 +613,61 @@ describe('<ToolGroupMessage />', () => {
       // InlineParallelAgentsDisplay panel.
       expect(frame).toContain('MockSubagent[agent-1]');
       expect(frame).toContain('MockSubagent[agent-2]');
+    });
+
+    it('lifts per-tool height truncation when fullDetail (no availableTerminalHeight passed to ToolMessage)', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'shell-1',
+          name: 'run_shell_command',
+          description: 'echo hi',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'a result with content',
+        }),
+      ];
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          availableTerminalHeight={10}
+          fullDetail
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-1');
+      expect(call).toBeDefined();
+      // fullDetail forces the height override to undefined so the tool output
+      // renders untruncated, even though availableTerminalHeight=10 was given.
+      expect(call?.[0].availableTerminalHeight).toBeUndefined();
+      expect(call?.[0].forceShowResult).toBe(true);
+    });
+
+    it('still truncates per-tool height when not fullDetail', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'shell-2',
+          name: 'run_shell_command',
+          description: 'echo hi',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'a result with content',
+        }),
+      ];
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          availableTerminalHeight={10}
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-2');
+      expect(call?.[0].availableTerminalHeight).toBeTypeOf('number');
     });
   });
 

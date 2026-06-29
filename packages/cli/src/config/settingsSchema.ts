@@ -984,6 +984,20 @@ const SETTINGS_SCHEMA = {
         description: 'The last time the feedback dialog was shown.',
         showInDialog: false,
       },
+      compactMode: {
+        type: 'boolean',
+        label: 'Compact Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        // Retired from the TUI (compact tool output is now always-on there, and
+        // Ctrl+O opens the transcript instead of toggling this). Kept as a
+        // hidden, schema-only setting so the web shell's independent compact
+        // toggle can still persist via the daemon settings routes (mirrors
+        // `voiceModel`). Not shown in the TUI settings dialog.
+        description: 'Compact view (web shell only; not used by the TUI).',
+        showInDialog: false,
+      },
       useTerminalBuffer: {
         type: 'boolean',
         label: 'Virtualized History (reduces flicker on long sessions)',
