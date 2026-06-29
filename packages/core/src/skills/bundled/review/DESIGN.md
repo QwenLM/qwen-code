@@ -244,7 +244,7 @@ Critical stays inline because blockers must be pinned to the exact code line and
 - ✅ Agentic authors are no longer forced to walk a queue of Suggestion threads — they read one list, address what they accept, push, and the next run overwrites it.
 - ✅ Reuses the same "locate-by-author-and-update" pattern already used for triage comments, and the same `gh` wrapper the other subcommands use — no new platform primitive.
 - ❌ Suggestion findings are less visually prominent than inline comments: they appear in the PR conversation thread rather than pinned next to the code in "Files changed." Mitigated by keeping a `file:line` column in the summary table so each row stays directly actionable.
-- ❌ If an author fully addresses all suggestions and pushes, the stale list lingers until the next /review run overwrites it (no auto-clear on merge). This mirrors the existing inline-comment staleness model and is bounded — the next run always refreshes it.
+- When an author fully addresses all suggestions and the next /review run finds zero new Suggestions, the stale summary is automatically replaced with a short "all addressed" message (rather than left as a frozen artifact). If no prior summary exists and there are no suggestions, the step is skipped entirely.
 - ❌ Pattern-aggregated Suggestion findings (the multi-occurrence `Pattern:` form) flatten into table rows — the aggregation is visible in the terminal output, which retains the full structured form, but the PR summary lists representative instances.
 
 ## Rejected alternatives

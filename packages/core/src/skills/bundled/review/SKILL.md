@@ -581,7 +581,17 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
 
 After submitting the review, publish the Suggestion-level findings as a single updatable issue comment — this is what lets Suggestion-level recommendations refresh each /review run instead of piling up as inline threads.
 
-1. Collect all high-confidence **Suggestion** findings (exclude Critical, Nice-to-have, and low-confidence). If there are **none**, SKIP this step entirely — do not post or touch the summary.
+1. Collect all high-confidence **Suggestion** findings (exclude Critical, Nice-to-have, and low-confidence). If there are **none**:
+   - Check whether a prior suggestion summary exists on the PR (look for a comment by the bot with the `SUMMARY_MARKER`). If one exists, still call `post-suggestions` with a short "all addressed" body so the stale table is replaced:
+
+     ```markdown
+     <!-- qwen-review-suggestion-summary -->
+
+     _No new Suggestion-level findings this round — all prior suggestions have been addressed or superseded._
+     ```
+
+   - If no prior summary exists and there are no suggestions, SKIP this step entirely.
+
 2. Write the summary body to `.qwen/tmp/qwen-review-{target}-suggestions.md`. It MUST begin with the marker exactly as shown — `post-suggestions` uses it to locate and PATCH the existing comment rather than create a duplicate:
 
    ```markdown

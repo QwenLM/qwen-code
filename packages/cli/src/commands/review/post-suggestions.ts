@@ -30,7 +30,7 @@ export interface IssueComment {
   body?: string;
 }
 
-interface PostSuggestionsArgs {
+export interface PostSuggestionsArgs {
   pr_number: string;
   owner_repo: string;
   'body-file': string;
@@ -66,7 +66,9 @@ export function findExistingSummary(
   return match;
 }
 
-async function runPostSuggestions(args: PostSuggestionsArgs): Promise<void> {
+export async function runPostSuggestions(
+  args: PostSuggestionsArgs,
+): Promise<void> {
   const {
     pr_number: prNumber,
     owner_repo: ownerRepo,
