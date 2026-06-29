@@ -7,15 +7,56 @@
  */
 
 import { execSync } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
 const YAMLLINT_VERSION = '1.35.1';
 
 const TEMP_DIR = join(tmpdir(), 'qwen-code-linters');
+
+/**
+ * SHA256 checksums for downloaded binaries.
+ * Compute with: sha256sum <binary>
+ */
+const CHECKSUMS = {
+  actionlint: {
+    linux_amd64: 'PLACEHOLDER_COMPUTE_WITH_SHA256SUM',
+    darwin_amd64: 'PLACEHOLDER_COMPUTE_WITH_SHA256SUM',
+    darwin_arm64: 'PLACEHOLDER_COMPUTE_WITH_SHA256SUM',
+  },
+  shellcheck: {
+    'linux.x86_64': 'PLACEHOLDER_COMPUTE_WITH_SHA256SUM',
+    'darwin.x86_64': 'PLACEHOLDER_COMPUTE_WITH_SHA256SUM',
+    'darwin.aarch64': 'PLACEHOLDER_COMPUTE_WITH_SHA256SUM',
+  },
+};
+
+function computeSHA256(filePath) {
+  const hash = createHash('sha256');
+  hash.update(readFileSync(filePath));
+  return hash.digest('hex');
+}
+
+function verifyChecksum(filePath, expectedChecksum) {
+  if (expectedChecksum === 'PLACEHOLDER_COMPUTE_WITH_SHA256SUM') {
+    console.warn(
+      `[lint.js] WARNING: No checksum configured for ${filePath}, skipping verification`,
+    );
+    return true;
+  }
+  const actual = computeSHA256(filePath);
+  if (actual !== expectedChecksum) {
+    console.error(`[lint.js] CHECKSUM MISMATCH for ${filePath}`);
+    console.error(`  Expected: ${expectedChecksum}`);
+    console.error(`  Actual:   ${actual}`);
+    return false;
+  }
+  return true;
+}
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -43,10 +84,20 @@ function getPlatformArch() {
 
 const platformArch = getPlatformArch();
 
+function downloadAndVerify(url, destPath, expectedChecksum) {
+  const dir = destPath.substring(0, destPath.lastIndexOf('/')) || '.';
+  mkdirSync(dir, { recursive: true });
+  execSync(`curl -sSLo "${destPath}" "${url}"`);
+  if (!verifyChecksum(destPath, expectedChecksum)) {
+    rmSync(destPath, { force: true });
+    throw new Error(`Checksum verification failed for ${destPath}`);
+  }
+}
+
 /**
  * @typedef {{
  *   check: string;
- *   installer: string;
+ *   installer: () => void;
  *   run: string;
  * }}
  */
@@ -57,11 +108,15 @@ const platformArch = getPlatformArch();
 const LINTERS = {
   actionlint: {
     check: 'command -v actionlint',
-    installer: `
-      mkdir -p "${TEMP_DIR}/actionlint"
-      curl -sSLo "${TEMP_DIR}/.actionlint.tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
-      tar -xzf "${TEMP_DIR}/.actionlint.tgz" -C "${TEMP_DIR}/actionlint"
-    `,
+    installer: () => {
+      const arch = platformArch.actionlint;
+      const url = `https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${arch}.tar.gz`;
+      const tgzPath = `${TEMP_DIR}/.actionlint.tgz`;
+      const expected = CHECKSUMS.actionlint[arch];
+      downloadAndVerify(url, tgzPath, expected);
+      execSync(`tar -xzf "${tgzPath}" -C "${TEMP_DIR}/actionlint"`);
+      rmSync(tgzPath, { force: true });
+    },
     run: `
       actionlint \
         -color \
@@ -73,11 +128,17 @@ const LINTERS = {
   },
   shellcheck: {
     check: 'command -v shellcheck',
-    installer: `
-      mkdir -p "${TEMP_DIR}/shellcheck"
-      curl -sSLo "${TEMP_DIR}/.shellcheck.txz" "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
-      tar -xf "${TEMP_DIR}/.shellcheck.txz" -C "${TEMP_DIR}/shellcheck" --strip-components=1
-    `,
+    installer: () => {
+      const arch = platformArch.shellcheck;
+      const url = `https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${arch}.tar.xz`;
+      const txzPath = `${TEMP_DIR}/.shellcheck.txz`;
+      const expected = CHECKSUMS.shellcheck[arch];
+      downloadAndVerify(url, txzPath, expected);
+      execSync(
+        `tar -xf "${txzPath}" -C "${TEMP_DIR}/shellcheck" --strip-components=1`,
+      );
+      rmSync(txzPath, { force: true });
+    },
     run: `
       git ls-files | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))' | xargs file --mime-type \
         | grep "text/x-shellscript" | awk '{ print substr($1, 1, length($1)-1) }' \
@@ -92,7 +153,9 @@ const LINTERS = {
   },
   yamllint: {
     check: 'command -v yamllint',
-    installer: `pip3 install --user "yamllint==${YAMLLINT_VERSION}"`,
+    installer: () => {
+      execSync(`pip3 install --user "yamllint==${YAMLLINT_VERSION}"`);
+    },
     run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
   },
 };
@@ -123,9 +186,11 @@ export function setupLinters() {
     const { check, installer } = LINTERS[linter];
     if (!runCommand(check, 'ignore')) {
       console.log(`Installing ${linter}...`);
-      if (!runCommand(installer)) {
+      try {
+        installer();
+      } catch (err) {
         console.error(
-          `Failed to install ${linter}. Please install it manually.`,
+          `Failed to install ${linter}: ${err instanceof Error ? err.message : err}`,
         );
         process.exit(1);
       }

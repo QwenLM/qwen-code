@@ -104,7 +104,6 @@ Use these anchors when moving from the docs into the latest `main` code:
 
 - **Java / Python SDK daemon clients** - only the TypeScript SDK ships a daemon client today. Doc 13 is TypeScript-only.
 - **Web UI product details** - the shared transcript layer and web UI daemon entry points are covered here, but product UI layout is tracked in `docs/developers/daemon-ui/` and adapter design notes.
-- **Zed extension (`packages/zed-extension/`)** - it launches `qwen --acp` over stdio directly and bypasses the daemon.
 - **Experimental in-process hosting** - `--no-http-bridge` still falls back to http-bridge today; a stable in-process serve mode would need new docs when it lands.
 
 ## Current daemon mode coverage
