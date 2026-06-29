@@ -66,7 +66,10 @@ import {
 export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
-  /** Curated conversation history with copied Content and parts containers */
+  /**
+   * Curated conversation history with copied Content and parts containers.
+   * Part objects are shared by reference; consumers must not mutate them.
+   */
   history: Content[];
   /** Model identifier */
   model: string;

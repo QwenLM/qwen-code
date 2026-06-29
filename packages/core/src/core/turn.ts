@@ -534,7 +534,15 @@ export class Turn {
         throw error;
       }
 
-      const contextForReport = buildApiErrorReportContext(this.chat, req);
+      let contextForReport: unknown;
+      try {
+        contextForReport = buildApiErrorReportContext(this.chat, req);
+      } catch {
+        contextForReport = {
+          history: { error: 'failed to build diagnostic summary' },
+          request: { partCount: countRequestParts(req) },
+        };
+      }
       await reportError(
         error,
         'Error when talking to API',

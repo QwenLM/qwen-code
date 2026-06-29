@@ -414,6 +414,40 @@ describe('Turn', () => {
       );
     });
 
+    it('should report API errors with empty history summary', async () => {
+      const error = new Error('API Error');
+      const reqParts: Part[] = [{ text: 'Trigger error' }];
+      mockSendMessageStream.mockRejectedValue(error);
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const errorEvent = events[0] as ServerGeminiErrorEvent;
+      expect(errorEvent.type).toBe(GeminiEventType.Error);
+      expect(errorEvent.value).toEqual({
+        error: { message: 'API Error', status: undefined },
+      });
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            length: 0,
+            tail: [],
+          },
+          request: { partCount: 1 },
+        },
+        'Turn.run-sendMessageStream',
+      );
+    });
+
     it('should report API errors without cloning full history', async () => {
       const error = new Error('API Error');
       const largeText = 'x'.repeat(1024 * 1024);
@@ -470,6 +504,36 @@ describe('Turn', () => {
               },
             ],
           },
+          request: { partCount: 1 },
+        },
+        'Turn.run-sendMessageStream',
+      );
+    });
+
+    it('should preserve API errors when diagnostic summary fails', async () => {
+      const error = new Error('API Error');
+      const reqParts: Part[] = [{ text: 'Trigger error' }];
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistoryLength.mockImplementation(() => {
+        throw new Error('history is unavailable');
+      });
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: { error: 'failed to build diagnostic summary' },
           request: { partCount: 1 },
         },
         'Turn.run-sendMessageStream',
