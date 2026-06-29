@@ -126,7 +126,7 @@ export abstract class ChannelBase {
   private readonly bridgeSessionDiedListener = (
     event: SessionDiedEvent,
   ): void => {
-    this.router.removeSessionId(event.sessionId);
+    this.onSessionDied(event.sessionId);
   };
 
   constructor(
@@ -181,6 +181,11 @@ export abstract class ChannelBase {
   }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
+
+  onSessionDied(sessionId: string): void {
+    this.router.removeSessionId(sessionId);
+    this.instructedSessions.delete(sessionId);
+  }
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);

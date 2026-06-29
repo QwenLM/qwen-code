@@ -498,6 +498,27 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session: none');
     });
 
+    it('forgets instructions for a session when the bridge reports that it died', async () => {
+      const ch = createChannel({ instructions: 'Be concise.' });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]!;
+      const sid = firstPrompt[0] as string;
+      expect(firstPrompt[1]).toContain('Be concise.');
+
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId: sid,
+      });
+      (bridge.newSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sid,
+      );
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![1] as string;
+      expect(secondPrompt).toContain('Be concise.');
+    });
+
     it('can register bridge events when a supplied router is channel-owned', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),

@@ -231,6 +231,25 @@ describe('SessionRouter', () => {
       expect(router.getTarget('dead-session')).toBeUndefined();
       expect(router.getAll()).toEqual([]);
     });
+
+    it.each([
+      ['empty string', ''],
+      ['non-string value', 42],
+    ])('rejects a %s returned by newSession', async (_label, sessionId) => {
+      const router = new SessionRouter(mockBridge(), '/default');
+      const newSession = vi.fn(async (): Promise<string> => sessionId as string);
+      router.setBridge({
+        ...mockBridge(),
+        newSession,
+      });
+
+      await expect(router.resolve('ch', 'alice', 'chat1')).rejects.toThrow(
+        'Invalid session ID from bridge',
+      );
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(router.getAll()).toEqual([]);
+    });
   });
 
   describe('getTarget', () => {

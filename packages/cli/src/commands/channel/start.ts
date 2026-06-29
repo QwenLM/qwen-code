@@ -170,12 +170,19 @@ function registerToolCallDispatch(
 function registerSessionCleanup(
   bridge: ChannelAgentBridge,
   router: SessionRouter,
+  channels: Map<string, ChannelBase>,
 ): void {
   bridge.on('sessionDied', (event: { sessionId: string; reason?: string }) => {
     writeStderrLine(
       `[Channel] Session ${event.sessionId} died${event.reason ? ` (${event.reason})` : ''}, removing routing state`,
     );
-    router.removeSessionId(event.sessionId);
+    const target = router.getTarget(event.sessionId);
+    const channel = target ? channels.get(target.channelName) : undefined;
+    if (channel) {
+      channel.onSessionDied(event.sessionId);
+    } else {
+      router.removeSessionId(event.sessionId);
+    }
   });
 }
 
@@ -237,7 +244,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   const channel = await createChannel(name, config, bridge, { router, proxy });
   channels.set(name, channel);
   registerToolCallDispatch(bridge, router, channels);
-  registerSessionCleanup(bridge, router);
+  registerSessionCleanup(bridge, router, channels);
 
   try {
     await channel.connect();
@@ -284,7 +291,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         router.setBridge(bridge);
         channel.setBridge(bridge);
         registerToolCallDispatch(bridge, router, channels);
-        registerSessionCleanup(bridge, router);
+        registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
         const result = await router.restoreSessions();
@@ -389,7 +396,7 @@ async function startAll(proxy?: string): Promise<void> {
     );
   }
   registerToolCallDispatch(bridge, router, channels);
-  registerSessionCleanup(bridge, router);
+  registerSessionCleanup(bridge, router, channels);
 
   // Connect all channels
   let connectedCount = 0;
@@ -455,7 +462,7 @@ async function startAll(proxy?: string): Promise<void> {
           channel.setBridge(bridge);
         }
         registerToolCallDispatch(bridge, router, channels);
-        registerSessionCleanup(bridge, router);
+        registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
         const result = await router.restoreSessions();

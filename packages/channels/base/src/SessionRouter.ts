@@ -390,6 +390,9 @@ export class SessionRouter {
     let lastDeadSessionId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const sessionId = await this.bridge.newSession(cwd);
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        throw new Error('Invalid session ID from bridge');
+      }
       if (!loadWindow.delete(sessionId)) {
         return sessionId;
       }

@@ -21,6 +21,7 @@ const mockChannelConnect = vi.hoisted(() => vi.fn());
 const mockChannelDisconnect = vi.hoisted(() => vi.fn());
 const mockChannelSetBridge = vi.hoisted(() => vi.fn());
 const mockChannelOnToolCall = vi.hoisted(() => vi.fn());
+const mockChannelOnSessionDied = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockBridgeStart = vi.hoisted(() => vi.fn());
 const mockBridgeStop = vi.hoisted(() => vi.fn());
@@ -116,6 +117,7 @@ const mockParsedChannelConfig = {
 const mockChannel = {
   connect: mockChannelConnect,
   disconnect: mockChannelDisconnect,
+  onSessionDied: mockChannelOnSessionDied,
   onToolCall: mockChannelOnToolCall,
   setBridge: mockChannelSetBridge,
 };
@@ -281,6 +283,38 @@ describe('startCommand.handler', () => {
     sessionDiedListener!({ sessionId: 'dead-session' });
 
     expect(mockRouterRemoveSessionId).toHaveBeenCalledWith('dead-session');
+    expect(mockChannelOnSessionDied).not.toHaveBeenCalled();
+  });
+
+  it('dispatches session death to the owning channel when the route is known', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockRouterGetTarget.mockReturnValue({
+      channelName: 'telegram',
+      senderId: 'alice',
+      chatId: 'chat1',
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const sessionDiedListener = mockBridgeOn.mock.calls.find(
+      ([eventName]) => eventName === 'sessionDied',
+    )?.[1] as ((event: { sessionId: string }) => void) | undefined;
+    expect(sessionDiedListener).toBeDefined();
+
+    sessionDiedListener!({ sessionId: 'dead-session' });
+
+    expect(mockChannelOnSessionDied).toHaveBeenCalledWith('dead-session');
+    expect(mockRouterRemoveSessionId).not.toHaveBeenCalled();
   });
 
   it('registers session cleanup on the replacement bridge before restoring sessions', async () => {
