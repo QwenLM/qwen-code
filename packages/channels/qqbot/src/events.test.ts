@@ -83,6 +83,7 @@ vi.mock('@qwen-code/channel-base', () => ({
     }).join('');
     return cleaned.trim().slice(0, 64) || 'unknown';
   },
+  sanitizePromptText: (text: string): string => text,
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -439,6 +440,37 @@ describe('handleGroup', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('@all (isAtBot=false) 时 isMentioned=false 且不更新 replyMsgId', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    // Pre-populate replyMsgId to verify it is NOT clobbered
+    const replyMsgId = (ch as unknown as Record<string, unknown>)[
+      'replyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
+    replyMsgId.set('group-openid-1', { msgId: 'old-msg', timestamp: 0 });
+
+    // Trigger handleGroup with @all mention (is_you: false)
+    pvt.handleGroup(
+      makeGroupEvent({
+        content: '<@all> 大家看看',
+        mentions: [{ scope: 'all' as const, is_you: false }],
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env.isMentioned).toBe(false);
+    expect(env.isReplyToBot).toBe(false);
+    expect(env.text).toContain('[atMention=false]');
+    expect(env.text).toContain('大家看看');
+    expect(env.alreadyPrefixed).toBe(true);
+
+    // replyMsgId should NOT have been updated
+    expect(replyMsgId.get('group-openid-1')!.msgId).toBe('old-msg');
   });
 });
 

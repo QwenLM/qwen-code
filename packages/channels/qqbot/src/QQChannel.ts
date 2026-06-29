@@ -18,6 +18,7 @@ import {
   SessionRouter,
   getGlobalQwenDir,
   sanitizeLogText,
+  sanitizePromptText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
 import type {
@@ -1319,7 +1320,7 @@ export class QQChannel extends ChannelBase {
     const isSlash = cleanText.startsWith('/');
     const text = isSlash
       ? cleanText
-      : `[atMention=true] [${safeName}]: ${cleanText}`;
+      : `[atMention=true] [${safeName}]: ${sanitizePromptText(cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
@@ -1380,7 +1381,7 @@ export class QQChannel extends ChannelBase {
     // Log slash commands with safeName for audit trail
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${cleanText.split(/\s/)[0]}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
       );
     }
 
@@ -1391,9 +1392,15 @@ export class QQChannel extends ChannelBase {
       this.saveQQState();
     }
 
+    if (!isAtBot) {
+      process.stderr.write(
+        `[QQ:${this.name}] @all msg from ${sanitizeLogText(safeName, 64)} in ${sanitizeLogText(chatId, 64)} — not @bot, forwarding as non-mention\n`,
+      );
+    }
+
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] [${safeName}]: ${cleanText}`;
+      : `[atMention=${isAtBot}] [${safeName}]: ${sanitizePromptText(cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1538,7 +1545,7 @@ export class QQChannel extends ChannelBase {
     // Log slash commands with safeName for audit trail
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${cleanText.split(/\s/)[0]}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
       );
     }
 
@@ -1548,7 +1555,7 @@ export class QQChannel extends ChannelBase {
     // in its replies.
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] [${safeName}]: ${content}`;
+      : `[atMention=${isAtBot}] [${safeName}]: ${sanitizePromptText(content)}`;
 
     // Only track replyMsgId for at-mention messages — non-@messages should
     // not clobber a preceding @mention's replyMsgId, or the bot's response
