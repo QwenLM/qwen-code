@@ -160,6 +160,12 @@ export const MessageItem = memo(function MessageItem({
     );
   }
 
+  // The cancellation marker is a right-aligned, full-width turn-terminal row; a
+  // hover timestamp would overlap its text, so render it without the wrapper.
+  if (message.role === 'system' && message.source === 'prompt_cancelled') {
+    return safeBody;
+  }
+
   return (
     <MessageTimestamp
       timestamp={message.timestamp}

@@ -754,7 +754,6 @@ export interface UseComposerCoreOptions {
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
-  onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -888,7 +887,6 @@ export function useComposerCore(
     slashCommandCategoryOrder,
     queuedMessages = [],
     onPopQueuedMessages,
-    onClearQueuedMessages,
     currentMode = 'default',
     onFocusFooter,
     dialogOpen = false,
@@ -925,8 +923,6 @@ export function useComposerCore(
   queuedMessagesRef.current = queuedMessages;
   const onPopQueuedMessagesRef = useRef(onPopQueuedMessages);
   onPopQueuedMessagesRef.current = onPopQueuedMessages;
-  const onClearQueuedMessagesRef = useRef(onClearQueuedMessages);
-  onClearQueuedMessagesRef.current = onClearQueuedMessages;
   const followupStateRef = useRef(followupState);
   followupStateRef.current = followupState;
   const onAcceptFollowupRef = useRef(onAcceptFollowup);
@@ -1440,8 +1436,10 @@ export function useComposerCore(
             setShellMode(false);
             return true;
           }
-          if (queuedMessagesRef.current.length === 0) return false;
-          return onClearQueuedMessagesRef.current?.() ?? false;
+          // Don't clear the queue on Escape — let it fall through to the
+          // window handler, where Escape cancels the in-flight turn (queued
+          // prompts are preserved and drain once it settles).
+          return false;
         },
       },
       {
