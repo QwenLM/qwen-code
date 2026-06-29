@@ -2,6 +2,11 @@ export interface AvailableCommand {
   name: string;
   description: string;
   input?: { hint: string } | null;
+  /**
+   * Aliases the agent's parser also accepts for this command (for example
+   * `summarize` for `compress`).
+   */
+  altNames?: string[];
 }
 
 export interface ToolCallEvent {

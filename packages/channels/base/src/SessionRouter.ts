@@ -153,7 +153,7 @@ export class SessionRouter {
     chatId?: string,
     threadId?: string,
   ): boolean {
-    // If chatId is provided, do an exact lookup; otherwise prefix-scan for any
+    // If chatId is provided, do an exact lookup; otherwise scan for any
     // session belonging to this sender on this channel.
     if (chatId) {
       return this.toSession.has(

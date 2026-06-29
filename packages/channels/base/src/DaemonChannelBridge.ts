@@ -8,6 +8,7 @@ import type {
   ChannelAgentBridge,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import { readAvailableCommandAltNames } from './AcpBridge.js';
 import type { SessionScope } from './types.js';
 
 const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
@@ -105,7 +106,16 @@ function getSessionUpdate(data: unknown): Record<string, unknown> | undefined {
 }
 
 function isAvailableCommand(value: unknown): value is AvailableCommand {
-  return isRecord(value) && typeof value['name'] === 'string';
+  if (!isRecord(value) || typeof value['name'] !== 'string') return false;
+  // altNames is optional; when present it MUST be a string[] (so the type guard is
+  // honest). A malformed wire payload — e.g. `altNames: 5` — would otherwise survive
+  // onto the command and throw at the downstream `altNames.some(...)` recognition
+  // site in ChannelBase.matchAgentCommand.
+  const altNames = value['altNames'];
+  return (
+    altNames === undefined ||
+    (Array.isArray(altNames) && altNames.every((n) => typeof n === 'string'))
+  );
 }
 
 function isPermissionRequestData(
@@ -542,8 +552,12 @@ export class DaemonChannelBridge
       }
       case 'available_commands_update': {
         if (Array.isArray(update['availableCommands'])) {
-          const commands =
-            update['availableCommands'].filter(isAvailableCommand);
+          const commands = update['availableCommands']
+            .filter(isAvailableCommand)
+            .map((cmd) => {
+              const altNames = readAvailableCommandAltNames(cmd);
+              return altNames ? { ...cmd, altNames } : cmd;
+            });
           this.availableCommandsBySession.set(sessionId, commands);
           this.latestAvailableCommandsSessionId = sessionId;
         } else {
