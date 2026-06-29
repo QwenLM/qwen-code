@@ -16,6 +16,8 @@ import {
   ChannelBase,
   SessionRouter,
   getGlobalQwenDir,
+  sanitizeSenderName,
+  sanitizeLogText,
 } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
@@ -966,14 +968,28 @@ export class QQChannel extends ChannelBase {
     // (pure @mention, image, or sticker messages).
     if (!cleanText) return;
     const isSlash = cleanText.startsWith('/');
-    // Log slash commands with senderName for audit trail
+    // We self-prefix and set alreadyPrefixed below, which skips ChannelBase's
+    // [..]/newline/length sanitization — so neutralize the nick here too (same
+    // shared helper), or a crafted QQ nickname could inject brackets/newlines.
+    // Hoisted above the audit log so the log uses the sanitized name too:
+    // event.author.username is attacker-controlled, and a crafted nick bearing
+    // CR/LF/ANSI escapes could otherwise forge or corrupt the operator audit log.
+    const safeName = sanitizeSenderName(senderName);
+    // Log slash commands for an audit trail. cleanText is attacker-controlled, so
+    // neutralize it with the shared log sanitizer (same helper as ChannelBase's
+    // dropped-turn log): it renders newlines visibly and strips the C0/DEL controls
+    // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line break
+    // that could forge an extra log line), the Unicode line/paragraph separators
+    // U+2028/U+2029, and the bidi overrides — any of which would otherwise inject,
+    // overwrite, or reorder an operator's audit line.
     if (isSlash) {
+      const loggedCmd = sanitizeLogText(cleanText, 80);
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText}\n`,
+        `[QQ:${this.name}] Slash cmd from ${safeName} (${chatId}): ${loggedCmd}\n`,
       );
     }
-    // Don't prefix slash commands, keep [senderName] for normal messages
-    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
+    // Don't prefix slash commands, keep [safeName] for normal messages
+    const text = isSlash ? cleanText : `[${safeName}]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId: event.author.user_openid || event.author.id,
@@ -986,6 +1002,7 @@ export class QQChannel extends ChannelBase {
       // QQ Bot only receives group messages when explicitly @mentioned, so
       // every group message is semantically a reply to the bot.
       isReplyToBot: true,
+      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
     );

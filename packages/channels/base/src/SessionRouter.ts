@@ -64,6 +64,11 @@ export class SessionRouter {
    * ':' delimiter ensures a sender id matches as a whole segment — without it
    * sender "bob" would also match another sender "bobby"
    * (key `${channelName}:bobby:${chatId}`).
+   *
+   * NOTE: this prefix never matches `single`-scoped keys (`${channelName}:
+   * __single__`, no sender segment). That path is latent today — every
+   * ChannelBase caller passes `envelope.chatId`, taking the exact-lookup branch
+   * — so a `single`-scoped channel must not rely on the by-sender scan.
    */
   private senderPrefix(channelName: string, senderId: string): string {
     return `${channelName}:${senderId}:`;
@@ -106,11 +111,18 @@ export class SessionRouter {
     );
   }
 
-  hasSession(channelName: string, senderId: string, chatId?: string): boolean {
+  hasSession(
+    channelName: string,
+    senderId: string,
+    chatId?: string,
+    threadId?: string,
+  ): boolean {
     // If chatId is provided, do an exact lookup; otherwise prefix-scan for any
     // session belonging to this sender on this channel.
     if (chatId) {
-      return this.toSession.has(this.routingKey(channelName, senderId, chatId));
+      return this.toSession.has(
+        this.routingKey(channelName, senderId, chatId, threadId),
+      );
     }
     const prefix = this.senderPrefix(channelName, senderId);
     for (const k of this.toSession.keys()) {
@@ -126,10 +138,11 @@ export class SessionRouter {
     channelName: string,
     senderId: string,
     chatId?: string,
+    threadId?: string,
   ): string[] {
     const removedIds: string[] = [];
     if (chatId) {
-      const key = this.routingKey(channelName, senderId, chatId);
+      const key = this.routingKey(channelName, senderId, chatId, threadId);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
     } else {
