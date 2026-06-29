@@ -4106,6 +4106,27 @@ describe('GeminiChat', async () => {
       expect(chat.getLastModelMessageText()).toBe('new answer');
       expect(structuredCloneSpy).not.toHaveBeenCalled();
     });
+
+    it('filters out thought parts from the last model message', () => {
+      chat.addHistory({
+        role: 'model',
+        parts: [
+          { text: 'internal reasoning...', thought: true },
+          { text: 'visible response' },
+        ],
+      });
+
+      expect(chat.getLastModelMessageText()).toBe('visible response');
+    });
+
+    it('returns undefined when all text parts are thoughts', () => {
+      chat.addHistory({
+        role: 'model',
+        parts: [{ text: 'only thinking', thought: true }],
+      });
+
+      expect(chat.getLastModelMessageText()).toBeUndefined();
+    });
   });
 
   describe('sendMessageStream with retries', () => {

@@ -2759,7 +2759,8 @@ export class GeminiChat {
       const text =
         message.parts
           ?.filter(
-            (part): part is { text: string } => typeof part.text === 'string',
+            (part): part is { text: string } =>
+              typeof part.text === 'string' && !part.thought,
           )
           .map((part) => part.text)
           .join('') ?? '';
