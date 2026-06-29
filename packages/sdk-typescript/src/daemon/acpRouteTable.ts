@@ -500,6 +500,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ serverName: segs[0] }),
     },
   },
+  // GET /workspace/mcp/:server/resources → _qwen/workspace/mcp/resources
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/mcp\/([^/]+)\/resources\/?$/,
+    mapping: {
+      method: '_qwen/workspace/mcp/resources',
+      extractParams: (segs) => ({ serverName: segs[0] }),
+    },
+  },
   // POST /workspace/mcp/servers → _qwen/workspace/mcp/servers/add
   {
     httpMethod: 'POST',

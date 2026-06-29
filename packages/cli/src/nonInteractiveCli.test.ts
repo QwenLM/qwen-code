@@ -6,6 +6,7 @@
 
 import type {
   Config,
+  CronJob,
   ToolRegistry,
   ServerGeminiStreamEvent,
   SessionMetrics,
@@ -21,10 +22,17 @@ import {
   FatalInputError,
   ApprovalMode,
   SendMessageType,
+  SYSTEM_REMINDER_OPEN,
   LoopType,
+  CronScheduler,
+  LOOP_SENTINEL_CRON,
+  LOOP_SENTINEL_DYNAMIC,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
-import { runNonInteractive } from './nonInteractiveCli.js';
+import {
+  runNonInteractive,
+  skipHeadlessLoopSentinel,
+} from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -73,6 +81,73 @@ vi.mock('./services/CommandService.js', () => ({
   },
 }));
 
+describe('skipHeadlessLoopSentinel', () => {
+  it('deletes a recurring session loop.md sentinel job so sessionSize reaches 0', () => {
+    // A recurring SESSION (non-durable) loop.md job left in the scheduler keeps
+    // sessionSize > 0, so the headless hold-open never resolves and the run
+    // hangs. Skipping the sentinel must delete the job, not just no-op the tick.
+    const scheduler = new CronScheduler();
+    const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_CRON, true);
+    expect(scheduler.sessionSize).toBe(1);
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(scheduler.sessionSize).toBe(0);
+    expect(scheduler.list()).toHaveLength(0);
+  });
+
+  it('also cleans up a recurring session job for the dynamic sentinel', () => {
+    // Mirror of the cron case for `<<loop.md-dynamic>>`. skipHeadlessLoopSentinel
+    // must route through detectLoopSentinel (which matches BOTH sentinels), not a
+    // `=== LOOP_SENTINEL_CRON` comparison — otherwise a dynamic loop.md job would
+    // pin sessionSize > 0 and hang the headless run.
+    const scheduler = new CronScheduler();
+    const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_DYNAMIC, true);
+    expect(scheduler.sessionSize).toBe(1);
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(scheduler.sessionSize).toBe(0);
+    expect(scheduler.list()).toHaveLength(0);
+  });
+
+  it('returns false and keeps a non-sentinel job', () => {
+    const scheduler = new CronScheduler();
+    scheduler.create('*/5 * * * *', 'do real work', true);
+    const job = scheduler.list()[0] as CronJob;
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(false);
+
+    expect(scheduler.sessionSize).toBe(1);
+  });
+
+  it('does not delete a durable sentinel job (it persists for a future session)', () => {
+    // Durable jobs live under ~/.qwen and never count toward sessionSize, so
+    // they don't pin the run; deleting one would wrongly remove it from disk.
+    const scheduler = new CronScheduler();
+    const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_CRON, true);
+    job.durable = true;
+    const deleteSpy = vi.spyOn(scheduler, 'delete');
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not delete a non-recurring sentinel job (one-shot stays in the scheduler)', () => {
+    // The deletion branch requires BOTH `recurring && !durable`. A one-shot
+    // sentinel job is already removed by the scheduler before it fires, so this
+    // guard must NOT delete it — a `!durable`-only guard would wrongly evict it.
+    const scheduler = new CronScheduler();
+    const job = scheduler.create('*/5 * * * *', LOOP_SENTINEL_CRON, false);
+    const deleteSpy = vi.spyOn(scheduler, 'delete');
+
+    expect(skipHeadlessLoopSentinel(scheduler, job)).toBe(true);
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('runNonInteractive', () => {
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
@@ -99,10 +174,12 @@ describe('runNonInteractive', () => {
     sendMessageStream: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
+    stripOrphanedUserEntriesFromHistory: Mock;
     getHistoryFunctionResponseIds: Mock;
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
   };
+  let mockGetDebugResponses: Mock;
 
   beforeEach(async () => {
     // Reset module-level state from any prior test in this file. Without
@@ -113,6 +190,7 @@ describe('runNonInteractive', () => {
 
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
+    mockGetDebugResponses = vi.fn().mockReturnValue([]);
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
     );
@@ -157,6 +235,7 @@ describe('runNonInteractive', () => {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
+      stripOrphanedUserEntriesFromHistory: vi.fn(),
       getChatRecordingService: vi.fn(() => ({
         initialize: vi.fn(),
         recordMessage: vi.fn(),
@@ -343,6 +422,182 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  describe('continueInterrupted', () => {
+    it('re-submits an orphaned trailing user prompt with Retry semantics', async () => {
+      setupMetricsMock();
+      // The orphan strip + restore is owned by the Retry send path in
+      // client.ts (covered by client.test.ts); here we only assert the
+      // continuation hands off to that path with Retry semantics.
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c1', {
+        continueInterrupted: true,
+      });
+
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+        [{ text: 'do the thing' }],
+        expect.any(AbortSignal),
+        'prompt-c1',
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+    });
+
+    it('adds plan mode reminders to an interrupted prompt replay', async () => {
+      setupMetricsMock();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plan', {
+        continueInterrupted: true,
+      });
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      expect(request).toEqual([
+        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+        { text: 'do the thing' },
+      ]);
+    });
+
+    it('closes dangling tool calls with synthesized ToolResult parts', async () => {
+      setupMetricsMock();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+          },
+        ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c2', {
+        continueInterrupted: true,
+      });
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(request).toEqual([
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { error: expect.stringContaining('not recorded') },
+          },
+        },
+      ]);
+    });
+
+    it('adds plan mode reminders to a continued tool result without moving function responses', async () => {
+      setupMetricsMock();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+          },
+        ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c-tool-plan',
+        {
+          continueInterrupted: true,
+        },
+      );
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(request).toEqual([
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { error: expect.stringContaining('not recorded') },
+          },
+        },
+        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+      ]);
+    });
+
+    it('is a no-op when the last turn ended cleanly', async () => {
+      setupMetricsMock();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
+      }));
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c3', {
+        continueInterrupted: true,
+      });
+
+      expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    });
   });
 
   it('on EPIPE, destroys stdout and returns normally instead of process.exit', async () => {
@@ -3135,6 +3390,42 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       { type: SendMessageType.UserQuery },
     );
+  });
+
+  it('installs a skipDurableFire predicate that classifies loop.md sentinels in headless mode', async () => {
+    // Locks the wiring at the scheduler-enable site: runNonInteractive must
+    // hand the scheduler a predicate that skips durable loop.md sentinels
+    // (which a headless run can't expand), while still letting non-sentinel
+    // durable jobs fire. Both halves are covered alone — detectLoopSentinel via
+    // skipHeadlessLoopSentinel above, the filter via cronScheduler tests — but
+    // nothing pins that runNonInteractive actually connects them. A refactor
+    // dropping or rewriting this call would otherwise silently fire raw
+    // `<<loop.md>>` sentinels at the model (or skip real durable jobs), uncaught.
+    setupMetricsMock();
+    // Real scheduler with no projectRoot: enableDurable() short-circuits (no
+    // filesystem/lock work) and, with no jobs, the headless cron hold-open
+    // resolves immediately, so runNonInteractive returns without hanging.
+    const scheduler = new CronScheduler();
+    const skipSpy = vi.spyOn(scheduler, 'setSkipDurableFire');
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'ok' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p-cron-wiring');
+
+    expect(skipSpy).toHaveBeenCalledOnce();
+    const predicate = skipSpy.mock.calls[0][0];
+    expect(predicate({ prompt: LOOP_SENTINEL_CRON } as CronJob)).toBe(true);
+    expect(predicate({ prompt: LOOP_SENTINEL_DYNAMIC } as CronJob)).toBe(true);
+    expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
   });
 
   describe('--json-schema structured output', () => {

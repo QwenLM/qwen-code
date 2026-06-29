@@ -435,6 +435,8 @@ export enum LoopType {
   REPETITIVE_THOUGHTS = 'repetitive_thoughts',
   READ_FILE_LOOP = 'read_file_loop',
   ACTION_STAGNATION = 'action_stagnation',
+  /** Similar read-only shell inspection commands repeat with varied args. */
+  SHELL_COMMAND_STAGNATION = 'shell_command_stagnation',
   /** Same (tool, args) pair appears N times across the entire turn, not necessarily consecutively. */
   GLOBAL_TOOL_CALL_DUPLICATE = 'global_tool_call_duplicate',
   /** Two tools alternating in a fixed pattern (A B A B A B ...). */

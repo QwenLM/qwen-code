@@ -251,7 +251,7 @@ context threaded through bridge calls; it carries `clientId`,
 - `MCP_RESTART_TIMEOUT_MS = 300_000` (5 min) — the bridge timeout for `/workspace/mcp/:server/restart` is intentionally large because `McpClientManager.MAX_DISCOVERY_TIMEOUT_MS` can be up to 5 min for stdio servers. A shorter deadline would produce false timeouts while the ACP child kept reconnecting in the background.
 - `BridgeOptions.eventRingSize > 1_000_000` throws at construction.
 - `connection.unstable_resumeSession` is exposed through the stable `session_resume` daemon capability; `unstable_session_resume` remains advertised as a deprecated compatibility alias for older SDKs. Clients should feature-detect `session_resume`.
-- The bridge package is `@qwen-code/acp-bridge` and is consumed through re-export shims in `serve/event-bus.ts`, `serve/status.ts`, `serve/httpAcpBridge.ts` for backward compatibility with pre-F1 import paths. New code should import directly.
+- The bridge package is `@qwen-code/acp-bridge`. Current code imports event-bus and status primitives directly from package subpaths; `serve/acp-session-bridge.ts` remains as the CLI-local compatibility facade for the broader bridge surface.
 
 ## References
 

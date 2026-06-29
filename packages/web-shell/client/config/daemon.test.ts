@@ -133,6 +133,48 @@ describe('getDaemonToken', () => {
   });
 });
 
+describe('waitForDaemonTokenMessage', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  function mockFramedWindow() {
+    Object.defineProperty(window, 'parent', {
+      value: {},
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  it('accepts a bearer token posted from a browser extension parent', async () => {
+    mockFramedWindow();
+    const mod = await import('./daemon');
+    const token = mod.waitForDaemonTokenMessage(1000);
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { type: 'qwen-daemon-auth', token: 'posted-secret' },
+        origin: 'chrome-extension://abcdefghijklmnop',
+        source: window.parent,
+      }),
+    );
+    await expect(token).resolves.toBe('posted-secret');
+  });
+
+  it('ignores bearer token messages from non-extension origins', async () => {
+    mockFramedWindow();
+    const mod = await import('./daemon');
+    const token = mod.waitForDaemonTokenMessage(1);
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { type: 'qwen-daemon-auth', token: 'evil-secret' },
+        origin: 'https://evil.example.com',
+        source: window.parent,
+      }),
+    );
+    await expect(token).resolves.toBeUndefined();
+  });
+});
+
 describe('removeDaemonTokenFromUrl', () => {
   beforeEach(() => {
     vi.resetModules();

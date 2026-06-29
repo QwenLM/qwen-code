@@ -4,6 +4,8 @@ import type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourceStatus,
+  DaemonWorkspaceMcpResourcesStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useMcp } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
@@ -107,6 +109,12 @@ function toolAnnotationText(tool: DaemonWorkspaceMcpToolStatus, t: T): string {
 
 function toolKey(serverName: string, toolName: string): string {
   return `${serverName}:${toolName}`;
+}
+
+// A resource URI may contain ':', so join with NUL (mirrors core's
+// ResourceRegistry key) to keep the expand-state key collision-proof.
+function resourceKey(serverName: string, uri: string): string {
+  return `${serverName}\u0000${uri}`;
 }
 
 const detailLabel = trimDialogLabel;
@@ -252,6 +260,55 @@ function ToolDetail({ tool, t }: { tool: DaemonWorkspaceMcpToolStatus; t: T }) {
   );
 }
 
+function ResourceDetail({
+  resource,
+  t,
+}: {
+  resource: DaemonWorkspaceMcpResourceStatus;
+  t: T;
+}) {
+  // Only surface the friendly name when it adds information beyond the URI
+  // that is already shown — mirrors the TUI ResourceDetailStep.
+  const friendlyName = resource.title || resource.name || '';
+  const showName = friendlyName !== '' && friendlyName !== resource.uri;
+  return (
+    <div className={styles.toolDetail}>
+      <Field
+        label={detailLabel(t('mcp.resource.uriLabel'))}
+        value={resource.uri}
+      />
+      {showName ? (
+        <Field
+          label={detailLabel(t('mcp.resource.nameLabel'))}
+          value={friendlyName}
+        />
+      ) : null}
+      {resource.mimeType ? (
+        <Field
+          label={detailLabel(t('mcp.resource.mimeTypeLabel'))}
+          value={resource.mimeType}
+        />
+      ) : null}
+      {typeof resource.size === 'number' ? (
+        <Field
+          label={detailLabel(t('mcp.resource.sizeLabel'))}
+          value={t('mcp.resource.bytes', { count: resource.size })}
+        />
+      ) : null}
+      {resource.description ? (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>
+            {detailLabel(t('mcp.description'))}
+          </div>
+          <div className={styles.description}>
+            {resource.description.trim()}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function McpDialog({ message }: McpDialogProps) {
   const { t } = useI18n();
   const mcp = useMcp({ autoLoad: false });
@@ -261,11 +318,17 @@ export function McpDialog({ message }: McpDialogProps) {
   const [toolsByServer, setToolsByServer] = useState<
     Record<string, DaemonWorkspaceMcpToolsStatus>
   >(message.toolsByServer);
+  const [resourcesByServer, setResourcesByServer] = useState<
+    Record<string, DaemonWorkspaceMcpResourcesStatus>
+  >(message.resourcesByServer ?? {});
   const servers = useMemo(() => status.servers ?? [], [status.servers]);
   const [expandedServers, setExpandedServers] = useState<Set<string>>(
     new Set(),
   );
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  const [expandedResources, setExpandedResources] = useState<Set<string>>(
+    new Set(),
+  );
   const [actionMessage, setActionMessage] = useState<{
     serverName: string;
     text: string;
@@ -289,6 +352,7 @@ export function McpDialog({ message }: McpDialogProps) {
       items: Array<{
         server: DaemonWorkspaceMcpServerStatus;
         tools: DaemonWorkspaceMcpToolStatus[];
+        resources: DaemonWorkspaceMcpResourceStatus[];
       }>;
     }> = [];
     for (const server of servers) {
@@ -296,13 +360,14 @@ export function McpDialog({ message }: McpDialogProps) {
       const item = {
         server,
         tools: toolsByServer[server.name]?.tools ?? [],
+        resources: resourcesByServer[server.name]?.resources ?? [],
       };
       const group = groups.find((candidate) => candidate.label === label);
       if (group) group.items.push(item);
       else groups.push({ label, items: [item] });
     }
     return groups;
-  }, [servers, t, toolsByServer]);
+  }, [servers, t, toolsByServer, resourcesByServer]);
 
   const reloadServer = useCallback(
     async (serverName: string) => {
@@ -318,6 +383,30 @@ export function McpDialog({ message }: McpDialogProps) {
         ...current,
         [nextServer.name]: nextTools,
       }));
+      // Keep the resource list in sync after reconnect/enable. Only fetch
+      // when the refreshed status still advertises resources; otherwise
+      // drop any now-stale list so the section disappears. The fetch is
+      // isolated in its own try/catch so a failed resource refresh never
+      // turns a successful reconnect/enable into a reported failure.
+      if (nextServer.resourceCount) {
+        try {
+          const nextResources = await mcp.loadResources(nextServer.name);
+          setResourcesByServer((current) => ({
+            ...current,
+            [nextServer.name]: nextResources,
+          }));
+        } catch {
+          // Leave the prior resource list in place; the count badge still
+          // reflects the refreshed status.
+        }
+      } else {
+        setResourcesByServer((current) => {
+          if (!(nextServer.name in current)) return current;
+          const next = { ...current };
+          delete next[nextServer.name];
+          return next;
+        });
+      }
     },
     [mcp],
   );
@@ -377,11 +466,19 @@ export function McpDialog({ message }: McpDialogProps) {
       return current.has(serverName) ? new Set() : new Set([serverName]);
     });
     setExpandedTools(new Set());
+    setExpandedResources(new Set());
   }, []);
 
   const toggleTool = useCallback((serverName: string, toolName: string) => {
     const key = toolKey(serverName, toolName);
     setExpandedTools((current) => {
+      return current.has(key) ? new Set() : new Set([key]);
+    });
+  }, []);
+
+  const toggleResource = useCallback((serverName: string, uri: string) => {
+    const key = resourceKey(serverName, uri);
+    setExpandedResources((current) => {
       return current.has(key) ? new Set() : new Set([key]);
     });
   }, []);
@@ -404,11 +501,13 @@ export function McpDialog({ message }: McpDialogProps) {
               {group.label !== t('mcp.extensionMcp') ? (
                 <div className={styles.groupTitle}>{group.label}</div>
               ) : null}
-              {group.items.map(({ server, tools }) => {
+              {group.items.map(({ server, tools, resources }) => {
                 const display = statusDisplay(server, t);
                 const expanded = expandedServers.has(server.name);
                 const actions = serverActions(server, t);
                 const toolCount = toolsByServer[server.name]?.tools.length ?? 0;
+                const resourceCount = server.resourceCount ?? 0;
+                const promptCount = server.promptCount ?? 0;
                 return (
                   <div key={server.name} className={styles.server}>
                     <div
@@ -449,6 +548,20 @@ export function McpDialog({ message }: McpDialogProps) {
                             },
                           )}
                         </span>
+                        {resourceCount > 0 ? (
+                          <span
+                            className={`${styles.badge} ${styles.resourceCount}`}
+                          >
+                            {t('mcp.resourceCount', { count: resourceCount })}
+                          </span>
+                        ) : null}
+                        {promptCount > 0 ? (
+                          <span
+                            className={`${styles.badge} ${styles.promptCount}`}
+                          >
+                            {t('mcp.promptCount', { count: promptCount })}
+                          </span>
+                        ) : null}
                         <span className={styles.chevronCell} aria-hidden="true">
                           <ChevronIcon expanded={expanded} />
                         </span>
@@ -517,6 +630,73 @@ export function McpDialog({ message }: McpDialogProps) {
                               })}
                             </div>
                           )}
+                          {resourceCount > 0 ? (
+                            <div className={styles.resources}>
+                              <div className={styles.sectionTitle}>
+                                {t('mcp.resources')}
+                              </div>
+                              {resources.length === 0 ? (
+                                <div className={styles.emptyTools}>
+                                  {t('mcp.resourcesUnavailable')}
+                                </div>
+                              ) : null}
+                              {resources.map((resource) => {
+                                const key = resourceKey(
+                                  server.name,
+                                  resource.uri,
+                                );
+                                const resourceExpanded =
+                                  expandedResources.has(key);
+                                const label =
+                                  resource.title || resource.name || '';
+                                return (
+                                  <div
+                                    key={resource.uri}
+                                    className={styles.tool}
+                                  >
+                                    <button
+                                      type="button"
+                                      className={`${styles.row} ${styles.toolRow} ${
+                                        resourceExpanded
+                                          ? styles.expandedRow
+                                          : ''
+                                      }`}
+                                      onClick={() =>
+                                        toggleResource(
+                                          server.name,
+                                          resource.uri,
+                                        )
+                                      }
+                                    >
+                                      <span
+                                        className={styles.rowIcon}
+                                        aria-hidden="true"
+                                      />
+                                      <span
+                                        className={`${styles.name} ${styles.resourceUri}`}
+                                      >
+                                        {resource.uri}
+                                      </span>
+                                      {label && label !== resource.uri ? (
+                                        <span className={styles.resourceLabel}>
+                                          {label}
+                                        </span>
+                                      ) : null}
+                                      <ChevronIcon
+                                        expanded={resourceExpanded}
+                                      />
+                                    </button>
+                                    {resourceExpanded ? (
+                                      <ResourceDetail
+                                        resource={resource}
+                                        t={t}
+                                      />
+                                    ) : null}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>

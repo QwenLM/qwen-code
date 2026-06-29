@@ -5,10 +5,10 @@
   margin: 0 0 12px;
   padding: 10px 14px;
   max-width: min(var(--chat-regular-content-width, 1000px), calc(100vw - 64px));
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--background);
+  color: var(--foreground);
   font-family: var(--font-mono);
   font-size: 13px;
 }
@@ -37,13 +37,13 @@
 .hint,
 .empty,
 .busy {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .hint {
   padding: 8px;
   border-radius: 6px;
-  background: var(--bg-primary);
+  background: var(--background);
 }
 
 .scopeTabs {
@@ -52,7 +52,7 @@
   gap: 4px;
   padding: 3px;
   border-radius: 8px;
-  background: var(--bg-primary);
+  background: var(--background);
 }
 
 .scopeTab {
@@ -61,7 +61,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
@@ -69,8 +69,8 @@
 
 .scopeTab:hover,
 .scopeTabActive {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--secondary);
+  color: var(--foreground);
 }
 
 .settingsPage {
@@ -86,7 +86,7 @@
   gap: 3px;
   min-width: 0;
   padding-right: 8px;
-  border-right: 1px solid var(--border-color);
+  border-right: 1px solid var(--border);
 }
 
 .categoryButton {
@@ -100,7 +100,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   cursor: pointer;
   font: inherit;
   text-align: left;
@@ -108,13 +108,13 @@
 
 .categoryButton:hover,
 .categoryButtonActive {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--secondary);
+  color: var(--foreground);
 }
 
 .categoryCount {
   flex: 0 0 auto;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 11px;
 }
 
@@ -132,11 +132,11 @@
   align-items: center;
   padding: 8px;
   border-radius: 8px;
-  background: var(--bg-primary);
+  background: var(--background);
 }
 
 .card:hover {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .cardBody {
@@ -147,7 +147,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   font-weight: 500;
 }
@@ -155,7 +155,7 @@
 .cardDescription,
 .scopeHint {
   margin-top: 3px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -165,8 +165,8 @@
   flex: 0 0 auto;
   padding: 1px 5px;
   border-radius: 999px;
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
+  background: var(--secondary);
+  color: var(--muted-foreground);
   font-size: 11px;
   font-weight: 400;
 }
@@ -181,10 +181,10 @@
 .actionButton,
 .editInput {
   min-height: 28px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--background);
+  color: var(--foreground);
   font: inherit;
   font-size: 12px;
 }
@@ -204,7 +204,7 @@
 }
 
 .actionButton:hover {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .actionButton:disabled {
@@ -213,7 +213,7 @@
 }
 
 .actionButton:disabled:hover {
-  background: var(--bg-primary);
+  background: var(--background);
 }
 
 .editor {
@@ -232,15 +232,15 @@
   position: relative;
   width: 38px;
   height: 22px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--bg-tertiary);
+  background: var(--secondary);
   cursor: pointer;
 }
 
 .switchOn {
-  background: var(--accent-color);
-  border-color: var(--accent-color);
+  background: var(--agent-blue-500);
+  border-color: var(--agent-blue-500);
 }
 
 .switchKnob {
@@ -250,7 +250,7 @@
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: var(--bg-primary);
+  background: var(--background);
   transition: transform 120ms ease;
 }
 
@@ -260,8 +260,8 @@
 
 .footer {
   padding-top: 8px;
-  border-top: 1px solid var(--border-color);
-  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
 }
 
 @media (max-width: 720px) {
@@ -276,7 +276,7 @@
     padding-right: 0;
     padding-bottom: 8px;
     border-right: 0;
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border);
   }
 
   .categoryButton {

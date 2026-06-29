@@ -137,7 +137,7 @@ The daemon reads settings once at boot through `loadSettings(boundWorkspace)` in
 | `DEFAULT_MAX_PENDING_PER_SESSION` | `bridge.ts`             | `64`              | Aligned with `DEFAULT_MAX_SUBSCRIBERS`.                           |
 | `MAX_RESOLVED_PERMISSION_RECORDS` | `permissionMediator.ts` | `512`             | FIFO for recently resolved permissions.                           |
 | `KILL_HARD_DEADLINE_MS`           | `spawnChannel.ts`       | `10_000`          | Per-channel graceful shutdown window.                             |
-| `SHUTDOWN_FORCE_CLOSE_MS`         | `run-qwen-serve.ts`       | `5_000`           | HTTP server force-close timer.                                    |
+| `SHUTDOWN_FORCE_CLOSE_MS`         | `run-qwen-serve.ts`     | `5_000`           | HTTP server force-close timer.                                    |
 | `MAX_READ_BYTES`                  | `fs/policy.ts`          | `256 * 1024`      | Read cap.                                                         |
 | `MAX_WRITE_BYTES`                 | `fs/policy.ts`          | `5 * 1024 * 1024` | Write cap.                                                        |
 | `MAX_DISPLAY_NAME_LENGTH`         | `bridge.ts`             | `256`             | Session `displayName` cap.                                        |
