@@ -272,15 +272,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // header's "N · done/N" honest, and `availableTerminalHeight` is a hard cap
   // backstop for degenerate cases (many agents finishing at once).
   if (isPureParallelAgentGroup(toolCalls) && !hasSubagentPendingConfirmation) {
-    const inlineAgentToolCalls = inlineToolCalls.filter(isSubagentToolEntry);
-    if (inlineAgentToolCalls.length === 0) {
+    // `isPureParallelAgentGroup` already guarantees every entry is a subagent,
+    // so `inlineToolCalls` (a subset) and `toolCalls.length` need no further
+    // `isSubagentToolEntry` filtering here.
+    if (inlineToolCalls.length === 0) {
       return null;
     }
     return (
       <InlineParallelAgentsDisplay
-        toolCalls={inlineAgentToolCalls}
+        toolCalls={inlineToolCalls}
         contentWidth={contentWidth}
-        totalAgentCount={toolCalls.filter(isSubagentToolEntry).length}
+        totalAgentCount={toolCalls.length}
         availableTerminalHeight={availableTerminalHeight}
       />
     );

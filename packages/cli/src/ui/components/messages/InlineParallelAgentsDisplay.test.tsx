@@ -310,5 +310,29 @@ describe('<InlineParallelAgentsDisplay />', () => {
       // Header tally still reflects the full count.
       expect(frame).toContain('10/10 done');
     });
+
+    it('at a budget of 2, keeps the header + indicator only (drops every row)', () => {
+      const budget = 2;
+      const { lastFrame } = renderCapped(manyAgents(10), budget);
+      const frame = lastFrame() ?? '';
+      // header (1) + "+N more" indicator (1) = 2 rows, exactly the budget — no
+      // data row may slip in, or the frame overflows and snaps back.
+      expect(frame.split('\n').length).toBeLessThanOrEqual(budget);
+      expect(frame).toContain('+10 more agents');
+      expect(frame).not.toContain('CapAgent');
+      expect(frame).toContain('10/10 done');
+    });
+
+    it('at a budget of 1, keeps only the header (drops rows and the indicator)', () => {
+      const budget = 1;
+      const { lastFrame } = renderCapped(manyAgents(10), budget);
+      const frame = lastFrame() ?? '';
+      // Only the header fits; even the overflow indicator would overflow.
+      expect(frame.split('\n').length).toBeLessThanOrEqual(budget);
+      expect(frame).not.toContain('more agent');
+      expect(frame).not.toContain('CapAgent');
+      // The header label still carries the full tally.
+      expect(frame).toContain('10/10 done');
+    });
   });
 });

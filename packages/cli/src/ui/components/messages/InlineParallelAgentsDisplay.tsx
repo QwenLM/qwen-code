@@ -279,16 +279,33 @@ export const InlineParallelAgentsDisplay: React.FC<
   const headerLabel = `Parallel agents · ${total} · ${doneCount}/${total} done`;
 
   // Height backstop: the panel lives in the non-`<Static>` live frame, so its
-  // height must stay within budget or ink clears the whole terminal on every
-  // repaint (scroll snap-back). Reserve 1 row for the header and 1 for the
-  // overflow indicator, then window to the most recent rows that fit. A budget
-  // ≤ 0 / undefined means "no cap" (committed phase — already in `<Static>`).
-  const rowBudget =
-    availableTerminalHeight && availableTerminalHeight > 0
-      ? Math.max(1, availableTerminalHeight - 2)
-      : rows.length;
-  const overflowCount = Math.max(0, rows.length - rowBudget);
-  const visibleRows = overflowCount > 0 ? rows.slice(rows.length - rowBudget) : rows;
+  // total height must stay within budget or ink clears the whole terminal on
+  // every repaint (scroll snap-back). The header always costs 1 row; when rows
+  // overflow, the "+N more" indicator costs another. Window to the most recent
+  // rows that still fit AFTER reserving those lines, so the rendered height
+  // (header + optional indicator + visibleRows) never exceeds the budget — even
+  // at degenerate budgets ≤ 2, where we drop all rows (and at a budget of 1 the
+  // indicator too, leaving just the header whose label still states the total).
+  // A budget ≤ 0 / undefined means "no cap" (committed phase — already in
+  // `<Static>`).
+  const hasBudget =
+    availableTerminalHeight != null && availableTerminalHeight > 0;
+  let overflowCount = 0;
+  let visibleRows = rows;
+  if (hasBudget && rows.length + 1 > availableTerminalHeight) {
+    // header (1) + all rows would exceed the budget → window.
+    if (availableTerminalHeight >= 2) {
+      // Reserve 1 row for the header and 1 for the "+N more" indicator; the
+      // remainder is for rows.
+      const rowsFit = availableTerminalHeight - 2;
+      overflowCount = rows.length - rowsFit;
+      visibleRows = rowsFit > 0 ? rows.slice(rows.length - rowsFit) : [];
+    } else {
+      // Budget of 1: only the header fits — drop every row and the indicator
+      // too. The header label still states the total agent count.
+      visibleRows = [];
+    }
+  }
 
   return (
     <Box flexDirection="column" width={contentWidth} paddingX={1}>
