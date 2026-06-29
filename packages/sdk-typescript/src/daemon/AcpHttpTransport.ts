@@ -1147,9 +1147,9 @@ export class AcpHttpTransport implements DaemonTransport {
             const reason =
               pumpError ??
               new Error('Session SSE reply stream closed unexpectedly');
-            for (const [id, entry] of this.pending) {
-              if (entry.sessionId !== sessionId) continue;
-              entry.reject(reason);
+            for (const [id, pending] of this.pending) {
+              if (pending.sessionId !== sessionId) continue;
+              pending.reject(reason);
               this.pending.delete(id);
             }
           }

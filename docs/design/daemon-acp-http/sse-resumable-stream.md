@@ -249,7 +249,18 @@ operator logging can't drift.
   `session/permission` request the ACP daemon has no handler for — it only
   accepts a permission vote as the JSON-RPC _response_ echoing the outbound
   `_qwen_perm_N` id. Wiring the vote round-trip is part of the §1.7
-  permission-coordination follow-up.
+  permission-coordination follow-up. A related facet: the no-subscriber session
+  **reply pump** (`ensureSessionReplyPump`) opens a real `GET /acp` session
+  stream, which the daemon treats as a live stream — so an agent
+  `permission_request` raised while only the reply pump is attached is ROUTED to
+  that stream and dropped by the pump (it forwards only JSON-RPC responses),
+  hanging the mediator, whereas with no stream at all the daemon cancel-denies
+  and the agent proceeds. Both the daemon-side "is this a real consumer or just
+  a reply pump?" distinction and the SDK-side handling (deny locally / surface
+  to a permission callback) belong with the same permission-coordination
+  follow-up, since the pump cannot itself cast a vote. Consumers that need
+  permission handling should open `subscribeEvents` before issuing session RPCs
+  (the documented contract), which gives the daemon a real consumer stream.
 - **Session RPCs issued from inside the `subscribeEvents` loop on the exported
   `AcpHttpTransport`.** The session `/acp` stream is single-reader: while a
   consumer's async generator is parked between `yield`s, the reader is not
@@ -269,6 +280,13 @@ operator logging can't drift.
   `sendRequest` for it hangs until abort. Neither package's type system enforces
   this. A CI guard (a lightweight script or vitest that extracts the daemon's
   session-reply method names and diffs them against the SDK set) is the right
-  fix, but cross-package static-analysis tooling is its own focused task; the set
-  is small and stable in the meantime, and the JSDoc on the constant documents
-  the invariant.
+  fix, but cross-package static-analysis tooling is its own focused task — and
+  not a trivial grep: a correct extractor needs light dataflow analysis, because
+  `session/prompt`'s reply is NOT emitted inside its `case 'session/prompt'`
+  block. The prompt kicks off asynchronously and its `replySession(...)` fires
+  later from the prompt-completion handler (a different call site), so a naive
+  "which `case` blocks contain `replySession`" scan would wrongly EXCLUDE
+  `session/prompt` and fail the build against a correct set. The set is small and
+  stable in the meantime, and the JSDoc on the constant documents the invariant;
+  the robust long-term fix is to have the daemon advertise its session-routed
+  method names (a shared source of truth) rather than scrape `dispatch.ts`.

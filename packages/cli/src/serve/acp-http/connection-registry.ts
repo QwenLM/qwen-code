@@ -571,7 +571,19 @@ export class AcpConnection {
       if (resumeFromEventId === undefined) {
         void stream.send(entry.frame, entry.id); // fresh connect: flush all now
       } else if (entry.id !== undefined) {
-        continue; // resume: ring replay owns bus events
+        // Resume: ring replay owns bus events, so drop the buffered copy to
+        // avoid double-delivery (the same id arrives via replay). This branch is
+        // near-vacuous on the resume path: id-bearing frames are buffered ONLY
+        // by `sendSession` from the event pump, which is aborted the moment the
+        // stream detaches — so during the detach gap that precedes a resume the
+        // buffer accumulates only id-LESS out-of-band replies. Even the rare
+        // race (an in-flight `translateEvent` buffering one id-bearing frame
+        // just after detach) is covered: that id is still in the ring and the
+        // replay redelivers it. The only residual loss needs that frame to ALSO
+        // be ring-evicted before reconnect, which the replay signals to the
+        // client as `state_resync_required` (not a silent gap) — strictly better
+        // than the pre-resume live-only behaviour, which lost every gap frame.
+        continue;
       } else {
         binding.buffer.push(entry); // resume: defer id-less past replay
       }

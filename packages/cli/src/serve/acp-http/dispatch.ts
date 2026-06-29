@@ -2789,6 +2789,17 @@ export class AcpDispatcher {
         }
         if (event.type === 'replay_complete') {
           conn.endReplayDeferral(sessionId, lastDeliveredId, sawEviction);
+          // Operator breadcrumb for "did resume recover the gap?": one line per
+          // resumed stream stating the cursor it resumed from, how far delivery
+          // reached, the bus-reported replayed count, and whether the ring had
+          // evicted frames (a gap the replay could not fully backfill).
+          const replayedCount = (event.data as { replayedCount?: number })
+            ?.replayedCount;
+          writeStderrLine(
+            `qwen serve: /acp replay complete (${logSafe(sessionId)}) ` +
+              `from=${lastEventId ?? 'none'} delivered_through=${lastDeliveredId} ` +
+              `count=${replayedCount ?? 'n/a'} evicted=${sawEviction}`,
+          );
         }
       }
       // Safety: a live-only subscription (no cursor → no replay boundary) or a
