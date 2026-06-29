@@ -59,6 +59,7 @@ import {
   buildRuntimeFetchOptions,
   extractHostnameFromProxyUrl,
   getOrCreateSharedDispatcher,
+  isTlsVerificationDisabled,
   redactProxyCredentials,
   redactProxyError,
   resetDispatcherCache,
@@ -287,6 +288,116 @@ describe('getOrCreateSharedDispatcher', () => {
       result as { fetchOptions?: { dispatcher?: unknown } }
     ).fetchOptions?.dispatcher;
     expect(sdkDispatcher).toBe(shared);
+  });
+});
+
+describe('TLS verification opt-out (insecure)', () => {
+  const savedEnv = {
+    QWEN_TLS_INSECURE: process.env['QWEN_TLS_INSECURE'],
+    NODE_TLS_REJECT_UNAUTHORIZED: process.env['NODE_TLS_REJECT_UNAUTHORIZED'],
+  };
+
+  beforeEach(() => {
+    resetDispatcherCache();
+    delete process.env['QWEN_TLS_INSECURE'];
+    delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+  });
+
+  afterEach(() => {
+    if (savedEnv.QWEN_TLS_INSECURE === undefined) {
+      delete process.env['QWEN_TLS_INSECURE'];
+    } else {
+      process.env['QWEN_TLS_INSECURE'] = savedEnv.QWEN_TLS_INSECURE;
+    }
+    if (savedEnv.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
+      delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+    } else {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] =
+        savedEnv.NODE_TLS_REJECT_UNAUTHORIZED;
+    }
+  });
+
+  const getDispatcherOptions = (result: unknown): UndiciOptions | undefined =>
+    (
+      result as {
+        fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+      }
+    ).fetchOptions?.dispatcher?.options;
+
+  it('does not set connect options on the no-proxy Agent by default', () => {
+    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
+    expect(options?.['connect']).toBeUndefined();
+  });
+
+  it('disables verification on the no-proxy Agent via QWEN_TLS_INSECURE', () => {
+    process.env['QWEN_TLS_INSECURE'] = '1';
+    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
+    expect(options?.['connect']).toEqual({ rejectUnauthorized: false });
+  });
+
+  it('honors NODE_TLS_REJECT_UNAUTHORIZED=0 for parity', () => {
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
+    expect(options?.['connect']).toEqual({ rejectUnauthorized: false });
+  });
+
+  it('ignores falsy QWEN_TLS_INSECURE values', () => {
+    process.env['QWEN_TLS_INSECURE'] = '0';
+    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
+    expect(options?.['connect']).toBeUndefined();
+  });
+
+  it('uses requestTls/proxyTls (not connect) for the ProxyAgent', () => {
+    process.env['QWEN_TLS_INSECURE'] = '1';
+    const dispatcher = getOrCreateSharedDispatcher(
+      'http://proxy.local',
+    ) as unknown as { options: UndiciOptions };
+    expect(dispatcher.options['requestTls']).toEqual({
+      rejectUnauthorized: false,
+    });
+    expect(dispatcher.options['proxyTls']).toEqual({
+      rejectUnauthorized: false,
+    });
+    expect(dispatcher.options['connect']).toBeUndefined();
+  });
+
+  it('keeps secure and insecure dispatchers in separate cache entries', () => {
+    const secure = getOrCreateSharedDispatcher('http://proxy.local');
+    process.env['QWEN_TLS_INSECURE'] = '1';
+    const insecure = getOrCreateSharedDispatcher('http://proxy.local');
+    expect(secure).not.toBe(insecure);
+  });
+
+  describe('isTlsVerificationDisabled', () => {
+    it.each(['1', 'true', 'TRUE', 'Yes', 'on', '  1  '])(
+      'treats QWEN_TLS_INSECURE=%j as enabled',
+      (value) => {
+        process.env['QWEN_TLS_INSECURE'] = value;
+        expect(isTlsVerificationDisabled()).toBe(true);
+      },
+    );
+
+    it.each(['0', 'false', 'no', 'off', '', 'enabled'])(
+      'treats QWEN_TLS_INSECURE=%j as disabled',
+      (value) => {
+        process.env['QWEN_TLS_INSECURE'] = value;
+        expect(isTlsVerificationDisabled()).toBe(false);
+      },
+    );
+
+    it('honors NODE_TLS_REJECT_UNAUTHORIZED=0', () => {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+      expect(isTlsVerificationDisabled()).toBe(true);
+    });
+
+    it('ignores NODE_TLS_REJECT_UNAUTHORIZED values other than "0"', () => {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '1';
+      expect(isTlsVerificationDisabled()).toBe(false);
+    });
+
+    it('returns false when neither variable is set', () => {
+      expect(isTlsVerificationDisabled()).toBe(false);
+    });
   });
 });
 

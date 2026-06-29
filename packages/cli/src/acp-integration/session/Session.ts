@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
   Content,
   FunctionCall,
@@ -28,11 +30,14 @@ import type {
   GoalTerminalEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
+  LoopTickResult,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
+  detectLoopSentinel,
+  LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
@@ -222,6 +227,23 @@ const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // conforming-but-busy client, while a client that never answers stops
 // costing a stall per tool batch after a few batches.
 const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+// fs codes that let a `dynamic` (self-paced) loop treat a THROWN loop.md
+// sentinel-resolution as transient — degrade to a no-op re-arm tick so the loop
+// survives — instead of re-throwing (which ends it: the firing wakeup is already
+// consumed, so only an end-of-turn re-arm keeps it alive). readLoopTaskFile only
+// re-throws EACCES/EIO/EBUSY/EPERM (it skips ENOENT/EISDIR/ENOTDIR/ELOOP/… to its
+// own `missing` → no-op path); EISDIR/ENOTDIR stay here as defense-in-depth for
+// the lstat→open TOCTOU race (path swapped to a dir/non-dir mid-read) should that
+// internal skip ever narrow. ENOENT is omitted on purpose: "absent" is not a
+// transient read failure and can never reach this catch.
+const TRANSIENT_FS_CODES: readonly string[] = [
+  'EACCES',
+  'EIO',
+  'EBUSY',
+  'EPERM',
+  'EISDIR',
+  'ENOTDIR',
+];
 
 type DrainedMidTurnMessage =
   | { kind: 'text'; message: string }
@@ -576,6 +598,13 @@ export async function buildAvailableCommandsSnapshot(
         supportedModes: getEffectiveSupportedModes(cmd),
         subcommands: getCommandSubcommandNames(cmd),
         modelInvocable: cmd.modelInvocable === true,
+        // Carry aliases so a channel consumer (which only sees the wire snapshot,
+        // not the command registry) can recognize an aliased command and avoid
+        // tagging it. _meta is ACP's extension point; omitted when there are none
+        // so command entries without aliases stay byte-identical on the wire.
+        ...(cmd.altNames && cmd.altNames.length > 0
+          ? { altNames: cmd.altNames }
+          : {}),
       },
     };
   });
@@ -677,6 +706,13 @@ export class Session implements SessionContext {
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
+  // Resolves the `<<loop.md>>` / `<<loop.md-dynamic>>` sentinels at fire time.
+  // Lazily created on the first loop tick; its content cache is reset on
+  // compaction (see #sendMessageStreamWithAutoCompression) and it is rebuilt if
+  // the working dir changes (e.g. /cd) so it always reads the current project's
+  // loop.md.
+  private loopTickResolver: LoopTickResolver | null = null;
+  private loopTickResolverRoot: string | null = null;
   private cronCompletion: Promise<void> | null = null;
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
@@ -2103,6 +2139,10 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          // Context was just compacted; a loop.md tick must re-deliver the full
+          // task block (a short reminder refers back to a message that is no
+          // longer in context).
+          this.loopTickResolver?.resetCache();
           const reasonClause =
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
@@ -2621,6 +2661,44 @@ export class Session implements SessionContext {
     }
   }
 
+  #getLoopTickResolver(): LoopTickResolver {
+    const root = this.config.getWorkingDir();
+    // Rebuild if the working dir changed (e.g. /cd) so loop.md resolves against
+    // the current project; a fresh resolver also correctly re-delivers full.
+    if (!this.loopTickResolver || this.loopTickResolverRoot !== root) {
+      // Resolve the home/global loop.md from the QWEN_HOME-aware global dir (the
+      // rest of Qwen honors QWEN_HOME for `.qwen`); reading raw os.homedir() here
+      // would always hit the real `~/.qwen` and ignore a relocated config home.
+      const homeQwenDir = Storage.getGlobalQwenDir();
+      // Confinement root for the home candidate's resolved target: $QWEN_HOME
+      // when set (it IS the global dir), else $HOME — keeps the earlier
+      // confinement (an in-root dotfile symlink resolves; an escape is refused).
+      // The `|| path.dirname(homeQwenDir)` guards an empty os.homedir() (minimal
+      // containers with no HOME): an empty root makes isWithin('', target) always
+      // true, trivially bypassing the symlink confinement. homeQwenDir
+      // (Storage.getGlobalQwenDir()) is always non-empty, so its parent is a
+      // sound non-empty fallback root.
+      const homeConfineRoot =
+        (process.env['QWEN_HOME'] ? homeQwenDir : os.homedir()) ||
+        path.dirname(homeQwenDir);
+      this.loopTickResolver = new LoopTickResolver({
+        projectRoot: root,
+        homeDir: homeConfineRoot,
+        homeQwenDir,
+        // The project `.qwen/loop.md` is repo-controlled, so an untrusted folder
+        // must not read it and feed it to the model (mirrors getProjectHooks()'s
+        // trust gate). The home/global `~/.qwen/loop.md` is user-owned and stays
+        // allowed. Pass a getter, not a snapshot: isTrustedFolder() can flip
+        // mid-session on an IDE workspace-trust update, and the resolver outlives
+        // a single tick — re-read it on every resolve() so a trusted→untrusted
+        // flip stops reading the project file immediately.
+        allowProjectFile: () => this.config.isTrustedFolder(),
+      });
+      this.loopTickResolverRoot = root;
+    }
+    return this.loopTickResolver;
+  }
+
   /**
    * Executes a single cron-fired prompt: echoes it as a user message with
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
@@ -2654,10 +2732,114 @@ export class Session implements SessionContext {
           async () => {
             let turnCount = 0;
             try {
+              // A `<<loop.md>>` / `<<loop.md-dynamic>>` sentinel is expanded at
+              // fire time into the loop.md task block — full on the first or a
+              // changed fire, a short reminder when unchanged. Non-sentinel
+              // prompts pass through untouched.
+              const loopMode = detectLoopSentinel(prompt);
+              let loopTick: LoopTickResult | null = null;
+              if (loopMode) {
+                const resolver = this.#getLoopTickResolver();
+                // Capture folder-trust ONCE for this tick and thread it through
+                // both the resolve probe and the error path. isTrustedFolder()
+                // can flip mid-tick (an IDE workspace-trust update), so two
+                // separate reads could let the sanitized error name a different
+                // candidate set than resolve() actually probed.
+                const trustedAtResolve = this.config.isTrustedFolder();
+                try {
+                  loopTick = await resolver.resolve(loopMode, trustedAtResolve);
+                } catch (resolveErr) {
+                  // resolve() reads .qwen/loop.md (project or home/global); an
+                  // EACCES/EIO here is a sentinel-RESOLUTION failure, not a
+                  // model-call failure — tag it so the two are distinguishable
+                  // in logs.
+                  const code =
+                    (resolveErr as NodeJS.ErrnoException).code ?? 'unknown';
+                  // Full detail — including the raw fs error's ABSOLUTE loop.md
+                  // path (OS username + dir layout) — stays in this LOCAL debug
+                  // log only; debug logs are never sent to the ACP client.
+                  debugLogger.warn(
+                    `loop.md sentinel resolution failed (mode=${loopMode}, code=${code}) — check .qwen/loop.md permissions/IO`,
+                    resolveErr,
+                  );
+                  if (
+                    loopMode === 'dynamic' &&
+                    TRANSIENT_FS_CODES.includes(code)
+                  ) {
+                    // A `dynamic` (self-paced) loop is kept alive ONLY by the
+                    // model re-arming LoopWakeup at the end of each turn; the
+                    // firing wakeup was already consumed, so throwing here (no
+                    // turn → no re-arm) would silently kill the loop forever on a
+                    // transient hiccup (EACCES/EIO, or a Windows editor/AV briefly
+                    // locking the file). Degrade to a no-op tick mirroring the
+                    // absent path so the model still re-arms and the loop survives.
+                    // (`cron` re-fires on its own next interval, so it still
+                    // throws below.) The captured trust names the SAME candidate
+                    // set the probe used; the errno (no absolute path) is noted.
+                    // Only KNOWN-transient codes degrade: an unexpected error
+                    // (TypeError / assertion → code 'unknown') falls through to the
+                    // throw so the real bug surfaces instead of an infinite no-op
+                    // cycle.
+                    loopTick = resolver.buildTransientErrorTick(
+                      loopMode,
+                      trustedAtResolve,
+                      code,
+                    );
+                  } else {
+                    // Reached by `cron` (re-fires on its own next interval) and by
+                    // `dynamic` with an UNEXPECTED (non-transient) error — both
+                    // surface rather than silently degrade. Re-throw a SANITIZED
+                    // error: the outer catch forwards error.message verbatim to the
+                    // client via emitAgentMessage,
+                    // so re-throwing the raw fs error would leak that absolute
+                    // path. Surface only the candidate labels + errno code via the
+                    // shared absentLocations() — reusing the QWEN_HOME-aware home
+                    // label (never a hardcoded `~/.qwen`) and naming the project
+                    // candidate only when it was actually read (the captured trust
+                    // matches the resolve() probe, so an untrusted folder can't
+                    // falsely claim `(project)`).
+                    throw new Error(
+                      `loop.md resolution failed (${code}) for ${resolver.absentLocations(
+                        trustedAtResolve,
+                      )}`,
+                    );
+                  }
+                }
+              }
+              const modelText = loopTick ? loopTick.modelText : prompt;
+              if (loopTick) {
+                debugLogger.debug(
+                  `loop tick: mode=${loopMode} delivery=${
+                    loopTick.full
+                      ? 'full'
+                      : loopTick.sourceLabel
+                        ? 'reminder'
+                        : 'absent'
+                  } source=${loopTick.sourceLabel ?? 'none'} transient=${
+                    loopTick.transientError ?? false
+                  }`,
+                );
+              }
+              // For a loop tick echo a stable, relative label — never the bare
+              // sentinel or the full task dump (and the resolver never hands back
+              // the absolute path, which would leak the OS username / dir layout
+              // into the ACP client UI); otherwise echo the prompt verbatim.
+              const echoText = loopTick
+                ? loopTick.sourceLabel
+                  ? `Loop tick — tasks from ${loopTick.sourceLabel}`
+                  : // A transient-error tick (buildTransientErrorTick) resolved a
+                    // file but couldn't read it this tick; it deliberately omits
+                    // sourceLabel, so don't conflate it with a genuinely-absent
+                    // loop.md. No errno/path here — those stay in the model text.
+                    loopTick.transientError
+                    ? 'Loop tick — loop.md temporarily unavailable'
+                    : 'Loop tick — loop.md not present'
+                : prompt;
+
               // Echo the cron prompt as a user message so the client sees it
               await this.sendUpdate({
                 sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: prompt },
+                content: { type: 'text', text: echoText },
                 _meta: { source: item.source },
               });
 
@@ -2666,7 +2848,7 @@ export class Session implements SessionContext {
               const cronReminders = await this.#buildInitialSystemReminders();
               let nextMessage: Content | null = {
                 role: 'user',
-                parts: [...cronReminders, { text: prompt }],
+                parts: [...cronReminders, { text: modelText }],
               };
 
               while (nextMessage !== null) {
@@ -2695,6 +2877,13 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                if (loopTick && turnCount === 1) {
+                  // The block reached the model (the send started); commit it so
+                  // the next tick can detect "unchanged". Deferring the commit
+                  // to here keeps an abort before delivery from poisoning the
+                  // cache into a dangling short reminder.
+                  this.loopTickResolver?.markDelivered();
+                }
                 nextMessage = null;
 
                 for await (const resp of responseStream) {

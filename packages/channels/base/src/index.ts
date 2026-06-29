@@ -1,10 +1,12 @@
 export { getGlobalQwenDir, resolvePath } from './paths.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
-  AcpBridgeOptions,
   AvailableCommand,
+  ChannelAgentBridge,
+  SessionDiedEvent,
   ToolCallEvent,
-} from './AcpBridge.js';
+} from './ChannelAgentBridge.js';
+export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
   DaemonChannelBridgeOptions,
@@ -27,6 +29,11 @@ export type { GroupCheckResult } from './GroupGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
+export {
+  sanitizeSenderName,
+  sanitizePromptText,
+  sanitizeLogText,
+} from './sanitize.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,

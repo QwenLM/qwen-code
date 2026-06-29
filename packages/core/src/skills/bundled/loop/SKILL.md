@@ -92,4 +92,13 @@ If the interval does not cleanly divide its unit (for example `7m` gives uneven 
    - If it is a slash command, invoke it via the Skill tool.
    - Otherwise, act on it directly.
 
+## loop.md task-file mode
+
+Use this when the user wants the loop to work a task list kept in a file (they say "work through my loop.md", "loop over the tasks in .qwen/loop.md", or point at such a file). Tasks live in `.qwen/loop.md` (project) or `~/.qwen/loop.md` (home; project wins). Instead of a natural-language prompt, set the loop's `prompt` to a sentinel so each fire re-reads the file:
+
+- Self-paced (no interval) → LoopWakeup `prompt`: `<<loop.md-dynamic>>`
+- Fixed interval → CronCreate `prompt`: `<<loop.md>>` (with `recurring: true`, and `durable: true` if persistence is implied)
+
+At each fire you receive either the full task list (first delivery, after the file changes, or after a compaction) or a short reminder to keep working the list established earlier. Work the tasks; in self-paced mode re-arm LoopWakeup with `<<loop.md-dynamic>>` only when continued follow-up is useful (same "don't re-arm if complete/blocked" rules as the prompt-only path). If `.qwen/loop.md` is absent at fire time, treat the tick as a no-op. Confirm to the user in plain language ("looping over your `.qwen/loop.md` task list…"), not the raw sentinel.
+
 ## Input

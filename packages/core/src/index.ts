@@ -257,6 +257,7 @@ export {
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
+export * from './utils/safe-mode.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -374,6 +375,8 @@ export {
 export * from './extension/index.js';
 export * from './prompts/mcp-prompts.js';
 export * from './skills/index.js';
+export * from './skills/bundled/loop/loop-task-file.js';
+export * from './skills/bundled/loop/loop-tick-resolver.js';
 export * from './subagents/index.js';
 export * from './agents/index.js';
 
@@ -447,6 +450,7 @@ export * from './utils/ripgrepUtils.js';
 export {
   detectRuntime,
   getOrCreateSharedDispatcher,
+  isTlsVerificationDisabled,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';
