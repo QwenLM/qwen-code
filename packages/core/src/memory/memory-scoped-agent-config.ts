@@ -62,17 +62,18 @@ function mergePermissionDecision(
     : scopedDecision;
 }
 
-function isAllowedMemoryPath(
+export function isAllowedMemoryPath(
   filePath: string | undefined,
   projectRoot: string,
-  opts: Required<MemoryScopedAgentConfigOptions>,
+  options: Pick<MemoryScopedAgentConfigOptions, 'includeUserMemory'> = {},
 ): boolean {
   if (!filePath) return false;
+  const includeUserMemory = options.includeUserMemory ?? true;
   const projectMemoryRoot = realpathOrResolved(getAutoMemoryRoot(projectRoot));
   const userMemoryRoot = realpathOrResolved(getUserAutoMemoryRoot());
   const isAllowed = (candidate: string): boolean =>
     isWithinRoot(candidate, projectMemoryRoot) ||
-    (opts.includeUserMemory && isWithinRoot(candidate, userMemoryRoot));
+    (includeUserMemory && isWithinRoot(candidate, userMemoryRoot));
   const resolved = realpathExistingOrNew(filePath);
   return !!resolved && isAllowed(resolved);
 }
@@ -134,12 +135,16 @@ async function evaluateScopedDecision(
     case ToolNames.GREP:
     case ToolNames.LS:
       if (!opts.restrictReadsToMemoryPaths) return 'default';
-      return isAllowedMemoryPath(ctx.filePath, projectRoot, opts)
+      return isAllowedMemoryPath(ctx.filePath, projectRoot, {
+        includeUserMemory: opts.includeUserMemory,
+      })
         ? 'allow'
         : 'deny';
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
-      return isAllowedMemoryPath(ctx.filePath, projectRoot, opts)
+      return isAllowedMemoryPath(ctx.filePath, projectRoot, {
+        includeUserMemory: opts.includeUserMemory,
+      })
         ? 'allow'
         : 'deny';
     default:

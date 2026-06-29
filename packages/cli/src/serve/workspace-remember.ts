@@ -63,7 +63,6 @@ function cloneTask(
     contextMode: task.contextMode,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-    ...(task.error ? { error: { ...task.error } } : {}),
     result: task.result
       ? {
           ...task.result,
@@ -100,6 +99,9 @@ function publicErrorMessage(code: string): string {
   }
   if (code === 'remember_queue_full') {
     return 'Workspace memory remember queue is full.';
+  }
+  if (code === 'remember_timeout') {
+    return 'Workspace memory remember timed out.';
   }
   return 'Workspace memory remember failed.';
 }
@@ -307,17 +309,21 @@ export function mountWorkspaceMemoryRememberRoutes(
     },
   );
 
-  app.get('/workspace/memory/remember/:taskId', (req, res) => {
-    const requesterClientId = validateOriginatorClientId(deps, req, res);
-    if (requesterClientId === null) return;
-    const task = lane.get(req.params.taskId, requesterClientId);
-    if (!task) {
-      res.status(404).json({
-        error: 'Workspace memory remember task not found',
-        code: 'remember_task_not_found',
-      });
-      return;
-    }
-    res.status(200).json(task);
-  });
+  app.get(
+    '/workspace/memory/remember/:taskId',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      const requesterClientId = validateOriginatorClientId(deps, req, res);
+      if (requesterClientId === null) return;
+      const task = lane.get(req.params['taskId'], requesterClientId);
+      if (!task) {
+        res.status(404).json({
+          error: 'Workspace memory remember task not found',
+          code: 'remember_task_not_found',
+        });
+        return;
+      }
+      res.status(200).json(task);
+    },
+  );
 }

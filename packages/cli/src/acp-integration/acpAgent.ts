@@ -5441,7 +5441,7 @@ class QwenAgent implements Agent {
             throw new RequestError(
               -32099,
               'Workspace memory remember timed out',
-              { errorKind: 'remember_failed' },
+              { errorKind: 'remember_timeout' },
             );
           }
           const code =

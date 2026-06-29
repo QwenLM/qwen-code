@@ -7,13 +7,7 @@
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
-import {
-  getAutoMemoryRoot,
-  getUserAutoMemoryRoot,
-  isAnyAutoMemPath,
-  isAutoMemPath,
-  isUserAutoMemPath,
-} from './paths.js';
+import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { buildManagedAutoMemoryPrompt } from './prompt.js';
 import {
   readAutoMemoryIndex,
@@ -25,7 +19,10 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
-import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import {
+  createMemoryScopedAgentConfig,
+  isAllowedMemoryPath,
+} from './memory-scoped-agent-config.js';
 
 export type WorkspaceRememberContextMode = 'workspace' | 'clean';
 export type WorkspaceRememberScope = 'user' | 'project';
@@ -39,6 +36,7 @@ export interface ManagedRememberResult {
 export function buildManagedRememberPrompt(
   fact: string,
   projectRoot?: string,
+  options: { wrapUserContent?: boolean } = {},
 ): string {
   const trimmed = fact.trim();
   const projectDir = projectRoot ? getAutoMemoryRoot(projectRoot) : undefined;
@@ -47,7 +45,10 @@ export function buildManagedRememberPrompt(
     projectDir !== undefined
       ? ` Choose the destination directory by the type's \`<scope>\`: USER memory at \`${userDir}\` for cross-project facts, PROJECT memory at \`${projectDir}\` for this-project-only facts.`
       : '';
-  return `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n<user-content>\n${trimmed}\n</user-content>`;
+  const content = options.wrapUserContent
+    ? `<user-content>\n${trimmed}\n</user-content>`
+    : trimmed;
+  return `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n${content}`;
 }
 
 export function buildBareRememberPrompt(fact: string): string {
@@ -104,16 +105,18 @@ function classifyTouchedScopes(
 ): WorkspaceRememberScope[] {
   const scopes: WorkspaceRememberScope[] = [];
   for (const filePath of filesTouched) {
-    if (!isAnyAutoMemPath(filePath, projectRoot)) {
+    if (!isAllowedMemoryPath(filePath, projectRoot)) {
       throw Object.assign(
         new Error(`Remember agent touched a non-memory path: ${filePath}`),
         { code: 'remember_path_escape' },
       );
     }
-    if (isUserAutoMemPath(filePath)) {
-      scopes.push('user');
-    } else if (isAutoMemPath(filePath, projectRoot)) {
+    if (
+      isAllowedMemoryPath(filePath, projectRoot, { includeUserMemory: false })
+    ) {
       scopes.push('project');
+    } else {
+      scopes.push('user');
     }
   }
   return uniqueSortedScopes(scopes);
@@ -151,7 +154,9 @@ export async function runManagedRememberByAgent(params: {
   const result = await runForkedAgent({
     name: 'managed-auto-memory-remember',
     config: scopedConfig,
-    taskPrompt: buildManagedRememberPrompt(params.content, params.projectRoot),
+    taskPrompt: buildManagedRememberPrompt(params.content, params.projectRoot, {
+      wrapUserContent: true,
+    }),
     systemPrompt: buildRememberSystemPrompt(memoryPrompt),
     maxTurns: 6,
     maxTimeMinutes: 5,

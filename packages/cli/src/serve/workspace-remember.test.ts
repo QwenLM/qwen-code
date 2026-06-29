@@ -147,15 +147,18 @@ function buildBridgeStub(opts: {
   };
 }
 
-function buildApp(bridge: AcpSessionBridge) {
+function buildApp(
+  bridge: AcpSessionBridge,
+  auth: { tokenConfigured: boolean; requireAuth: boolean } = {
+    tokenConfigured: true,
+    requireAuth: false,
+  },
+) {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
   mountWorkspaceMemoryRememberRoutes(app, {
     bridge,
-    mutate: createMutationGate({
-      tokenConfigured: true,
-      requireAuth: false,
-    }),
+    mutate: createMutationGate(auth),
     parseClientId: (req, res) => {
       const raw = req.get('x-qwen-client-id');
       if (raw === undefined || raw === '') return undefined;
@@ -228,6 +231,21 @@ describe('workspace memory remember routes', () => {
         touchedScopes: ['project'],
       },
     });
+  });
+
+  it('requires auth for task polling', async () => {
+    const bridge = buildBridgeStub({});
+    const app = buildApp(bridge, {
+      tokenConfigured: false,
+      requireAuth: false,
+    });
+
+    await request(app)
+      .get('/workspace/memory/remember/remember-test')
+      .expect(401)
+      .expect((res) => {
+        expect(res.body.code).toBe('token_required');
+      });
   });
 
   it('validates content, contextMode, client id, and unknown task ids', async () => {
@@ -394,6 +412,9 @@ describe('workspace memory remember routes', () => {
         .mockRejectedValueOnce({ code: 'remember_path_escape' })
         .mockRejectedValueOnce({
           data: { errorKind: 'managed_memory_unavailable' },
+        })
+        .mockRejectedValueOnce({
+          data: { errorKind: 'remember_timeout' },
         }),
     });
     const app = buildApp(bridge);
@@ -427,6 +448,22 @@ describe('workspace memory remember routes', () => {
         expect(res.body.error).toEqual({
           code: 'managed_memory_unavailable',
           message: 'Managed memory is unavailable for this daemon workspace.',
+        });
+      });
+
+    const third = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'timeout' })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 3);
+    await request(app)
+      .get(`/workspace/memory/remember/${third.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'remember_timeout',
+          message: 'Workspace memory remember timed out.',
         });
       });
   });

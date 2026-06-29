@@ -85,9 +85,18 @@ describe('remember memory helper', () => {
     expect(managed).toContain('PROJECT memory at');
     expect(managed).toContain(getAutoMemoryRoot(projectRoot));
     expect(managed).toContain('prefers focused tests');
-    expect(managed).toContain('<user-content>');
-    expect(managed).toContain('</user-content>');
+    expect(managed).not.toContain('<user-content>');
+    expect(managed).not.toContain('</user-content>');
     expect(managed).not.toContain('  prefers focused tests  ');
+
+    const wrapped = buildManagedRememberPrompt(
+      '  hidden context  ',
+      projectRoot,
+      { wrapUserContent: true },
+    );
+    expect(wrapped).toContain(
+      '<user-content>\nhidden context\n</user-content>',
+    );
 
     const bare = buildBareRememberPrompt('  appends to qwen  ');
     expect(bare).toBe(
@@ -151,6 +160,7 @@ describe('remember memory helper', () => {
     ).resolves.toBe('deny');
     expect(params.systemPrompt).toContain('managed auto-memory system only');
     expect(params.taskPrompt).toContain('Remember the project uses vitest.');
+    expect(params.taskPrompt).toContain('<user-content>');
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
@@ -175,6 +185,29 @@ describe('remember memory helper', () => {
     expect(result.touchedScopes).toEqual(['project', 'user']);
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies symlinked project memory paths by realpath', async () => {
+    const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
+    await fs.mkdir(projectMemoryRoot, { recursive: true });
+    const linkedMemoryRoot = path.join(tempDir, 'linked-project-memory');
+    await fs.symlink(projectMemoryRoot, linkedMemoryRoot, 'dir');
+    const touched = path.join(linkedMemoryRoot, 'project.md');
+    await fs.writeFile(touched, 'memory');
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [touched],
+    } satisfies ForkedAgentResult);
+
+    const result = await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember symlinked memory.',
+      contextMode: 'workspace',
+    });
+
+    expect(result.touchedScopes).toEqual(['project']);
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
   it('rejects when managed memory is unavailable', async () => {
