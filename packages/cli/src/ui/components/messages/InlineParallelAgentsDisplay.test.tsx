@@ -294,12 +294,14 @@ describe('<InlineParallelAgentsDisplay />', () => {
       expect(frame).not.toContain('more agent');
     });
 
-    it('with a generous budget, renders every agent (backstop is a no-op)', () => {
-      // 10 agents + header = 11 rows < budget 20, so the `rows.length + 1 >
-      // budget` guard is false and windowing must NOT kick in. Pins the `>`
-      // boundary: a regression to `>=` (or an off-by-one) would truncate here
-      // even though there is room.
-      const { lastFrame } = renderCapped(manyAgents(10), 20);
+    it('at the exact-fit budget, renders every agent (backstop is a no-op)', () => {
+      // Budget = rows.length + 1 = 11 pins the `>` boundary precisely:
+      //   11 > 11  = false → correct, no windowing (renders all 10 + header)
+      //   11 >= 11 = true  → a regression to `>=` would fire windowing and emit
+      //                      a "+1 more" indicator even though everything fits.
+      // The `not.toContain('more agent')` assertion is what catches that flip
+      // (the line count alone coincides at 11 in both branches).
+      const { lastFrame } = renderCapped(manyAgents(10), 11);
       const frame = lastFrame() ?? '';
       expect(frame.split('\n').length).toBe(11);
       expect(frame).not.toContain('more agent');
