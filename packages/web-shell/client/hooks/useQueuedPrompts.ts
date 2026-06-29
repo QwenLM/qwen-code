@@ -309,14 +309,21 @@ export function useQueuedPrompts({
           shouldAppendLocalUserMessage &&
           !displayedServerPromptIdsRef.current.has(promptId)
         ) {
-          displayedServerPromptIdsRef.current.add(promptId);
-          const prompt = queuedPromptsRef.current.find(
-            (item) => item.serverPromptId === promptId,
-          );
-          const text =
-            prompt?.text ??
-            (typeof event.data.text === 'string' ? event.data.text : '');
+          const eventText =
+            typeof event.data.text === 'string' ? event.data.text : '';
+          const prompt =
+            queuedPromptsRef.current.find(
+              (item) => item.serverPromptId === promptId,
+            ) ??
+            queuedPromptsRef.current.find(
+              (item) =>
+                !item.serverPromptId &&
+                item.serverState === 'submitting' &&
+                item.text === eventText,
+            );
+          const text = prompt?.text ?? '';
           if (text) {
+            displayedServerPromptIdsRef.current.add(promptId);
             store.appendLocalUserMessage(text, toStoreImages(prompt?.images));
           }
         }
@@ -655,6 +662,16 @@ export function useQueuedPrompts({
       ) {
         return;
       }
+      const removedCompletionCallback = prompt.serverPromptId
+        ? (prompt.onComplete ??
+          completionCallbacksRef.current.get(prompt.serverPromptId))
+        : undefined;
+      const finishRemovedPrompt = () => {
+        if (prompt.serverPromptId) {
+          completionCallbacksRef.current.delete(prompt.serverPromptId);
+        }
+        removedCompletionCallback?.();
+      };
       if (
         prompt.serverPromptId &&
         !(await removeServerPromptForAction(
@@ -680,6 +697,7 @@ export function useQueuedPrompts({
       } catch (error) {
         if (prompt.serverPromptId) {
           restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
+          finishRemovedPrompt();
         }
         reportError(error, t('queue.insertFailed'));
         return;
@@ -687,6 +705,7 @@ export function useQueuedPrompts({
       if (!result.accepted) {
         if (prompt.serverPromptId) {
           restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
+          finishRemovedPrompt();
         }
         reportError(
           new Error('Queued message was not accepted for insertion'),
@@ -694,6 +713,7 @@ export function useQueuedPrompts({
         );
         return;
       }
+      finishRemovedPrompt();
       if (!prompt.serverPromptId) {
         const next = queuedPromptsRef.current.filter((item) => item.id !== id);
         queuedPromptsRef.current = next;
