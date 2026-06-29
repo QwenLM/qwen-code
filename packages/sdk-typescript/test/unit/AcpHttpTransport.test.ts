@@ -746,6 +746,46 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     expect(events[0].id).toBe(11);
   });
 
+  it('rejects in-flight session-scoped pendings when the subscription stream closes (M2iHz) — a session/prompt caller does not hang', async () => {
+    const { fetch } = sessionStreamFetch([]); // stream closes with no frames
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const sessionReject = vi.fn();
+    const connReject = vi.fn();
+    pending.set(42, {
+      resolve: () => {},
+      reject: sessionReject,
+      sessionId: 'sess-1',
+    });
+    // A connection-scoped pending must survive — different scope, different route.
+    pending.set(43, {
+      resolve: () => {},
+      reject: connReject,
+      sessionId: undefined,
+    });
+
+    // Drain the (empty) session stream to its close; the inner finally sweeps.
+    await collect(t, 'sess-1');
+
+    expect(sessionReject).toHaveBeenCalledTimes(1);
+    expect(pending.has(42)).toBe(false);
+    expect(connReject).not.toHaveBeenCalled();
+    expect(pending.has(43)).toBe(true);
+    t.dispose();
+  });
+
   it('surfaces a session/request_permission request as a permission_request event', async () => {
     const { fetch } = sessionStreamFetch([
       frame(9, {

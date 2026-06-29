@@ -566,6 +566,27 @@ export class AcpHttpTransport implements DaemonTransport {
       } catch {
         /* already closed */
       }
+      // When a consumer subscription delivers session replies (no reply pump is
+      // started while one is active), it owns the route for this session's
+      // pendings. If the session stream closes with this as the LAST route (no
+      // other active subscription — the ref-count still includes self here,
+      // decremented by the outer wrapper right after — and no reply pump), reject
+      // its still-live session-scoped pendings so a `session/prompt` caller can't
+      // hang on a reply the closed stream will never deliver (the mirror of the
+      // reply-pump sweep, and of the connection-stream sweep for conn scope).
+      const otherSubs =
+        (this.activeSessionSubscriptions.get(sessionId) ?? 0) - 1;
+      if (
+        !this._disposed &&
+        otherSubs <= 0 &&
+        !this.sessionReplyPumps.has(sessionId)
+      ) {
+        for (const [id, entry] of this.pending) {
+          if (entry.sessionId !== sessionId) continue;
+          entry.reject(new Error('Session SSE stream closed unexpectedly'));
+          this.pending.delete(id);
+        }
+      }
     }
   }
 
