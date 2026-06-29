@@ -10,36 +10,79 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_METAFILE_PATH = resolve('dist/esbuild.json');
-const RUN_QWEN_SERVE_SOURCE = 'packages/cli/src/serve/run-qwen-serve.ts';
+const SERVE_PRE_LISTEN_ROOTS = [
+  {
+    label: 'serve fast path entry',
+    suffixes: [
+      'packages/cli/src/serve/fast-path.ts',
+      'packages/cli/dist/src/serve/fast-path.js',
+    ],
+  },
+  {
+    label: 'serve fast path settings',
+    suffixes: [
+      'packages/cli/src/serve/fast-path-settings.ts',
+      'packages/cli/dist/src/serve/fast-path-settings.js',
+    ],
+  },
+  {
+    label: 'run qwen serve entry',
+    suffixes: [
+      'packages/cli/src/serve/run-qwen-serve.ts',
+      'packages/cli/dist/src/serve/run-qwen-serve.js',
+    ],
+  },
+];
 
 const FORBIDDEN_SOURCE_INPUTS = [
   {
     label: 'Serve ACP compatibility shim',
-    suffix: 'packages/cli/src/serve/acp-session-bridge.ts',
+    suffixes: [
+      'packages/cli/src/serve/acp-session-bridge.ts',
+      'packages/cli/dist/src/serve/acp-session-bridge.js',
+    ],
   },
   {
     label: 'ACP bridge runtime',
-    suffix: 'packages/acp-bridge/src/bridge.ts',
+    suffixes: [
+      'packages/acp-bridge/src/bridge.ts',
+      'packages/acp-bridge/dist/bridge.js',
+    ],
   },
   {
     label: 'ACP bridge client runtime',
-    suffix: 'packages/acp-bridge/src/bridgeClient.ts',
+    suffixes: [
+      'packages/acp-bridge/src/bridgeClient.ts',
+      'packages/acp-bridge/dist/bridgeClient.js',
+    ],
   },
   {
     label: 'ACP spawnChannel runtime',
-    suffix: 'packages/acp-bridge/src/spawnChannel.ts',
+    suffixes: [
+      'packages/acp-bridge/src/spawnChannel.ts',
+      'packages/acp-bridge/dist/spawnChannel.js',
+    ],
   },
   {
     label: 'ACP permission mediator runtime',
-    suffix: 'packages/acp-bridge/src/permissionMediator.ts',
+    suffixes: [
+      'packages/acp-bridge/src/permissionMediator.ts',
+      'packages/acp-bridge/dist/permissionMediator.js',
+    ],
   },
   {
     label: 'ACP compaction engine runtime',
-    suffix: 'packages/acp-bridge/src/compactionEngine.ts',
+    suffixes: [
+      'packages/acp-bridge/src/compactionEngine.ts',
+      'packages/acp-bridge/dist/compactionEngine.js',
+    ],
   },
   {
     label: 'Core shell tool runtime',
-    suffix: 'packages/core/src/tools/shell.ts',
+    suffixes: [
+      'packages/core/src/tools/shell.ts',
+      'packages/core/dist/src/tools/shell.js',
+    ],
   },
 ];
 
@@ -57,6 +100,10 @@ export function normalizeMetafilePath(filePath) {
 function inputMatchesSuffix(input, suffix) {
   const normalizedInput = normalizeMetafilePath(input);
   return normalizedInput === suffix || normalizedInput.endsWith(`/${suffix}`);
+}
+
+function inputMatchesAnySuffix(input, suffixes) {
+  return suffixes.some((suffix) => inputMatchesSuffix(input, suffix));
 }
 
 function inputMatchesPackage(input, packageName) {
@@ -77,22 +124,42 @@ function normalizeOutputs(metafile) {
   );
 }
 
-function findRunQwenServeOutput(outputs) {
-  for (const [outputPath, output] of outputs) {
-    for (const input of Object.keys(output.inputs ?? {})) {
-      if (inputMatchesSuffix(input, RUN_QWEN_SERVE_SOURCE)) {
-        return outputPath;
+function findServePreListenRootOutputs(outputs) {
+  const rootOutputs = [];
+  const missingRoots = [];
+
+  for (const root of SERVE_PRE_LISTEN_ROOTS) {
+    let matchedOutput;
+    for (const [outputPath, output] of outputs) {
+      for (const input of Object.keys(output.inputs ?? {})) {
+        if (inputMatchesAnySuffix(input, root.suffixes)) {
+          matchedOutput = outputPath;
+          break;
+        }
       }
+      if (matchedOutput) break;
+    }
+
+    if (matchedOutput) {
+      rootOutputs.push(matchedOutput);
+    } else {
+      missingRoots.push(`${root.label} (${root.suffixes.join(' or ')})`);
     }
   }
-  throw new Error(
-    `Could not find bundled output for ${RUN_QWEN_SERVE_SOURCE}. ` +
-      'Run DEV=true npm run bundle before this check.',
-  );
+
+  if (missingRoots.length > 0) {
+    throw new Error(
+      'Could not find bundled outputs for serve pre-listen roots:\n' +
+        missingRoots.map((root) => `- ${root}`).join('\n') +
+        '\nRun DEV=true npm run bundle before this check.',
+    );
+  }
+
+  return [...new Set(rootOutputs)];
 }
 
-function collectStaticClosure(outputs, entryOutput) {
-  const queue = [entryOutput];
+function collectStaticClosure(outputs, entryOutputs) {
+  const queue = [...entryOutputs];
   const closure = new Set(queue);
   const parent = new Map();
 
@@ -117,10 +184,11 @@ function collectStaticClosure(outputs, entryOutput) {
   return { closure, parent };
 }
 
-function buildImportPath(entryOutput, outputPath, parent) {
+function buildImportPath(entryOutputs, outputPath, parent) {
+  const roots = new Set(entryOutputs);
   const reversed = [outputPath];
   let current = outputPath;
-  while (current !== entryOutput) {
+  while (!roots.has(current)) {
     current = parent.get(current);
     if (!current) break;
     reversed.push(current);
@@ -130,8 +198,8 @@ function buildImportPath(entryOutput, outputPath, parent) {
 
 export function findServeFastPathBundleOffenders(metafile) {
   const outputs = normalizeOutputs(metafile);
-  const entryOutput = findRunQwenServeOutput(outputs);
-  const { closure, parent } = collectStaticClosure(outputs, entryOutput);
+  const entryOutputs = findServePreListenRootOutputs(outputs);
+  const { closure, parent } = collectStaticClosure(outputs, entryOutputs);
   const offenders = [];
   const seen = new Set();
 
@@ -141,8 +209,8 @@ export function findServeFastPathBundleOffenders(metafile) {
 
     for (const input of inputs) {
       const normalizedInput = normalizeMetafilePath(input);
-      const sourceMatch = FORBIDDEN_SOURCE_INPUTS.find(({ suffix }) =>
-        inputMatchesSuffix(normalizedInput, suffix),
+      const sourceMatch = FORBIDDEN_SOURCE_INPUTS.find(({ suffixes }) =>
+        inputMatchesAnySuffix(normalizedInput, suffixes),
       );
       if (sourceMatch) {
         addOffender(sourceMatch.label, normalizedInput, outputPath);
@@ -168,7 +236,7 @@ export function findServeFastPathBundleOffenders(metafile) {
       matchedInput,
       outputPath,
       bytes: outputs.get(outputPath)?.bytes ?? 0,
-      importPath: buildImportPath(entryOutput, outputPath, parent),
+      importPath: buildImportPath(entryOutputs, outputPath, parent),
     });
   }
 }

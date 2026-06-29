@@ -5,14 +5,36 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   findServeFastPathBundleOffenders,
   formatServeFastPathBundleOffenders,
   normalizeMetafilePath,
 } from '../check-serve-fast-path-bundle.js';
 
+const checkScriptPath = fileURLToPath(
+  new URL('../check-serve-fast-path-bundle.js', import.meta.url),
+);
+
 function makeMetafile(outputs) {
-  return { outputs };
+  return {
+    outputs: {
+      'dist/chunks/fast-path.js': output({
+        inputs: ['packages/cli/src/serve/fast-path.ts'],
+      }),
+      'dist/chunks/fast-path-settings.js': output({
+        inputs: ['packages/cli/src/serve/fast-path-settings.ts'],
+      }),
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+      }),
+      ...outputs,
+    },
+  };
 }
 
 function output({ inputs = [], imports = [], bytes = 1 } = {}) {
@@ -70,6 +92,47 @@ describe('serve fast-path bundle check', () => {
     );
   });
 
+  it('reports forbidden built package files reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/dist/src/serve/run-qwen-serve.js'],
+        imports: [staticImport('dist/chunks/acp-runtime.js')],
+      }),
+      'dist/chunks/acp-runtime.js': output({
+        inputs: ['packages/acp-bridge/dist/bridge.js'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: 'packages/acp-bridge/dist/bridge.js',
+      }),
+    ]);
+  });
+
+  it('checks fast-path modules that run before runQwenServe listens', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/fast-path.js': output({
+        inputs: ['packages/cli/src/serve/fast-path.ts'],
+        imports: [staticImport('dist/chunks/core-runtime.js')],
+      }),
+      'dist/chunks/core-runtime.js': output({
+        inputs: ['packages/core/dist/src/tools/shell.js'],
+      }),
+    });
+
+    const offenders = findServeFastPathBundleOffenders(metafile);
+
+    expect(offenders).toEqual([
+      expect.objectContaining({
+        label: 'Core shell tool runtime',
+        matchedInput: 'packages/core/dist/src/tools/shell.js',
+        importPath: ['dist/chunks/fast-path.js', 'dist/chunks/core-runtime.js'],
+      }),
+    ]);
+  });
+
   it('allows forbidden runtime files behind dynamic imports', () => {
     const metafile = makeMetafile({
       'dist/chunks/run-qwen-serve.js': output({
@@ -95,7 +158,7 @@ describe('serve fast-path bundle check', () => {
         inputs: [
           'packages/core/src/tools/shell.ts',
           'node_modules/.pnpm/glob@10.5.0/node_modules/glob/dist/esm/index.js',
-          'node_modules/@iarna/toml/toml.js',
+          'node_modules/.pnpm/@iarna+toml@2.2.5/node_modules/@iarna/toml/toml.js',
           'node_modules/chokidar/esm/index.js',
           'node_modules/fzf/dist/fzf.es.js',
         ],
@@ -132,5 +195,52 @@ describe('serve fast-path bundle check', () => {
       'dist/chunks/run-qwen-serve.js',
     );
     expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
+  });
+
+  it('exits non-zero with CLI diagnostics for bundle offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      mkdirSync(join(tempDir, 'dist'));
+      writeFileSync(
+        join(tempDir, 'dist', 'esbuild.json'),
+        JSON.stringify(
+          makeMetafile({
+            'dist/chunks/run-qwen-serve.js': output({
+              inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+              imports: [staticImport('dist/chunks/acp-runtime.js')],
+            }),
+            'dist/chunks/acp-runtime.js': output({
+              bytes: 179_129,
+              inputs: ['packages/acp-bridge/src/bridge.ts'],
+            }),
+          }),
+        ),
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(/Serve fast-path bundle closure includes pre-listen runtime/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero when the metafile is missing', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(/Missing esbuild metafile/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
