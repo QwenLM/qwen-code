@@ -188,11 +188,13 @@ operator logging can't drift.
 - **Adding `id:` lines is backward-compatible SSE** — a client that ignores
   the field is unaffected; an EventSource-based one starts tracking it for
   free.
-- **The vendored `AcpHttpTransport` keeps `supportsReplay = false`** until
-  it opts in; the daemon change is inert for it until then. Once it flips
-  `supportsReplay = true` and resends `Last-Event-ID`, gap frames are
-  replayed from the ring and the §1.8 content loss is closed — **no further
-  daemon change needed**.
+- **The vendored SDK `AcpHttpTransport` opts in to replay in this PR** —
+  it sets `supportsReplay = true` and resends `Last-Event-ID` on reconnect,
+  so gap frames are replayed from the ring and the §1.8 content loss is
+  closed with **no further daemon change needed**. (The separate external
+  `agent-web` transport flip stays deferred — see Out of scope.) The daemon
+  change remains inert for any consumer that still reports
+  `supportsReplay = false` and omits the header.
 - The REST surface is untouched.
 
 ## Test plan

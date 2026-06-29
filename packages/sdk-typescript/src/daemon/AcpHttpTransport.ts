@@ -826,18 +826,29 @@ export class AcpHttpTransport implements DaemonTransport {
           );
         }
 
-        let idx: number;
-        while ((idx = buf.indexOf('\n\n')) !== -1) {
-          const frame = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          const dataLine = frame
-            .split('\n')
-            .find((l) => l.startsWith('data: '));
-          if (!dataLine) continue;
+        // Reuse the shared CRLF-aware frame splitter (handles both `\n\n` and
+        // `\r\n\r\n`) instead of an LF-only `indexOf('\n\n')`. A server/proxy
+        // emitting `\r\n\r\n` separators never produces a `\n\n` substring, so
+        // the old scan found no boundary, grew `buf` to the cap, and killed
+        // this pump — leaving every conn-scoped JSON-RPC reply unresolved. This
+        // matches the session readers' framing exactly.
+        const { frames, tail } = consumeFrames(buf);
+        buf = tail;
+        for (const rawFrame of frames) {
+          // Per the SSE spec multiple `data:` lines join with a newline; strip a
+          // trailing CR so CRLF line endings don't corrupt JSON.parse.
+          const dataParts: string[] = [];
+          for (const rawLine of rawFrame.split('\n')) {
+            const line = rawLine.endsWith('\r')
+              ? rawLine.slice(0, -1)
+              : rawLine;
+            if (line.startsWith('data:')) {
+              dataParts.push(line.slice('data:'.length).replace(/^ /, ''));
+            }
+          }
+          if (dataParts.length === 0) continue;
           try {
-            const parsed = JSON.parse(
-              dataLine.slice('data: '.length),
-            ) as JsonRpcResponse;
+            const parsed = JSON.parse(dataParts.join('\n')) as JsonRpcResponse;
             if (
               typeof parsed === 'object' &&
               parsed !== null &&

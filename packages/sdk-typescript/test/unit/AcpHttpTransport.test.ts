@@ -1274,4 +1274,57 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     expect(pending.has(1)).toBe(true);
     t.dispose();
   });
+
+  it('resolves a conn-scoped reply delivered with CRLF (`\\r\\n\\r\\n`) frame separators, not just LF', async () => {
+    // The conn-stream pump must use the same CRLF-aware framing as the session
+    // readers. A server/proxy emitting `\r\n\r\n` separators produces no `\n\n`
+    // substring, so the old LF-only `indexOf('\n\n')` never found a boundary —
+    // the buffer grew to the cap and the pump died, leaving every conn-scoped
+    // reply unresolved.
+    const crlfFrame = `data: ${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 7,
+      result: { ok: true },
+    })}\r\n\r\n`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (url.endsWith('/acp')) return sseResponse([crlfFrame]);
+      return jsonResponse(200, { ok: true });
+    }) as unknown as typeof globalThis.fetch;
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    let resolved: unknown;
+    pending.set(7, {
+      resolve: (r) => {
+        resolved = r;
+      },
+      reject: () => {},
+      sessionId: undefined,
+    });
+
+    (t as unknown as { openConnStream: () => void }).openConnStream();
+    // Let the pump read the body and dispatch.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(resolved).toMatchObject({ id: 7, result: { ok: true } });
+    expect(pending.has(7)).toBe(false);
+    t.dispose();
+  });
 });
