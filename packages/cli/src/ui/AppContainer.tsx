@@ -1014,8 +1014,21 @@ export const AppContainer = (props: AppContainerProps) => {
   const prevTranscriptOpenRef = useRef(isTranscriptOpen);
   const wasOpenPrevRender = prevTranscriptOpenRef.current;
   prevTranscriptOpenRef.current = isTranscriptOpen;
+  // Bump a counter on each close transition and use IT — not `wasOpenPrevRender`
+  // / `isTranscriptOpen` — as the effect's only changing trigger. If those were
+  // in the dep array (as they were originally), the very next streaming
+  // re-render flips `wasOpenPrevRender` back to false, the deps change, cleanup
+  // runs, and `clearTimeout` cancels the pending repaint before it fires —
+  // leaving stale pre-transcript content in the normal buffer. With the counter,
+  // post-close re-renders don't change the deps, so the scheduled repaint
+  // survives and fires exactly once per close.
+  const transcriptCloseCountRef = useRef(0);
+  if (wasOpenPrevRender && !isTranscriptOpen) {
+    transcriptCloseCountRef.current += 1;
+  }
+  const transcriptCloseCount = transcriptCloseCountRef.current;
   useEffect(() => {
-    if (!wasOpenPrevRender || isTranscriptOpen || useTerminalBuffer) {
+    if (transcriptCloseCount === 0 || useTerminalBuffer) {
       return undefined;
     }
     const id = setTimeout(() => {
@@ -1023,13 +1036,7 @@ export const AppContainer = (props: AppContainerProps) => {
       remountStaticHistory();
     }, 0);
     return () => clearTimeout(id);
-  }, [
-    wasOpenPrevRender,
-    isTranscriptOpen,
-    useTerminalBuffer,
-    stdout,
-    remountStaticHistory,
-  ]);
+  }, [transcriptCloseCount, useTerminalBuffer, stdout, remountStaticHistory]);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -2174,7 +2181,13 @@ export const AppContainer = (props: AppContainerProps) => {
     // when the transcript closes (the transcript renders ahead of it).
     setThinkingViewerData(null);
     setTranscriptFreeze({
-      committedItems: historyManager.history.slice(),
+      // Mirror MainContent's filter (`!item.display?.suppressOnRestore`) so the
+      // transcript shows exactly what the main view shows. Items collapsed on
+      // session resume (ui.history.collapseOnResume) are represented by their
+      // collapse-summary row and must NOT be re-exposed in the Ctrl+O view.
+      committedItems: historyManager.history.filter(
+        (item) => !item.display?.suppressOnRestore,
+      ),
       pendingItems: [...pendingHistoryItems],
     });
   }, [historyManager.history, pendingHistoryItems]);

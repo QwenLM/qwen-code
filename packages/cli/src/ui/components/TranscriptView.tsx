@@ -5,7 +5,9 @@
  */
 
 import { memo, useCallback, useMemo, useRef } from 'react';
+import type { ErrorInfo } from 'react';
 import { Box, Text } from 'ink';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
@@ -19,6 +21,8 @@ import {
 } from './shared/ScrollableList.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import type { HistoryItem } from '../types.js';
+
+const debugLogger = createDebugLogger('TRANSCRIPT_VIEW');
 
 interface TranscriptViewProps {
   /** Frozen snapshot of history + pending items, already stitched by the caller. */
@@ -131,6 +135,16 @@ const TranscriptViewImpl = ({
     [],
   );
 
+  // Log caught render errors to the debug channel — the on-screen fallback is
+  // user-facing, but the fullDetail paths exercise rendering the normal view
+  // never hits, so a swallowed error must still leave a diagnostic trail.
+  const onRenderError = useCallback((error: Error, info: ErrorInfo) => {
+    debugLogger.error(
+      `render error: ${error.message}`,
+      info.componentStack ?? '',
+    );
+  }, []);
+
   return (
     <AlternateScreen disabled={!useAlternateScreen}>
       <Box flexDirection="column" height={rows} width={columns}>
@@ -140,7 +154,9 @@ const TranscriptViewImpl = ({
           </Text>
         </Box>
         <Box flexDirection="column" flexGrow={1}>
-          <ErrorBoundary fallback={errorFallback}>{content}</ErrorBoundary>
+          <ErrorBoundary fallback={errorFallback} onError={onRenderError}>
+            {content}
+          </ErrorBoundary>
         </Box>
         <Box justifyContent="center">
           <Text dimColor italic>
