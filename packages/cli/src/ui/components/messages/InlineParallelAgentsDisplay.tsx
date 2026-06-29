@@ -43,6 +43,16 @@ interface InlineParallelAgentsDisplayProps {
    * defaults to the number of agent entries in `toolCalls`.
    */
   totalAgentCount?: number;
+  /**
+   * Hard cap on the panel's rendered height (rows). The panel renders
+   * inside the non-`<Static>` live frame; if that frame exceeds the
+   * terminal height, ink clears the whole screen on every repaint
+   * (scroll snap-back / flicker — see ink `shouldClearTerminalForFrame`).
+   * When set, the agent list windows to the most recent rows that fit,
+   * leaving a "+N more" indicator. Omitted → no cap (committed phase,
+   * where the row already lives in `<Static>`).
+   */
+  availableTerminalHeight?: number;
 }
 
 /**
@@ -173,7 +183,12 @@ function truncateMiddle(input: string, max: number): string {
 
 export const InlineParallelAgentsDisplay: React.FC<
   InlineParallelAgentsDisplayProps
-> = ({ toolCalls, contentWidth, totalAgentCount }) => {
+> = ({
+  toolCalls,
+  contentWidth,
+  totalAgentCount,
+  availableTerminalHeight,
+}) => {
   const config = useContext(ConfigContext);
 
   // Static slice of agent calls for this group. The caller already
@@ -263,6 +278,18 @@ export const InlineParallelAgentsDisplay: React.FC<
   const total = totalAgentCount ?? rows.length;
   const headerLabel = `Parallel agents · ${total} · ${doneCount}/${total} done`;
 
+  // Height backstop: the panel lives in the non-`<Static>` live frame, so its
+  // height must stay within budget or ink clears the whole terminal on every
+  // repaint (scroll snap-back). Reserve 1 row for the header and 1 for the
+  // overflow indicator, then window to the most recent rows that fit. A budget
+  // ≤ 0 / undefined means "no cap" (committed phase — already in `<Static>`).
+  const rowBudget =
+    availableTerminalHeight && availableTerminalHeight > 0
+      ? Math.max(1, availableTerminalHeight - 2)
+      : rows.length;
+  const overflowCount = Math.max(0, rows.length - rowBudget);
+  const visibleRows = overflowCount > 0 ? rows.slice(rows.length - rowBudget) : rows;
+
   return (
     <Box flexDirection="column" width={contentWidth} paddingX={1}>
       <Box>
@@ -270,7 +297,14 @@ export const InlineParallelAgentsDisplay: React.FC<
           {headerLabel}
         </Text>
       </Box>
-      {rows.map((row) => (
+      {overflowCount > 0 && (
+        <Box>
+          <Text color={theme.text.secondary}>
+            … +{overflowCount} more {overflowCount === 1 ? 'agent' : 'agents'}
+          </Text>
+        </Box>
+      )}
+      {visibleRows.map((row) => (
         <AgentRow key={row.agentId} row={row} now={now} />
       ))}
     </Box>

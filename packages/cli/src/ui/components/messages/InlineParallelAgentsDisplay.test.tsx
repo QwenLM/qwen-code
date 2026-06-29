@@ -260,4 +260,55 @@ describe('<InlineParallelAgentsDisplay />', () => {
     // Tally counts only the agent.
     expect(frame).toContain('0/1 done');
   });
+
+  describe('height backstop (availableTerminalHeight)', () => {
+    const manyAgents = (n: number): IndividualToolCallDisplay[] =>
+      Array.from({ length: n }, (_, i) =>
+        agentToolCall({
+          callId: `cap-${i}`,
+          subagentName: 'general-purpose',
+          taskDescription: `CapAgent ${i}`,
+          status: 'completed',
+        }),
+      );
+
+    const renderCapped = (
+      toolCalls: IndividualToolCallDisplay[],
+      availableTerminalHeight?: number,
+    ) =>
+      render(
+        <ConfigContext.Provider value={undefined}>
+          <InlineParallelAgentsDisplay
+            toolCalls={toolCalls}
+            contentWidth={120}
+            availableTerminalHeight={availableTerminalHeight}
+          />
+        </ConfigContext.Provider>,
+      );
+
+    it('without a budget, renders every agent (no cap)', () => {
+      const { lastFrame } = renderCapped(manyAgents(10));
+      const frame = lastFrame() ?? '';
+      // header + 10 rows, no overflow indicator.
+      expect(frame.split('\n').length).toBe(11);
+      expect(frame).not.toContain('more agent');
+    });
+
+    it('with a budget, windows to the most recent rows + "+N more" and never exceeds the budget', () => {
+      const budget = 6;
+      const { lastFrame } = renderCapped(manyAgents(10), budget);
+      const frame = lastFrame() ?? '';
+      // The whole non-Static frame must fit the budget, else ink clears the
+      // terminal every repaint (the scroll snap-back this guards against).
+      expect(frame.split('\n').length).toBeLessThanOrEqual(budget);
+      // rowBudget = budget - 2 = 4 visible rows → 6 hidden.
+      expect(frame).toContain('+6 more agents');
+      // Windows from the END (most recent), so the last agent shows and the
+      // first does not.
+      expect(frame).toContain('CapAgent 9');
+      expect(frame).not.toContain('CapAgent 0');
+      // Header tally still reflects the full count.
+      expect(frame).toContain('10/10 done');
+    });
+  });
 });
