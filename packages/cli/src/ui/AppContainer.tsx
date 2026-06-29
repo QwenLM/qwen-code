@@ -2685,12 +2685,21 @@ export const AppContainer = (props: AppContainerProps) => {
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
+  // `staticExtraHeight` + `MAIN_CONTENT_HEIGHT_RESERVATION` are breathing room
+  // for the append-only <Static> region in legacy mode (they prevent the
+  // overflow flicker the non-VP path is prone to). VP mode owns the viewport
+  // through the React tree and clips natively, so reserving those rows just
+  // strands ~5 blank rows beneath the composer — the input never reaches the
+  // bottom of the terminal. Drop the reservation in VP so the composer sinks
+  // to the bottom; non-VP keeps it unchanged.
+  const mainContentHeightReservation = useTerminalBuffer
+    ? 0
+    : staticExtraHeight + MAIN_CONTENT_HEIGHT_RESERVATION;
   const availableTerminalHeight = Math.max(
     0,
     terminalHeight -
       controlsHeight -
-      staticExtraHeight -
-      MAIN_CONTENT_HEIGHT_RESERVATION -
+      mainContentHeightReservation -
       tabBarHeight,
   );
 
