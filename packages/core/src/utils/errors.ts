@@ -98,9 +98,17 @@ export function getErrorMessage(error: unknown): string {
     return error.message;
   }
   if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
-    const message = (error as { message?: unknown }).message;
+    const { message, cause } = error as {
+      message?: unknown;
+      cause?: unknown;
+    };
     if (typeof message === 'string' && message.trim()) {
-      return message;
+      const detail = describeErrorCause(cause);
+      const result =
+        detail && detail !== message
+          ? `${message} (cause: ${detail})`
+          : message;
+      return truncateStringifiedErrorMessage(result);
     }
     try {
       const serialized = JSON.stringify(error);

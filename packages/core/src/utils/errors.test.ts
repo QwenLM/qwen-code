@@ -53,6 +53,21 @@ describe('getErrorMessage cause unwrapping', () => {
     ).toBe('path escapes workspace: /root/.qwen/skills/example.md');
   });
 
+  it('surfaces cause details from plain error-like objects', () => {
+    expect(
+      getErrorMessage({
+        message: 'fetch failed',
+        cause: { code: 'ECONNREFUSED' },
+      }),
+    ).toBe('fetch failed (cause: ECONNREFUSED)');
+  });
+
+  it('bounds long messages from plain error-like objects', () => {
+    const message = getErrorMessage({ message: 'x'.repeat(2000) });
+
+    expect(message).toBe(`${'x'.repeat(997)}...`);
+  });
+
   it('stringifies plain objects without a message', () => {
     expect(getErrorMessage({ code: -32603 })).toBe('{"code":-32603}');
   });
