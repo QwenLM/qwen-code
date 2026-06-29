@@ -9,6 +9,7 @@ import type {
   CommandContext,
   OpenDialogActionReturn,
   MessageActionReturn,
+  SubmitPromptActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -212,10 +213,10 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, [model-id] [prompt] to run a one-off prompt on another model).',
     );
   },
-  argumentHint: '[--fast|--voice|--vision] [<model-id>]',
+  argumentHint: '[--fast|--voice|--vision] [<model-id>] [<prompt>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -267,7 +268,9 @@ export const modelCommand: SlashCommand = {
   action: async (
     context: CommandContext,
     actionArgs: string,
-  ): Promise<OpenDialogActionReturn | MessageActionReturn> => {
+  ): Promise<
+    OpenDialogActionReturn | MessageActionReturn | SubmitPromptActionReturn
+  > => {
     const { services } = context;
     const { config, settings } = services;
 
@@ -555,7 +558,15 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const modelName = args.trim().split(/\s+/)[0] ?? '';
+    // `/model <id>` switches the session model; `/model <id> <prompt>` runs the
+    // prompt on <id> for this turn only (inline one-shot override) without
+    // changing or persisting the session model.
+    const trimmedArgs = args.trim();
+    const firstSpace = trimmedArgs.search(/\s/);
+    const modelName =
+      firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
+    const inlinePrompt =
+      firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
     if (modelName) {
       if (!settings) {
         return {
@@ -581,6 +592,29 @@ export const modelCommand: SlashCommand = {
           ),
         };
       }
+
+      if (inlinePrompt) {
+        // The per-turn override only changes the model id sent to the active
+        // provider; it cannot rebuild credentials/endpoint, so a model that
+        // resolves to a different auth type can't be run inline. Point the user
+        // at the two-step `/model <id>` flow, which does switch providers.
+        if (parsed.authType && parsed.authType !== authType) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.",
+              { model: modelName },
+            ),
+          };
+        }
+        return {
+          type: 'submit_prompt',
+          content: inlinePrompt,
+          modelOverride: parsed.modelId,
+        };
+      }
+
       const effectiveModelName = await switchMainModel(
         config,
         settings,

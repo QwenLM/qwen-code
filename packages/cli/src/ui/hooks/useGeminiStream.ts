@@ -989,6 +989,14 @@ export const useGeminiStream = (
               localQueryToSendToGemini = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
+              // Per-turn model override (e.g. inline `/model <id> <prompt>`).
+              // Runs after the new-user-turn reset above and before the stream
+              // is sent, so it applies to this turn and — because the reset is
+              // skipped for ToolResult/Retry — persists across the tool loop,
+              // then clears on the next user turn.
+              if (slashCommandResult.modelOverride) {
+                modelOverrideRef.current = slashCommandResult.modelOverride;
+              }
 
               return {
                 queryToSend: localQueryToSendToGemini,
