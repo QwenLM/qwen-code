@@ -907,6 +907,8 @@ export function App({
   const [sidebarSwitchingSessionId, setSidebarSwitchingSessionId] = useState<
     string | null
   >(null);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
   const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
     setSidebarCollapsed(collapsed);
     writeSidebarCollapsed(collapsed);
@@ -2155,6 +2157,7 @@ export function App({
       const session = await (
         sessionActions as typeof sessionActions & SessionActionsWithCreate
       ).createSession();
+      closeMobileDrawer();
       if (onSessionIdChange) {
         onSessionIdChange(session.sessionId);
         return true;
@@ -2169,7 +2172,7 @@ export function App({
       reportError(error, 'Failed to create a new session');
       return false;
     }
-  }, [onSessionIdChange, reportError, sessionActions]);
+  }, [closeMobileDrawer, onSessionIdChange, reportError, sessionActions]);
 
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
@@ -2178,6 +2181,7 @@ export function App({
         await sessionActions.loadSession(sessionId, {
           deferTranscriptReset: true,
         });
+        closeMobileDrawer();
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -2185,7 +2189,7 @@ export function App({
         throw error;
       }
     },
-    [sessionActions],
+    [closeMobileDrawer, sessionActions],
   );
 
   useEffect(() => {
@@ -3793,16 +3797,53 @@ export function App({
 
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
-              <WebShellSidebar
-                collapsed={sidebarCollapsed}
-                onCollapsedChange={handleSidebarCollapsedChange}
-                onOpenSettings={() => setShowSettingsDialog(true)}
-                onNewSession={createNewSession}
-                onLoadSession={loadSidebarSession}
-                onError={reportError}
-              />
+              <div
+                className={[
+                  styles.mobileDrawer,
+                  mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                <div
+                  className={styles.mobileBackdrop}
+                  onClick={closeMobileDrawer}
+                  aria-hidden="true"
+                />
+                <WebShellSidebar
+                  collapsed={sidebarCollapsed}
+                  onCollapsedChange={handleSidebarCollapsedChange}
+                  onOpenSettings={() => setShowSettingsDialog(true)}
+                  onNewSession={createNewSession}
+                  onLoadSession={loadSidebarSession}
+                  onError={reportError}
+                  mobileOpen={mobileDrawerOpen}
+                />
+              </div>
             )}
             <div className={styles.chatPane}>
+              {sidebarOptions.enabled && (
+                <button
+                  type="button"
+                  className={styles.hamburgerButton}
+                  onClick={() => setMobileDrawerOpen((open) => !open)}
+                  aria-label={t('sidebar.toggleMenu')}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <line x1="3" y1="6" x2="21" y2="6" />
+                    <line x1="3" y1="12" x2="21" y2="12" />
+                    <line x1="3" y1="18" x2="21" y2="18" />
+                  </svg>
+                </button>
+              )}
               <WebShellCustomizationProvider value={customization}>
                 <CompactModeContext.Provider value={compactMode}>
                   <TodoContextsProvider
