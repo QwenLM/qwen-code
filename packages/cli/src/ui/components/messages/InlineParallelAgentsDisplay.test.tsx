@@ -219,7 +219,7 @@ describe('<InlineParallelAgentsDisplay />', () => {
           failedToolCalls: 0,
           successRate: 1,
           inputTokens: 0,
-          outputTokens: 0,
+          outputTokens: 800,
           thoughtTokens: 0,
           cachedTokens: 0,
           totalTokens: 2400,
@@ -234,8 +234,8 @@ describe('<InlineParallelAgentsDisplay />', () => {
     const { lastFrame } = renderInline({ toolCalls: [toolCall] });
     const frame = lastFrame() ?? '';
     expect(frame).toContain('12s');
-    // 2400 tokens → "2.4k" per formatTokenCount.
-    expect(frame).toContain('2.4k tok');
+    // outputTokens: 800 → "800" per formatTokenCount (not totalTokens: 2400).
+    expect(frame).toContain('800 tok');
   });
 
   it('ignores non task_execution tool calls in the same group', () => {

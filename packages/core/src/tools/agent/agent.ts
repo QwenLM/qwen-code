@@ -1277,8 +1277,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
-          | string
-          | Content,
+          string | Content,
         initialMessages,
       };
       toolConfig = {
@@ -2225,7 +2224,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // already requires confirmation — this only flips deny → surface.)
         const shouldBubble = Boolean(
           subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
-            this.config.isInteractive(),
+          this.config.isInteractive(),
         );
         // Use Object.create so the resolved approval mode override (e.g.
         // subagent-level `approvalMode: auto-edit`) is preserved.
@@ -2422,6 +2421,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const summary = bgSubagent.getExecutionSummary();
           entry.stats = {
             totalTokens: summary.totalTokens,
+            outputTokens: summary.outputTokens,
             toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
@@ -2473,6 +2473,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const summary = bgSubagent.getExecutionSummary();
           return {
             totalTokens: summary.totalTokens,
+            outputTokens: summary.outputTokens,
             toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
@@ -2879,6 +2880,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const summary = subagent.getExecutionSummary();
         entry.stats = {
           totalTokens: summary.totalTokens,
+          outputTokens: summary.outputTokens,
           toolUses: fgLiveToolCallCount,
           durationMs: summary.totalDurationMs,
         };
