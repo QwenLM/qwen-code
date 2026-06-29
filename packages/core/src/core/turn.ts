@@ -127,23 +127,26 @@ export interface ToolCallResponseInfo {
   modelOverride?: string;
 }
 
-function countRequestParts(req: PartListUnion): number {
-  if (Array.isArray(req)) return req.length;
-  return 1;
+function normalizeRequestParts(req: PartListUnion): Part[] {
+  const parts = Array.isArray(req) ? req : [req];
+  return parts.map((part) =>
+    typeof part === 'string' ? { text: part } : (part as Part),
+  );
 }
 
-function summarizeHistoryEntry(content: Content): {
-  role: string | undefined;
+function summarizeParts(parts: Part[]): {
   partCount: number;
-  functionNames: string[];
+  functionCalls: string[];
+  functionResponses: string[];
   textPreview: string;
 } {
-  const parts = content.parts ?? [];
   return {
-    role: content.role,
     partCount: parts.length,
-    functionNames: parts
-      .map((part) => part.functionCall?.name ?? part.functionResponse?.name)
+    functionCalls: parts
+      .map((part) => part.functionCall?.name)
+      .filter((name): name is string => typeof name === 'string'),
+    functionResponses: parts
+      .map((part) => part.functionResponse?.name)
       .filter((name): name is string => typeof name === 'string'),
     textPreview: parts
       .map((part) => (typeof part.text === 'string' ? part.text : ''))
@@ -152,15 +155,23 @@ function summarizeHistoryEntry(content: Content): {
   };
 }
 
+function summarizeHistoryEntry(content: Content) {
+  return {
+    role: content.role,
+    ...summarizeParts(content.parts ?? []),
+  };
+}
+
 function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
+  const requestParts = normalizeRequestParts(req);
   return {
     history: {
-      length: chat.getHistoryLength(),
+      rawLength: chat.getHistoryLength(),
       tail: chat
         .getHistoryTailShallow(ERROR_REPORT_HISTORY_TAIL_COUNT, true)
         .map(summarizeHistoryEntry),
     },
-    request: { partCount: countRequestParts(req) },
+    request: summarizeParts(requestParts),
   };
 }
 
@@ -534,13 +545,13 @@ export class Turn {
         throw error;
       }
 
-      let contextForReport: unknown;
+      let contextForReport: Record<string, unknown>;
       try {
         contextForReport = buildApiErrorReportContext(this.chat, req);
       } catch {
         contextForReport = {
           history: { error: 'failed to build diagnostic summary' },
-          request: { partCount: countRequestParts(req) },
+          request: summarizeParts(normalizeRequestParts(req)),
         };
       }
       await reportError(

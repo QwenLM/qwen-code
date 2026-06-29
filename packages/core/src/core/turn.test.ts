@@ -398,17 +398,23 @@ describe('Turn', () => {
         'Error when talking to API',
         {
           history: {
-            length: 1,
+            rawLength: 1,
             tail: [
               {
                 role: 'model',
                 partCount: 1,
-                functionNames: [],
+                functionCalls: [],
+                functionResponses: [],
                 textPreview: 'Previous history',
               },
             ],
           },
-          request: { partCount: 1 },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
         },
         'Turn.run-sendMessageStream',
       );
@@ -439,10 +445,15 @@ describe('Turn', () => {
         'Error when talking to API',
         {
           history: {
-            length: 0,
+            rawLength: 0,
             tail: [],
           },
-          request: { partCount: 1 },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
         },
         'Turn.run-sendMessageStream',
       );
@@ -451,7 +462,7 @@ describe('Turn', () => {
     it('should report API errors without cloning full history', async () => {
       const error = new Error('API Error');
       const largeText = 'x'.repeat(1024 * 1024);
-      const reqParts: Part[] = [{ text: 'Trigger error' }];
+      const reqParts: Part = { text: 'Trigger error' };
       mockSendMessageStream.mockRejectedValue(error);
       mockGetHistory.mockImplementation(() => {
         throw new Error('full history clone should not be used');
@@ -464,7 +475,13 @@ describe('Turn', () => {
             { functionResponse: { name: 'tool', response: { largeText } } },
           ],
         },
-        { role: 'model', parts: [{ text: largeText }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'readFile', args: {} } },
+            { text: largeText },
+          ],
+        },
       ] satisfies Content[]);
       mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
 
@@ -488,23 +505,30 @@ describe('Turn', () => {
         'Error when talking to API',
         {
           history: {
-            length: 100,
+            rawLength: 100,
             tail: [
               {
                 role: 'user',
                 partCount: 1,
-                functionNames: ['tool'],
+                functionCalls: [],
+                functionResponses: ['tool'],
                 textPreview: '',
               },
               {
                 role: 'model',
-                partCount: 1,
-                functionNames: [],
+                partCount: 2,
+                functionCalls: ['readFile'],
+                functionResponses: [],
                 textPreview: largeText.slice(0, 200),
               },
             ],
           },
-          request: { partCount: 1 },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
         },
         'Turn.run-sendMessageStream',
       );
@@ -534,7 +558,12 @@ describe('Turn', () => {
         'Error when talking to API',
         {
           history: { error: 'failed to build diagnostic summary' },
-          request: { partCount: 1 },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
         },
         'Turn.run-sendMessageStream',
       );

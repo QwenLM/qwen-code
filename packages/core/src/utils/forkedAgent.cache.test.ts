@@ -94,26 +94,29 @@ describe('CacheSafeParams', () => {
         role: 'user',
         parts: [historyPart],
       };
-      const history: Content[] = [historyEntry];
+      const historyEntryWithoutParts: Content = { role: 'model' };
+      const history: Content[] = [historyEntry, historyEntryWithoutParts];
 
       saveCacheSafeParams({}, history, 'model');
       history.push({ role: 'model', parts: [{ text: 'late mutation' }] });
       historyEntry.parts!.push({ text: 'late part mutation' });
 
       const params = getCacheSafeParams();
-      expect(params!.history).toHaveLength(1);
+      expect(params!.history).toHaveLength(2);
       expect(params!.history).not.toBe(history);
       expect(params!.history[0]).not.toBe(historyEntry);
       expect(params!.history[0]!.parts).toHaveLength(1);
       expect(params!.history[0]!.parts).not.toBe(historyEntry.parts);
       expect(params!.history[0]!.parts![0]).toBe(historyPart);
+      expect(params!.history[1]).not.toBe(historyEntryWithoutParts);
+      expect('parts' in params!.history[1]!).toBe(false);
 
       params!.history.push({
         role: 'model',
         parts: [{ text: 'returned mutation' }],
       });
       params!.history[0]!.parts!.push({ text: 'returned part mutation' });
-      expect(getCacheSafeParams()!.history).toHaveLength(1);
+      expect(getCacheSafeParams()!.history).toHaveLength(2);
       expect(getCacheSafeParams()!.history[0]!.parts).toHaveLength(1);
     });
   });
