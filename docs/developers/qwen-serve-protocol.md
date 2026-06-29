@@ -1726,10 +1726,11 @@ The connection then closes.
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                                                                                |
 | `packages/cli/src/serve/run-qwen-serve.ts`           | listener lifecycle + signal handling                                                                       |
-| `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                                                                |
+| `packages/cli/src/serve/server.ts`                   | Express app assembly, middleware ordering, and remaining direct routes                                     |
+| `packages/cli/src/serve/routes/*.ts`                 | Focused Express route groups, including session, SSE, workspace auth, workspace status, and file routes    |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
-| `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry                                                   |
-| `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
+| `packages/cli/src/serve/acp-session-bridge.ts`       | CLI-local bridge compatibility facade for spawn-or-attach, per-session FIFO, and permission registry       |
+| `packages/acp-bridge/src/status.ts`                  | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
 | `packages/cli/src/serve/env-snapshot.ts`             | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
 | `packages/acp-bridge/src/eventBus.ts`                | bounded async queue + replay ring                                                                          |
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                                                                  |

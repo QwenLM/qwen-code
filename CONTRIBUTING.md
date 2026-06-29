@@ -66,6 +66,22 @@ Your PR should have a clear, descriptive title and a detailed description of the
 
 In the PR description, explain the "why" behind your changes and link to the relevant issue (e.g., `Fixes #123`).
 
+### Adding a Provider Preset
+
+A built-in preset is an **endorsement**, not just a convenience. Users route API keys and full prompt data through these endpoints, so the bar is high.
+
+**Tier 1 — Built-in Preset** requires all of the following:
+
+- **Affiliation Disclosure** — PR author must disclose any relationship with the provider.
+- **Operational Maturity** — publicly operational with demonstrated uptime; public SLA or status page preferred.
+- **Organic User Demand** — evidence of community demand (issues, discussions), not just a self-listing.
+- **Data and Security Transparency** — provider's data handling practices must be publicly documented.
+- **Maintenance Commitment** — provider team commits to tracking Qwen Code protocol changes.
+
+**Default Path — Custom Provider**: for providers that don't meet Tier 1, users connect via the built-in custom-provider flow (`/auth` or `/model` → Custom Provider). No code change or project endorsement needed.
+
+**If a Tier 1 preset is approved**, the PR should follow the existing `openrouter.ts` / `requesty.ts` pattern: use `customHeaders` for attribution, implement `ownsModel` with a dual-gate (env key + hostname), and add the env key to `SECRET_ENV_VARS` in `packages/cli/src/serve/envSnapshot.ts` with corresponding test assertions in `auth.test.ts` and `provider-config.test.ts`.
+
 ## Development Setup and Workflow
 
 This section guides contributors on how to build, modify, and understand the development setup of this project.

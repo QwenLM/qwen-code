@@ -22,6 +22,7 @@ import {
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
   isAnyAutoMemPath,
 } from './paths.js';
@@ -102,9 +103,9 @@ function getScopedDenyRule(
     case ToolNames.SHELL:
       return 'ManagedAutoMemory(run_shell_command: read-only only)';
     case ToolNames.EDIT:
-      return `ManagedAutoMemory(edit: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()})`;
+      return `ManagedAutoMemory(edit: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()}; team memory ${getTeamAutoMemoryRoot(projectRoot)} is not auto-writable)`;
     case ToolNames.WRITE_FILE:
-      return `ManagedAutoMemory(write_file: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()})`;
+      return `ManagedAutoMemory(write_file: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()}; team memory ${getTeamAutoMemoryRoot(projectRoot)} is not auto-writable)`;
     default:
       return undefined;
   }

@@ -585,6 +585,30 @@ describe('qwen serve — PATCH /session/:id/metadata', () => {
   });
 });
 
+describe('qwen serve — POST /session/:id/continue', () => {
+  // Real-daemon wiring check for the continuation lifecycle path
+  // (route → bridge.continueSession → control method → agent
+  // continueLastTurn). Model-free: a fresh session has no interrupted turn,
+  // so the pre-check rejects and no continuation turn is dispatched — the
+  // happy/reject path that exercises the full HTTP round-trip.
+  it('returns accepted:false on a session with no interrupted turn', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const res = await fetch(`${base}/session/${session.sessionId}/continue`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      accepted: false,
+      interruption: 'none',
+    });
+    await client.closeSession(session.sessionId);
+  });
+});
+
 describe('qwen serve — prompt clientId admission', () => {
   // Validates the three real-daemon behaviors that DaemonSessionClient's
   // clientId self-heal relies on (see

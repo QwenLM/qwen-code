@@ -61,6 +61,7 @@ export { MAX_WIDTH };
  * shrink the description away entirely.
  */
 const MIN_DESCRIPTION_WIDTH = 12;
+const ACTIVE_MARKER_WIDTH = 2;
 
 /**
  * Collapse all runs of whitespace (including newlines from multi-line
@@ -118,13 +119,14 @@ export function SuggestionsDisplay({
   const describedLabelLengths = suggestions
     .filter((s) => s.description)
     .map((s) => getFullLabel(s).length);
+  const contentWidth = Math.max(width - ACTIVE_MARKER_WIDTH, 1);
   const labelColumnWidth =
     mode === 'slash'
-      ? Math.min(maxLabelLength, Math.floor(width * 0.5))
+      ? Math.min(maxLabelLength, Math.floor(contentWidth * 0.5))
       : describedLabelLengths.length > 0
         ? Math.min(
             Math.max(...describedLabelLengths),
-            Math.max(width - MIN_DESCRIPTION_WIDTH - 2, 1),
+            Math.max(contentWidth - MIN_DESCRIPTION_WIDTH - 2, 1),
           )
         : 0;
 
@@ -141,7 +143,7 @@ export function SuggestionsDisplay({
         const isLong = displayLabel.length >= MAX_WIDTH;
         const expansionIndicatorWidth = isActive && isLong ? 3 : 0;
         const descriptionColumnWidth = Math.max(
-          width - labelColumnWidth - 2 - expansionIndicatorWidth,
+          contentWidth - labelColumnWidth - 2 - expansionIndicatorWidth,
           1,
         );
         const labelElement = (
@@ -156,6 +158,9 @@ export function SuggestionsDisplay({
 
         return (
           <Box key={`${suggestion.value}-${originalIndex}`} flexDirection="row">
+            <Box width={ACTIVE_MARKER_WIDTH} flexShrink={0}>
+              <Text color={textColor}>{isActive ? '> ' : '  '}</Text>
+            </Box>
             <Box
               {...(mode === 'slash' || suggestion.description
                 ? { width: labelColumnWidth, flexShrink: 0 as const }

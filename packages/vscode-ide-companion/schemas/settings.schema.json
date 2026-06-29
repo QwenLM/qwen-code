@@ -96,12 +96,14 @@
         "sessionRecapAwayThresholdMinutes": {
           "description": "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
           "type": "number",
-          "default": 5
+          "default": 5,
+          "minimum": 1
         },
         "cleanupPeriodDays": {
           "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.",
           "type": "number",
-          "default": 30
+          "default": 30,
+          "minimum": 0
         },
         "gitCoAuthor": {
           "description": "Attribution added to git commits and pull requests created through Qwen Code.",
@@ -528,6 +530,11 @@
       "type": "string",
       "default": ""
     },
+    "visionModel": {
+      "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
+      "type": "string",
+      "default": ""
+    },
     "voiceModel": {
       "description": "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
       "type": "string",
@@ -743,6 +750,12 @@
               "default": true
             }
           }
+        },
+        "autoCompactThreshold": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1,
+          "description": "Fraction of context window at which auto-compaction triggers (greater than 0, up to 1). Default is 0.7 (70%)."
         }
       }
     },
@@ -769,6 +782,16 @@
           "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
           "type": "boolean",
           "default": true
+        },
+        "enableTeamMemory": {
+          "description": "Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.",
+          "type": "boolean",
+          "default": false
+        },
+        "enableTeamMemorySync": {
+          "description": "When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -1036,9 +1059,16 @@
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.",
+              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.",
               "type": "boolean",
               "default": true
+            },
+            "idleTimeoutMs": {
+              "description": "Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.",
+              "type": "number",
+              "default": 300000,
+              "minimum": 0,
+              "maximum": 2147483647
             },
             "maxImageDimension": {
               "description": "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",

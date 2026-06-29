@@ -1233,12 +1233,20 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
+    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，--vision 可設置視覺橋接模型，[model-id] 可立即切換）',
+  "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
+    "⚠ '{{model}}' 不是已知的圖像能力模型；視覺橋接處理圖片時可能會失敗。",
   'Set a lighter model for prompt suggestions and speculative execution':
     '設置用於輸入建議和推測執行的輕量模型',
   'Toggle voice dictation input': '切換語音聽寫輸入',
   'Set the model for voice transcription': '設定語音轉寫模型',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    '設定用於為純文字主模型轉寫圖像的圖像能力模型',
   'Select Fast Model': '選擇快速模型',
+  'Select Vision Model': '選擇視覺模型',
   'Select Voice Model': '選擇語音模型',
+  'Vision Model': '視覺模型',
   'Voice Model': '語音模型',
   'Selected voice model is unavailable.': '所選語音模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
@@ -1442,6 +1450,8 @@ export default {
   'not set': '未設置',
   'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
     '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
+  'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
+    '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "語音模型 '{{modelName}}' 不唯一。請先配置唯一的模型 ID，再使用 /model --voice。",
   none: '無',

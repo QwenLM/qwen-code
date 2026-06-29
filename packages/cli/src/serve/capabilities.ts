@@ -248,6 +248,21 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
+  // the Chrome extension) can host an MCP server that the daemon's agent
+  // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
+  // reusing the SDK-MCP-server control-plane pattern. Inbound WS frame types:
+  // `mcp_register` { server }, `mcp_message` { id, server, payload }
+  // (bidirectional, request/response correlated by `id`), `mcp_unregister`
+  // { server }. Advertised CONDITIONALLY — only when the operator opts in
+  // (the public contract is still settling per #5626), so clients pre-flight
+  // this tag before attempting to register a client-hosted server.
+  client_mcp_over_ws: { since: 'v1' },
+  // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
+  // where a loopback puppeteer client (chrome-devtools-mcp) drives ONE real tab
+  // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
+  // frames. Advertised only when the operator opts in (contract still settling).
+  cdp_tunnel_over_ws: { since: 'v1' },
   // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
   // streams raw PCM, the daemon transcribes server-side via the configured
   // `voiceModel` (credentials never reach the client). Advertised
@@ -278,6 +293,18 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
+  /**
+   * Whether the daemon will accept client-hosted MCP servers over the WS
+   * (`client_mcp_over_ws`, issue #5626). Opt-in: the contract is still
+   * settling, so the tag is advertised only when explicitly enabled.
+   */
+  clientMcpOverWsEnabled?: boolean;
+  /**
+   * Whether the daemon exposes the Plan C `/cdp` tunnel endpoint
+   * (`cdp_tunnel_over_ws`, issue #5626). Opt-in: the contract is still
+   * settling, so the tag is advertised only when explicitly enabled.
+   */
+  cdpTunnelOverWsEnabled?: boolean;
   voiceWsAvailable?: boolean;
 }
 
@@ -345,6 +372,8 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
+  ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
   [
     // Advertised whenever the `/voice/stream` WS endpoint exists. A configured
     // token (or `--require-auth`) no longer suppresses it: browsers can't set

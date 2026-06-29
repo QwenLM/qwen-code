@@ -135,12 +135,14 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     const trimmedValue = currentCustomInputValue.trim();
 
     if (isMultiSelect) {
-      // Toggle custom input checked state
-      if (!trimmedValue) return;
+      // Toggle custom input checked state, then submit/advance if non-empty
       setCustomInputChecked((prev) => ({
         ...prev,
-        [currentQuestionIndex]: !prev[currentQuestionIndex],
+        [currentQuestionIndex]: trimmedValue.length > 0,
       }));
+      if (trimmedValue) {
+        handleMultiSelectSubmit();
+      }
       return;
     }
 
