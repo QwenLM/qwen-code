@@ -37,6 +37,15 @@ const MAX_RECURRING_JITTER_MS = 15 * 60 * 1000;
 const MAX_ONESHOT_JITTER_MS = 90 * 1000;
 const LOCK_PROBE_INTERVAL_MS = 5000;
 const FILE_DEBOUNCE_MS = 300;
+// Loop wakeups (self-paced /loop) align with Claude Code's ScheduleWakeup:
+// the requested delay is clamped to [60, 3600] seconds, with a 1200s default
+// heartbeat for non-finite input. Unlike cron jobs the fire time is exact
+// (second resolution, not minute-rounded) and lives in a separate map — not
+// subject to MAX_JOBS, never durable.
+export const WAKEUP_MIN_SECONDS = 60;
+export const WAKEUP_MAX_SECONDS = 3600;
+const WAKEUP_DEFAULT_SECONDS = 1200;
+const WAKEUP_CHAIN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface CronJob {
   id: string;
@@ -45,12 +54,25 @@ export interface CronJob {
   recurring: boolean;
   createdAt: number;
   expiresAt: number;
+  fireAtMs?: number;
   lastFiredAt?: number;
   jitterMs: number;
   /** Persisted under ~/.qwen (per-project) — survives restarts. */
   durable?: boolean;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
+}
+
+/**
+ * A second-resolution, session-only one-shot wakeup used by self-paced
+ * `/loop` (loop_wakeup). Kept separate from cron jobs: never persisted,
+ * never counted against MAX_JOBS, fired at an exact ms (not minute-rounded).
+ */
+interface SessionWakeup {
+  id: string;
+  fireAtMs: number;
+  prompt: string;
+  createdAt: number;
 }
 
 /**
@@ -131,11 +153,61 @@ function generateId(): string {
   return id;
 }
 
+export function clampWakeupSeconds(delaySeconds: number): number {
+  if (!Number.isFinite(delaySeconds)) return WAKEUP_DEFAULT_SECONDS;
+  return Math.min(
+    WAKEUP_MAX_SECONDS,
+    Math.max(WAKEUP_MIN_SECONDS, Math.round(delaySeconds)),
+  );
+}
+
+/**
+ * Maps a wakeup onto the minimal CronJob shape onFire consumers read (they
+ * only use `prompt`). cronExpr `@wakeup` marks its origin.
+ */
+function wakeupToJob(wakeup: SessionWakeup): CronJob {
+  return {
+    id: wakeup.id,
+    cronExpr: '@wakeup',
+    prompt: wakeup.prompt,
+    recurring: false,
+    createdAt: wakeup.createdAt,
+    expiresAt: Infinity,
+    fireAtMs: wakeup.fireAtMs,
+    jitterMs: 0,
+  };
+}
+
+function truncatePrompt(prompt: string): string {
+  return prompt.length > 60 ? prompt.slice(0, 57) + '...' : prompt;
+}
+
 export class CronScheduler {
   // All jobs — session-only and durable — live in this one map.
   private jobs = new Map<string, CronJob>();
+  // Loop wakeups live separately: second-resolution, never durable, never
+  // counted against MAX_JOBS. Delivered through the same onFire as cron.
+  private wakeups = new Map<string, SessionWakeup>();
+  // Start of the self-paced wakeup chain — a session-level 24h budget that
+  // spans the whole session. Deliberately NOT reset when a wakeup fires or
+  // is cancelled: re-arm leaves at most one pending wakeup, so resetting on
+  // an empty map would restart the clock every fire and let a continuous
+  // loop escape the cap. Reset only by stop()/destroy() (a new session).
+  private wakeupChainStartedAt: number | null = null;
+  // Set once disable() runs (the session's token-limit breaker). Permanent
+  // for this scheduler's lifetime — distinct from a stopped-but-restartable
+  // timer, so LoopWakeup can reject wakeups that would never fire.
+  private _disabled = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private onFire: ((job: CronJob) => void) | null = null;
+  // Guard a consumer installs when it cannot execute certain durable jobs. A
+  // headless run can't expand a `.qwen/loop.md` sentinel, so it marks such
+  // durable jobs skippable here: they are then neither fired NOR have their
+  // persisted fired-state advanced (lastFiredAt stamp / one-shot removal),
+  // leaving the tick for the owning interactive session instead of silently
+  // consuming it for work the consumer never ran. Session-only jobs and durable
+  // jobs in a consumer that can run them are unaffected (predicate unset/false).
+  private skipDurableFire: ((job: CronJob) => boolean) | null = null;
 
   // --- Durable (file-backed) support ---
   private durableEnabled = false;
@@ -209,6 +281,96 @@ export class CronScheduler {
   }
 
   /**
+   * Schedules a second-resolution, session-only one-shot wakeup for
+   * self-paced `/loop`. Clamps `delaySeconds` to [60, 3600]; non-finite
+   * input falls back to the default heartbeat. The fire time is exact (not
+   * minute-rounded) and is not subject to MAX_JOBS. Returns the scheduling
+   * outcome for the model (mirrors ScheduleWakeup's output).
+   */
+  scheduleWakeup(
+    delaySeconds: number,
+    prompt: string,
+  ): {
+    id: string;
+    scheduledFor: string;
+    clampedDelaySeconds: number;
+    wasClamped: boolean;
+    replacedId: string | null;
+  } {
+    // Enforce the disabled invariant at the layer that owns it: a disabled
+    // scheduler never fires, so a wakeup scheduled here would be a silent
+    // zombie. LoopWakeup pre-checks `disabled` for a friendly message; this
+    // guards any other caller.
+    if (this._disabled) {
+      throw new Error(
+        'Cannot schedule a loop wakeup: the scheduler is disabled for this ' +
+          'session. Restart the session to re-enable.',
+      );
+    }
+    const clampedDelaySeconds = clampWakeupSeconds(delaySeconds);
+    const roundedDelaySeconds = Number.isFinite(delaySeconds)
+      ? Math.round(delaySeconds)
+      : delaySeconds;
+    const wasClamped =
+      !Number.isFinite(delaySeconds) ||
+      roundedDelaySeconds < WAKEUP_MIN_SECONDS ||
+      roundedDelaySeconds > WAKEUP_MAX_SECONDS;
+    const id = generateId();
+    const now = Date.now();
+    const fireAtMs = now + clampedDelaySeconds * 1000;
+    const replacedWakeup = this.wakeups.values().next().value ?? null;
+    const replacedId = replacedWakeup?.id ?? null;
+    if (this.wakeupChainStartedAt === null) {
+      this.wakeupChainStartedAt = now;
+    }
+    // Drop any prior pending wakeup before the budget check: a rejected
+    // re-arm must leave nothing behind, or the stale wakeup (its fireAtMs now
+    // in the past) would fire one iteration past the 24h limit it enforces.
+    this.wakeups.clear();
+    if (fireAtMs > this.wakeupChainStartedAt + WAKEUP_CHAIN_MAX_AGE_MS) {
+      throw new Error(
+        'Loop wakeup chain exceeded the 24h session limit. ' +
+          'Omit LoopWakeup to end this loop, or start a new session.',
+      );
+    }
+    if (replacedId) {
+      debugLogger.debug(`Replacing pending wakeup ${replacedId}`);
+    }
+    this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
+    debugLogger.debug(
+      `Wakeup ${id} scheduled for ${new Date(fireAtMs).toISOString()} ` +
+        `(delay=${clampedDelaySeconds}s)`,
+    );
+    return {
+      id,
+      scheduledFor: new Date(fireAtMs).toISOString(),
+      clampedDelaySeconds,
+      wasClamped,
+      replacedId,
+    };
+  }
+
+  /** Cancels a single pending wakeup. Returns true if it existed. */
+  cancelWakeup(id: string): boolean {
+    const deleted = this.wakeups.delete(id);
+    if (deleted) {
+      debugLogger.debug(`Cancelled wakeup ${id}`);
+    }
+    return deleted;
+  }
+
+  /**
+   * Cancels every pending wakeup; returns how many were cancelled. The
+   * primitive behind a future loop-scoped "cancel all wakeups on abort".
+   */
+  cancelAllWakeups(): number {
+    const count = this.wakeups.size;
+    this.wakeups.clear();
+    if (count > 0) debugLogger.debug(`Cancelled ${count} wakeup(s)`);
+    return count;
+  }
+
+  /**
    * Creates a durable cron job: registered like any other job, and
    * persisted under ~/.qwen (per-project) so it survives restarts.
    * Throws if the job can't be persisted.
@@ -244,7 +406,7 @@ export class CronScheduler {
    */
   async delete(id: string): Promise<boolean> {
     const job = this.jobs.get(id);
-    if (!job) return false;
+    if (!job) return this.cancelWakeup(id);
 
     this.jobs.delete(id);
     if (job.durable && this.projectRoot) {
@@ -264,14 +426,17 @@ export class CronScheduler {
    * Returns all active jobs.
    */
   list(): CronJob[] {
-    return [...this.jobs.values()];
+    return [
+      ...this.jobs.values(),
+      ...[...this.wakeups.values()].map(wakeupToJob),
+    ];
   }
 
   /**
-   * Returns the number of active jobs.
+   * Returns the number of active jobs and wakeups.
    */
   get size(): number {
-    return this.jobs.size;
+    return this.jobs.size + this.wakeups.size;
   }
 
   /**
@@ -280,7 +445,10 @@ export class CronScheduler {
    * design and never fire without lock ownership, so they must not pin it.
    */
   get sessionSize(): number {
-    let count = 0;
+    // Pending wakeups count: a self-paced loop must hold the headless
+    // process open until its wakeup fires (and re-arms), mirroring CC's
+    // "call to keep alive / omit to end".
+    let count = this.wakeups.size;
     for (const job of this.jobs.values()) {
       if (!job.durable) count++;
     }
@@ -582,12 +750,40 @@ export class CronScheduler {
         // load (claw-code parity) — one model turn and one confirmation
         // flow instead of N separate prompts. The carrier job exists to
         // satisfy the onFire shape; consumers only read prompt/missed.
-        onFire({
-          ...durableTaskToJob(pending.tasks[0]!),
-          prompt: buildMissedCronNotification(pending.tasks),
-          missed: true,
+        // Same skip as catch-up/final: partition out durable one-shots
+        // this consumer can't run (e.g. a loop.md sentinel in a headless
+        // run). They are not notified and, critically, left on disk (not
+        // in removeMissedFromDisk) so the owning interactive session still
+        // surfaces and runs them instead of losing the task permanently.
+        const skipped: string[] = [];
+        const runnable = pending.tasks.filter((t) => {
+          const job = durableTaskToJob(t);
+          // `job.durable &&` mirrors catch-up/final/tick — durableTaskToJob always
+          // sets durable, so it's a no-op today, but keeps the four skip sites
+          // identical so a future non-durable carrier can't be silently dropped.
+          if (job.durable && this.skipDurableFire?.(job)) {
+            debugLogger.debug(
+              `Skipping durable job ${t.id} (missed): consumer cannot run it`,
+            );
+            skipped.push(t.id);
+            return false;
+          }
+          return true;
         });
-        this.removeMissedFromDisk(pending.tasks.map((t) => t.id));
+        // A skipped sentinel stays on disk (not in removeMissedFromDisk) for its
+        // interactive owner — so drop its pendingRemoval guard too. Left set, it
+        // would sit out of BOTH the job map and disk reconciliation forever;
+        // cleared, the next loadFileTasks re-installs it (the intended
+        // "defer to the owning session" path).
+        for (const id of skipped) this.pendingRemoval.delete(id);
+        if (runnable.length > 0) {
+          onFire({
+            ...durableTaskToJob(runnable[0]!),
+            prompt: buildMissedCronNotification(runnable),
+            missed: true,
+          });
+          this.removeMissedFromDisk(runnable.map((t) => t.id));
+        }
         break;
       }
       case 'catch-up': {
@@ -595,6 +791,16 @@ export class CronScheduler {
         for (const id of pending.ids) {
           const job = this.jobs.get(id);
           if (!job) continue; // deleted while buffered
+          // Same skip as the tick loop (job.durable && …): a durable job this
+          // consumer can't run is not fired and not stamped (left out of
+          // persistCatchUpStamps), so its overdue schedule survives for the
+          // owning session.
+          if (job.durable && this.skipDurableFire?.(job)) {
+            debugLogger.debug(
+              `Skipping durable job ${job.id} (catch-up): consumer cannot run it`,
+            );
+            continue;
+          }
           onFire(job);
           fired.push(id);
         }
@@ -602,10 +808,24 @@ export class CronScheduler {
         break;
       }
       case 'final': {
+        const fired: string[] = [];
         for (const job of pending.jobs) {
+          // Same skip as the tick loop (job.durable && …): a skipped durable
+          // job is left on disk (not in removeMissedFromDisk) so the owning
+          // session still gets its one final fire + delete.
+          if (job.durable && this.skipDurableFire?.(job)) {
+            debugLogger.debug(
+              `Skipping durable job ${job.id} (final): consumer cannot run it`,
+            );
+            // Same limbo as the missed branch: a skipped final task stays on
+            // disk, so clear its pendingRemoval guard rather than strand it.
+            this.pendingRemoval.delete(job.id);
+            continue;
+          }
           onFire(job);
+          fired.push(job.id);
         }
-        this.removeMissedFromDisk(pending.jobs.map((j) => j.id));
+        this.removeMissedFromDisk(fired);
         break;
       }
       default: {
@@ -701,6 +921,17 @@ export class CronScheduler {
   }
 
   /**
+   * Installs a predicate marking durable jobs the active consumer cannot run
+   * (see the `skipDurableFire` field). Such jobs are skipped before any fire or
+   * persist, so their durable schedule is left intact for an owning session that
+   * can run them. Set before `start()` so a buffered catch-up flush also honors
+   * it. A no-op for session-only jobs.
+   */
+  setSkipDurableFire(predicate: (job: CronJob) => boolean): void {
+    this.skipDurableFire = predicate;
+  }
+
+  /**
    * Starts the scheduler tick. Calls `onFire` when a job is due.
    * Only fires when called — does not auto-fire missed intervals.
    */
@@ -726,7 +957,8 @@ export class CronScheduler {
    * is released so another session can take over, and a later
    * `enableDurable()` re-acquires from scratch (a re-enable under a new
    * sessionId must not be blocked by this session's own old lock).
-   * Does not clear jobs — they remain queryable.
+   * Does not clear cron jobs — they remain queryable. Pending wakeups are
+   * cleared because they are session-scoped and meaningless without a timer.
    */
   stop(): void {
     if (this.timer) {
@@ -745,6 +977,11 @@ export class CronScheduler {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    if (this.wakeups.size > 0) {
+      debugLogger.debug(`stop() discarding ${this.wakeups.size} wakeup(s)`);
+      this.wakeups.clear();
+    }
+    this.wakeupChainStartedAt = null;
     this.onFire = null;
 
     if (this.durableEnabled) {
@@ -791,7 +1028,7 @@ export class CronScheduler {
    * install fireable tasks at any time, even while the map is empty).
    */
   get hasPendingWork(): boolean {
-    return this.jobs.size > 0 || this.durableEnabled;
+    return this.jobs.size > 0 || this.wakeups.size > 0 || this.durableEnabled;
   }
 
   /**
@@ -802,11 +1039,32 @@ export class CronScheduler {
   }
 
   /**
+   * True once disable() has run. Distinct from `!running`: a fresh scheduler
+   * is stopped but not disabled, and starts on first pending work. Used by
+   * LoopWakeup to reject wakeups that would never fire (vs. ones that will
+   * fire once the post-prompt hook starts the tick).
+   */
+  get disabled(): boolean {
+    return this._disabled;
+  }
+
+  /**
+   * Permanently disables the scheduler for this session: stops the tick and
+   * marks it disabled so LoopWakeup rejects new wakeups. Only the token-limit
+   * breaker calls this; cleared only by a new session (a fresh instance).
+   */
+  disable(): void {
+    this._disabled = true;
+    this.stop();
+  }
+
+  /**
    * Manual tick — checks all jobs against the current time and fires those
    * that are due. Exported for testing.
    */
   tick(now?: Date): void {
-    if (this.jobs.size === 0) return;
+    // Wakeups live in a separate map; check both or self-paced loops stop firing.
+    if (this.jobs.size === 0 && this.wakeups.size === 0) return;
     const currentDate = now ?? new Date();
     const currentMs = currentDate.getTime();
 
@@ -818,6 +1076,16 @@ export class CronScheduler {
       // in non-owner sessions, where a persisted job would otherwise fire
       // uncoordinated alongside the real owner's copy.
       if (job.durable && !this.isOwner) continue;
+      // A durable job this consumer can't run (e.g. a loop.md sentinel in a
+      // headless run) is skipped BEFORE processJob stamps lastFiredAt — firing
+      // it here would persist the stamp while the work is skipped downstream,
+      // silently consuming the tick. Leave it for the owning session.
+      if (job.durable && this.skipDurableFire?.(job)) {
+        debugLogger.debug(
+          `Skipping durable job ${job.id} (tick): consumer cannot run it`,
+        );
+        continue;
+      }
 
       const result = this.processJob(job, currentDate, currentMs);
       if (!job.durable || result === 'none') continue;
@@ -843,6 +1111,16 @@ export class CronScheduler {
             ),
         ),
       );
+    }
+
+    // Fire due wakeups (second-resolution, one-shot). Delivered through the
+    // same onFire channel as cron jobs so interactive, headless, and ACP
+    // consumers handle them identically, then removed immediately.
+    for (const wakeup of this.wakeups.values()) {
+      if (wakeup.fireAtMs > currentMs) continue;
+      this.wakeups.delete(wakeup.id);
+      debugLogger.debug(`Firing wakeup ${wakeup.id}`);
+      if (this.onFire) this.onFire(wakeupToJob(wakeup));
     }
   }
 
@@ -914,17 +1192,23 @@ export class CronScheduler {
    */
   getExitSummary(): string | null {
     const sessionJobs = [...this.jobs.values()].filter((job) => !job.durable);
-    if (sessionJobs.length === 0) return null;
+    const wakeups = [...this.wakeups.values()];
+    if (sessionJobs.length === 0 && wakeups.length === 0) return null;
 
-    const count = sessionJobs.length;
+    const count = sessionJobs.length + wakeups.length;
     const lines = [
       `Session ending. ${count} active loop${count === 1 ? '' : 's'} cancelled:`,
     ];
     for (const job of sessionJobs) {
       const schedule = humanReadableCron(job.cronExpr);
-      const prompt =
-        job.prompt.length > 60 ? job.prompt.slice(0, 57) + '...' : job.prompt;
-      lines.push(`  - [${job.id}] ${schedule}: ${prompt}`);
+      lines.push(`  - [${job.id}] ${schedule}: ${truncatePrompt(job.prompt)}`);
+    }
+    for (const wakeup of wakeups) {
+      lines.push(
+        `  - [${wakeup.id}] wakeup at ${new Date(
+          wakeup.fireAtMs,
+        ).toISOString()}: ${truncatePrompt(wakeup.prompt)}`,
+      );
     }
     return lines.join('\n');
   }
@@ -935,6 +1219,8 @@ export class CronScheduler {
   destroy(): void {
     this.stop();
     this.jobs.clear();
+    this.wakeups.clear();
+    this.wakeupChainStartedAt = null;
     this.pendingRemoval.clear();
     this.pendingAdd.clear();
   }

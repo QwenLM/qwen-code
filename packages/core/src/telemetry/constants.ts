@@ -43,10 +43,26 @@ export const EVENT_SUBAGENT_EXECUTION = 'qwen-code.subagent_execution';
 export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
 export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
+export const EVENT_TOOL_OUTPUT_TRUNCATED = 'qwen-code.tool_output_truncated';
+
+export const DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH = 1024 * 1024;
+export const SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT = 100 * 1024 * 1024;
+
+export function isValidSensitiveSpanAttributeMaxLength(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    value >= 1 &&
+    value <= SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT
+  );
+}
 
 // Prompt Suggestion Events
 export const EVENT_PROMPT_SUGGESTION = 'qwen-code.prompt_suggestion';
 export const EVENT_SPECULATION = 'qwen-code.speculation';
+
+// Workflow Events (#4721)
+export const EVENT_WORKFLOW_KEYWORD = 'qwen-code.workflow_keyword';
+export const EVENT_WORKFLOW_RUN = 'qwen-code.workflow_run';
 
 // Arena Events
 export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';

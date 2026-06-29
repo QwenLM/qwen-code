@@ -11,17 +11,18 @@ import { isSubAgentToolCall } from '../../adapters/toolClassification';
 // other's exports at render time — never in top-level code.
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { DiffView } from './tools/DiffView';
-import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
 import {
   extractTodosFromToolCall,
   isTodoWriteToolName,
 } from '../../utils/todos';
+import { useSharedNow } from '../../hooks/useSharedNow';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import {
   formatDurationMs,
   formatElapsed,
-  formatToolDisplayName,
+  formatLiveElapsed,
+  localizeToolDisplayName,
   StatusIcon,
   truncateText,
 } from './tools/toolDisplay';
@@ -29,7 +30,6 @@ import {
   extractText,
   formatTokenCount,
   getAgentCancellationReason,
-  getAgentCurrentToolHint,
   getAgentDescription,
   getAgentDisplayStatus,
   getAgentType,
@@ -52,11 +52,6 @@ import styles from './tools/ToolChrome.module.css';
 interface ToolGroupProps {
   tools: ACPToolCall[];
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   workspaceCwd?: string;
   shellOutputMaxLines?: number;
 }
@@ -115,17 +110,21 @@ function hasEditContent(tool: ACPToolCall): boolean {
   return hasDiffContent(tool) || !!extractText(tool);
 }
 
-function extractDiff(tool: ACPToolCall): string {
+export function extractDiff(tool: ACPToolCall): string {
+  const rawFileDiff = getRawFileDiff(tool);
+  if (rawFileDiff) return rawFileDiff;
+
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
       return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
-  return getRawFileDiff(tool);
+
+  return '';
 }
 
-function getRawFileDiff(tool: ACPToolCall): string {
+export function getRawFileDiff(tool: ACPToolCall): string {
   if (tool.rawOutput && typeof tool.rawOutput === 'object') {
     const raw = tool.rawOutput as Record<string, unknown>;
     if (isTruncatedSessionDiff(raw)) return '';
@@ -142,7 +141,7 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
 
 const MAX_DIFF_PRODUCT = 250_000;
 
-function buildUnifiedDiff(oldText: string, newText: string): string {
+export function buildUnifiedDiff(oldText: string, newText: string): string {
   const oldLines = oldText.split('\n');
   const newLines = newText.split('\n');
 
@@ -367,7 +366,6 @@ function TodoToolBody({
 interface ToolLineProps {
   tool: ACPToolCall;
   approval?: PermissionRequest | null;
-  onConfirm?: (id: string, selectedOption: string) => void;
   workspaceCwd?: string;
   shellOutputMaxLines?: number;
 }
@@ -377,6 +375,7 @@ function getAgentDisplayInfo(
   now?: number,
 ): {
   agentType: string;
+  explicitAgentType: string;
   description: string;
   subToolCount: number;
   elapsed: string;
@@ -388,6 +387,7 @@ function getAgentDisplayInfo(
   const reason = getAgentCancellationReason(tool);
   const status = getAgentDisplayStatus(tool);
   const agentType = getAgentType(tool);
+  const explicitAgentType = getExplicitAgentType(tool);
   const description = getAgentDescription(tool);
 
   const subToolCount =
@@ -407,20 +407,21 @@ function getAgentDisplayInfo(
             (tool.status === 'in_progress' && now ? now : undefined),
         );
 
-  const totalTokens =
+  const outputTokens =
     taskExec &&
     typeof taskExec['tokenCount'] === 'number' &&
     taskExec['tokenCount'] > 0
       ? (taskExec['tokenCount'] as number)
       : stats &&
-          typeof stats['totalTokens'] === 'number' &&
-          stats['totalTokens'] > 0
-        ? (stats['totalTokens'] as number)
+          typeof stats['outputTokens'] === 'number' &&
+          stats['outputTokens'] > 0
+        ? (stats['outputTokens'] as number)
         : 0;
-  const tokens = totalTokens > 0 ? formatTokenCount(totalTokens) : '';
+  const tokens = outputTokens > 0 ? formatTokenCount(outputTokens) : '';
 
   return {
     agentType,
+    explicitAgentType,
     description,
     subToolCount,
     elapsed,
@@ -430,7 +431,18 @@ function getAgentDisplayInfo(
   };
 }
 
-function shouldAutoExpand(tool: ACPToolCall): boolean {
+function getExplicitAgentType(tool: ACPToolCall): string {
+  const taskExec = getTaskExecutionRecord(tool.rawOutput);
+  const name = taskExec?.['subagentName'];
+  if (typeof name === 'string' && name.trim()) return name.trim();
+  const subagentType = tool.args?.subagent_type;
+  if (typeof subagentType === 'string' && subagentType.trim()) {
+    return subagentType.trim();
+  }
+  return '';
+}
+
+export function shouldAutoExpand(tool: ACPToolCall): boolean {
   // Only the verbose tool kinds below (shell/edit/write/ask) auto-expand, and
   // only while pending/in-progress or after failing: a successful completion
   // collapses them to a one-line summary so the transcript stays scannable
@@ -452,7 +464,7 @@ function ExpandedAskUserQuestionOutput({ tool }: { tool: ACPToolCall }) {
   return <pre className={styles.expandedOutput}>{text}</pre>;
 }
 
-function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
+export function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
   const name = tool.toolName.toLowerCase();
   if (isSubAgentToolCall(tool)) return 'agent';
   if (isShellToolName(name)) return 'shell';
@@ -500,13 +512,203 @@ function isDescriptionExpandable(description: string): boolean {
   );
 }
 
-function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
+export function isActiveToolStatus(
+  status: ACPToolCall['status'] | string,
+): boolean {
   return (
-    tools.find((t) => t.status === 'in_progress') ?? tools[tools.length - 1]
+    status === 'in_progress' || status === 'pending' || status === 'running'
   );
 }
 
-function isWebFetchToolName(toolName: string): boolean {
+export function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
+  return (
+    tools.find((tool) => isActiveToolStatus(tool.status)) ??
+    tools[tools.length - 1]
+  );
+}
+
+export function formatToolGroupSummary(
+  tools: ACPToolCall[],
+  t: ReturnType<typeof useI18n>['t'],
+  duration?: string,
+): string {
+  if (hasActiveTool(tools)) {
+    const activeTool = getActiveTool(tools);
+    return t('toolGroup.running', {
+      name: localizeToolDisplayName(activeTool.toolName, t),
+      count: tools.length,
+      duration: duration ?? '',
+    });
+  }
+
+  return t('toolGroup.summary', {
+    count: tools.length,
+  });
+}
+
+export function hasActiveTool(tools: ACPToolCall[]): boolean {
+  return tools.some((tool) => isActiveToolStatus(tool.status));
+}
+
+function PencilIcon() {
+  return (
+    <svg
+      className={styles.chatSummaryToolIcon}
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+function ToolGroupIcon() {
+  return (
+    <svg
+      className={styles.chatSummaryToolIcon}
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      data-testid="chat-summary-tool-icon"
+      aria-hidden="true"
+    >
+      <rect
+        x="2"
+        y="2"
+        width="10"
+        height="10"
+        rx="2.4"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <path
+        d="M4.6 5.2 6 6.6 4.6 8"
+        stroke="currentColor"
+        strokeWidth="1.05"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M7.3 8.1h2.1"
+        stroke="currentColor"
+        strokeWidth="1.05"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function WebFetchIcon() {
+  return (
+    <svg
+      className={styles.chatSummaryToolIcon}
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.25" />
+      <path
+        d="M1.8 7h10.4M7 1.5c1.3 1.5 2 3.3 2 5.5s-.7 4-2 5.5M7 1.5C5.7 3 5 4.8 5 7s.7 4 2 5.5"
+        stroke="currentColor"
+        strokeWidth="1.05"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg
+      className={styles.chatSummaryToolIcon}
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <rect
+        x="2"
+        y="1.6"
+        width="10"
+        height="10.8"
+        rx="2.2"
+        stroke="currentColor"
+        strokeWidth="1.25"
+      />
+      <path
+        d="M4.5 5.2h5M4.5 7h5M4.5 8.8h5"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function TodoIcon() {
+  return (
+    <svg
+      className={styles.chatSummaryToolIcon}
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M3 4.2 4.2 5.4 6.1 3.3M7.5 4.5h3.6M3 9.1l1.2 1.2 1.9-2.1M7.5 9.4h3.6"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function AgentIcon() {
+  return (
+    <svg
+      className={styles.chatSummaryToolIcon}
+      width="14"
+      height="14"
+      viewBox="0 0 1024 1024"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path
+        d="M770.08 96.32c1.728.64 3.072 1.984 3.712 3.712l38.848 107.584c.64 1.728 1.984 3.104 3.712 3.712l107.584 38.848a6.144 6.144 0 0 1 0 11.584l-107.584 38.848a6.144 6.144 0 0 0-3.712 3.712l-38.848 107.584a6.144 6.144 0 0 1-11.584 0L723.36 304.32a6.144 6.144 0 0 0-3.712-3.712L612.064 261.76a6.144 6.144 0 0 1 0-11.584l107.584-38.848a6.144 6.144 0 0 0 3.712-3.712l38.848-107.584c1.184-3.2 4.704-4.8 7.872-3.68zM576 160H384q-119.296 0-203.648 84.352Q96 328.704 96 448v192q0 119.296 84.352 203.648Q264.704 928 384 928h256q119.296 0 203.648-84.352Q928 759.296 928 640V512h-64v128q0 92.8-65.6 158.4Q732.8 864 640 864H384q-92.8 0-158.4-65.6Q160 732.8 160 640V448q0-92.8 65.6-158.4Q291.2 224 384 224h192v-64zm96 248.224L568.224 512 672 615.776l45.248-45.28L658.752 512l58.496-58.496L672 408.224zM320 608V448h64v160h-64z"
+        stroke="currentColor"
+        strokeWidth="28"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
+  const kind = getToolHeaderKind(tool);
+  if (kind === 'agent') return <AgentIcon />;
+  if (kind === 'edit' || kind === 'write') return <PencilIcon />;
+  if (kind === 'fetch') return <WebFetchIcon />;
+  if (kind === 'read') return <FileIcon />;
+  if (kind === 'todo') return <TodoIcon />;
+  return <ToolGroupIcon />;
+}
+
+export function isWebFetchToolName(toolName: string): boolean {
   const name = toolName.toLowerCase();
   return name === 'web_fetch' || name === 'webfetch' || name === 'fetch';
 }
@@ -522,7 +724,7 @@ function CompactToolGroup({
 }) {
   const { t } = useI18n();
   const activeTool = getActiveTool(tools);
-  const displayName = formatToolDisplayName(activeTool.toolName);
+  const displayName = localizeToolDisplayName(activeTool.toolName, t);
   const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
   const elapsed =
@@ -563,7 +765,6 @@ function areToolLinePropsEqual(
   next: ToolLineProps,
 ): boolean {
   if (prev.approval?.id !== next.approval?.id) return false;
-  if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   const a = prev.tool;
@@ -612,7 +813,6 @@ function areSubToolsEqual(
 export const ToolLine = memo(function ToolLine({
   tool,
   approval,
-  onConfirm,
   workspaceCwd,
   shellOutputMaxLines = DEFAULT_SHELL_OUTPUT_MAX_LINES,
 }: ToolLineProps) {
@@ -624,7 +824,6 @@ export const ToolLine = memo(function ToolLine({
   // Set once the user explicitly toggles this row, so auto-collapse-on-
   // completion never silently overrides their choice.
   const userToggledRef = useRef(false);
-  const [now, setNow] = useState(() => Date.now());
 
   useEffect(
     () => {
@@ -643,13 +842,7 @@ export const ToolLine = memo(function ToolLine({
     isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
   const isRunningAgent = isAgent && tool.status === 'in_progress';
-
-  useEffect(() => {
-    if (!isRunningAgent) return;
-    setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [isRunningAgent]);
+  const now = useSharedNow(isRunningAgent);
 
   // Collapse a regular tool to its one-line summary once it completes
   // successfully — unless the user explicitly toggled this row, in which case
@@ -663,27 +856,31 @@ export const ToolLine = memo(function ToolLine({
   }, [isAgent, tool.status]);
 
   if (isAgent) {
-    if (hasApproval && onConfirm) {
-      return (
-        <div className={styles.line}>
-          <ToolApproval request={approval} onConfirm={onConfirm} />
-        </div>
-      );
-    }
-
     const info = getAgentDisplayInfo(tool, now);
-    const displayName = t('agent.label');
+    const displayName = info.explicitAgentType
+      ? `${t('agent.label')} (${info.explicitAgentType})`
+      : t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
-    const toolHint = getAgentCurrentToolHint(tool);
     const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
-    const runningMeta = [toolHint, progressLabel, info.elapsed]
+    const runningMeta = [progressLabel, info.elapsed]
       .filter(Boolean)
       .join(' · ');
-    const showExpanded = expanded || !!hasSubToolApproval;
+    const completeMeta = [
+      info.subToolCount > 0 ? `${info.subToolCount} tools` : '',
+      info.elapsed,
+      info.tokens,
+      info.reason ? truncateText(info.reason, 80) : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const showExpanded = expanded || !!hasApproval || !!hasSubToolApproval;
     return (
       <div className={styles.line}>
-        <div className={styles.lineMain}>
-          <StatusIcon status={tool.status} />
+        <div
+          className={`${styles.lineMain} ${styles.lineExpandable}`}
+          onClick={() => setExpanded(!expanded)}
+        >
+          <StatusIcon status={isComplete ? info.status : tool.status} />
           <span className={styles.lineName}>{displayName}</span>
           <ToolHeaderExtra
             info={{
@@ -693,60 +890,11 @@ export const ToolLine = memo(function ToolLine({
               description: info.description
                 ? truncateText(info.description, 60)
                 : '',
-              elapsed: '',
+              elapsed: isComplete ? completeMeta : runningMeta,
               workspaceCwd,
             }}
           />
         </div>
-        {!isComplete && (
-          <div
-            className={`${styles.agentSummary} ${styles.lineExpandable}`}
-            onClick={() => setExpanded(!expanded)}
-          >
-            <StatusIcon status={tool.status} />
-            <span className={styles.lineName}>{info.agentType}:</span>
-            <span className={styles.lineArg}>
-              {truncateText(info.description || info.agentType, 50)}
-            </span>
-            {runningMeta && (
-              <span className={styles.lineElapsed}>· {runningMeta}</span>
-            )}
-          </div>
-        )}
-        {isComplete && (
-          <div
-            className={`${styles.agentSummary} ${styles.lineExpandable}`}
-            onClick={() => setExpanded(!expanded)}
-          >
-            <StatusIcon status={info.status} />
-            <span className={styles.lineName}>{info.agentType}:</span>
-            <span className={styles.lineArg}>
-              {truncateText(info.description, 50)}
-            </span>
-            {info.subToolCount > 0 && (
-              <span className={styles.lineElapsed}>
-                · {info.subToolCount} tools
-              </span>
-            )}
-            {info.elapsed && (
-              <span className={styles.lineElapsed}>· {info.elapsed}</span>
-            )}
-            {info.tokens && (
-              <span className={styles.lineElapsed}>· {info.tokens}</span>
-            )}
-            {info.reason && (
-              <span className={styles.lineElapsed}>
-                · {truncateText(info.reason, 80)}
-              </span>
-            )}
-          </div>
-        )}
-        {hasApproval && onConfirm && (
-          <ToolApproval request={approval} onConfirm={onConfirm} />
-        )}
-        {hasSubToolApproval && onConfirm && (
-          <ToolApproval request={approval!} onConfirm={onConfirm} />
-        )}
         {showExpanded && (
           <div className={styles.lineDetail}>
             <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
@@ -758,7 +906,7 @@ export const ToolLine = memo(function ToolLine({
 
   const description = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
-  const displayName = formatToolDisplayName(tool.toolName);
+  const displayName = localizeToolDisplayName(tool.toolName, t);
   const elapsed =
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
@@ -784,14 +932,6 @@ export const ToolLine = memo(function ToolLine({
   // not (e.g. grep/glob/web_fetch with a long description), keep the result
   // summary visible instead of replacing it with an empty detail area.
   const detailView = hasDetailView(tool);
-
-  if (hasApproval && onConfirm) {
-    return (
-      <div className={styles.line}>
-        <ToolApproval request={approval} onConfirm={onConfirm} />
-      </div>
-    );
-  }
 
   return (
     <div className={styles.line}>
@@ -887,25 +1027,90 @@ export const ToolLine = memo(function ToolLine({
 export const ToolGroup = memo(function ToolGroup({
   tools,
   pendingApproval,
-  onConfirm,
   workspaceCwd,
   shellOutputMaxLines,
 }: ToolGroupProps) {
+  const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
-  const directApprovalTool =
-    pendingApproval?.toolCallId &&
-    tools.find((t) => t.callId === pendingApproval.toolCallId);
+  const [chatExpanded, setChatExpanded] = useState(false);
+  const hasRunningTool = hasActiveTool(tools);
+  const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
+  const summaryIconTool = tools[0] ?? activeTool;
+  const liveStartedAtRef = useRef(Date.now());
+  const summaryNow = useSharedNow(hasRunningTool);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
   const showCompact = compactMode && !hasApprovalTool;
+  const runningDuration = hasRunningTool
+    ? formatLiveElapsed(summaryNow - liveStartedAtRef.current)
+    : undefined;
 
-  if (directApprovalTool && tools.length === 1 && onConfirm) {
-    return <ToolApproval request={pendingApproval} onConfirm={onConfirm} />;
-  }
+  useEffect(() => {
+    if (!hasRunningTool) return;
+    liveStartedAtRef.current = Date.now();
+  }, [hasRunningTool, activeTool?.callId]);
 
   if (showCompact) {
     return <CompactToolGroup tools={tools} workspaceCwd={workspaceCwd} />;
+  }
+
+  if (!hasApprovalTool) {
+    return (
+      <div className={styles.chatGroupWrap}>
+        <button
+          type="button"
+          className={styles.chatSummary}
+          onClick={() => setChatExpanded((value) => !value)}
+          aria-expanded={chatExpanded}
+          title={chatExpanded ? t('tool.collapseHint') : t('tool.expand')}
+        >
+          <span className={styles.chatSummaryIcon} aria-hidden="true">
+            {summaryIconTool ? (
+              <ToolSummaryIcon tool={summaryIconTool} />
+            ) : (
+              <ToolGroupIcon />
+            )}
+          </span>
+          <span
+            className={
+              hasRunningTool
+                ? `${styles.chatSummaryText} ${styles.chatSummaryTextActive}`
+                : styles.chatSummaryText
+            }
+          >
+            {formatToolGroupSummary(tools, t, runningDuration)}
+          </span>
+          <span
+            className={
+              chatExpanded ? styles.chatChevronDown : styles.chatChevronRight
+            }
+            aria-hidden="true"
+          />
+        </button>
+        <div
+          className={
+            chatExpanded
+              ? styles.chatSummaryContentClip
+              : `${styles.chatSummaryContentClip} ${styles.chatSummaryContentCollapsed}`
+          }
+        >
+          <div className={styles.chatSummaryContentInner}>
+            <div className={styles.group}>
+              {tools.map((tool) => (
+                <ToolLine
+                  key={tool.callId}
+                  tool={tool}
+                  approval={pendingApproval}
+                  workspaceCwd={workspaceCwd}
+                  shellOutputMaxLines={shellOutputMaxLines}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -915,7 +1120,6 @@ export const ToolGroup = memo(function ToolGroup({
           key={tool.callId}
           tool={tool}
           approval={pendingApproval}
-          onConfirm={onConfirm}
           workspaceCwd={workspaceCwd}
           shellOutputMaxLines={shellOutputMaxLines}
         />

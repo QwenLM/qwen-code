@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const mockSetGlobalDispatcher = vi.hoisted(() => vi.fn());
 const mockProxyAgent = vi.hoisted(() =>
@@ -19,6 +21,7 @@ const mockChannelConnect = vi.hoisted(() => vi.fn());
 const mockChannelDisconnect = vi.hoisted(() => vi.fn());
 const mockChannelSetBridge = vi.hoisted(() => vi.fn());
 const mockChannelOnToolCall = vi.hoisted(() => vi.fn());
+const mockChannelOnSessionDied = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockBridgeStart = vi.hoisted(() => vi.fn());
 const mockBridgeStop = vi.hoisted(() => vi.fn());
@@ -32,6 +35,7 @@ const mockAcpBridge = vi.hoisted(() =>
 );
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockRouterGetTarget = vi.hoisted(() => vi.fn());
+const mockRouterRemoveSessionId = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
@@ -39,6 +43,7 @@ const mockSessionRouter = vi.hoisted(() =>
   vi.fn(() => ({
     clearAll: mockRouterClearAll,
     getTarget: mockRouterGetTarget,
+    removeSessionId: mockRouterRemoveSessionId,
     restoreSessions: mockRouterRestoreSessions,
     setBridge: mockRouterSetBridge,
     setChannelScope: mockRouterSetChannelScope,
@@ -84,7 +89,11 @@ vi.mock('@qwen-code/channel-base', () => ({
   SessionRouter: mockSessionRouter,
 }));
 
-import { resolveProxy, startCommand } from './start.js';
+import {
+  resolveExtensionChannelEntrySpecifier,
+  resolveProxy,
+  startCommand,
+} from './start.js';
 
 type StartCommandArgs = Parameters<NonNullable<typeof startCommand.handler>>[0];
 
@@ -108,6 +117,7 @@ const mockParsedChannelConfig = {
 const mockChannel = {
   connect: mockChannelConnect,
   disconnect: mockChannelDisconnect,
+  onSessionDied: mockChannelOnSessionDied,
   onToolCall: mockChannelOnToolCall,
   setBridge: mockChannelSetBridge,
 };
@@ -168,6 +178,17 @@ describe('resolveProxy', () => {
   });
 });
 
+describe('resolveExtensionChannelEntrySpecifier', () => {
+  it('returns a file URL for extension channel entry paths', () => {
+    const extensionPath = join('/tmp', 'qwen extension');
+    const entry = join('dist', 'channel.js');
+
+    expect(resolveExtensionChannelEntrySpecifier(extensionPath, entry)).toBe(
+      pathToFileURL(join(extensionPath, entry)).href,
+    );
+  });
+});
+
 describe('startCommand.handler', () => {
   it('loads settings.merged.proxy when no CLI proxy is provided', async () => {
     const settingsProxy = 'http://settings.example.com:8080';
@@ -197,6 +218,204 @@ describe('startCommand.handler', () => {
       mockParsedChannelConfig,
       expect.any(Object),
       expect.objectContaining({ proxy: settingsProxy }),
+    );
+  });
+
+  it('starts a standalone AcpBridge before creating the channel', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const bridge = mockAcpBridge.mock.results[0]!.value;
+    const router = mockSessionRouter.mock.results[0]!.value;
+    expect(mockAcpBridge).toHaveBeenCalledWith({
+      cliEntryPath: '/tmp/qwen-cli-entry.js',
+      cwd: mockParsedChannelConfig.cwd,
+      model: mockParsedChannelConfig.model,
+    });
+    expect(mockBridgeStart.mock.invocationCallOrder[0]).toBeLessThan(
+      mockCreateChannel.mock.invocationCallOrder[0]!,
+    );
+    expect(mockSessionRouter).toHaveBeenCalledWith(
+      bridge,
+      mockParsedChannelConfig.cwd,
+      mockParsedChannelConfig.sessionScope,
+      expect.any(String),
+    );
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      mockParsedChannelConfig,
+      bridge,
+      expect.objectContaining({ router }),
+    );
+  });
+
+  it('removes router sessions when the bridge reports session death', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const sessionDiedListener = mockBridgeOn.mock.calls.find(
+      ([eventName]) => eventName === 'sessionDied',
+    )?.[1] as ((event: { sessionId: string }) => void) | undefined;
+    expect(sessionDiedListener).toBeDefined();
+
+    sessionDiedListener!({ sessionId: 'dead-session' });
+
+    expect(mockRouterRemoveSessionId).toHaveBeenCalledWith('dead-session');
+    expect(mockChannelOnSessionDied).not.toHaveBeenCalled();
+  });
+
+  it('dispatches session death to the owning channel when the route is known', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockRouterGetTarget.mockReturnValue({
+      channelName: 'telegram',
+      senderId: 'alice',
+      chatId: 'chat1',
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const sessionDiedListener = mockBridgeOn.mock.calls.find(
+      ([eventName]) => eventName === 'sessionDied',
+    )?.[1] as ((event: { sessionId: string }) => void) | undefined;
+    expect(sessionDiedListener).toBeDefined();
+
+    sessionDiedListener!({ sessionId: 'dead-session' });
+
+    expect(mockChannelOnSessionDied).toHaveBeenCalledWith('dead-session');
+    expect(mockRouterRemoveSessionId).not.toHaveBeenCalled();
+  });
+
+  it('registers session cleanup on the replacement bridge before restoring sessions', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const restart = disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await restart;
+
+      const restartedBridge = mockAcpBridge.mock.results[1]!.value;
+      expect(mockRouterSetBridge).toHaveBeenCalledWith(restartedBridge);
+      expect(mockChannelSetBridge).toHaveBeenCalledWith(restartedBridge);
+
+      const sessionDiedCalls = mockBridgeOn.mock.calls.filter(
+        ([eventName]) => eventName === 'sessionDied',
+      );
+      expect(sessionDiedCalls).toHaveLength(2);
+      const restartedSessionDiedListener = sessionDiedCalls[1]![1] as (event: {
+        sessionId: string;
+      }) => void;
+      expect(mockBridgeOn.mock.invocationCallOrder.at(-2)).toBeLessThan(
+        mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
+      );
+
+      restartedSessionDiedListener({ sessionId: 'dead-after-restart' });
+
+      expect(mockRouterRemoveSessionId).toHaveBeenCalledWith(
+        'dead-after-restart',
+      );
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts all channels with one shared bridge and router', async () => {
+    const channels = {
+      first: { type: 'telegram' },
+      second: { type: 'telegram' },
+    };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockImplementation(async (name: string) => ({
+      ...mockParsedChannelConfig,
+      cwd: `/tmp/${name}`,
+      model: 'shared-model',
+      sessionScope: name === 'first' ? 'thread' : 'single',
+    }));
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const bridge = mockAcpBridge.mock.results[0]!.value;
+    const router = mockSessionRouter.mock.results[0]!.value;
+    expect(mockAcpBridge).toHaveBeenCalledTimes(1);
+    expect(mockAcpBridge).toHaveBeenCalledWith({
+      cliEntryPath: '/tmp/qwen-cli-entry.js',
+      cwd: process.cwd(),
+      model: 'shared-model',
+    });
+    expect(mockSessionRouter).toHaveBeenCalledWith(
+      bridge,
+      process.cwd(),
+      'user',
+      expect.any(String),
+    );
+    expect(mockRouterSetChannelScope).toHaveBeenCalledWith('first', 'thread');
+    expect(mockRouterSetChannelScope).toHaveBeenCalledWith('second', 'single');
+    expect(mockCreateChannel).toHaveBeenNthCalledWith(
+      1,
+      'first',
+      expect.objectContaining({ cwd: '/tmp/first' }),
+      bridge,
+      expect.objectContaining({ router }),
+    );
+    expect(mockCreateChannel).toHaveBeenNthCalledWith(
+      2,
+      'second',
+      expect.objectContaining({ cwd: '/tmp/second' }),
+      bridge,
+      expect.objectContaining({ router }),
     );
   });
 });

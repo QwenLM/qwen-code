@@ -4,5 +4,6 @@ export default {
   weixin: 'WeChat',
   dingtalk: 'DingTalk',
   feishu: 'Feishu',
+  qqbot: 'QQ Bot',
   plugins: 'Plugins',
 };

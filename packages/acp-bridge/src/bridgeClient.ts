@@ -19,8 +19,14 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
+// Wire constants shared with the child-side caller (`Session.ts`) and, for the
+// SSE event type, the SDK validator + browser consumer — single sources of truth
+// so a rename can't silently break the protocol.
+import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
 import type { MidTurnQueueEntry } from './bridgeTypes.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
@@ -198,18 +204,6 @@ function sliceLineRange(
  * `SessionEntry` is required to provide them — TS enforces the
  * structural match at the callback signature).
  */
-// `MID_TURN_QUEUE_DRAIN_METHOD` is imported from `./bridgeTypes.js` (the single
-// source of truth shared with the child-side caller in `Session.ts`).
-
-/**
- * SSE frame published when mid-turn messages are actually drained into the
- * running turn. The browser consumes it to move those messages out of its
- * pending queue so they aren't resent as the next turn (a transient dedupe
- * signal — it isn't rendered as a transcript item).
- * `data: { sessionId, messages: string[] }`.
- */
-const MID_TURN_MESSAGE_INJECTED_EVENT = 'mid_turn_message_injected';
-
 export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
@@ -329,6 +323,15 @@ export class BridgeClient implements Client {
       modeId: string,
       originatorClientId: string | undefined,
     ) => void,
+    /**
+     * Reverse tool channel (issue #5626, Phase 2). Resolves the
+     * `sendSdkMcpMessage`-shaped sender for a client-hosted MCP server name so
+     * the `qwen/control/client_mcp/message` ext-method (child → parent) can
+     * deliver a JSON-RPC frame to the extension and return the response.
+     * Omitted by tests / Mode A consumers — the method then rejects with
+     * `methodNotFound` (no client-hosted server can exist without it).
+     */
+    private readonly clientMcpSender?: ClientMcpMessageSender,
   ) {}
 
   async requestPermission(
@@ -545,6 +548,15 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    // Reverse tool channel (issue #5626, Phase 2): the child's session
+    // `McpClientManager` routes a client-hosted MCP server's
+    // `sendSdkMcpMessage` UP to the parent through this method. We hand the
+    // JSON-RPC `payload` to the per-WS-connection `ClientMcpRegistrar` (looked
+    // up by `server` name), which carries it down the daemon WS to the
+    // extension and returns the correlated response.
+    if (method === SERVE_CONTROL_EXT_METHODS.clientMcpMessage) {
+      return this.handleClientMcpMessage(params);
+    }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
     }
@@ -593,6 +605,56 @@ export class BridgeClient implements Client {
       }
     }
     return { messages };
+  }
+
+  /**
+   * Reverse tool channel (issue #5626, Phase 2) — answer the child's
+   * `qwen/control/client_mcp/message` ext-method. The child's session
+   * `McpClientManager` calls this when its agent drives a client-hosted
+   * (extension) MCP server: `params` carries the advertised `server` name and
+   * the JSON-RPC `payload` (initialize / tools/list / tools/call / a
+   * notification). We resolve the per-WS-connection sender via the injected
+   * `clientMcpSender` lookup, deliver the payload over the daemon WS, and
+   * return the correlated response as `{ payload }`.
+   *
+   * Rejects with ACP `methodNotFound` when no `clientMcpSender` is wired (Mode
+   * A / tests can't host a client MCP server), and `invalidParams` when the
+   * frame is malformed or the named server is no longer hosted (e.g. the
+   * extension disconnected mid-turn) — the agent's `SdkControlClientTransport`
+   * surfaces that as a transport error rather than hanging.
+   */
+  private async handleClientMcpMessage(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.clientMcpSender) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+      );
+    }
+    const server = params['server'];
+    if (typeof server !== 'string' || server.length === 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`server` must be a non-empty string',
+      );
+    }
+    const payload = params['payload'];
+    if (payload === null || typeof payload !== 'object') {
+      throw RequestError.invalidParams(
+        undefined,
+        '`payload` must be a JSON-RPC message object',
+      );
+    }
+    const send = this.clientMcpSender(server);
+    if (!send) {
+      // The client that hosted this server is gone (WS closed / unregistered).
+      throw RequestError.invalidParams(
+        undefined,
+        `client-hosted MCP server '${server}' is not currently connected`,
+      );
+    }
+    const response = await send(payload);
+    return { payload: response as Record<string, unknown> };
   }
 
   /**

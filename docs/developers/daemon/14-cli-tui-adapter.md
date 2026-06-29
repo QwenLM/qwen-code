@@ -1,12 +1,12 @@
 # Shared UI Transcript Layer
 
-> **Current status**: `packages/cli/src/ui/daemon/DaemonTuiAdapter.ts` is still present on `main` as a legacy experimental CLI-side adapter. This document describes the newer SDK-side shared UI transcript layer: reusable daemon event normalization and transcript primitives that any UI host can consume, including Web, TUI, IDE, and IM channels. CLI TUI, channel, and VS Code IDE migrations are follow-up work.
+> **Current status**: `packages/cli/src/ui/daemon/daemon-tui-adapter.ts` is still present on `main` as a legacy experimental CLI-side adapter. This document describes the newer SDK-side shared UI transcript layer: reusable daemon event normalization and transcript primitives that any UI host can consume, including Web, TUI, IDE, and IM channels. CLI TUI, channel, and VS Code IDE migrations are follow-up work.
 
 ## Overview
 
 `packages/sdk-typescript/src/daemon/ui/` adds a `ui/*` subpackage to the SDK. It turns the daemon SSE event stream into UI-renderable transcript blocks through reusable primitives:
 
-- **Normalization** (`normalizer.ts`): maps the daemon wire schema's 43 known event types (see [`09-event-schema.md`](./09-event-schema.md)) into 37 UI-friendly `DaemonUiEventType` semantic events such as `assistant.text.delta`, `tool.update`, and `session.metadata.changed`.
+- **Normalization** (`normalizer.ts`): maps the daemon wire schema's 47 known event types (see [`09-event-schema.md`](./09-event-schema.md)) into 37 UI-friendly `DaemonUiEventType` semantic events such as `assistant.text.delta`, `tool.update`, and `session.metadata.changed`.
 - **State machine** (`transcript.ts`, `store.ts`): pure reducer plus subscribable store that projects UI events into an ordered `DaemonTranscriptBlock[]`.
 - **Renderers** (`render.ts`, `terminal.ts`, `toolPreview.ts`): transcript blocks to HTML, terminal text, and tool preview strings. Hosts can use or replace them.
 - **Conformance** (`conformance.ts`): cross-host consistency tests used when channel, TUI, and IDE surfaces migrate to these primitives.
@@ -15,7 +15,7 @@ The first production consumer is **`packages/webui/src/daemon/`** ([#4328](https
 
 ## Responsibilities
 
-- Normalize the 43 daemon wire events into a stable UI vocabulary (`DaemonUiEventType`) so renderers do not inspect `rawEvent.data`.
+- Normalize the 47 daemon wire events into a stable UI vocabulary (`DaemonUiEventType`) so renderers do not inspect `rawEvent.data`.
 - Keep daemon-monotonic SSE `eventId` as the **primary ordering key** so different clients render transcripts in the same order.
 - Use a pure reducer to produce transcript blocks, with selectors for pending permissions, current tool, approval mode, tool progress, and subagent children.
 - Provide baseline HTML and terminal renderers while allowing host-specific rendering.
@@ -71,7 +71,7 @@ The first production consumer is **`packages/webui/src/daemon/`** ([#4328](https
 - `auth.device_flow.started`, `auth.device_flow.throttled`, `auth.device_flow.authorized`
 - `auth.device_flow.failed`, `auth.device_flow.cancelled`
 
-`normalizeDaemonEvent` maps the 43 daemon known wire events into this vocabulary. Unknown, unmodeled, or malformed event types normalize to `debug` and preserve `rawEvent` for host diagnostics.
+`normalizeDaemonEvent` maps the 47 daemon known wire events into this vocabulary. Unknown, unmodeled, or malformed event types normalize to `debug` and preserve `rawEvent` for host diagnostics.
 
 ### Reducer and selectors
 
@@ -148,7 +148,7 @@ The web UI can now connect directly to daemon HTTP+SSE and render a transcript. 
 
 [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) provides a v2 incremental guide for web chat and web terminal adapters. It explicitly calls out that **CLI TUI, channel base, and VS Code IDE are not migrated by that PR**; each will move in follow-up PRs and use the conformance suite to preserve rendering parity.
 
-## Relationship to legacy `DaemonTuiAdapter.ts`
+## Relationship to legacy `daemon-tui-adapter.ts`
 
 | Dimension         | Legacy CLI `DaemonTuiAdapter`                                   | New shared transcript layer                                    |
 | ----------------- | --------------------------------------------------------------- | -------------------------------------------------------------- |
@@ -175,7 +175,7 @@ The web UI can now connect directly to daemon HTTP+SSE and render a transcript. 
 
 ## Caveats and known limits
 
-- **`DaemonTuiAdapter.ts` still exists**. It is the CLI package's legacy experimental adapter. New code should prefer SDK `ui/*`: `normalizeDaemonEvent`, `reduceDaemonTranscriptEvents`, and `DaemonTranscriptBlock`.
+- **`daemon-tui-adapter.ts` still exists**. It is the CLI package's legacy experimental adapter. New code should prefer SDK `ui/*`: `normalizeDaemonEvent`, `reduceDaemonTranscriptEvents`, and `DaemonTranscriptBlock`.
 - **CLI TUI, channel base, and VS Code IDE are not migrated yet**. They still maintain their own rendering logic. The `docs/developers/daemon-client-adapters/` directory still has `ide.md`, `channel-web.md`, and the historical `tui.md` draft; the newer `web-ui.md` covers the web UI adapter design.
 - **`eventId` is the primary ordering key**. `createdAt` remains as a deprecated alias (`clientReceivedAt`). New code should use `selectTranscriptBlocksOrderedByEventId(state)`. `MIGRATION.md` shows the code diff for switching from `createdAt` ordering to `eventId` ordering.
 - **Unknown wire types normalize to `debug`**. They are no longer dropped as in the old adapter. Renderers do not show `debug` by default; hosts must opt in to display it.

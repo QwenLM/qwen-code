@@ -1,4 +1,4 @@
-import type { AcpBridge } from './AcpBridge.js';
+import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
@@ -39,7 +39,7 @@ export interface ChannelConfig {
   groupPolicy: GroupPolicy; // default: "disabled"
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
-  /** Dispatch mode for concurrent messages. Default: 'collect'. */
+  /** Dispatch mode for concurrent messages. Default: 'steer' (resolved in ChannelBase.handleInbound). */
   dispatchMode?: DispatchMode;
 
   /** Enable block streaming — emit completed blocks as separate messages. */
@@ -83,6 +83,16 @@ export interface Envelope {
   imageMimeType?: string;
   /** Structured attachments (images, files, audio, video). */
   attachments?: Attachment[];
+  /**
+   * Marks an envelope whose `text` ALREADY carries its `[sender]` attribution, so
+   * handleInbound must NOT re-prefix it. Set in two places: on a synthetic
+   * collect-mode re-entry (coalesced text already carries each message's prefix), AND
+   * by the QQ adapter on a REAL inbound it self-prefixes as `[name]: …`. QQ
+   * neutralizes that embedded name with sanitizeSenderName at the source (QQChannel),
+   * so the self-prefixed name reaching the prompt is already sanitized — setting this
+   * flag does not bypass sanitization.
+   */
+  alreadyPrefixed?: true;
 }
 
 export interface SessionTarget {
@@ -114,7 +124,7 @@ export interface ChannelPlugin {
   createChannel(
     name: string,
     config: ChannelConfig & Record<string, unknown>,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ): ChannelBase;
 }

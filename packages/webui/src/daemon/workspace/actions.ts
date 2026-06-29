@@ -28,12 +28,12 @@ export function createDaemonWorkspaceActions({
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
   return {
-    async listSessions() {
+    async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
       const cwd = getWorkspaceCwd();
       if (!cwd) return [];
       return withActionTimeout(
-        client.listWorkspaceSessions(cwd),
+        client.listWorkspaceSessions(cwd, options),
         'List sessions timed out',
       );
     },
@@ -92,6 +92,36 @@ export function createDaemonWorkspaceActions({
       }
     },
 
+    async loadMcpResources(serverName) {
+      const client = requireClient(getClient, 'Load MCP resources failed');
+      try {
+        return await withActionTimeout(
+          client.workspaceMcpResources(serverName),
+          'Load MCP resources timed out',
+        );
+      } catch {
+        // Older daemons lack the resources route. Degrade gracefully so a
+        // mixed-version client still renders the rest of the /mcp dialog —
+        // mirrors the loadMcpTools fallback.
+        return {
+          v: 1 as const,
+          workspaceCwd: '',
+          serverName,
+          initialized: false,
+          acpChannelLive: false,
+          resources: [],
+          errors: [
+            {
+              kind: 'mcp_resources' as const,
+              status: 'error' as const,
+              error:
+                'The connected daemon does not expose MCP resource details.',
+            },
+          ],
+        };
+      }
+    },
+
     async restartMcpServer(serverName) {
       const client = requireClient(getClient, 'Restart MCP server failed');
       return withActionTimeout(
@@ -116,6 +146,14 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.workspaceSkills(),
         'Load skills timed out',
+      );
+    },
+
+    async loadExtensionsStatus() {
+      const client = requireClient(getClient, 'Load extensions failed');
+      return withActionTimeout(
+        client.workspaceExtensions(),
+        'Load extensions timed out',
       );
     },
 
@@ -342,6 +380,73 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.updateWorkspaceAgent(agentType, req, scope ? { scope } : {}),
         'Update agent timed out',
+      );
+    },
+
+    async installExtension(params, clientId) {
+      const client = requireClient(getClient, 'Install extension failed');
+      return withActionTimeout(
+        client.installExtension(params, clientId),
+        'Install extension timed out',
+      );
+    },
+
+    async extensionOperationStatus(operationId) {
+      const client = requireClient(
+        getClient,
+        'Load extension operation failed',
+      );
+      return withActionTimeout(
+        client.extensionOperationStatus(operationId),
+        'Load extension operation timed out',
+      );
+    },
+
+    async checkExtensionUpdates(clientId) {
+      const client = requireClient(getClient, 'Check extension updates failed');
+      return withActionTimeout(
+        client.checkExtensionUpdates(clientId),
+        'Check extension updates timed out',
+      );
+    },
+
+    async refreshExtensions(clientId) {
+      const client = requireClient(getClient, 'Refresh extensions failed');
+      return withActionTimeout(
+        client.refreshExtensions(clientId),
+        'Refresh extensions timed out',
+      );
+    },
+
+    async enableExtension(name, params, clientId) {
+      const client = requireClient(getClient, 'Enable extension failed');
+      return withActionTimeout(
+        client.enableExtension(name, params, clientId),
+        'Enable extension timed out',
+      );
+    },
+
+    async disableExtension(name, params, clientId) {
+      const client = requireClient(getClient, 'Disable extension failed');
+      return withActionTimeout(
+        client.disableExtension(name, params, clientId),
+        'Disable extension timed out',
+      );
+    },
+
+    async updateExtension(name, clientId) {
+      const client = requireClient(getClient, 'Update extension failed');
+      return withActionTimeout(
+        client.updateExtension(name, clientId),
+        'Update extension timed out',
+      );
+    },
+
+    async uninstallExtension(name, clientId) {
+      const client = requireClient(getClient, 'Uninstall extension failed');
+      return withActionTimeout(
+        client.uninstallExtension(name, clientId),
+        'Uninstall extension timed out',
       );
     },
 

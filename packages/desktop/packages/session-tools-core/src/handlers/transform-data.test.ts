@@ -106,13 +106,17 @@ describe('transform_data path containment', () => {
   it('allows valid descendant paths and writes output', async () => {
     const result = await handleTransformData(ctx(), {
       language: 'node',
-      script: "const fs=require('node:fs');fs.writeFileSync(process.argv.at(-1), JSON.stringify({ok:true}));",
+      script: "const fs=require('node:fs');console.log('made output');fs.writeFileSync(process.argv.at(-1), JSON.stringify({ok:true}));",
       inputFiles: ['in.txt'],
       outputFile: 'out.json',
     });
 
     expect(result.isError).toBe(false);
     expect(existsSync(join(dataDir, 'out.json'))).toBe(true);
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('out.json\nRuntime:');
+    expect(text).toContain('\n\nUse this absolute path as the "src" value');
+    expect(text).toContain('\n\nStdout:\nmade output');
   });
 
   it('allows input files from skills directory (absolute path)', async () => {

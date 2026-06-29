@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdtempS
 import { extname, basename, resolve, join, relative } from 'path';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
+import { isPathInsideOrEqual } from '@craft-agent/session-tools-core';
 
 /**
  * Strip UTF-8 BOM (Byte Order Mark) from a string.
@@ -828,15 +829,14 @@ function readImageFile(tempFile: string): FileAttachment | null {
  * @returns Relative path prefixed with ./ or original path if outside cwd
  */
 export function formatSinglePathToRelative(absolutePath: string, cwd?: string): string {
-  const basePath = cwd || process.cwd();
+  const basePath = resolve(cwd || process.cwd());
+  const targetPath = resolve(absolutePath);
+  const relativePath = relative(basePath, targetPath);
 
-  if (absolutePath.startsWith(basePath)) {
-    const relativePath = relative(basePath, absolutePath);
-    if (relativePath && !relativePath.startsWith('..') && !relativePath.startsWith('./')) {
-      return './' + relativePath;
-    }
-    return relativePath || absolutePath;
+  if (relativePath && isPathInsideOrEqual(basePath, targetPath)) {
+    return './' + relativePath;
   }
+
   return absolutePath;
 }
 

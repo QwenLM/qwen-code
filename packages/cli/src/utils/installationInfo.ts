@@ -56,7 +56,7 @@ export function getInstallationInfo(
     if (
       isGit &&
       normalizedProjectRoot &&
-      realPath.startsWith(normalizedProjectRoot) &&
+      isSamePathOrInside(realPath, normalizedProjectRoot) &&
       !realPath.includes('/node_modules/')
     ) {
       return {
@@ -158,7 +158,7 @@ export function getInstallationInfo(
     // Check for local install
     if (
       normalizedProjectRoot &&
-      realPath.startsWith(`${normalizedProjectRoot}/node_modules`)
+      isSamePathOrInside(realPath, `${normalizedProjectRoot}/node_modules`)
     ) {
       let pm = PackageManager.NPM;
       if (fs.existsSync(path.join(projectRoot, 'yarn.lock'))) {
@@ -215,6 +215,22 @@ export function getInstallationInfo(
     debugLogger.error('Failed to detect installation info:', error);
     return { packageManager: PackageManager.UNKNOWN, isGlobal: false };
   }
+}
+
+function stripTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '') || '/';
+}
+
+function isSamePathOrInside(candidate: string, parent: string): boolean {
+  const normalizedCandidate = stripTrailingSlashes(candidate);
+  const normalizedParent = stripTrailingSlashes(parent);
+  if (normalizedParent === '/') {
+    return normalizedCandidate === '/' || normalizedCandidate.startsWith('/');
+  }
+  return (
+    normalizedCandidate === normalizedParent ||
+    normalizedCandidate.startsWith(`${normalizedParent}/`)
+  );
 }
 
 function getStandaloneInstallInfo(

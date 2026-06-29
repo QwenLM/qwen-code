@@ -129,6 +129,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
  'session_supported_commands', 'session_tasks', 'session_stats',
+ 'session_lsp', 'session_status',
  'session_close', 'session_metadata', 'mcp_guardrails',
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
@@ -157,6 +158,10 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `client_heartbeat` advertises `POST /session/:id/heartbeat`. Older daemons return `404`; pre-flight this tag before issuing periodic heartbeats.
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
+
+`session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
+
+`session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id (`clientCount` / `hasActivePrompt` and the core fields). Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
 
 `session_approval_mode_control`, `workspace_tool_toggle`, `workspace_init`, and `workspace_mcp_restart` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) advertise the four mutation control routes documented under "Mutation: approval, tools, init, MCP restart" below. All four are strict-gated by the PR 15 mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
 
@@ -293,7 +298,10 @@ warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
 `mcp_budget_exhausted`, `rate_limit_hits`, and
-`workspace_status_unavailable`.
+`workspace_status_unavailable`. During the short window after the listener is
+ready but before the full runtime is mounted, `/daemon/status` may report
+`daemon_runtime_starting`; if the async runtime mount fails, it reports
+`daemon_runtime_failed` while non-status runtime routes return `503`.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. `summary` omits
@@ -343,6 +351,7 @@ Capability tags:
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 - `session_tasks` → `GET /session/:id/tasks`
+- `session_status` → `GET /session/:id/status`
 
 Common status cell:
 
@@ -1003,6 +1012,43 @@ contains whitelisted metadata from the agent, shell, and monitor task
 registries; controllers, timers, offsets, pending messages, and raw registry
 objects are never exposed.
 
+### `GET /session/:id/lsp`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "workspaceCwd": "/canonical/path",
+  "enabled": true,
+  "configuredServers": 1,
+  "readyServers": 1,
+  "failedServers": 0,
+  "inProgressServers": 0,
+  "notStartedServers": 0,
+  "servers": [
+    {
+      "name": "typescript",
+      "status": "READY",
+      "languages": ["typescript", "javascript"],
+      "transport": "stdio",
+      "command": "typescript-language-server"
+    }
+  ]
+}
+```
+
+`status` is one of `NOT_STARTED`, `IN_PROGRESS`, `READY`, or `FAILED`.
+Optional `error` is present on failed servers when available. Disabled LSP
+(including bare mode) returns HTTP 200 with `enabled: false`, zero counts, and
+`servers: []`. LSP enabled with no configured servers returns `enabled: true`,
+`configuredServers: 0`, and `servers: []`. If initialization fails before the
+client exists, the response may include `initializationError`; if a live client
+cannot provide a snapshot, the response includes `statusUnavailable: true`.
+
+This route exposes only stable client-facing fields. It intentionally omits
+debug internals such as process IDs, spawn args, stderr tails, root URIs, and
+workspace-folder paths.
+
 ### `POST /session`
 
 Spawn a new agent or attach to an existing one (under `sessionScope: 'single'`, the default).
@@ -1085,7 +1131,7 @@ Response:
 
 `attached: true` means the session was already live (either from a prior `session/load`/`session/resume`, or because a coalesced concurrent caller raced just ahead).
 
-**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 4000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
+**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 8000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
 
 **Errors:**
 
@@ -1559,7 +1605,14 @@ After a successful vote, every connected client sees `permission_resolved` with 
 
 The daemon brokers an OAuth 2.0 Device Authorization Grant (RFC 8628) so a remote SDK client can trigger a login whose tokens land on the **daemon** filesystem — not on the client. The daemon polls the IdP itself; the client's only job is to display the verification URL + user code and (optionally) subscribe to SSE for completion events.
 
-Capability tag: `auth_device_flow` (always advertised). Supported providers in v1: `qwen-oauth`.
+Capability tag: `auth_device_flow` (always advertised). Supported providers in
+v1: `qwen-oauth`.
+
+> [!note]
+>
+> Qwen OAuth free tier was discontinued on 2026-04-15. Treat `qwen-oauth` as the
+> legacy v1 provider identifier in this protocol; new clients should prefer a
+> currently supported auth provider when one is available.
 
 **Runtime locality.** The daemon never spawns a browser — even if it can. The client decides whether to call `open(verificationUri)` locally; on a headless pod (the canonical Mode B deployment) the user opens the URL on whatever device they have a browser on. See `docs/users/qwen-serve.md` for the recommended UX.
 
@@ -1663,24 +1716,24 @@ The connection then closes.
 
 ## Environment variables
 
-| Var                 | Purpose                                                                                                                                                             |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QWEN_SERVER_TOKEN` | Bearer token. Stripped of leading/trailing whitespace at boot.                                                                                                      |
-| `SKIP_LLM_TESTS`    | Set to `1` to **skip** LLM-required integration tests in `integration-tests/cli/qwen-serve-streaming.test.ts` (default-on for CI envs that lack provider API keys). |
+| Var                 | Purpose                                                        |
+| ------------------- | -------------------------------------------------------------- |
+| `QWEN_SERVER_TOKEN` | Bearer token. Stripped of leading/trailing whitespace at boot. |
 
 ## Source layout
 
 | Path                                                 | Purpose                                                                                                    |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                                                                                |
-| `packages/cli/src/serve/runQwenServe.ts`             | listener lifecycle + signal handling                                                                       |
-| `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                                                                |
+| `packages/cli/src/serve/run-qwen-serve.ts`           | listener lifecycle + signal handling                                                                       |
+| `packages/cli/src/serve/server.ts`                   | Express app assembly, middleware ordering, and remaining direct routes                                     |
+| `packages/cli/src/serve/routes/*.ts`                 | Focused Express route groups, including session, SSE, workspace auth, workspace status, and file routes    |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
-| `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry                                                   |
-| `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
-| `packages/cli/src/serve/envSnapshot.ts`              | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
-| `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                                                                          |
+| `packages/cli/src/serve/acp-session-bridge.ts`       | CLI-local bridge compatibility facade for spawn-or-attach, per-session FIFO, and permission registry       |
+| `packages/acp-bridge/src/status.ts`                  | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
+| `packages/cli/src/serve/env-snapshot.ts`             | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
+| `packages/acp-bridge/src/eventBus.ts`                | bounded async queue + replay ring                                                                          |
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                                                                  |
 | `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                                                                   |
 | `integration-tests/cli/qwen-serve-routes.test.ts`    | 18 cases, no LLM                                                                                           |
-| `integration-tests/cli/qwen-serve-streaming.test.ts` | 3 cases, real `qwen --acp` child (skipped when `SKIP_LLM_TESTS=1`)                                         |
+| `integration-tests/cli/qwen-serve-streaming.test.ts` | 3 cases, real `qwen --acp` child backed by the local fake OpenAI server (POSIX only; skipped on Windows)   |

@@ -108,7 +108,7 @@ const WARN_RESET_RATIO = 0.375;
  * session from being opened thousands of times by an attacker to amplify
  * each `publish()` (which is O(N) over subscribers) into a CPU/memory
  * DoS. Daemon's HTTP listener also wants `server.maxConnections`
- * configured at the listener level — see `runQwenServe.ts`.
+ * configured at the listener level — see `run-qwen-serve.ts`.
  */
 const DEFAULT_MAX_SUBSCRIBERS = 64;
 

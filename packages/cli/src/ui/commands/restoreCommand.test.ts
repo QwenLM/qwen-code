@@ -277,20 +277,29 @@ describe('restoreCommand', () => {
     expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
   });
 
-  it('should return an error for a checkpoint file missing the toolCall property', async () => {
+  it('should not mutate state for a checkpoint file missing the toolCall property', async () => {
     const checkpointName = 'missing-toolcall';
+    const toolCallData = {
+      history: [{ type: 'user', text: 'do a thing' }],
+      clientHistory: [{ role: 'user', parts: [{ text: 'do a thing' }] }],
+      promptId: 'prompt-abc123',
+    };
     await fs.writeFile(
       path.join(checkpointsDir, `${checkpointName}.json`),
-      JSON.stringify({ history: [] }), // An object that is valid JSON but missing the 'toolCall' property
+      JSON.stringify(toolCallData),
     );
     const command = restoreCommand(mockConfig);
 
     expect(await command?.action?.(mockContext, checkpointName)).toEqual({
       type: 'message',
       messageType: 'error',
-      // A more specific error message would be ideal, but for now, we can assert the current behavior.
-      content: expect.stringContaining('Could not read restorable tool calls.'),
+      content: expect.stringContaining(
+        'Checkpoint is missing a valid toolCall.',
+      ),
     });
+    expect(mockRewind).not.toHaveBeenCalled();
+    expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+    expect(mockSetHistory).not.toHaveBeenCalled();
   });
 
   describe('completion', () => {

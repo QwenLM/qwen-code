@@ -34,7 +34,7 @@ The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST 
 | `policy.ts`              | `MAX_READ_BYTES`, `MAX_WRITE_BYTES`, `BINARY_PROBE_BYTES`, `assertTrustedForIntent`, `detectBinary`, `enforceReadBytesSize`, `enforceReadSize`, `enforceWriteSize`, `shouldIgnore`.                                                                   |
 | `audit.ts`               | `FS_ACCESS_EVENT_TYPE`, `FS_DENIED_EVENT_TYPE`, `createAuditPublisher`, audit payload types.                                                                                                                                                          |
 | `errors.ts`              | `FsError` class, `isFsError`, `FsErrorKind` union (14 kinds), `FsErrorStatus` union (`400 / 403 / 404 / 409 / 413 / 422 / 500 / 503`).                                                                                                                |
-| `workspaceFileSystem.ts` | `createWorkspaceFileSystemFactory`, `WorkspaceFileSystem` (the orchestrator that reads/writes/lists), `WriteMode`, `ContentHash`, `FsEntry`, `FsStat`, `ListOptions`, `GlobOptions`, `ReadTextOptions`, `ReadBytesOptions`, `WriteTextAtomicOptions`. |
+| `workspace-file-system.ts` | `createWorkspaceFileSystemFactory`, `WorkspaceFileSystem` (the orchestrator that reads/writes/lists), `WriteMode`, `ContentHash`, `FsEntry`, `FsStat`, `ListOptions`, `GlobOptions`, `ReadTextOptions`, `ReadBytesOptions`, `WriteTextAtomicOptions`. |
 
 ### `FsErrorKind` taxonomy
 
@@ -66,7 +66,7 @@ interface BridgeFileSystem {
 }
 ```
 
-This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridgeFileSystemAdapter.ts`) so agent-side ACP writes pick up the same TOCTOU, symlink, trust-gate, and audit gates the HTTP routes use.
+This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridge-file-system-adapter.ts`) so agent-side ACP writes pick up the same TOCTOU, symlink, trust-gate, and audit gates the HTTP routes use.
 
 Two defensive gates the adapter MUST replicate (because the inline proxy is fully bypassed when the adapter is injected):
 
@@ -210,7 +210,7 @@ flowchart LR
 - `@qwen-code/qwen-code-core` — `Ignore`, `isBinaryFile`, `Config.isTrustedFolder()`.
 - `node:fs`, `node:path`, `node:crypto`.
 - `@qwen-code/acp-bridge` — `BridgeFileSystem` contract on the ACP side.
-- HTTP routes: `packages/cli/src/serve/routes/workspaceFileRead.ts`, `workspaceFileWrite.ts`.
+- HTTP routes: `packages/cli/src/serve/routes/workspace-file-read.ts`, `workspace-file-write.ts`.
 
 ## Configuration
 
@@ -239,7 +239,7 @@ flowchart LR
 - `packages/cli/src/serve/fs/policy.ts`
 - `packages/cli/src/serve/fs/errors.ts`
 - `packages/cli/src/serve/fs/audit.ts`
-- `packages/cli/src/serve/fs/workspaceFileSystem.ts`
-- `packages/cli/src/serve/bridgeFileSystemAdapter.ts`
+- `packages/cli/src/serve/fs/workspace-file-system.ts`
+- `packages/cli/src/serve/bridge-file-system-adapter.ts`
 - `packages/acp-bridge/src/bridgeFileSystem.ts`
 - HTTP route reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md).

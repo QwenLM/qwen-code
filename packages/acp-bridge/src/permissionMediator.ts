@@ -136,7 +136,7 @@ export type PermissionDecisionReason =
 
 /**
  * Audit sink the mediator writes to. Implementation lives in
- * `packages/cli/src/serve/permissionAudit.ts` and writes into an
+ * `packages/cli/src/serve/permission-audit.ts` and writes into an
  * in-memory bounded ring on the bridge — NOT onto the SSE bus
  * (audit records and SSE wire events are intentionally separate
  * channels by design).

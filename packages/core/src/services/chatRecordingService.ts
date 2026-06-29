@@ -19,6 +19,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
@@ -165,11 +166,20 @@ export function sanitizeToolCallResultForRecording<
   T extends Partial<ToolCallResponseInfo>,
 >(toolCallResult: T): T {
   const resultDisplay = toolCallResult.resultDisplay;
-  if (!isFileDiffDisplay(resultDisplay)) {
-    return toolCallResult;
+  if (isFileDiffDisplay(resultDisplay)) {
+    const sanitizedResultDisplay = sanitizeFileDiffForRecording(resultDisplay);
+    if (sanitizedResultDisplay === resultDisplay) {
+      return toolCallResult;
+    }
+
+    return {
+      ...toolCallResult,
+      resultDisplay: sanitizedResultDisplay,
+    } as T;
   }
 
-  const sanitizedResultDisplay = sanitizeFileDiffForRecording(resultDisplay);
+  const sanitizedResultDisplay =
+    compactToolResultDisplayForRecording(resultDisplay);
   if (sanitizedResultDisplay === resultDisplay) {
     return toolCallResult;
   }
@@ -1220,10 +1230,6 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.turnParentUuids = [];
-    let prevUuid: string | null =
-      this.config.getResumedSessionData()?.lastCompletedUuid !== undefined
-        ? null
-        : this.lastRecordUuid;
 
     for (let i = 0; i < messages.length; i++) {
       const record = messages[i];
@@ -1233,9 +1239,10 @@ export class ChatRecordingService {
         record.subtype !== 'cron' &&
         record.subtype !== 'mid_turn_user_message'
       ) {
-        this.turnParentUuids.push(prevUuid);
+        // Reconstructed histories can start mid-chain; the persisted edge is
+        // the source of truth, not the previous item in this sliced list.
+        this.turnParentUuids.push(record.parentUuid ?? null);
       }
-      prevUuid = record.uuid;
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
     if (messages.length > 0) {
@@ -1261,6 +1268,17 @@ export class ChatRecordingService {
       | undefined,
   ): void {
     this.titleRecordedCallback = callback;
+  }
+
+  /**
+   * Returns the currently registered title-recorded callback.
+   * Used to chain callbacks (e.g., when a UI component needs to observe
+   * title changes without replacing an existing ACP notification callback).
+   */
+  getTitleRecordedCallback():
+    | ((customTitle: string, titleSource: TitleSource) => void)
+    | undefined {
+    return this.titleRecordedCallback;
   }
 
   /**

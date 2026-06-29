@@ -132,7 +132,7 @@ export const UpdatedPlanToolCall: FC<BaseToolCallProps> = ({
   if (errors.length > 0) {
     return (
       <PlanToolCallContainer
-        label="TodoWrite"
+        label="TodoList"
         status="error"
         isFirst={isFirst}
         isLast={isLast}

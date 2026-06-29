@@ -1,25 +1,25 @@
-# Adaptive Output Token Escalation Design
+# Output Token Limit and Escalation Design
 
-> Reduces GPU slot over-reservation by ~4x through a "low default + escalate on truncation" strategy for output tokens, with multi-turn recovery for responses that exceed even the escalated limit.
+> Defaults to the model's declared output limit unless the user or environment configures `max_tokens`, then uses escalation and multi-turn recovery only when a response still hits `MAX_TOKENS`.
 
 ## Problem
 
-Every API request reserves a fixed GPU slot proportional to `max_tokens`. The previous default of 32K tokens means each request reserves a 32K output slot, but 99% of responses are under 5K tokens. This over-reserves GPU capacity by 4-6x, limiting server concurrency and increasing cost.
+Every API request reserves a fixed GPU slot proportional to `max_tokens`. A low default can reduce slot reservation, but it also makes normal large responses more likely to truncate. For file-writing workflows, that can produce incomplete tool-call arguments and force the scheduler to reject the partial write.
 
 ## Solution
 
-Use a capped default of **8K** output tokens. When a response is truncated (the model hits `max_tokens`):
+Use the model's declared output limit by default. When a response is truncated (the model hits `max_tokens`):
 
-1. **Escalate** to the model's full output limit (with 64K as a floor for unknown models)
+1. **Escalate** to the model's full output limit (with 64K as a floor when the current limit is lower)
 2. If still truncated, **recover** by keeping the partial response in history and injecting a continuation message, up to 3 times
 3. If recovery is exhausted, fall back to the tool scheduler's truncation guidance
 
-Since <1% of requests are actually truncated, this reduces average slot reservation significantly while preserving output quality for long responses.
+This favors correctness for large generation and file-edit tasks. Operators that need a lower reservation can still set `QWEN_CODE_MAX_OUTPUT_TOKENS`, and that explicit value is respected.
 
 ## Architecture
 
 ```
-Request (max_tokens = 8K)
+Request (max_tokens = user/env value or model output limit)
 │
 ▼
 ┌─────────────────────────┐
@@ -78,11 +78,11 @@ Request (max_tokens = 8K)
 
 The effective `max_tokens` is resolved in the following priority order:
 
-| Priority    | Source                                               | Value (known model)          | Value (unknown model) | Escalation behavior                             |
-| ----------- | ---------------------------------------------------- | ---------------------------- | --------------------- | ----------------------------------------------- |
-| 1 (highest) | User config (`samplingParams.max_tokens`)            | `min(userValue, modelLimit)` | `userValue`           | No escalation                                   |
-| 2           | Environment variable (`QWEN_CODE_MAX_OUTPUT_TOKENS`) | `min(envValue, modelLimit)`  | `envValue`            | No escalation                                   |
-| 3 (lowest)  | Capped default                                       | `min(modelLimit, 8K)`        | `min(32K, 8K)` = 8K   | Escalates to model limit (64K floor) + recovery |
+| Priority    | Source                                               | Value (known model)          | Value (unknown model)              | Escalation behavior                             |
+| ----------- | ---------------------------------------------------- | ---------------------------- | ---------------------------------- | ----------------------------------------------- |
+| 1 (highest) | User config (`samplingParams.max_tokens`)            | `min(userValue, modelLimit)` | `userValue`                        | No escalation                                   |
+| 2           | Environment variable (`QWEN_CODE_MAX_OUTPUT_TOKENS`) | `min(envValue, modelLimit)`  | `envValue`                         | No escalation                                   |
+| 3 (lowest)  | Model/default output limit                           | `modelLimit`                 | `DEFAULT_OUTPUT_TOKEN_LIMIT` = 32K | Escalates to model limit (64K floor) + recovery |
 
 A "known model" is one that has an explicit entry in `OUTPUT_PATTERNS` (checked via `hasExplicitOutputLimit()`). For known models, the effective value is always capped at the model's declared output limit to avoid API errors. Unknown models (custom deployments, self-hosted endpoints) pass the user's value through directly, since the backend may support larger limits.
 
@@ -143,11 +143,10 @@ The `isContinuation` flag is passed through to the UI so it can decide whether t
 
 Defined in `geminiChat.ts` and `tokenLimits.ts`:
 
-| Constant                       | Value  | Purpose                                                 |
-| ------------------------------ | ------ | ------------------------------------------------------- |
-| `CAPPED_DEFAULT_MAX_TOKENS`    | 8,000  | Default output token limit when no user override is set |
-| `ESCALATED_MAX_TOKENS`         | 64,000 | Floor for escalation (used when model limit is unknown) |
-| `MAX_OUTPUT_RECOVERY_ATTEMPTS` | 3      | Max multi-turn recovery attempts after escalation       |
+| Constant                       | Value  | Purpose                                           |
+| ------------------------------ | ------ | ------------------------------------------------- |
+| `ESCALATED_MAX_TOKENS`         | 64,000 | Floor for escalation when the model limit is low  |
+| `MAX_OUTPUT_RECOVERY_ATTEMPTS` | 3      | Max multi-turn recovery attempts after escalation |
 
 The effective escalated limit is `max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'))`:
 
@@ -160,11 +159,12 @@ The effective escalated limit is `max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'o
 
 ## Design decisions
 
-### Why 8K default?
+### Why not use an 8K default?
 
-- 99% of responses are under 5K tokens
-- 8K provides reasonable headroom for slightly longer responses without triggering unnecessary retries
-- Reduces average slot reservation from 32K to 8K (4x improvement)
+- An 8K default is a slot-reservation/capacity optimization, not a correctness requirement. It trades correctness (large responses truncate) for backend throughput (a request reserves a GPU slot proportional to `max_tokens`, so a lower value over-reserves less).
+- Large file generation and edit tool calls can legitimately exceed 8K, so an 8K default turns a normal request into a truncate → escalate round-trip (and, in the worst case, a retry loop).
+- Claude Code keeps the same 8K cap but gates it behind a feature flag (`tengu_otk_slot_v1`) that **defaults to off for third-party providers** ("not validated on Bedrock/Vertex") — i.e. its default behavior for non-first-party serving is exactly "use the model's declared limit." qwen-code's providers are all third-party / OpenAI-compatible / self-hosted, so matching that default-off behavior is the safe choice; assuming the low default is safe for every backend is not.
+- The capacity tradeoff is not lost, only made opt-in: operators on a capacity-constrained self-hosted backend can set `QWEN_CODE_MAX_OUTPUT_TOKENS` (e.g. `8000`) to restore the lower per-request reservation. A GrowthBook-style feature flag is intentionally not reintroduced — qwen-code has no such infrastructure, and the env var already covers the need.
 
 ### Why escalate to model limit instead of fixed 64K?
 
@@ -174,7 +174,7 @@ The effective escalated limit is `max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'o
 
 ### Why multi-turn recovery instead of progressive escalation?
 
-- Progressive escalation (8K → 16K → 32K → 64K) requires regenerating the full response each time
+- Progressive escalation (for example 16K -> 32K -> 64K) requires regenerating the full response each time
 - Multi-turn recovery keeps the partial response and lets the model continue, saving tokens and latency
 - Recovery messages are cheap (~40 tokens each) compared to regenerating large responses
 - The 3-attempt limit prevents infinite loops while covering most practical cases

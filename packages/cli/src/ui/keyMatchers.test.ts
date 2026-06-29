@@ -40,15 +40,18 @@ describe('keyMatchers', () => {
     [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down' && !key.shift,
     [Command.ACCEPT_SUGGESTION]: (key: Key) =>
       key.name === 'tab' || (key.name === 'return' && !key.ctrl),
-    // Completion navigation only uses arrow keys (not Ctrl+P/N)
-    // to allow Ctrl+P/N to always navigate history
-    [Command.COMPLETION_UP]: (key: Key) => key.name === 'up' && !key.shift,
-    [Command.COMPLETION_DOWN]: (key: Key) => key.name === 'down' && !key.shift,
+    // Completion navigation uses arrows plus readline/Vim-style Ctrl+P/N.
+    [Command.COMPLETION_UP]: (key: Key) =>
+      (key.name === 'up' && !key.shift) || (key.ctrl && key.name === 'p'),
+    [Command.COMPLETION_DOWN]: (key: Key) =>
+      (key.name === 'down' && !key.shift) || (key.ctrl && key.name === 'n'),
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
     [Command.NEWLINE]: (key: Key) =>
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
+    [Command.VOICE_PUSH_TO_TALK]: (key: Key) =>
+      key.name === 'space' && !key.ctrl && !key.meta,
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
     [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) =>
@@ -89,6 +92,8 @@ describe('keyMatchers', () => {
     [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
     [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
+    [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
+      key.meta && key.name === 't',
   };
 
   // Test data for each command with positive and negative test cases
@@ -200,26 +205,24 @@ describe('keyMatchers', () => {
       negative: [createKey('return', { ctrl: true }), createKey('space')],
     },
     {
-      // Completion navigation only uses arrow keys (not Ctrl+P/N)
-      // to allow Ctrl+P/N to always navigate history
+      // Completion navigation uses arrows plus readline/Vim-style Ctrl+P.
       command: Command.COMPLETION_UP,
-      positive: [createKey('up')],
+      positive: [createKey('up'), createKey('p', { ctrl: true })],
       negative: [
         createKey('p'),
         createKey('down'),
-        createKey('p', { ctrl: true }),
+        createKey('n', { ctrl: true }),
         createKey('up', { shift: true }),
       ],
     },
     {
-      // Completion navigation only uses arrow keys (not Ctrl+P/N)
-      // to allow Ctrl+P/N to always navigate history
+      // Completion navigation uses arrows plus readline/Vim-style Ctrl+N.
       command: Command.COMPLETION_DOWN,
-      positive: [createKey('down')],
+      positive: [createKey('down'), createKey('n', { ctrl: true })],
       negative: [
         createKey('n'),
         createKey('up'),
-        createKey('n', { ctrl: true }),
+        createKey('p', { ctrl: true }),
         createKey('down', { shift: true }),
       ],
     },
@@ -409,6 +412,11 @@ describe('keyMatchers', () => {
       command: Command.SCROLL_END,
       positive: [createKey('end', { ctrl: true })],
       negative: [createKey('end'), createKey('end', { shift: true })],
+    },
+    {
+      command: Command.TOGGLE_THINKING_EXPANDED,
+      positive: [createKey('t', { meta: true })],
+      negative: [createKey('t'), createKey('t', { ctrl: true })],
     },
   ];
 

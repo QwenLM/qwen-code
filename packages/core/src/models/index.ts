@@ -9,13 +9,18 @@ export {
   type ModelGenerationConfig,
   type ModelConfig,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type ResolvedModelConfig,
   type AvailableModel,
   type ModelSwitchMetadata,
   type RuntimeModelSnapshot,
 } from './types.js';
 
-export { ModelRegistry, modelRegistryKey } from './modelRegistry.js';
+export {
+  ModelRegistry,
+  modelRegistryKey,
+  resolveProviderProtocol,
+} from './modelRegistry.js';
 
 export {
   ModelsConfig,

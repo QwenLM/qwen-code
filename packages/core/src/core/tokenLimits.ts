@@ -11,12 +11,21 @@ export type TokenLimitType = 'input' | 'output';
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
-// Capped default for slot-reservation optimization. 99% of outputs are under 5K
-// tokens, so 32K defaults over-reserve 4-6× slot capacity. With the cap
-// enabled, <1% of requests hit the limit; those get one clean retry at 64K
-// (see geminiChat.ts max_output_tokens escalation).
-export const CAPPED_DEFAULT_MAX_TOKENS: TokenCount = 8_000;
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
+
+export function parsePositiveIntegerEnvValue(
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
+
+  return parsed;
+}
 
 /**
  * Accurate numeric limits:
@@ -180,7 +189,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Alibaba / Qwen
   [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
-  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
+  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
 
   // DeepSeek
   [/^deepseek-v4/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
@@ -189,7 +198,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
-  [/^glm-5/, LIMITS['16k']],
+  [/^glm-5(?:\.\d+)?(?:-|$)/, LIMITS['128k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax

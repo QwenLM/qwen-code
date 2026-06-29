@@ -136,7 +136,11 @@ export const AgentToolCall: FC<BaseToolCallProps> = ({ toolCall }) => {
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             <span>{data.executionSummary.totalToolCalls} tool calls</span>
             <span>
-              {data.executionSummary.totalTokens.toLocaleString()} tokens
+              {(
+                data.executionSummary.outputTokens ??
+                data.executionSummary.totalTokens
+              ).toLocaleString()}{' '}
+              tokens
             </span>
             <span>{formatDuration(data.executionSummary.totalDurationMs)}</span>
           </div>

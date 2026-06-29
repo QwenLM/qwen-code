@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -36,16 +37,28 @@ const TARGETS = new Map([
   ['win-x64', { outputExtension: 'zip', nodeExecutable: ['node.exe'] }],
 ]);
 
+// Standalone target -> prebuildify platform-arch dir name (process.platform
+// based, so Windows is 'win32'). Only this archive's matching prebuild is
+// bundled, keeping each archive lean and correct-arch.
+const TARGET_PREBUILD_DIR = new Map([
+  ['darwin-arm64', 'darwin-arm64'],
+  ['darwin-x64', 'darwin-x64'],
+  ['linux-arm64', 'linux-arm64'],
+  ['linux-x64', 'linux-x64'],
+  ['win-x64', 'win32-x64'],
+]);
+
 const DIST_REQUIRED_PATHS = [
   'cli.js',
+  'cli-entry.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
-  // bin wrapper emitted by prepare-package.js that re-spawns `node --expose-gc
-  // cli.js`; ships in dist/ as the package `bin` entry (#4914).
+  // bin wrapper emitted by prepare-package.js. Standalone shims use it for
+  // `qwen serve` so daemon startup gets the same fast path as npm installs.
   'cli-entry.js',
   // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
@@ -58,10 +71,18 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'LICENSE',
   'locales',
   'examples',
+  // Web Shell SPA served at the daemon root by `qwen serve` (index.html +
+  // assets/). Copied into dist/web-shell/ by copy_bundle_assets.js when the
+  // web-shell workspace has been built; optional, so it's allowed but not
+  // required.
+  'web-shell',
 ]);
 const DIST_ALLOWED_ENTRY_PATTERNS = [
   /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,
 ];
+// Emitted into dist/ by prepare-package.js for npm publishing only;
+// standalone archives must not copy them into lib/.
+const DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set(['postinstall.js', 'patches']);
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
 
 if (isMainModule()) {
@@ -113,6 +134,7 @@ async function main() {
     fs.mkdirSync(runtimeExtractDir, { recursive: true });
 
     copyRuntimeAssets(packageRoot, outDir);
+    copyNativeAddon(packageRoot, target);
     extractNodeArchive(nodeArchive, runtimeExtractDir);
     const nodeDir = path.join(packageRoot, 'node');
     copyExtractedNode(runtimeExtractDir, nodeDir);
@@ -222,7 +244,10 @@ function assertRequiredInputs() {
   for (const relativePath of DIST_REQUIRED_PATHS) {
     const fullPath = path.join(distDir, relativePath);
     if (!fs.existsSync(fullPath)) {
-      fail(`Required dist asset missing: ${fullPath}`);
+      fail(
+        `Required dist asset missing: ${fullPath}. ` +
+          'Run "npm run bundle" and "npm run prepare:package" first.',
+      );
     }
   }
 
@@ -246,7 +271,16 @@ function copyRuntimeAssets(packageRoot, outDir) {
   fs.mkdirSync(libDir, { recursive: true });
 
   for (const entry of fs.readdirSync(distDir)) {
-    if (entry === skippedDistEntry || entry === '.DS_Store') {
+    // prepare-package.js stages the audio-capture addon into dist/node_modules
+    // for the npm package, but standalone rebuilds a clean, target-trimmed
+    // lib/node_modules via copyNativeAddon(). Copying dist/node_modules here
+    // would drag in every platform's prebuild and collide with that — skip it.
+    if (
+      entry === skippedDistEntry ||
+      entry === '.DS_Store' ||
+      entry === 'node_modules' ||
+      DIST_NPM_PACKAGE_ONLY_ENTRIES.has(entry)
+    ) {
       continue;
     }
     if (!isAllowedDistEntry(entry)) {
@@ -270,6 +304,82 @@ function copyRuntimeAssets(packageRoot, outDir) {
   fs.copyFileSync(
     path.join(rootDir, 'package.json'),
     path.join(packageRoot, 'package.json'),
+  );
+}
+
+// Bundle the @qwen-code/audio-capture native addon (compiled JS + only this
+// target's prebuild + its runtime dep node-gyp-build) into lib/node_modules so
+// streaming voice works in standalone installs. The addon is esbuild-external
+// and resolved at runtime via import('@qwen-code/audio-capture') from
+// lib/cli.js, so lib/node_modules is where Node looks. Without it, standalone
+// users fall back to SoX/arecord (batch only) — #5502 follow-up #5590.
+function copyNativeAddon(packageRoot, target) {
+  const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
+  const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
+  const prebuildSrc = path.join(addonSrc, 'prebuilds', prebuildDirName);
+  if (!hasNativePrebuild(prebuildSrc)) {
+    if (process.env.QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1') {
+      fail(
+        `Required audio-capture prebuild is missing for ${prebuildDirName}: ${prebuildSrc}`,
+      );
+    }
+    // No prebuild for this target (e.g. a local build without the release
+    // artifacts). Ship without the addon: voice degrades to the SoX/arecord
+    // fallback, streaming is unavailable. The release pipeline downloads
+    // prebuilds before packaging, so release archives do bundle it.
+    console.warn(
+      `[standalone] no audio-capture prebuild for ${prebuildDirName}; ` +
+        'bundling without the native addon (streaming voice unavailable; ' +
+        'batch via SoX still works).',
+    );
+    return;
+  }
+
+  const nodeRequire = createRequire(import.meta.url);
+  const nodeGypBuildSrc = path.dirname(
+    nodeRequire.resolve('node-gyp-build/package.json'),
+  );
+
+  const modulesDir = path.join(packageRoot, 'lib', 'node_modules');
+  const addonDest = path.join(modulesDir, '@qwen-code', 'audio-capture');
+  fs.mkdirSync(addonDest, { recursive: true });
+
+  // Trimmed manifest: keep type/exports so ESM resolution works; drop the
+  // install hook (no npm runs inside the archive).
+  const addonPkg = JSON.parse(
+    fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
+  );
+  delete addonPkg.scripts;
+  delete addonPkg.devDependencies;
+  fs.writeFileSync(
+    path.join(addonDest, 'package.json'),
+    JSON.stringify(addonPkg, null, 2) + '\n',
+  );
+
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+  fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
+    ...copyOpts,
+    filter: (src) => !/\.test\.(d\.)?[mc]?[jt]s(\.map)?$/.test(src),
+  });
+  fs.cpSync(
+    prebuildSrc,
+    path.join(addonDest, 'prebuilds', prebuildDirName),
+    copyOpts,
+  );
+  // node-gyp-build is the addon's only runtime dependency (zero-dep itself).
+  fs.cpSync(nodeGypBuildSrc, path.join(modulesDir, 'node-gyp-build'), copyOpts);
+
+  assertNoSymlinks(modulesDir, 'Bundled native addon still contains symlinks.');
+}
+
+function hasNativePrebuild(prebuildDir) {
+  return (
+    fs.existsSync(prebuildDir) &&
+    fs.readdirSync(prebuildDir).some((entry) => entry.endsWith('.node'))
   );
 }
 
@@ -497,6 +607,9 @@ function writeShims(packageRoot) {
   const unixShim = `#!/usr/bin/env sh
 set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+if [ "\${1:-}" = "serve" ]; then
+  exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"
+fi
 exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"
 `;
   const unixShimPath = path.join(binDir, 'qwen');
@@ -506,7 +619,13 @@ exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"
   const windowsShim = `@echo off
 setlocal
 set "ROOT=%~dp0.."
+if "%~1"=="serve" goto serve
 "%ROOT%\\node\\node.exe" --expose-gc "%ROOT%\\lib\\cli.js" %*
+exit /b %ERRORLEVEL%
+
+:serve
+"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*
+exit /b %ERRORLEVEL%
 `;
   fs.writeFileSync(path.join(binDir, 'qwen.cmd'), windowsShim);
 }

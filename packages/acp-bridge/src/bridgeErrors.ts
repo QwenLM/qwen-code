@@ -18,8 +18,8 @@
  *
  *
  * The bridge package owns the error contract directly. The
- * 7 error classes server.ts imports + 1 each from workspaceAgents.ts
- * and workspaceMemory.ts continue to resolve through the
+ * 7 error classes server.ts imports + 1 each from workspace-agents.ts
+ * and workspace-memory.ts continue to resolve through the
  * httpAcpBridge.ts re-export shim.
  */
 
@@ -498,6 +498,17 @@ export class BranchWhilePromptActiveError extends Error {
   constructor(sessionId: string) {
     super(`Cannot branch session ${sessionId}: a prompt is currently active`);
     this.name = 'BranchWhilePromptActiveError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class CdWhilePromptActiveError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Cannot change directory for session ${sessionId}: a prompt is currently active`,
+    );
+    this.name = 'CdWhilePromptActiveError';
     this.sessionId = sessionId;
   }
 }

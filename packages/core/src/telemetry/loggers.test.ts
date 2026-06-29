@@ -38,6 +38,7 @@ import {
   EVENT_EXTENSION_DISABLE,
   EVENT_EXTENSION_INSTALL,
   EVENT_EXTENSION_UNINSTALL,
+  EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
   logApiRequest,
@@ -63,6 +64,7 @@ import {
 import * as metrics from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import * as sdk from './sdk.js';
+import * as tokenUsageService from '../services/tokenUsageService.js';
 import { ToolCallDecision } from './tool-call-decision.js';
 import {
   ApiRequestEvent,
@@ -111,6 +113,10 @@ describe('loggers', () => {
     );
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('logChatCompression', () => {
@@ -301,6 +307,10 @@ describe('loggers', () => {
       vi.spyOn(metrics, 'recordTokenUsageMetrics').mockImplementation(
         mockMetrics.recordTokenUsageMetrics,
       );
+      vi.spyOn(
+        tokenUsageService,
+        'recordTokenUsageFromApiResponseBestEffort',
+      ).mockImplementation(() => undefined);
     });
 
     it('should log an API response with all fields', () => {
@@ -364,11 +374,68 @@ describe('loggers', () => {
         },
         'test-session-id',
       );
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).toHaveBeenCalledWith(mockConfig, event);
+    });
+
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])('does not record token usage for internal prompt_id %s', (promptId) => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        promptId,
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+      );
+
+      logApiResponse(mockConfig, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not record token usage when usage statistics are disabled', () => {
+      const configWithUsageStatsDisabled = {
+        ...mockConfig,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id-1',
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+      );
+
+      logApiResponse(configWithUsageStatsDisabled, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).not.toHaveBeenCalled();
     });
   });
 
   describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
-    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])(
       'should not record to chatRecordingService when prompt_id is %s',
       (promptId) => {
         const mockRecordUiTelemetryEvent = vi.fn();
@@ -1324,7 +1391,7 @@ describe('loggers', () => {
         body: 'Tool output truncated for test-tool.',
         attributes: {
           'session.id': 'test-session-id',
-          'event.name': 'tool_output_truncated',
+          'event.name': EVENT_TOOL_OUTPUT_TRUNCATED,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           eventName: 'tool_output_truncated',
           prompt_id: 'prompt-id-1',

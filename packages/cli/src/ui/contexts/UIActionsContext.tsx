@@ -24,6 +24,10 @@ export interface UIActions {
   openThemeDialog: () => void;
   openEditorDialog: () => void;
   openMemoryDialog: () => void;
+  dismissSkillReviewDialog: () => void;
+  closeSkillReviewDialog: () => void;
+  acceptPendingSkill: (skillName: string) => void;
+  rejectPendingSkill: (skillName: string) => void;
   handleThemeSelect: (
     themeName: string | undefined,
     scope: SettingScope,
@@ -44,7 +48,11 @@ export interface UIActions {
   notifyStatusLineSettingsChanged: (config: StatusLinePresetConfig) => void;
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
-  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openModelDialog: (options?: {
+    fastModelMode?: boolean;
+    voiceModelMode?: boolean;
+    visionModelMode?: boolean;
+  }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -100,7 +108,7 @@ export interface UIActions {
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
-  handleResume: (sessionId: string) => void;
+  handleResume: (sessionId: string) => Promise<void>;
   // Branch (fork) session
   handleBranch: (name?: string) => Promise<void>;
   // Delete session dialog

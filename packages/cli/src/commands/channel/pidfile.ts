@@ -18,8 +18,39 @@ function pidFilePath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'service.pid');
 }
 
+function isValidPid(pid: unknown): pid is number {
+  return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0;
+}
+
+function isServiceInfo(value: unknown): value is ServiceInfo {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const info = value as Partial<ServiceInfo>;
+  return (
+    isValidPid(info.pid) &&
+    typeof info.startedAt === 'string' &&
+    !Number.isNaN(Date.parse(info.startedAt)) &&
+    Array.isArray(info.channels) &&
+    info.channels.every((channel) => typeof channel === 'string')
+  );
+}
+
+function unlinkPidFile(filePath: string): void {
+  try {
+    unlinkSync(filePath);
+  } catch {
+    // best-effort
+  }
+}
+
 /** Check if a process is alive. */
 function isProcessAlive(pid: number): boolean {
+  if (!isValidPid(pid)) {
+    return false;
+  }
+
   try {
     process.kill(pid, 0);
     return true;
@@ -37,30 +68,28 @@ export function readServiceInfo(): ServiceInfo | null {
   const filePath = pidFilePath();
   if (!existsSync(filePath)) return null;
 
-  let info: ServiceInfo;
+  let parsed: unknown;
   try {
-    info = JSON.parse(readFileSync(filePath, 'utf-8'));
+    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
   } catch {
     // Corrupt file — clean up
-    try {
-      unlinkSync(filePath);
-    } catch {
-      // best-effort
-    }
+    unlinkPidFile(filePath);
     return null;
   }
 
-  if (!isProcessAlive(info.pid)) {
+  if (!isServiceInfo(parsed)) {
+    // Invalid file — clean up before treating it as a running service.
+    unlinkPidFile(filePath);
+    return null;
+  }
+
+  if (!isProcessAlive(parsed.pid)) {
     // Stale PID — process is dead, clean up
-    try {
-      unlinkSync(filePath);
-    } catch {
-      // best-effort
-    }
+    unlinkPidFile(filePath);
     return null;
   }
 
-  return info;
+  return parsed;
 }
 
 /** Write PID file with current process info. */
@@ -84,11 +113,7 @@ export function writeServiceInfo(channels: string[]): void {
 export function removeServiceInfo(): void {
   const filePath = pidFilePath();
   if (existsSync(filePath)) {
-    try {
-      unlinkSync(filePath);
-    } catch {
-      // best-effort
-    }
+    unlinkPidFile(filePath);
   }
 }
 
@@ -100,6 +125,10 @@ export function signalService(
   pid: number,
   signal: NodeJS.Signals = 'SIGTERM',
 ): boolean {
+  if (!isValidPid(pid)) {
+    return false;
+  }
+
   try {
     process.kill(pid, signal);
     return true;

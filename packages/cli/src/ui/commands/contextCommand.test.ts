@@ -49,6 +49,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
       listSkills: vi.fn().mockResolvedValue([]),
     }),
     getChatCompression: vi.fn().mockReturnValue(undefined),
+    getAutoCompactThreshold: vi.fn(),
   } as unknown as Config;
 }
 
@@ -74,6 +75,7 @@ describe('collectContextData (contextCommand)', () => {
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
     } as unknown as Config;
   });
 
@@ -88,6 +90,48 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledTimes(1);
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
+  });
+
+  it('reads the per-session chat token count, not the process-global singleton (#5763)', async () => {
+    // uiTelemetryService is a module-level singleton shared by every session
+    // in a `serve` daemon. Reading it here would report whichever session most
+    // recently completed a turn. The active chat carries the correct
+    // per-session value and must win.
+    mockGetLastPromptTokenCount.mockReturnValue(999_000); // wrong session's global value
+    const getLastPromptTokenCount = vi.fn().mockReturnValue(50_000);
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({ getLastPromptTokenCount }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(getLastPromptTokenCount).toHaveBeenCalled();
+    expect(data.totalTokens).toBe(50_000);
+    // 50K < warn(147K); if the 999K global had leaked through it would be `hard`.
+    expect(data.breakdown.currentTier).toBe('safe');
+  });
+
+  it('falls back to the global singleton when the session chat is not initialized', async () => {
+    // First /context or --continue resume before any send: getChat() would
+    // throw, so collectContextData must use the global value instead.
+    mockGetLastPromptTokenCount.mockReturnValue(60_000);
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(false),
+        getChat: vi.fn(() => {
+          throw new Error('Chat not initialized');
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.totalTokens).toBe(60_000);
   });
 
   it('excludes deferred-but-not-revealed tools from the per-tool breakdown (#4508)', async () => {
@@ -123,6 +167,7 @@ describe('collectContextData (contextCommand)', () => {
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -204,5 +249,16 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.thresholds.auto).toBe(167_000);
     const text = formatContextUsageText(data);
     expect(text).not.toMatch(/Compaction thresholds/);
+  });
+
+  it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
+    // config.getAutoCompactThreshold() returns 0.5 → computeThresholds(32000, 0.5)
+    // = { warn: 16,000, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    const config = makeMockConfig(32_000);
+    vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
+    const data = await collectContextData(config, false);
+
+    expect(data.breakdown.thresholds).toBeDefined();
+    expect(data.breakdown.thresholds!.auto).toBe(16_000);
   });
 });

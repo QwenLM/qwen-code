@@ -43,13 +43,31 @@ import {
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge/status';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
+import { loadSettings } from '../../config/settings.js';
+import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import { buildPermissionSettings } from '../../config/permission-settings.js';
+import {
+  buildWorkspaceVoiceSettingsWrites,
+  buildWorkspaceVoiceStatus,
+  validateWorkspaceVoiceState,
+  voiceSettingsScopeToWire,
+  WorkspaceVoiceError,
+  type WorkspaceVoiceSettingsWrite,
+} from '../../services/voice-service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
+} from './types.js';
 import type {
   DaemonWorkspaceService,
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
   RestartMcpServerResult,
+  WorkspaceTrustChangeRequest,
+  WorkspacePermissionRulesUpdate,
+  WorkspaceVoiceSettingsUpdate,
 } from './types.js';
 
 // Re-export types for consumers.
@@ -58,9 +76,16 @@ export type {
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
   RestartMcpServerResult,
+  WorkspaceTrustChangeRequest,
+  WorkspaceTrustChangeResult,
+  WorkspaceTrustDesiredState,
+  WorkspacePermissionRulesUpdate,
+  WorkspaceVoiceSettingsUpdate,
   EnvReloadResult,
   ReloadResponse,
 } from './types.js';
+
+export { WorkspacePermissionRulesSessionRequiredError } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -135,10 +160,14 @@ export function createDaemonWorkspaceService(
     boundWorkspace,
     contextFilename,
     statusProvider,
+    workspaceProvidersStatusProvider,
     isChannelLive,
     persistDisabledTools,
+    persistSetting,
+    persistSettings,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
+    refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
     publishWorkspaceEvent,
   } = deps;
 
@@ -160,6 +189,12 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
+      if (workspaceProvidersStatusProvider) {
+        return workspaceProvidersStatusProvider(
+          boundWorkspace,
+          isChannelLive?.() ?? false,
+        );
+      }
       return queryWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceProviders,
         () => createIdleWorkspaceProvidersStatus(boundWorkspace),
@@ -266,7 +301,156 @@ export function createDaemonWorkspaceService(
       );
     },
 
+    async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
+      return getWorkspaceTrustStatus(
+        loadSettings(boundWorkspace).merged,
+        boundWorkspace,
+      );
+    },
+
+    async getWorkspacePermissionsStatus(_ctx: WorkspaceRequestContext) {
+      return buildPermissionSettings(loadSettings(boundWorkspace));
+    },
+
+    async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
+      return buildWorkspaceVoiceStatus(
+        boundWorkspace,
+        loadSettings(boundWorkspace),
+      );
+    },
+
     // -- Mutations --
+
+    async requestWorkspaceTrustChange(
+      ctx: WorkspaceRequestContext,
+      request: WorkspaceTrustChangeRequest,
+    ) {
+      publishWorkspaceEvent({
+        type: 'trust_change_requested',
+        data: {
+          workspaceCwd: boundWorkspace,
+          desiredState: request.desiredState,
+          ...(request.reason !== undefined ? { reason: request.reason } : {}),
+        },
+        originatorClientId: ctx.originatorClientId,
+      });
+      return {
+        accepted: false,
+        desiredState: request.desiredState,
+        requiresOperatorAction: true,
+      };
+    },
+
+    async setWorkspacePermissionRules(
+      ctx: WorkspaceRequestContext,
+      request: WorkspacePermissionRulesUpdate,
+    ) {
+      const key = `permissions.${request.ruleType}`;
+      try {
+        const result = await invokeWorkspaceCommand(
+          'qwen/permissions/setRules',
+          {
+            cwd: boundWorkspace,
+            scope: request.scope,
+            ruleType: request.ruleType,
+            rules: request.rules,
+          },
+        );
+        publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: { key, value: request.rules, scope: request.scope },
+          originatorClientId: ctx.originatorClientId,
+        });
+        return result as ReturnType<typeof buildPermissionSettings>;
+      } catch (err) {
+        if (!(err instanceof SessionNotFoundError)) {
+          throw err;
+        }
+        throw new WorkspacePermissionRulesSessionRequiredError();
+      }
+    },
+
+    async setWorkspaceVoiceSettings(
+      ctx: WorkspaceRequestContext,
+      request: WorkspaceVoiceSettingsUpdate,
+    ) {
+      if (!persistSettings && !persistSetting) {
+        throw new WorkspaceVoiceError(
+          501,
+          'not_implemented',
+          'Workspace voice settings persistence is not available',
+        );
+      }
+
+      const settings = loadSettings(boundWorkspace);
+      validateWorkspaceVoiceState(settings, request);
+      const workspaceTrusted =
+        getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective
+          .state === 'trusted';
+      const writes = buildWorkspaceVoiceSettingsWrites(settings, request, {
+        workspaceTrusted,
+      });
+
+      const publishWrite = (write: WorkspaceVoiceSettingsWrite) => {
+        publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key: write.key,
+            value: write.value,
+            scope: voiceSettingsScopeToWire(write.scope),
+          },
+          originatorClientId: ctx.originatorClientId,
+        });
+      };
+
+      if (persistSettings) {
+        try {
+          await persistSettings(boundWorkspace, writes);
+        } catch (err) {
+          if (err instanceof WorkspaceSettingsPartialPersistError) {
+            for (const write of err.committedWrites) {
+              publishWrite(write);
+            }
+          }
+          throw err;
+        }
+        for (const write of writes) {
+          publishWrite(write);
+        }
+      } else {
+        const committed: WorkspaceVoiceSettingsWrite[] = [];
+        for (const write of writes) {
+          try {
+            await persistSetting!(
+              boundWorkspace,
+              write.scope,
+              write.key,
+              write.value,
+            );
+          } catch (err) {
+            writeStderrLine(
+              `qwen serve: workspace voice partial persist error (workspace=${boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${voiceSettingsScopeToWire(write.scope)}): ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            throw new WorkspaceSettingsPartialPersistError(
+              `Voice settings partial persist failed: committed=${committed.length}/${writes.length}`,
+              committed,
+              err,
+            );
+          }
+          committed.push(write);
+        }
+        for (const write of committed) {
+          publishWrite(write);
+        }
+      }
+
+      return buildWorkspaceVoiceStatus(
+        boundWorkspace,
+        loadSettings(boundWorkspace),
+      );
+    },
 
     async setWorkspaceToolEnabled(
       ctx: WorkspaceRequestContext,
@@ -619,6 +803,20 @@ export function createDaemonWorkspaceService(
         sessionsSkipped,
         childError,
       };
+    },
+
+    async refreshExtensionsForAllSessions() {
+      try {
+        if (!refreshExtensionsForAllSessionsOnBridge) {
+          throw new Error('refreshExtensionsForAllSessions is not wired');
+        }
+        return await refreshExtensionsForAllSessionsOnBridge();
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: refreshExtensionsForAllSessions failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { refreshed: 0, failed: 1 };
+      }
     },
   };
 }

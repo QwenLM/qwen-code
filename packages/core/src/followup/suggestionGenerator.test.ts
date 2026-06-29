@@ -8,13 +8,10 @@ import type { Content } from '@google/genai';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 
-const { mockGetCacheSafeParams, mockRunForkedAgent, mockAddEvent } = vi.hoisted(
-  () => ({
-    mockGetCacheSafeParams: vi.fn(),
-    mockRunForkedAgent: vi.fn(),
-    mockAddEvent: vi.fn(),
-  }),
-);
+const { mockGetCacheSafeParams, mockRunForkedAgent } = vi.hoisted(() => ({
+  mockGetCacheSafeParams: vi.fn(),
+  mockRunForkedAgent: vi.fn(),
+}));
 
 vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
   const actual =
@@ -26,19 +23,9 @@ vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../telemetry/uiTelemetry.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../telemetry/uiTelemetry.js')>();
-  return {
-    ...actual,
-    uiTelemetryService: {
-      addEvent: mockAddEvent,
-    },
-  };
-});
-
 import {
   generatePromptSuggestion,
+  getFilterReason,
   shouldFilterSuggestion,
 } from './suggestionGenerator.js';
 
@@ -53,7 +40,6 @@ describe('generatePromptSuggestion', () => {
   beforeEach(() => {
     mockGetCacheSafeParams.mockReset();
     mockRunForkedAgent.mockReset();
-    mockAddEvent.mockReset();
   });
 
   it('passes cache-safe model in cache mode when no explicit or fast model exists', async () => {
@@ -176,6 +162,15 @@ describe('shouldFilterSuggestion', () => {
   it('filters formatting', () => {
     expect(shouldFilterSuggestion('run the **tests**')).toBe(true);
     expect(shouldFilterSuggestion('line1\nline2')).toBe(true);
+  });
+
+  it('filters control characters and ANSI escapes', () => {
+    expect(shouldFilterSuggestion('run\rtests')).toBe(true); // carriage return
+    expect(shouldFilterSuggestion('run\x1b[31mtests')).toBe(true); // ESC/CSI
+    expect(shouldFilterSuggestion('run\ttests')).toBe(true); // tab (C0)
+    expect(shouldFilterSuggestion('run\x7ftests')).toBe(true); // DEL
+    expect(shouldFilterSuggestion('run\x9btests')).toBe(true); // C1 CSI
+    expect(getFilterReason('run\x1b[31mtests')).toBe('control_chars');
   });
 
   it('filters evaluative language', () => {

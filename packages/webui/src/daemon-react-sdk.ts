@@ -117,6 +117,9 @@ export { useDaemonWorkspaceActions as useWorkspaceActions } from './daemon/index
 /** Like `useWorkspace()` but returns null when outside a WorkspaceProvider. */
 export { useOptionalDaemonWorkspace as useOptionalWorkspace } from './daemon/index.js';
 
+/** Workspace-level event signals (memory/agents/tools/settings/mcp/extensions version counters). */
+export { useDaemonWorkspaceEventSignals as useWorkspaceEventSignals } from './daemon/index.js';
+
 // ── Transcript Hooks (low-level) ──────────────────────────────────
 
 /** Raw transcript blocks from the SSE stream. For custom message conversion. */
@@ -268,6 +271,10 @@ export type {
   DaemonWorkspaceMcpToolStatus,
   /** All tools from a single MCP server. */
   DaemonWorkspaceMcpToolsStatus,
+  /** Single MCP resource: uri, name, title, mime type, size, description. */
+  DaemonWorkspaceMcpResourceStatus,
+  /** All resources from a single MCP server. */
+  DaemonWorkspaceMcpResourcesStatus,
   /** Memory file entry: path, scope, byte size. */
   DaemonWorkspaceMemoryFile,
   /** Skill status: name, description, level, model-invocable flag. */

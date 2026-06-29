@@ -4,14 +4,14 @@ import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
-import { ChannelBase } from '@qwen-code/channel-base';
+import { ChannelBase, sanitizeSenderName } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
-  AcpBridge,
+  ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 
 /**
@@ -86,7 +86,7 @@ export class DingtalkChannel extends ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
@@ -129,6 +129,18 @@ export class DingtalkChannel extends ChannelBase {
     }, 60_000);
 
     process.stderr.write(`[DingTalk:${this.name}] Connected via stream.\n`);
+  }
+
+  /**
+   * A group message with no conversationId can't be routed to a stable shared
+   * session (chatId would fall back to the expiring sessionWebhook), so it is
+   * dropped on ingestion. Exposed for testing the drop rule.
+   */
+  static isUnroutableGroupMessage(
+    isGroup: boolean,
+    conversationId: string | undefined,
+  ): boolean {
+    return isGroup && !conversationId;
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -244,7 +256,7 @@ export class DingtalkChannel extends ChannelBase {
    * conversation ID — skip the webhook-URL fallback case.
    */
   private isConversationId(chatId: string): boolean {
-    return !!chatId && !chatId.startsWith('http');
+    return !!chatId && !/^https?:\/\//i.test(chatId);
   }
 
   protected override onPromptStart(
@@ -508,6 +520,23 @@ export class DingtalkChannel extends ChannelBase {
       if (!sessionWebhook) {
         process.stderr.write(
           `[DingTalk:${this.name}] No sessionWebhook in message, skipping.\n`,
+        );
+        return;
+      }
+
+      // A group message with no conversationId can't be routed to a stable
+      // session — chatId would fall back to the expiring sessionWebhook and the
+      // shared-session key would churn. Drop it rather than fragment the group.
+      if (DingtalkChannel.isUnroutableGroupMessage(isGroup, conversationId)) {
+        // Include identifying context so an operator can tell whether one sender
+        // or every group message is affected if DingTalk starts omitting
+        // conversationId (API regression / edge-case message type).
+        process.stderr.write(
+          `[DingTalk:${this.name}] Group message has no conversationId, skipping (msgId=${
+            msgId || 'unknown'
+          }, sender=${sanitizeSenderName(
+            data.senderNick || data.senderStaffId || 'unknown',
+          )})\n`,
         );
         return;
       }

@@ -9,7 +9,7 @@ import fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import type { PartListUnion } from '@google/genai';
+import type { Part, PartListUnion } from '@google/genai';
 import { readManyFiles } from './readManyFiles.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
@@ -29,6 +29,14 @@ function contentToString(parts: PartListUnion): string {
   return JSON.stringify(parts);
 }
 
+function findInlineDataPart(parts: PartListUnion): Part | undefined {
+  if (!Array.isArray(parts)) return undefined;
+  return parts.find(
+    (part): part is Part =>
+      typeof part === 'object' && part !== null && 'inlineData' in part,
+  );
+}
+
 describe('readManyFiles', () => {
   let tempRootDir: string;
 
@@ -46,6 +54,8 @@ describe('readManyFiles', () => {
       getTruncateToolOutputLines: () => 1000,
       getTruncateToolOutputThreshold: () => 2500,
       getFileSystemService: () => new StandardFileSystemService(),
+      getContentGeneratorConfig: () => ({ modalities: {} }),
+      getModel: () => 'text-only-model',
     }) as unknown as Config;
 
   async function createTestFile(
@@ -132,6 +142,48 @@ describe('readManyFiles', () => {
       );
       expect(result.files).toHaveLength(1);
       expect(result.files[0]!.filePath).toBe(absolutePath);
+    });
+
+    it('preserves unsupported images when the bridge handoff flag is set', async () => {
+      const relativePath = 'screenshot.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const imageBytes = Buffer.from('fake png data');
+      await fs.writeFile(absolutePath, imageBytes);
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        preserveUnsupportedImageForBridge: true,
+      });
+
+      const imagePart = findInlineDataPart(result.contentParts);
+      expect(imagePart).toBeDefined();
+      expect(
+        (imagePart as { inlineData: { mimeType: string; data: string } })
+          .inlineData,
+      ).toEqual({
+        mimeType: 'image/png',
+        data: imageBytes.toString('base64'),
+        displayName: 'screenshot.png',
+      });
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.content).toEqual(imagePart);
+    });
+
+    it('skips unsupported images when the bridge handoff flag is absent', async () => {
+      const relativePath = 'screenshot.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.from('fake png data'));
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      expect(findInlineDataPart(result.contentParts)).toBeUndefined();
+      expect(contentToString(result.contentParts)).toContain(
+        'Unsupported image file',
+      );
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.content).toContain('Unsupported image file');
     });
 
     it('should return message when no files found', async () => {

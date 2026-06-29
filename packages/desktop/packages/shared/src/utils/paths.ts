@@ -33,9 +33,15 @@ export function expandPath(inputPath: string, basePath?: string): string {
     return home;
   }
 
-  // Handle ~/ prefix
-  if (expanded.startsWith('~/')) {
-    expanded = join(home, expanded.slice(2));
+  // Handle ~/ and ~\ prefixes
+  if (expanded.startsWith('~/') || expanded.startsWith('~\\')) {
+    expanded = join(
+      home,
+      ...expanded
+        .slice(2)
+        .split(/[/\\]+/)
+        .filter(Boolean),
+    );
   }
 
   // Handle ${HOME} and $HOME variables

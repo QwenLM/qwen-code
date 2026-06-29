@@ -288,11 +288,21 @@ export function getDiffCommand(
           newPath,
         ],
       };
-    case 'emacs':
+    case 'emacs': {
+      // Paths are interpolated into an Elisp string literal, so backslashes
+      // (Windows separators) and double quotes have to be escaped or the
+      // (ediff ...) form is corrupted. Escape backslashes first so the
+      // backslashes we add for quotes are not doubled again.
+      const toElispString = (p: string) =>
+        p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       return {
         command: 'emacs',
-        args: ['--eval', `(ediff "${oldPath}" "${newPath}")`],
+        args: [
+          '--eval',
+          `(ediff "${toElispString(oldPath)}" "${toElispString(newPath)}")`,
+        ],
       };
+    }
     default:
       return null;
   }

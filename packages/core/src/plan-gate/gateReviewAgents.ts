@@ -14,6 +14,14 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('GATE_REVIEW_AGENTS');
 
+/**
+ * Timeout for the gate agent in milliseconds. The gate agent typically
+ * completes within 1–2 minutes; this is a fixed 5-minute ceiling that
+ * coincides with the typical runConfig.max_time_minutes setting (5 min)
+ * but is independent of it. Provides a safety net against hangs.
+ */
+const GATE_AGENT_TIMEOUT_MS = 5 * 60 * 1000;
+
 // ── Gate agent prompt ──────────────────────────────────────────────────
 
 function buildReviewPrompt(evidence: string): string {
@@ -104,12 +112,21 @@ export function formatEvidence(bundle: EvidenceBundle): string {
  * Runs the gate review agent via `createAgentHeadless`. The agent operates
  * under a forced-PLAN config override and cannot spawn nested agents.
  *
+ * Signal isolation: The gate agent creates its own independent AbortController
+ * with a timeout, rather than directly inheriting the parent's signal. This
+ * prevents transient parent-side issues (stream errors, round cleanup) from
+ * cascading into the gate agent. The parent signal is intentionally not
+ * checked or monitored — the gate agent's own 5-minute timeout (matching
+ * runConfig.max_time_minutes) is the sole cancellation mechanism.
+ *
  * Returns the parsed `GateAgentResult`, or throws on unrecoverable failure.
  */
 export async function runGateAgent(
   config: Config,
   bundle: EvidenceBundle,
-  signal: AbortSignal,
+  // parentSignal is accepted for API consistency but intentionally unused:
+  // the gate agent is fully isolated from parent-side aborts.
+  _parentSignal: AbortSignal,
 ): Promise<GateAgentResult> {
   const evidence = formatEvidence(bundle);
   const taskPrompt = buildReviewPrompt(evidence);
@@ -129,6 +146,27 @@ export async function runGateAgent(
     ApprovalMode.PLAN,
   );
 
+  // Create an independent AbortController for the gate agent.
+  // This isolates the gate agent from transient parent-side aborts
+  // (e.g., stream errors, round cleanup, NO_FINISH_REASON retries).
+  // The gate agent has its own timeout (GATE_AGENT_TIMEOUT_MS) to prevent
+  // indefinite hangs. We deliberately do NOT propagate parent aborts here
+  // because:
+  // 1. The gate agent is a critical review step that should complete if possible
+  // 2. Parent aborts are often transient (stream retries, round cleanup)
+  // 3. The gate agent's own timeout provides a safety net
+  // If the parent is genuinely cancelled (user closes session), the timeout
+  // will eventually clean up, or the parent's cleanup logic will handle it.
+  const gateAbortController = new AbortController();
+
+  // Add a timeout so the gate agent doesn't hang indefinitely
+  const timeoutId = setTimeout(() => {
+    debugLogger.warn(
+      `[runGateAgent] Gate agent timed out after ${GATE_AGENT_TIMEOUT_MS}ms`,
+    );
+    gateAbortController.abort(new Error('Gate agent timeout'));
+  }, GATE_AGENT_TIMEOUT_MS);
+
   let disposeSubagent: (() => Promise<void>) | undefined;
 
   try {
@@ -142,7 +180,8 @@ export async function runGateAgent(
     const contextState = new ContextState();
     contextState.set('task_prompt', taskPrompt);
 
-    await subagent.execute(contextState, signal);
+    // Pass the isolated gate signal instead of the parent signal
+    await subagent.execute(contextState, gateAbortController.signal);
 
     const terminateMode = subagent.getTerminateMode();
     const rawText = subagent.getFinalText();
@@ -159,6 +198,7 @@ export async function runGateAgent(
 
     return parseGateAgentResult(rawText);
   } finally {
+    clearTimeout(timeoutId);
     // Dispose the subagent (stops its per-spawn ToolRegistry and
     // unregisters per-agent hooks, preventing listener leaks).
     if (disposeSubagent) {
@@ -171,6 +211,11 @@ export async function runGateAgent(
       }
     }
     cleanup();
+    // Abort only if the controller hasn't been aborted yet (i.e., timeout didn't fire)
+    // This ensures no lingering timers or listeners, but avoids unnecessary abort events
+    if (!gateAbortController.signal.aborted) {
+      gateAbortController.abort();
+    }
   }
 }
 

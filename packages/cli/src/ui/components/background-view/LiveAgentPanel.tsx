@@ -34,6 +34,7 @@ import {
   ToolDisplayNames,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
+import { localizeToolDisplayName } from '../../../i18n/index.js';
 import {
   useBackgroundTaskViewActions,
   useBackgroundTaskViewState,
@@ -137,7 +138,9 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
 function activityLabel(entry: AgentDialogEntry): string {
   const last = entry.recentActivities?.at(-1);
   if (!last) return '';
-  const display = TOOL_DISPLAY_BY_NAME[last.name] ?? last.name;
+  const display = localizeToolDisplayName(
+    TOOL_DISPLAY_BY_NAME[last.name] ?? last.name,
+  );
   const desc = last.description?.replace(/\s*\n\s*/g, ' ').trim();
   return desc ? `${display} ${desc}` : display;
 }
@@ -470,8 +473,8 @@ const AgentRow: React.FC<{
     ? escapeAnsiCtrlCodes(entry.subagentType ?? '')
     : '';
   const tokenSuffix =
-    entry.stats?.totalTokens && entry.stats.totalTokens > 0
-      ? ` · ${formatTokenCount(entry.stats.totalTokens)} tokens`
+    entry.stats?.outputTokens && entry.stats.outputTokens > 0
+      ? ` · ${formatTokenCount(entry.stats.outputTokens)} tokens`
       : '';
 
   // Layout (Claude Code's CoordinatorTaskPanel visual + our

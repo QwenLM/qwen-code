@@ -123,10 +123,10 @@ export class WebViewProvider {
   private cachedAvailableModels: ModelInfo[] | null = null;
   /** Model to apply once a new editor-tab session is initialized */
   private initialModelId: string | null = null;
-  /** Reference to a WebviewView webview (sidebar/panel/secondary) when attached via attachToView */
+  /** Reference to a WebviewView webview when attached via attachToView */
   private attachedWebview: vscode.Webview | null = null;
   /**
-   * Whether this provider is hosted inside a WebviewView (sidebar / secondary bar).
+   * Whether this provider is hosted inside the Activity Bar sidebar.
    * When true, "New Session" resets the conversation in-place instead of opening
    * a new editor tab.
    */
@@ -735,12 +735,12 @@ export class WebViewProvider {
   }
 
   /**
-   * Attach the provider to a WebviewView (sidebar / panel / secondary sidebar).
+   * Attach the provider to a WebviewView.
    * Called from ChatWebviewViewProvider.resolveWebviewView when VS Code opens
    * the view for the first time.
    *
    * @param webviewView - The WebviewView provided by VS Code
-   * @param viewType - The view identifier (e.g. sidebar, panel, secondary)
+   * @param viewType - The view identifier
    */
   async attachToView(
     webviewView: vscode.WebviewView,
@@ -763,7 +763,7 @@ export class WebViewProvider {
 
     // Store reference so sendMessageToWebView can reach it
     this.attachedWebview = webview;
-    // Mark this provider as a view host (sidebar / secondary bar)
+    // Mark this provider as a view host.
     this.isViewHost = true;
 
     // Generate HTML content
@@ -1793,7 +1793,7 @@ export class WebViewProvider {
   /**
    * Context-aware handler for the "New Chat" action (openNewChatTab message).
    *
-   * - View host (sidebar / secondary bar): resets the conversation in-place by
+   * - View host: resets the conversation in-place by
    *   routing to the newQwenSession handler (includes auth checks and UI clearing).
    * - Editor tab: returns false so the message falls through to
    *   SessionMessageHandler which opens a brand-new editor tab.
@@ -1995,7 +1995,7 @@ export class WebViewProvider {
           if (panel) {
             panel.reveal();
           } else if (this.isViewHost) {
-            // Sidebar / secondary bar — focus the view via its command.
+            // Sidebar view host: focus the view via its command.
             void vscode.commands.executeCommand('qwen-code.focusChat');
           }
         }

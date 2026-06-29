@@ -19,8 +19,17 @@ import type {
   ModelMetrics,
   ModelMetricsCore,
   ToolCallStats,
+  SkillCallStats,
+  SkillMetrics,
 } from '@qwen-code/qwen-code-core';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core';
+
+const EMPTY_SKILL_METRICS: SkillMetrics = {
+  totalCalls: 0,
+  totalSuccess: 0,
+  totalFail: 0,
+  byName: {},
+};
 
 export enum ToolCallDecision {
   ACCEPT = 'accept',
@@ -93,6 +102,34 @@ function areToolCallStatsEqual(a: ToolCallStats, b: ToolCallStats): boolean {
   return true;
 }
 
+function areSkillCallStatsEqual(a: SkillCallStats, b: SkillCallStats): boolean {
+  return a.count === b.count && a.success === b.success && a.fail === b.fail;
+}
+
+function areSkillMetricsEqual(a: SkillMetrics, b: SkillMetrics): boolean {
+  if (
+    a.totalCalls !== b.totalCalls ||
+    a.totalSuccess !== b.totalSuccess ||
+    a.totalFail !== b.totalFail
+  ) {
+    return false;
+  }
+
+  const aKeys = Object.keys(a.byName);
+  const bKeys = Object.keys(b.byName);
+  if (aKeys.length !== bKeys.length) return false;
+
+  for (const key of aKeys) {
+    const skillA = a.byName[key];
+    const skillB = b.byName[key];
+    if (!skillB || !areSkillCallStatsEqual(skillA, skillB)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
@@ -142,6 +179,15 @@ function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
     if (!toolB || !areToolCallStatsEqual(toolA, toolB)) {
       return false;
     }
+  }
+
+  if (
+    !areSkillMetricsEqual(
+      a.skills ?? EMPTY_SKILL_METRICS,
+      b.skills ?? EMPTY_SKILL_METRICS,
+    )
+  ) {
+    return false;
   }
 
   // Compare models
@@ -194,6 +240,79 @@ interface SessionStatsContextValue {
   seedPromptCount: (count: number) => void;
 }
 
+function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
+  return {
+    models: Object.fromEntries(
+      Object.entries(metrics.models).map(([name, model]) => [
+        name,
+        {
+          api: { ...model.api },
+          tokens: { ...model.tokens },
+          bySource: Object.fromEntries(
+            Object.entries(model.bySource).map(([source, sourceMetrics]) => [
+              source,
+              {
+                api: { ...sourceMetrics.api },
+                tokens: { ...sourceMetrics.tokens },
+              },
+            ]),
+          ),
+        },
+      ]),
+    ),
+    tools: {
+      totalCalls: metrics.tools.totalCalls,
+      totalSuccess: metrics.tools.totalSuccess,
+      totalFail: metrics.tools.totalFail,
+      totalDurationMs: metrics.tools.totalDurationMs,
+      totalDecisions: { ...metrics.tools.totalDecisions },
+      byName: Object.fromEntries(
+        Object.entries(metrics.tools.byName).map(([name, stats]) => [
+          name,
+          {
+            count: stats.count,
+            success: stats.success,
+            fail: stats.fail,
+            durationMs: stats.durationMs,
+            decisions: { ...stats.decisions },
+          },
+        ]),
+      ),
+    },
+    files: {
+      totalLinesAdded: metrics.files.totalLinesAdded,
+      totalLinesRemoved: metrics.files.totalLinesRemoved,
+    },
+    ...(metrics.skills
+      ? {
+          skills: {
+            totalCalls: metrics.skills.totalCalls,
+            totalSuccess: metrics.skills.totalSuccess,
+            totalFail: metrics.skills.totalFail,
+            byName: Object.fromEntries(
+              Object.entries(metrics.skills.byName).map(([name, stats]) => [
+                name,
+                {
+                  count: stats.count,
+                  success: stats.success,
+                  fail: stats.fail,
+                },
+              ]),
+            ),
+          },
+        }
+      : {}),
+  };
+}
+
+function getMetricsForDisplay(sessionId: string): SessionMetrics {
+  return cloneSessionMetrics(
+    sessionId
+      ? uiTelemetryService.getMetricsForSession(sessionId)
+      : uiTelemetryService.getMetrics(),
+  );
+}
+
 // --- Context Definition ---
 
 const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
@@ -203,7 +322,7 @@ const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
 const createDefaultStats = (sessionId: string = ''): SessionStatsState => ({
   sessionId,
   sessionStartTime: new Date(),
-  metrics: uiTelemetryService.getMetrics(),
+  metrics: getMetricsForDisplay(sessionId),
   lastPromptTokenCount: 0,
   promptCount: 0,
 });
@@ -227,15 +346,18 @@ export const SessionStatsProvider: React.FC<{
       lastPromptTokenCount: number;
     }) => {
       setStats((prevState) => {
+        const nextMetrics = prevState.sessionId
+          ? getMetricsForDisplay(prevState.sessionId)
+          : cloneSessionMetrics(metrics);
         if (
           prevState.lastPromptTokenCount === lastPromptTokenCount &&
-          areMetricsEqual(prevState.metrics, metrics)
+          areMetricsEqual(prevState.metrics, nextMetrics)
         ) {
           return prevState;
         }
         return {
           ...prevState,
-          metrics,
+          metrics: nextMetrics,
           lastPromptTokenCount,
         };
       });

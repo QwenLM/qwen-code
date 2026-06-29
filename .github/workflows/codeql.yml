@@ -1,0 +1,41 @@
+name: 'CodeQL'
+
+# CodeQL used to be a per-push job in ci.yml. Security findings rarely change
+# commit-to-commit and the scan is non-blocking (never a required check), so
+# running it on every merge to `main` just piled onto the scarce hosted Linux
+# pool. Run it on a nightly schedule (plus manual dispatch) instead; findings
+# still surface in the Security tab. If fresher results are wanted, add a
+# path-filtered `push` trigger for security-relevant sources.
+on:
+  schedule:
+    - cron: '0 3 * * *' # nightly (~03:00 UTC), staggered from the E2E nightly
+  workflow_dispatch:
+
+permissions:
+  actions: 'read'
+  contents: 'read'
+  security-events: 'write'
+
+concurrency:
+  group: 'codeql'
+  cancel-in-progress: false
+
+jobs:
+  codeql:
+    name: 'CodeQL'
+    runs-on: 'ubuntu-latest'
+    # Analysis normally finishes in ~7-9 min (22 min worst case observed). Cap it
+    # so a runner that drops its heartbeat mid-analysis can't hold a slot for the
+    # default 6h.
+    timeout-minutes: 30
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+
+      - name: 'Initialize CodeQL'
+        uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3
+        with:
+          languages: 'javascript'
+
+      - name: 'Perform CodeQL Analysis'
+        uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3

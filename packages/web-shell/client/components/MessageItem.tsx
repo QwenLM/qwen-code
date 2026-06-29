@@ -4,11 +4,12 @@ import type {
   Message,
   PermissionRequest,
   TodoItem,
-  TurnCollapseHead,
 } from '../adapters/types';
+import { useI18n } from '../i18n';
+import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage } from './messages/AssistantMessage';
+import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import { PlanMessage } from './messages/PlanMessage';
@@ -20,53 +21,54 @@ import { InsightReady } from './InsightReady';
 interface MessageItemProps {
   message: Message;
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   workspaceCwd?: string;
   isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
+  onBranchSession?: () => void;
+  showAssistantActions?: boolean;
+  showAssistantBranch?: boolean;
   shellOutputMaxLines: number;
-  /** Present on a collapsible turn's prompt row; renders the collapse toggle. */
-  collapse?: TurnCollapseHead;
-  onToggleCollapse?: (turnId: string) => void;
 }
 
 export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
-  onConfirm,
   onShowContextDetail,
   workspaceCwd,
   isLatest = false,
   showRetryHint = false,
   onRetryClick,
+  onBranchSession,
+  showAssistantActions = false,
+  showAssistantBranch = false,
   shellOutputMaxLines,
-  collapse,
-  onToggleCollapse,
 }: MessageItemProps) {
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
         return (
-          <UserMessage
-            content={message.content}
-            images={message.images}
-            collapse={collapse}
-            onToggleCollapse={onToggleCollapse}
-          />
+          <UserMessage content={message.content} images={message.images} />
         );
       case 'assistant':
         return (
           <AssistantMessage
             content={message.content}
-            thinking={message.thinking}
             isStreaming={message.isStreaming}
+            timestamp={message.timestamp}
+            onBranchSession={onBranchSession}
+            showFooterActions={showAssistantActions}
+            showBranchAction={showAssistantBranch}
+          />
+        );
+      case 'thinking':
+        return (
+          <ThinkingMessage
+            content={message.content}
+            isStreaming={message.isStreaming}
+            timestamp={message.timestamp}
           />
         );
       case 'tool_group':
@@ -74,7 +76,6 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             pendingApproval={pendingApproval}
-            onConfirm={onConfirm}
             workspaceCwd={workspaceCwd}
             shellOutputMaxLines={shellOutputMaxLines}
           />
@@ -131,45 +132,88 @@ export const MessageItem = memo(function MessageItem({
 
   if (body === null) return null;
 
+  // Isolate each message's render: a throw in Markdown/KaTeX/Mermaid/a tool
+  // panel degrades to an inline notice rather than white-screening the whole
+  // (embeddable) transcript. `resetKeys={[message]}` lets a streamed/edited/
+  // retried update recover on its own; a stable broken message stays on the
+  // fallback without looping.
+  const safeBody = (
+    <ErrorBoundary
+      label={`message:${message.role}`}
+      resetKeys={[message]}
+      fallback={
+        <MessageRenderError align={message.role === 'user' ? 'end' : 'start'} />
+      }
+    >
+      {body}
+    </ErrorBoundary>
+  );
+
+  if (message.role === 'assistant') {
+    if (showAssistantActions) {
+      return safeBody;
+    }
+    return (
+      <MessageTimestamp timestamp={message.timestamp}>
+        {safeBody}
+      </MessageTimestamp>
+    );
+  }
+
   return (
-    <MessageTimestamp timestamp={message.timestamp}>{body}</MessageTimestamp>
+    <MessageTimestamp
+      timestamp={message.timestamp}
+      chatMode={message.role === 'user'}
+      copyText={message.role === 'user' ? message.content : undefined}
+      copyTitle="Copy"
+    >
+      {safeBody}
+    </MessageTimestamp>
   );
 }, areMessageItemPropsEqual);
+
+// Aligns with the message it replaces: user messages are right-aligned bubbles,
+// so the notice sits on the right too and still reads as that user turn's prompt
+// (a left-aligned notice would look like it belongs to the previous turn's
+// output). Assistant and other rows are left-aligned, matching their layout.
+function MessageRenderError({ align }: { align: 'start' | 'end' }) {
+  const { t } = useI18n();
+  return (
+    <div
+      role="alert"
+      style={{
+        display: 'flex',
+        justifyContent: align === 'end' ? 'flex-end' : 'flex-start',
+      }}
+    >
+      <span
+        style={{
+          color: 'var(--error-color, #e06c75)',
+          fontSize: '0.85em',
+          opacity: 0.85,
+        }}
+      >
+        {t('message.renderError')}
+      </span>
+    </div>
+  );
+}
 
 function areMessageItemPropsEqual(
   prev: MessageItemProps,
   next: MessageItemProps,
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
-  if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
+  if (prev.onBranchSession !== next.onBranchSession) return false;
+  if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
-  if (prev.onToggleCollapse !== next.onToggleCollapse) return false;
-  if (!turnCollapseEqual(prev.collapse, next.collapse)) return false;
   return areMessagesEqual(prev.message, next.message);
-}
-
-function turnCollapseEqual(
-  a: TurnCollapseHead | undefined,
-  b: TurnCollapseHead | undefined,
-): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return (
-    a.turnId === b.turnId &&
-    a.collapsed === b.collapsed &&
-    a.hiddenCount === b.hiddenCount &&
-    a.elapsedMs === b.elapsedMs &&
-    a.inputTokens === b.inputTokens &&
-    a.outputTokens === b.outputTokens &&
-    a.cachedTokens === b.cachedTokens &&
-    a.toolCallCount === b.toolCallCount &&
-    a.liveStartedAt === b.liveStartedAt
-  );
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {
@@ -187,7 +231,12 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'assistant' &&
         prev.content === next.content &&
-        prev.thinking === next.thinking &&
+        prev.isStreaming === next.isStreaming
+      );
+    case 'thinking':
+      return (
+        next.role === 'thinking' &&
+        prev.content === next.content &&
         prev.isStreaming === next.isStreaming
       );
     case 'system':

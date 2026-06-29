@@ -183,4 +183,32 @@ describe('PermissionController', () => {
       );
     });
   });
+
+  it('omits modify suggestions when edit confirmation hides modify actions', () => {
+    const controller = new PermissionController(
+      createContext(),
+      createRegistry(),
+      'PermissionController',
+    );
+
+    const suggestions = controller.buildPermissionSuggestions({
+      type: 'edit',
+      title: 'Confirm Sed Edit',
+      fileName: 'file.txt',
+      hideModify: true,
+    });
+
+    expect(suggestions).toEqual([
+      {
+        type: 'allow',
+        label: 'Allow Edit',
+        description: 'Edit file: file.txt',
+      },
+      {
+        type: 'deny',
+        label: 'Deny',
+        description: 'Block this file edit',
+      },
+    ]);
+  });
 });

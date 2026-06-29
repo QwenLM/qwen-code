@@ -51,11 +51,11 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## Suggestions
 
-| Shortcut        | Description                            |
-| --------------- | -------------------------------------- |
-| `Down Arrow`    | Navigate down through the suggestions. |
-| `Tab` / `Enter` | Accept the selected suggestion.        |
-| `Up Arrow`      | Navigate up through the suggestions.   |
+| Shortcut                | Description                            |
+| ----------------------- | -------------------------------------- |
+| `Down Arrow` / `Ctrl+N` | Navigate down through the suggestions. |
+| `Tab` / `Enter`         | Accept the selected suggestion.        |
+| `Up Arrow` / `Ctrl+P`   | Navigate up through the suggestions.   |
 
 ## Radio Button Select
 
@@ -82,6 +82,12 @@ Active only when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtuali
 | **Mouse wheel** | Scroll history (3 lines per tick).                   |
 
 When `ui.useTerminalBuffer` is on, the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, **native click-and-drag text selection is consumed by the program** — hold `Shift` (or `Option` on macOS Terminal / iTerm) while dragging to bypass mouse capture and select text the usual way.
+
+### tmux trackpad scrolling
+
+Inside tmux, some terminals translate trackpad or wheel gestures into plain `Up Arrow` and `Down Arrow` sequences before qwen-code sees them. Those bytes are identical to real arrow-key presses, so qwen-code cannot tell whether you meant to scroll the viewport or navigate prompt history.
+
+If trackpad scrolling changes the prompt history in tmux, enable `ui.useTerminalBuffer`; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 ## IDE Integration
 

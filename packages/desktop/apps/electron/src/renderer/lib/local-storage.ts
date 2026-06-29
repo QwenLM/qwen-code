@@ -29,6 +29,9 @@ export const KEYS = {
   // Session files panel state
   sessionFilesExpandedFolders: 'session-files-expanded', // Expanded folders in session files tree (keyed by sessionId)
 
+  // File preview side panel
+  filePreviewWidth: 'file-preview-width', // Width (px) of the docked file preview side panel
+
   // Theme
   theme: 'theme',
 

@@ -26,6 +26,7 @@ import {
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
+  validateSettingValue,
 } from '../../utils/settingsUtils.js';
 import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
 import {
@@ -37,8 +38,8 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
-import chalk from 'chalk';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import {
   type SettingsValue,
   TOGGLE_TYPES,
@@ -325,6 +326,16 @@ export function SettingsDialog({
       }
     }
 
+    if (definition) {
+      const validationError = validateSettingValue(definition, parsed);
+      if (validationError) {
+        setEditingKey(null);
+        setEditBuffer('');
+        setEditCursorPos(0);
+        return;
+      }
+    }
+
     // Update pending
     setPendingSettings((prev) =>
       parsed === undefined
@@ -601,6 +612,12 @@ export function SettingsDialog({
             }
             return;
           }
+          if (currentItem?.value === 'visionModel') {
+            if (name === 'return') {
+              onSelect('visionModel', selectedScope);
+            }
+            return;
+          }
           if (
             currentItem?.type === 'number' ||
             currentItem?.type === 'string'
@@ -615,7 +632,8 @@ export function SettingsDialog({
           if (
             currentItem?.value === 'ui.theme' ||
             currentItem?.value === 'general.preferredEditor' ||
-            currentItem?.value === 'fastModel'
+            currentItem?.value === 'fastModel' ||
+            currentItem?.value === 'visionModel'
           ) {
             onSelect(currentItem.value, selectedScope);
           }
@@ -821,10 +839,10 @@ export function SettingsDialog({
                 );
                 const afterCursor = cpSlice(editBuffer, editCursorPos + 1);
                 displayValue =
-                  beforeCursor + chalk.inverse(atCursor) + afterCursor;
+                  beforeCursor + renderSoftwareCursor(atCursor) + afterCursor;
               } else if (cursorVisible && editCursorPos >= cpLen(editBuffer)) {
-                // Cursor is at the end - show inverted space
-                displayValue = editBuffer + chalk.inverse(' ');
+                // Cursor is at the end - show software cursor space
+                displayValue = editBuffer + renderSoftwareCursor(' ');
               } else {
                 // Cursor not visible
                 displayValue = editBuffer;
@@ -834,7 +852,8 @@ export function SettingsDialog({
               const isSubDialogSetting =
                 item.value === 'ui.theme' ||
                 item.value === 'general.preferredEditor' ||
-                item.value === 'fastModel';
+                item.value === 'fastModel' ||
+                item.value === 'visionModel';
 
               // For numbers/strings, get the actual current value from pending settings
               const path = item.value.split('.');
