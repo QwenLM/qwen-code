@@ -390,6 +390,11 @@ async function maybeOpenWebShellBrowser(
   open: boolean,
 ): Promise<void> {
   if (!open) return;
+  try {
+    await handle.runtimeReady;
+  } catch {
+    return;
+  }
   const { maybeOpenWebShellBrowser: openBrowser } = await import(
     '../commands/serve.js'
   );
