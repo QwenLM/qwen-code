@@ -12,6 +12,7 @@ export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
+  private creatingSessions: Map<string, Promise<string>> = new Map();
 
   private bridge: ChannelAgentBridge;
   private defaultCwd: string;
@@ -59,16 +60,6 @@ export class SessionRouter {
     }
   }
 
-  /**
-   * Sender-scoped key prefix for by-sender (no chatId) scans. The trailing
-   * ':' delimiter ensures a sender id matches as a whole segment — without it
-   * sender "bob" would also match another sender "bobby"
-   * (key `${channelName}:bobby:${chatId}`).
-   */
-  private senderPrefix(channelName: string, senderId: string): string {
-    return `${channelName}:${senderId}:`;
-  }
-
   async resolve(
     channelName: string,
     senderId: string,
@@ -82,13 +73,26 @@ export class SessionRouter {
       return existing;
     }
 
-    const sessionCwd = cwd || this.defaultCwd;
-    const sessionId = await this.bridge.newSession(sessionCwd);
-    this.toSession.set(key, sessionId);
-    this.toTarget.set(sessionId, { channelName, senderId, chatId, threadId });
-    this.toCwd.set(sessionId, sessionCwd);
-    this.persist();
-    return sessionId;
+    const creating = this.creatingSessions.get(key);
+    if (creating) {
+      return creating;
+    }
+
+    const created = (async () => {
+      const sessionCwd = cwd || this.defaultCwd;
+      const sessionId = await this.bridge.newSession(sessionCwd);
+      this.toSession.set(key, sessionId);
+      this.toTarget.set(sessionId, { channelName, senderId, chatId, threadId });
+      this.toCwd.set(sessionId, sessionCwd);
+      this.persist();
+      return sessionId;
+    })();
+    this.creatingSessions.set(key, created);
+    try {
+      return await created;
+    } finally {
+      this.creatingSessions.delete(key);
+    }
   }
 
   getTarget(sessionId: string): SessionTarget | undefined {
@@ -119,9 +123,10 @@ export class SessionRouter {
         this.routingKey(channelName, senderId, chatId, threadId),
       );
     }
-    const prefix = this.senderPrefix(channelName, senderId);
-    for (const k of this.toSession.keys()) {
-      if (k.startsWith(prefix)) return true;
+    for (const target of this.toTarget.values()) {
+      if (target.channelName === channelName && target.senderId === senderId) {
+        return true;
+      }
     }
     return false;
   }
@@ -142,9 +147,12 @@ export class SessionRouter {
       if (sessionId) removedIds.push(sessionId);
     } else {
       // No chatId: remove all sessions for this sender on this channel.
-      const prefix = this.senderPrefix(channelName, senderId);
-      for (const k of [...this.toSession.keys()]) {
-        if (k.startsWith(prefix)) {
+      for (const [k, sessionId] of [...this.toSession.entries()]) {
+        const target = this.toTarget.get(sessionId);
+        if (
+          target?.channelName === channelName &&
+          target.senderId === senderId
+        ) {
           const sessionId = this.deleteByKey(k);
           if (sessionId) removedIds.push(sessionId);
         }
@@ -222,8 +230,10 @@ export class SessionRouter {
 
     let restored = 0;
     let failed = 0;
+    let changed = false;
 
     for (const [key, entry] of Object.entries(entries)) {
+      this.deleteByKey(key);
       try {
         const sessionId = await this.bridge.loadSession(
           entry.sessionId,
@@ -231,20 +241,25 @@ export class SessionRouter {
         );
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           failed++;
+          changed = true;
           continue;
         }
         this.toSession.set(key, sessionId);
         this.toTarget.set(sessionId, entry.target);
         this.toCwd.set(sessionId, entry.cwd);
+        if (sessionId !== entry.sessionId) {
+          changed = true;
+        }
         restored++;
       } catch {
         // Session can't be loaded — will create fresh on next message
         failed++;
+        changed = true;
       }
     }
 
     // Update persist file to only include successfully restored sessions
-    if (failed > 0) {
+    if (changed) {
       this.persist();
     }
 
@@ -256,6 +271,7 @@ export class SessionRouter {
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
+    this.creatingSessions.clear();
     if (this.persistPath && existsSync(this.persistPath)) {
       try {
         unlinkSync(this.persistPath);

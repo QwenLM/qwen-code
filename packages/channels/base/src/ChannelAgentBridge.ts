@@ -1,5 +1,3 @@
-import type { EventEmitter } from 'node:events';
-
 export interface AvailableCommand {
   name: string;
   description: string;
@@ -15,8 +13,27 @@ export interface ToolCallEvent {
   rawInput?: Record<string, unknown>;
 }
 
-export interface ChannelAgentBridge extends Pick<EventEmitter, 'on' | 'off'> {
+export interface SessionDiedEvent {
+  sessionId: string;
+  reason?: string;
+}
+
+interface ChannelAgentBridgeEventMap {
+  sessionDied: [SessionDiedEvent];
+  textChunk: [sessionId: string, chunk: string];
+  toolCall: [ToolCallEvent];
+}
+
+export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
+  on<K extends keyof ChannelAgentBridgeEventMap>(
+    eventName: K,
+    listener: (...args: ChannelAgentBridgeEventMap[K]) => void,
+  ): unknown;
+  off<K extends keyof ChannelAgentBridgeEventMap>(
+    eventName: K,
+    listener: (...args: ChannelAgentBridgeEventMap[K]) => void,
+  ): unknown;
   newSession(cwd: string): Promise<string>;
   loadSession(sessionId: string, cwd: string): Promise<string>;
   prompt(

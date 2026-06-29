@@ -201,6 +201,56 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session: active');
     });
 
+    it('/status checks the matching thread when sessionScope=thread', async () => {
+      const ch = createChannel({ sessionScope: 'thread' });
+      await ch.handleInbound(envelope({ text: 'hi', threadId: 'thread-1' }));
+      ch.sent = [];
+
+      await ch.handleInbound(
+        envelope({ text: '/status', threadId: 'thread-2' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/status', threadId: 'thread-1' }),
+      );
+
+      expect(ch.sent[0]!.text).toContain('Session: none');
+      expect(ch.sent[1]!.text).toContain('Session: active');
+    });
+
+    it('/clear removes only the matching thread when sessionScope=thread', async () => {
+      const ch = createChannel({ sessionScope: 'thread' });
+      await ch.handleInbound(envelope({ text: 'one', threadId: 'thread-1' }));
+      await ch.handleInbound(envelope({ text: 'two', threadId: 'thread-2' }));
+      ch.sent = [];
+
+      await ch.handleInbound(
+        envelope({ text: '/clear', threadId: 'thread-1' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/status', threadId: 'thread-1' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/status', threadId: 'thread-2' }),
+      );
+
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+      expect(ch.sent[1]!.text).toContain('Session: none');
+      expect(ch.sent[2]!.text).toContain('Session: active');
+    });
+
+    it('removes a session when the bridge reports that it died', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope({ text: 'hi' }));
+      ch.sent = [];
+
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId: 's-1',
+      });
+      await ch.handleInbound(envelope({ text: '/status' }));
+
+      expect(ch.sent[0]!.text).toContain('Session: none');
+    });
+
     it('/cancel reports when no request is running', async () => {
       const ch = createChannel();
       ch.enableCancelCommand();

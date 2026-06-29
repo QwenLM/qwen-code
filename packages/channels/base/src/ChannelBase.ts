@@ -81,6 +81,9 @@ export abstract class ChannelBase {
           this.onToolCall(target.chatId, event);
         }
       });
+      bridge.on('sessionDied', ({ sessionId }) => {
+        this.router.removeSessionId(sessionId);
+      });
     }
   }
 

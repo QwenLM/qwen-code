@@ -34,6 +34,7 @@ const mockAcpBridge = vi.hoisted(() =>
 );
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockRouterGetTarget = vi.hoisted(() => vi.fn());
+const mockRouterRemoveSessionId = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
@@ -41,6 +42,7 @@ const mockSessionRouter = vi.hoisted(() =>
   vi.fn(() => ({
     clearAll: mockRouterClearAll,
     getTarget: mockRouterGetTarget,
+    removeSessionId: mockRouterRemoveSessionId,
     restoreSessions: mockRouterRestoreSessions,
     setBridge: mockRouterSetBridge,
     setChannelScope: mockRouterSetChannelScope,
@@ -214,6 +216,124 @@ describe('startCommand.handler', () => {
       mockParsedChannelConfig,
       expect.any(Object),
       expect.objectContaining({ proxy: settingsProxy }),
+    );
+  });
+
+  it('starts a standalone AcpBridge before creating the channel', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const bridge = mockAcpBridge.mock.results[0]!.value;
+    const router = mockSessionRouter.mock.results[0]!.value;
+    expect(mockAcpBridge).toHaveBeenCalledWith({
+      cliEntryPath: '/tmp/qwen-cli-entry.js',
+      cwd: mockParsedChannelConfig.cwd,
+      model: mockParsedChannelConfig.model,
+    });
+    expect(mockBridgeStart.mock.invocationCallOrder[0]).toBeLessThan(
+      mockCreateChannel.mock.invocationCallOrder[0]!,
+    );
+    expect(mockSessionRouter).toHaveBeenCalledWith(
+      bridge,
+      mockParsedChannelConfig.cwd,
+      mockParsedChannelConfig.sessionScope,
+      expect.any(String),
+    );
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      mockParsedChannelConfig,
+      bridge,
+      expect.objectContaining({ router }),
+    );
+  });
+
+  it('removes router sessions when the bridge reports session death', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const sessionDiedListener = mockBridgeOn.mock.calls.find(
+      ([eventName]) => eventName === 'sessionDied',
+    )?.[1] as ((event: { sessionId: string }) => void) | undefined;
+    expect(sessionDiedListener).toBeDefined();
+
+    sessionDiedListener!({ sessionId: 'dead-session' });
+
+    expect(mockRouterRemoveSessionId).toHaveBeenCalledWith('dead-session');
+  });
+
+  it('starts all channels with one shared bridge and router', async () => {
+    const channels = {
+      first: { type: 'telegram' },
+      second: { type: 'telegram' },
+    };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockImplementation(async (name: string) => ({
+      ...mockParsedChannelConfig,
+      cwd: `/tmp/${name}`,
+      model: 'shared-model',
+      sessionScope: name === 'first' ? 'thread' : 'single',
+    }));
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const bridge = mockAcpBridge.mock.results[0]!.value;
+    const router = mockSessionRouter.mock.results[0]!.value;
+    expect(mockAcpBridge).toHaveBeenCalledTimes(1);
+    expect(mockAcpBridge).toHaveBeenCalledWith({
+      cliEntryPath: '/tmp/qwen-cli-entry.js',
+      cwd: process.cwd(),
+      model: 'shared-model',
+    });
+    expect(mockSessionRouter).toHaveBeenCalledWith(
+      bridge,
+      process.cwd(),
+      'user',
+      expect.any(String),
+    );
+    expect(mockRouterSetChannelScope).toHaveBeenCalledWith('first', 'thread');
+    expect(mockRouterSetChannelScope).toHaveBeenCalledWith('second', 'single');
+    expect(mockCreateChannel).toHaveBeenNthCalledWith(
+      1,
+      'first',
+      expect.objectContaining({ cwd: '/tmp/first' }),
+      bridge,
+      expect.objectContaining({ router }),
+    );
+    expect(mockCreateChannel).toHaveBeenNthCalledWith(
+      2,
+      'second',
+      expect.objectContaining({ cwd: '/tmp/second' }),
+      bridge,
+      expect.objectContaining({ router }),
     );
   });
 });

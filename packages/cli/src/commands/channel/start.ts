@@ -167,6 +167,15 @@ function registerToolCallDispatch(
   });
 }
 
+function registerSessionCleanup(
+  bridge: ChannelAgentBridge,
+  router: SessionRouter,
+): void {
+  bridge.on('sessionDied', ({ sessionId }) => {
+    router.removeSessionId(sessionId);
+  });
+}
+
 /** Check for duplicate instance and abort if one is already running. */
 function checkDuplicateInstance(): void {
   const existing = readServiceInfo();
@@ -225,6 +234,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   const channel = await createChannel(name, config, bridge, { router, proxy });
   channels.set(name, channel);
   registerToolCallDispatch(bridge, router, channels);
+  registerSessionCleanup(bridge, router);
 
   try {
     await channel.connect();
@@ -271,6 +281,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         router.setBridge(bridge);
         channel.setBridge(bridge);
         registerToolCallDispatch(bridge, router, channels);
+        registerSessionCleanup(bridge, router);
         attachDisconnectHandler(bridge);
 
         const result = await router.restoreSessions();
@@ -375,6 +386,7 @@ async function startAll(proxy?: string): Promise<void> {
     );
   }
   registerToolCallDispatch(bridge, router, channels);
+  registerSessionCleanup(bridge, router);
 
   // Connect all channels
   let connectedCount = 0;
@@ -440,6 +452,7 @@ async function startAll(proxy?: string): Promise<void> {
           channel.setBridge(bridge);
         }
         registerToolCallDispatch(bridge, router, channels);
+        registerSessionCleanup(bridge, router);
         attachDisconnectHandler(bridge);
 
         const result = await router.restoreSessions();

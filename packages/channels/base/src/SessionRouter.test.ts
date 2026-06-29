@@ -19,9 +19,10 @@ function mockBridge(): ChannelAgentBridge {
     loadSession: vi.fn().mockImplementation((id: string) => id),
     on: vi.fn(),
     off: vi.fn(),
-    emit: vi.fn(),
     availableCommands: [],
-  } as unknown as ChannelAgentBridge;
+    prompt: vi.fn().mockResolvedValue(''),
+    cancelSession: vi.fn().mockResolvedValue(undefined),
+  };
 }
 
 function writePersistedSession(persistPath: string): void {
@@ -152,6 +153,31 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1');
       expect(bridge.newSession).toHaveBeenCalledWith('/default');
     });
+
+    it('deduplicates concurrent session creation for the same route', async () => {
+      let resolveNewSession!: (sessionId: string) => void;
+      const newSession = vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveNewSession = resolve;
+          }),
+      );
+      bridge = {
+        ...mockBridge(),
+        newSession,
+      };
+      const router = new SessionRouter(bridge, '/default');
+
+      const first = router.resolve('ch', 'alice', 'chat1');
+      const second = router.resolve('ch', 'alice', 'chat1');
+      resolveNewSession('session-1');
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        'session-1',
+        'session-1',
+      ]);
+      expect(newSession).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('getTarget', () => {
@@ -221,6 +247,14 @@ describe('SessionRouter', () => {
       expect(router.hasSession('ch', 'bob')).toBe(false);
       expect(router.hasSession('ch', 'bobby')).toBe(true);
     });
+
+    it('finds sender sessions outside user-scope routing keys', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.hasSession('ch', 'alice')).toBe(true);
+      expect(router.hasSession('ch', 'bob')).toBe(false);
+    });
   });
 
   describe('removeSession', () => {
@@ -253,6 +287,15 @@ describe('SessionRouter', () => {
       expect(router.removeSession('ch', 'bob')).toEqual([]);
       expect(router.hasSession('ch', 'bobby')).toBe(true);
       expect(router.getTarget(bobby)).toBeDefined();
+    });
+
+    it('removes sender sessions outside user-scope routing keys', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sid = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.removeSession('ch', 'alice')).toEqual([sid]);
+      expect(router.hasSession('ch', 'alice')).toBe(false);
+      expect(router.getTarget(sid)).toBeUndefined();
     });
 
     it('cleans up target mapping after removal', async () => {
@@ -343,6 +386,56 @@ describe('SessionRouter', () => {
       });
       expect(router.getAll()).toEqual([]);
       expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('drops existing in-memory mappings when restore fails after restart', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+      const restartedBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockResolvedValue(''),
+      } as unknown as ChannelAgentBridge;
+
+      router.setBridge(restartedBridge);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+      expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
+      expect(router.getTarget(sid)).toBeUndefined();
+      expect(router.getAll()).toEqual([]);
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('persists replacement ids returned by loadSession', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      await router.resolve('ch', 'alice', 'chat1');
+      const restartedBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockResolvedValue('replacement-session'),
+      } as unknown as ChannelAgentBridge;
+
+      router.setBridge(restartedBridge);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'replacement-session',
+      );
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({
+          sessionId: 'replacement-session',
+        }),
+      });
     });
   });
 

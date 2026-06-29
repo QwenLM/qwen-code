@@ -153,13 +153,23 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 ```typescript
 interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
+  on(eventName: 'toolCall', listener: (event: ToolCallEvent) => void): unknown;
   on(
-    eventName: string | symbol,
-    listener: (...args: unknown[]) => void,
+    eventName: 'textChunk',
+    listener: (sessionId: string, chunk: string) => void,
+  ): unknown;
+  on(
+    eventName: 'sessionDied',
+    listener: (event: { sessionId: string; reason?: string }) => void,
+  ): unknown;
+  off(eventName: 'toolCall', listener: (event: ToolCallEvent) => void): unknown;
+  off(
+    eventName: 'textChunk',
+    listener: (sessionId: string, chunk: string) => void,
   ): unknown;
   off(
-    eventName: string | symbol,
-    listener: (...args: unknown[]) => void,
+    eventName: 'sessionDied',
+    listener: (event: { sessionId: string; reason?: string }) => void,
   ): unknown;
   newSession(cwd: string): Promise<string>;
   loadSession(sessionId: string, cwd: string): Promise<string>;
