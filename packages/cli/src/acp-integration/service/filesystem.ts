@@ -16,11 +16,19 @@ import type {
   FileSystemService,
   ReadTextFileResponse,
 } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 const RESOURCE_NOT_FOUND_CODE = -32002;
 const PATH_OUTSIDE_WORKSPACE_KIND = 'path_outside_workspace';
+const SYMLINK_ESCAPE_KIND = 'symlink_escape';
+const LOCAL_READ_FALLBACK_ERROR_KINDS = new Set([
+  PATH_OUTSIDE_WORKSPACE_KIND,
+  SYMLINK_ESCAPE_KIND,
+]);
+const debugLogger = createDebugLogger('ACP_FILE_SYSTEM');
 
 interface AcpFileSystemServiceOptions {
   localReadRoots?: readonly string[];
@@ -81,10 +89,34 @@ function createEnoentError(filePath: string): NodeJS.ErrnoException {
   return err;
 }
 
-function isPathWithinRoot(filePath: string, root: string): boolean {
-  if (!root.trim()) return false;
+function isLocalReadFallbackErrorKind(errorKind: unknown): boolean {
+  return (
+    typeof errorKind === 'string' &&
+    LOCAL_READ_FALLBACK_ERROR_KINDS.has(errorKind)
+  );
+}
 
-  const relative = path.relative(path.resolve(root), path.resolve(filePath));
+async function resolveRealPath(value: string): Promise<string | undefined> {
+  if (!value.trim()) return undefined;
+
+  try {
+    return await realpath(path.resolve(value));
+  } catch {
+    return undefined;
+  }
+}
+
+async function isPathWithinRoot(
+  filePath: string,
+  root: string,
+): Promise<boolean> {
+  const [realFilePath, realRoot] = await Promise.all([
+    resolveRealPath(filePath),
+    resolveRealPath(root),
+  ]);
+  if (!realFilePath || !realRoot) return false;
+
+  const relative = path.relative(realRoot, realFilePath);
   return (
     relative === '' ||
     (!relative.startsWith(`..${path.sep}`) &&
@@ -122,11 +154,30 @@ export class AcpFileSystemService implements FileSystemService {
         throw createEnoentError(params.path);
       }
 
+      const errorKind = getErrorKind(error);
       if (
-        getErrorKind(error) === PATH_OUTSIDE_WORKSPACE_KIND &&
-        this.isLocalReadFallbackPath(params.path)
+        isLocalReadFallbackErrorKind(errorKind) &&
+        (await this.isLocalReadFallbackPath(params.path))
       ) {
-        return this.fallback.readTextFile(params);
+        debugLogger.debug('Falling back to local read after ACP error', {
+          path: params.path,
+          errorKind,
+          error: getErrorMessage(error),
+        });
+        try {
+          return await this.fallback.readTextFile(params);
+        } catch (fallbackError) {
+          debugLogger.warn('Local read fallback failed after ACP error', {
+            path: params.path,
+            errorKind,
+            originalError: getErrorMessage(error),
+            fallbackError: getErrorMessage(fallbackError),
+          });
+          throw new Error(
+            `Local fallback read failed for ${params.path}: ${getErrorMessage(fallbackError)} (original ACP error: ${getErrorMessage(error)})`,
+            { cause: fallbackError },
+          );
+        }
       }
 
       throw normalizeError(error);
@@ -147,11 +198,15 @@ export class AcpFileSystemService implements FileSystemService {
         ? '\uFEFF' + params.content
         : params.content;
 
-    await this.connection.writeTextFile({
-      ...params,
-      content: finalContent,
-      sessionId: this.sessionId,
-    });
+    try {
+      await this.connection.writeTextFile({
+        ...params,
+        content: finalContent,
+        sessionId: this.sessionId,
+      });
+    } catch (error) {
+      throw normalizeError(error);
+    }
 
     return { _meta: params._meta };
   }
@@ -160,9 +215,10 @@ export class AcpFileSystemService implements FileSystemService {
     return this.fallback.findFiles(fileName, searchPaths);
   }
 
-  private isLocalReadFallbackPath(filePath: string): boolean {
-    return (this.options.localReadRoots ?? []).some((root) =>
-      isPathWithinRoot(filePath, root),
-    );
+  private async isLocalReadFallbackPath(filePath: string): Promise<boolean> {
+    for (const root of this.options.localReadRoots ?? []) {
+      if (await isPathWithinRoot(filePath, root)) return true;
+    }
+    return false;
   }
 }
