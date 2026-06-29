@@ -387,7 +387,31 @@ export function loadEnvironment(
     }
   }
 
-  // Step 2: settings.env fallback (lowest priority, no-override).
+  // Step 2: settings.authEnv (auth-modified vars, higher priority than settings.env).
+  // Variables saved here by /auth are loaded with override semantics, ensuring
+  // the user's latest auth configuration takes effect even when system env vars
+  // exist. This is safe because only /auth writes to this field — workspace
+  // settings.json cannot inject arbitrary keys here.
+  if (settings.authEnv) {
+    for (const [key, value] of Object.entries(settings.authEnv)) {
+      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) {
+        continue;
+      }
+      if (typeof value === 'string') {
+        process.env[key] = value;
+        settingsEnvSourcedKeys.add(key);
+      }
+      if (
+        !lastReloadSnapshotSeeded &&
+        typeof value === 'string' &&
+        !lastReloadSnapshot.has(key)
+      ) {
+        lastReloadSnapshot.set(key, value);
+      }
+    }
+  }
+
+  // Step 3: settings.env fallback (lowest priority, no-override).
   // Storage-routing vars must never come from settings.json — a workspace
   // settings.json could otherwise redirect global state after path bootstrap.
   if (settings.env) {

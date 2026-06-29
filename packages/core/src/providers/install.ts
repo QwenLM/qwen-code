@@ -174,6 +174,12 @@ export async function applyProviderInstallPlan(
       }
       previousEnvValues.set(key, process.env[key]);
       settings.setValue(`env.${key}`, value);
+      // Also save to authEnv for /auth-specific persistence.
+      // authEnv is loaded with higher priority than env in loadEnvironment(),
+      // ensuring /auth changes take effect even when system env vars exist,
+      // without breaking the security contract that workspace settings.json
+      // cannot override system env vars.
+      settings.setValue(`authEnv.${key}`, value);
       process.env[key] = value;
     }
 
