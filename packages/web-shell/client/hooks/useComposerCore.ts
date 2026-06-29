@@ -1339,6 +1339,7 @@ export function useComposerCore(
     const completionSources = [
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
+        () => workspaceActionsRef.current?.loadExtensionsStatus,
       ),
     ];
 
