@@ -3,6 +3,7 @@ import {
   useActiveTodoList,
   usePendingPermissions,
   useTranscriptBlocks,
+  useWorkspace,
 } from '@qwen-code/webui/daemon-react-sdk';
 import {
   collectTaskTimelineFromTranscript,
@@ -13,10 +14,14 @@ export function useTaskTimeline() {
   const blocks = useTranscriptBlocks();
   const activeTodoList = useActiveTodoList();
   const pendingPermissions = usePendingPermissions();
+  const workspace = useWorkspace();
 
   const items = useMemo(
-    () => collectTaskTimelineFromTranscript(blocks),
-    [blocks],
+    () =>
+      collectTaskTimelineFromTranscript(blocks, {
+        workspaceCwd: workspace.workspaceCwd,
+      }),
+    [blocks, workspace.workspaceCwd],
   );
   const activeTodo = activeTodoList?.items.find(
     (item) => item.status === 'in_progress' || item.status === 'pending',

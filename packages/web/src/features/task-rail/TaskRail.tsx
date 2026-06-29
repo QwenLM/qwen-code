@@ -16,7 +16,7 @@ import type {
   DaemonTranscriptBlock,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useWebArtifacts } from '../artifacts/useWebArtifacts';
-import { useTaskTimeline } from '../task-timeline/useTaskTimeline';
+import { useTaskExecutionOverview } from '../task-overview/useTaskExecutionOverview';
 
 const MAX_RECENT_ITEMS = 5;
 const MAX_NOTICE_ITEMS = 2;
@@ -37,11 +37,14 @@ export function TaskRail({ onAddToChat, onOpenFile }: TaskRailProps) {
   const activeTodoList = useActiveTodoList();
   const { notices } = useSessionNotices();
   const { artifacts } = useWebArtifacts();
-  const { summary: timelineSummary } = useTaskTimeline();
+  const overview = useTaskExecutionOverview();
+  const timelineSummary = overview.progress.timeline;
 
   const currentTool = getCurrentTool(transcriptState, blocks);
   const recentTools = getRecentToolBlocks(blocks);
   const recentArtifacts = artifacts.slice(0, MAX_RECENT_ITEMS);
+  const latestCheck = overview.checks[0];
+  const changedFileCount = overview.repository.changedFiles.length;
   const importantNotices = notices
     .filter(
       (notice) => notice.severity === 'warning' || notice.severity === 'error',
@@ -114,6 +117,15 @@ export function TaskRail({ onAddToChat, onOpenFile }: TaskRailProps) {
           <TaskRow
             label="Attention"
             value={`${timelineSummary.blocked + timelineSummary.failed}`}
+          />
+          <TaskRow label="Changed" value={`${changedFileCount}`} />
+          <TaskRow
+            label="Latest check"
+            value={
+              latestCheck
+                ? `${latestCheck.kind}: ${latestCheck.status}`
+                : 'none'
+            }
           />
           {timelineSummary.activeTitle ? (
             <p className="web-task-muted">{timelineSummary.activeTitle}</p>

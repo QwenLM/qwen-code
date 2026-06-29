@@ -3,6 +3,8 @@ import { WebShell } from '@qwen-code/web-shell';
 import type { WebShellComposerApi } from '@qwen-code/web-shell';
 import { useConnection, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { ConnectionDiagnostics } from '../diagnostics/ConnectionDiagnostics';
+import { TaskExecutionStatusCard } from '../task-overview/TaskExecutionStatusCard';
+import { useTaskExecutionOverview } from '../task-overview/useTaskExecutionOverview';
 
 interface ChatPaneProps {
   composerRef?: Ref<WebShellComposerApi>;
@@ -17,6 +19,7 @@ export function ChatPane({
 }: ChatPaneProps) {
   const connection = useConnection();
   const workspace = useWorkspace();
+  const overview = useTaskExecutionOverview();
 
   return (
     <WebShell
@@ -29,19 +32,22 @@ export function ChatPane({
           currentModel={currentModel}
           cwd={cwd}
           diagnostics={
-            <ConnectionDiagnostics
-              daemonStatus={connection.status}
-              workspaceStatus={workspace.status}
-              daemonUrl={workspace.baseUrl}
-              requestedWorkspaceCwd={requestedWorkspaceCwd}
-              boundWorkspaceCwd={
-                connection.workspaceCwd ?? workspace.workspaceCwd ?? cwd
-              }
-              sessionId={connection.sessionId}
-              currentModel={connection.currentModel ?? currentModel}
-              daemonError={connection.error}
-              workspaceError={workspace.error?.message}
-            />
+            <>
+              <TaskExecutionStatusCard overview={overview} />
+              <ConnectionDiagnostics
+                daemonStatus={connection.status}
+                workspaceStatus={workspace.status}
+                daemonUrl={workspace.baseUrl}
+                requestedWorkspaceCwd={requestedWorkspaceCwd}
+                boundWorkspaceCwd={
+                  connection.workspaceCwd ?? workspace.workspaceCwd ?? cwd
+                }
+                sessionId={connection.sessionId}
+                currentModel={connection.currentModel ?? currentModel}
+                daemonError={connection.error}
+                workspaceError={workspace.error?.message}
+              />
+            </>
           }
         />
       )}

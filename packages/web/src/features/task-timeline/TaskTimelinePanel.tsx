@@ -6,6 +6,11 @@ import type {
 } from './taskTimelineTypes';
 import { useTaskTimeline } from './useTaskTimeline';
 
+interface TaskTimelinePanelProps {
+  onOpenArtifact?: (path: string) => void;
+  onOpenFile?: (path: string) => void;
+}
+
 type TimelineFilter = 'all' | 'todos' | 'tools' | 'blocked' | 'errors';
 
 const TIMELINE_FILTERS: Array<{ label: string; value: TimelineFilter }> = [
@@ -16,7 +21,10 @@ const TIMELINE_FILTERS: Array<{ label: string; value: TimelineFilter }> = [
   { label: 'Errors', value: 'errors' },
 ];
 
-export function TaskTimelinePanel() {
+export function TaskTimelinePanel({
+  onOpenArtifact,
+  onOpenFile,
+}: TaskTimelinePanelProps) {
   const { error, items, loading, source, summary } = useTaskTimeline();
   const [filter, setFilter] = useState<TimelineFilter>('all');
 
@@ -88,7 +96,12 @@ export function TaskTimelinePanel() {
       >
         <ol className="task-timeline-list">
           {filteredItems.map((item) => (
-            <TaskTimelineRow item={item} key={item.id} />
+            <TaskTimelineRow
+              item={item}
+              key={item.id}
+              onOpenArtifact={onOpenArtifact}
+              onOpenFile={onOpenFile}
+            />
           ))}
         </ol>
       </ResourceState>
@@ -114,7 +127,15 @@ function SummaryCard({
   );
 }
 
-function TaskTimelineRow({ item }: { item: WebTaskTimelineItem }) {
+function TaskTimelineRow({
+  item,
+  onOpenArtifact,
+  onOpenFile,
+}: {
+  item: WebTaskTimelineItem;
+  onOpenArtifact: ((path: string) => void) | undefined;
+  onOpenFile: ((path: string) => void) | undefined;
+}) {
   return (
     <li className={`task-timeline-item task-status-${item.status}`}>
       <span className="task-timeline-marker" aria-hidden="true" />
@@ -129,13 +150,56 @@ function TaskTimelineRow({ item }: { item: WebTaskTimelineItem }) {
           <p>{item.detail ?? kindLabel(item.kind)}</p>
           <div className="web-meta">
             <span>{kindLabel(item.kind)}</span>
+            <span>{phaseLabel(item.phase)}</span>
             <span>{formatTimelineTime(item.timestamp)}</span>
+            {item.checkResult ? (
+              <span>
+                {item.checkResult.kind}: {item.checkResult.status}
+              </span>
+            ) : null}
             {item.toolCallId ? <span>{item.toolCallId}</span> : null}
             {item.todoId ? <span>{item.todoId}</span> : null}
           </div>
+          {item.artifactPaths?.length ? (
+            <ArtifactLinks
+              paths={item.artifactPaths}
+              onOpenArtifact={onOpenArtifact}
+              onOpenFile={onOpenFile}
+            />
+          ) : null}
         </div>
       </article>
     </li>
+  );
+}
+
+function ArtifactLinks({
+  onOpenArtifact,
+  onOpenFile,
+  paths,
+}: {
+  onOpenArtifact: ((path: string) => void) | undefined;
+  onOpenFile: ((path: string) => void) | undefined;
+  paths: string[];
+}) {
+  return (
+    <div className="task-artifact-links">
+      {paths.map((path) => (
+        <span key={path}>
+          <code>{path}</code>
+          {onOpenArtifact ? (
+            <button type="button" onClick={() => onOpenArtifact(path)}>
+              Artifact
+            </button>
+          ) : null}
+          {onOpenFile ? (
+            <button type="button" onClick={() => onOpenFile(path)}>
+              File
+            </button>
+          ) : null}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -166,6 +230,25 @@ function kindLabel(kind: WebTaskTimelineItem['kind']) {
       return 'Permission';
     default:
       return 'Status';
+  }
+}
+
+function phaseLabel(phase: WebTaskTimelineItem['phase']) {
+  switch (phase) {
+    case 'prompt':
+      return 'Prompting';
+    case 'planning':
+      return 'Planning';
+    case 'editing':
+      return 'Editing';
+    case 'checking':
+      return 'Checking';
+    case 'blocked':
+      return 'Blocked';
+    case 'finished':
+      return 'Finished';
+    default:
+      return 'Other';
   }
 }
 

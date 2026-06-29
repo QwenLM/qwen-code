@@ -1308,6 +1308,109 @@ pre {
   }
 }
 
+.task-overview-card {
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid var(--web-border);
+  border-radius: 18px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  text-align: left;
+}
+
+.task-overview-running {
+  border-color: rgba(69, 113, 181, 0.24);
+}
+
+.task-overview-blocked {
+  border-color: rgba(177, 111, 46, 0.28);
+}
+
+.task-overview-failed {
+  border-color: rgba(180, 72, 72, 0.24);
+}
+
+.task-overview-done {
+  border-color: rgba(78, 141, 108, 0.24);
+}
+
+.task-overview-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.task-overview-header span,
+.task-overview-metric span,
+.task-overview-repo small,
+.task-overview-muted {
+  color: var(--web-muted);
+  font-size: 11px;
+}
+
+.task-overview-header strong {
+  color: var(--web-text);
+  display: block;
+  font-size: 16px;
+  margin-top: 3px;
+}
+
+.task-overview-header small {
+  color: var(--web-subtle);
+  font-size: 11px;
+  text-align: right;
+}
+
+.task-overview-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.task-overview-metric {
+  background: var(--web-surface-soft);
+  border-radius: 12px;
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+}
+
+.task-overview-metric strong {
+  color: var(--web-text);
+  font-size: 15px;
+}
+
+.task-overview-check,
+.task-overview-repo {
+  background: rgba(255, 255, 255, 0.58);
+  border-radius: 12px;
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+}
+
+.task-overview-check span,
+.task-overview-repo span {
+  color: var(--web-muted);
+  font-size: 11px;
+}
+
+.task-overview-check strong {
+  color: var(--web-text);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+
+.task-check-failed,
+.task-check-cancelled {
+  background: rgba(180, 72, 72, 0.1);
+}
+
+.task-check-passed {
+  background: rgba(78, 141, 108, 0.1);
+}
+
 .task-summary-grid {
   display: grid;
   gap: 10px;
@@ -1396,6 +1499,34 @@ pre {
 .task-timeline-card .web-card-main p {
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+.task-artifact-links {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.task-artifact-links span {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.58);
+  border-radius: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px;
+}
+
+.task-artifact-links code {
+  color: var(--web-muted);
+  font-family: var(--web-font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.task-artifact-links button {
+  font-size: 11px;
+  padding: 3px 7px;
 }
 
 .task-status-badge {

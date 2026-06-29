@@ -234,12 +234,43 @@ describe('collectTaskTimelineFromTranscript', () => {
     expect(items[0]?.timestamp).toBe(42);
   });
 
+  it('infers check results and artifact paths for tool events', () => {
+    const items = collectTaskTimelineFromTranscript(
+      [
+        toolBlock({
+          id: 'test-command',
+          toolName: 'Bash',
+          status: 'failed',
+          rawInput: {
+            command: 'npm run test --workspace=packages/web',
+            file_path: '/repo/packages/web/src/App.tsx',
+          },
+          updatedAt: 500,
+        }),
+      ],
+      { workspaceCwd: '/repo' },
+    );
+
+    expect(items[0]).toEqual(
+      expect.objectContaining({
+        phase: 'checking',
+        artifactPaths: ['packages/web/src/App.tsx'],
+        checkResult: expect.objectContaining({
+          kind: 'test',
+          status: 'failed',
+          command: 'npm run test --workspace=packages/web',
+        }),
+      }),
+    );
+  });
+
   it('summarizes active and terminal states', () => {
     const summary = summarizeTaskTimeline([
       {
         id: 'one',
         kind: 'tool',
         status: 'running',
+        phase: 'checking',
         title: 'Run',
         timestamp: 1,
       },
@@ -247,6 +278,7 @@ describe('collectTaskTimelineFromTranscript', () => {
         id: 'two',
         kind: 'permission',
         status: 'blocked',
+        phase: 'blocked',
         title: 'Approve',
         timestamp: 2,
       },
@@ -254,6 +286,7 @@ describe('collectTaskTimelineFromTranscript', () => {
         id: 'three',
         kind: 'tool',
         status: 'completed',
+        phase: 'finished',
         title: 'Done',
         timestamp: 3,
       },
@@ -261,6 +294,7 @@ describe('collectTaskTimelineFromTranscript', () => {
         id: 'four',
         kind: 'status',
         status: 'failed',
+        phase: 'blocked',
         title: 'Failed',
         timestamp: 4,
       },

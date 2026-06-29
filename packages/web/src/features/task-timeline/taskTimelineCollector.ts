@@ -4,19 +4,27 @@ import type {
   DaemonTranscriptBlock,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
+  WebTaskCheckResult,
   WebTaskTimelineItem,
+  WebTaskTimelinePhase,
   WebTaskTimelineStatus,
   WebTaskTimelineSummary,
 } from './taskTimelineTypes';
 
 const MAX_TIMELINE_ITEMS = 100;
+const MAX_ARTIFACT_PATHS = 4;
 const TITLE_LIMIT = 96;
 const DETAIL_LIMIT = 160;
 
 type TodoStatus = DaemonTodoItem['status'];
 
+interface CollectTaskTimelineOptions {
+  workspaceCwd?: string;
+}
+
 export function collectTaskTimelineFromTranscript(
   blocks: readonly DaemonTranscriptBlock[],
+  options: CollectTaskTimelineOptions = {},
 ): WebTaskTimelineItem[] {
   const items: WebTaskTimelineItem[] = [];
   const todoStatusById = new Map<string, TodoStatus>();
@@ -29,16 +37,20 @@ export function collectTaskTimelineFromTranscript(
           id: `task-timeline:${block.id}:prompt`,
           kind: 'prompt',
           status: 'info',
+          phase: 'prompt',
           title: truncateText(block.text, TITLE_LIMIT) || 'User prompt',
           timestamp,
           blockId: block.id,
         });
         break;
-      case 'tool':
+      case 'tool': {
+        const artifactPaths = collectArtifactPaths(block, options.workspaceCwd);
+        const checkResult = inferCheckResult(block, timestamp);
         items.push({
           id: `task-timeline:${block.id}:tool`,
           kind: 'tool',
           status: mapToolStatus(block.status),
+          phase: inferToolPhase(block, artifactPaths, checkResult),
           title: block.toolName ?? block.title,
           ...(block.details
             ? { detail: truncateText(block.details, DETAIL_LIMIT) }
@@ -46,14 +58,18 @@ export function collectTaskTimelineFromTranscript(
           timestamp,
           blockId: block.id,
           toolCallId: block.toolCallId,
+          ...(artifactPaths.length > 0 ? { artifactPaths } : {}),
+          ...(checkResult ? { checkResult } : {}),
         });
         collectTodoEvents(block, timestamp, todoStatusById, items);
         break;
+      }
       case 'permission':
         items.push({
           id: `task-timeline:${block.id}:permission`,
           kind: 'permission',
           status: block.resolved ? 'completed' : 'blocked',
+          phase: block.resolved ? 'finished' : 'blocked',
           title: block.title,
           ...(block.resolved ? { detail: `Resolved: ${block.resolved}` } : {}),
           timestamp,
@@ -65,6 +81,7 @@ export function collectTaskTimelineFromTranscript(
           id: `task-timeline:${block.id}:error`,
           kind: 'status',
           status: 'failed',
+          phase: 'blocked',
           title: truncateText(block.text, TITLE_LIMIT) || 'Error',
           ...(block.code ? { detail: block.code } : {}),
           timestamp,
@@ -76,6 +93,7 @@ export function collectTaskTimelineFromTranscript(
           id: `task-timeline:${block.id}:cancelled`,
           kind: 'status',
           status: 'cancelled',
+          phase: 'finished',
           title: 'Prompt cancelled',
           ...(block.reason ? { detail: block.reason } : {}),
           timestamp,
@@ -88,6 +106,7 @@ export function collectTaskTimelineFromTranscript(
           id: `task-timeline:${block.id}:${block.kind}`,
           kind: 'status',
           status: 'info',
+          phase: 'other',
           title: truncateText(block.text, TITLE_LIMIT) || block.kind,
           ...(block.code ? { detail: block.code } : {}),
           timestamp,
@@ -148,6 +167,7 @@ function collectTodoEvents(
       id: `task-timeline:${block.id}:todo:${todo.id}:${todo.status}`,
       kind: 'todo',
       status: mapTodoStatus(todo.status),
+      phase: todo.status === 'completed' ? 'finished' : 'planning',
       title: todo.content,
       detail: todoStatusLabel(todo.status),
       timestamp,
@@ -203,6 +223,141 @@ function isTodoToolBlock(block: DaemonToolTranscriptBlock) {
     toolKind === 'todo' ||
     toolKind === 'other'
   );
+}
+
+function inferToolPhase(
+  block: DaemonToolTranscriptBlock,
+  artifactPaths: readonly string[],
+  checkResult: WebTaskCheckResult | undefined,
+): WebTaskTimelinePhase {
+  const status = mapToolStatus(block.status);
+  if (checkResult) return 'checking';
+  if (isTodoToolBlock(block)) return 'planning';
+  if (artifactPaths.length > 0) return 'editing';
+  if (status === 'failed' || status === 'cancelled' || status === 'blocked') {
+    return 'blocked';
+  }
+  if (status === 'completed') return 'finished';
+  return 'other';
+}
+
+function inferCheckResult(
+  block: DaemonToolTranscriptBlock,
+  timestamp: number,
+): WebTaskCheckResult | undefined {
+  const command = getCommand(block);
+  const searchable = [block.toolName, block.title, block.details, command]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const kind = inferCheckKind(searchable);
+  if (!kind) return undefined;
+  return {
+    kind,
+    status: mapCheckStatus(block.status),
+    timestamp,
+    ...(command ? { command } : {}),
+    blockId: block.id,
+    toolCallId: block.toolCallId,
+  };
+}
+
+function inferCheckKind(value: string): WebTaskCheckResult['kind'] | undefined {
+  if (/\b(typecheck|tsc)\b/.test(value)) return 'typecheck';
+  if (/\b(lint|eslint|biome)\b/.test(value)) return 'lint';
+  if (/\b(test|vitest|jest|playwright)\b/.test(value)) return 'test';
+  if (/\b(build|vite build|webpack|tsup|esbuild)\b/.test(value)) {
+    return 'build';
+  }
+  if (/\b(npm|pnpm|yarn|bun)\s+run\s+\w+/.test(value)) return 'command';
+  return undefined;
+}
+
+function mapCheckStatus(value: string): WebTaskCheckResult['status'] {
+  const status = mapToolStatus(value);
+  if (status === 'completed') return 'passed';
+  if (status === 'failed') return 'failed';
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'running' || status === 'pending') return 'running';
+  return 'unknown';
+}
+
+function getCommand(block: DaemonToolTranscriptBlock) {
+  const rawInput = getRecord(block.rawInput);
+  return (
+    getString(rawInput, 'command') ??
+    getString(rawInput, 'cmd') ??
+    getString(rawInput, 'script')
+  );
+}
+
+function collectArtifactPaths(
+  block: DaemonToolTranscriptBlock,
+  workspaceCwd?: string,
+) {
+  const paths = new Set<string>();
+  collectPaths(block.locations, paths, workspaceCwd, 0, true);
+  collectPaths(block.preview, paths, workspaceCwd, 0, true);
+  collectPaths(block.rawInput, paths, workspaceCwd, 0, false);
+  collectPaths(block.rawOutput, paths, workspaceCwd, 0, false);
+  return Array.from(paths).slice(0, MAX_ARTIFACT_PATHS);
+}
+
+function collectPaths(
+  value: unknown,
+  paths: Set<string>,
+  workspaceCwd: string | undefined,
+  depth: number,
+  acceptString: boolean,
+) {
+  if (paths.size >= MAX_ARTIFACT_PATHS || depth > 3 || value == null) return;
+  if (typeof value === 'string') {
+    const path = acceptString ? normalizePath(value, workspaceCwd) : undefined;
+    if (path) paths.add(path);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectPaths(item, paths, workspaceCwd, depth + 1, acceptString);
+    }
+    return;
+  }
+  if (typeof value !== 'object') return;
+  for (const [key, entry] of Object.entries(value)) {
+    const pathKey = /path|file|files|filename|location|output/i.test(key);
+    if (typeof entry === 'string' && pathKey) {
+      const path = normalizePath(entry, workspaceCwd);
+      if (path) {
+        paths.add(path);
+        continue;
+      }
+    }
+    collectPaths(
+      entry,
+      paths,
+      workspaceCwd,
+      depth + 1,
+      pathKey || acceptString,
+    );
+  }
+}
+
+function normalizePath(value: string, workspaceCwd?: string) {
+  let path = value
+    .trim()
+    .replace(/^@/, '')
+    .replace(/^["']|["']$/g, '');
+  if (!path || path.length > 180) return undefined;
+  if (/^https?:\/\//.test(path)) return undefined;
+  if (/[\n\r\t]/.test(path)) return undefined;
+  if (workspaceCwd && path.startsWith(`${workspaceCwd}/`)) {
+    path = path.slice(workspaceCwd.length + 1);
+  }
+  if (path.startsWith('/')) return undefined;
+  if (path.startsWith('./')) path = path.slice(2);
+  if (path === '.' || path.includes('..')) return undefined;
+  if (!path.includes('/') && !/\.[a-z0-9]{1,8}$/i.test(path)) return undefined;
+  return path;
 }
 
 function mapToolStatus(value: string): WebTaskTimelineStatus {

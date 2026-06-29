@@ -89,6 +89,13 @@ export function App({ config }: AppProps) {
     [navigate],
   );
 
+  const openArtifact = useCallback(
+    (path: string) => {
+      navigate({ view: 'artifacts', path });
+    },
+    [navigate],
+  );
+
   useEffect(() => {
     const onPopState = () =>
       setRoute(parseWebRoute(new URL(window.location.href)));
@@ -129,7 +136,12 @@ export function App({ config }: AppProps) {
       {activeView === 'sessions' ? (
         <SessionsPanel onOpenChat={openChat} />
       ) : null}
-      {activeView === 'tasks' ? <TaskTimelinePanel /> : null}
+      {activeView === 'tasks' ? (
+        <TaskTimelinePanel
+          onOpenArtifact={openArtifact}
+          onOpenFile={openFile}
+        />
+      ) : null}
       {activeView === 'files' ? (
         <FilesPanel
           initialPath={route.view === 'files' ? route.path : undefined}
