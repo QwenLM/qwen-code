@@ -12,6 +12,7 @@ vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
+  renameSync: vi.fn(),
 }));
 
 vi.mock('./api.js', () => ({

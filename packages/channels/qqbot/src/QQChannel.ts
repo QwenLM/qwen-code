@@ -346,6 +346,7 @@ export class QQChannel extends ChannelBase {
       if (msgId && sentSeq !== nextSeq) {
         this.msgSeqMap.set(msgId, sentSeq);
       }
+      if (msgId) this.saveQQState();
     } catch (e) {
       process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
     }
@@ -455,6 +456,7 @@ export class QQChannel extends ChannelBase {
     chunk: string,
     sessionId: string,
   ): void {
+    if (this.config.blockStreaming === 'on') return;
     let state = this.streamState.get(sessionId);
     if (!state) {
       state = { chatId, buffer: chunk, timer: null };
@@ -501,7 +503,7 @@ export class QQChannel extends ChannelBase {
       clearTimeout(state.timer);
       state.timer = null;
     }
-    const remaining = state?.buffer ?? '';
+    const remaining = state?.buffer || _fullText;
     this.streamState.delete(sessionId);
     if (remaining) {
       await super.onResponseComplete(chatId, remaining, sessionId);
