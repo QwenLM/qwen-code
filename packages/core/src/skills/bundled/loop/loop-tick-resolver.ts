@@ -183,7 +183,7 @@ const ABSENT_AUTONOMOUS_REARM: Record<LoopMode, string> = {
  * NOT an unconditional no-op: the no-op wording would contradict the preamble
  * prepended on the first fire (and the dedup tick that follows it). */
 function absentAutonomousTickText(mode: LoopMode, locations: string): string {
-  return `${tickHeading(mode, { absent: true })}\nloop.md is not currently present at ${locations}. Run the autonomous check using the loop instructions established earlier in this conversation. ${ABSENT_AUTONOMOUS_REARM[mode]}`;
+  return `${tickHeading(mode, { absent: true })}\nloop.md is not currently present at ${locations}. Run the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick and stop immediately. ${ABSENT_AUTONOMOUS_REARM[mode]}`;
 }
 
 /** Trim a truncated body back to its last full line before the warning tail. */
@@ -199,12 +199,12 @@ function cutToLastNewline(content: string): string {
 
 export class LoopTickResolver {
   // What the model has actually received. Drives full-vs-reminder detection.
-  #lastContent: string | null = null;
+  #lastContent: string | typeof AUTONOMOUS_PREAMBLE_MARKER | null = null;
   // The most recent resolve()'s content, committed to #lastContent only once
   // the caller confirms it reached the model (markDelivered) — so a tick that
   // is aborted between resolve() and delivery can't poison the cache into
   // sending a dangling short reminder next time.
-  #pendingContent: string | null = null;
+  #pendingContent: string | typeof AUTONOMOUS_PREAMBLE_MARKER | null = null;
   // Instance-scoped fs.realpath cache for the confinement boundaries, handed to
   // readLoopTaskFile. Tying it to the resolver (a fresh Map per /cd rebuild,
   // cleared by resetCache) keeps the per-tick perf win while staying

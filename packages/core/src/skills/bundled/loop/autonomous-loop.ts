@@ -15,7 +15,7 @@ export interface AutonomousLoopTickResult {
 export const AUTONOMOUS_SENTINEL_CRON = '<<autonomous-loop>>';
 export const AUTONOMOUS_SENTINEL_DYNAMIC = '<<autonomous-loop-dynamic>>';
 
-export const AUTONOMOUS_PREAMBLE_MARKER = '__autonomous_preamble__';
+export const AUTONOMOUS_PREAMBLE_MARKER = Symbol('autonomous_preamble');
 
 export const CRON_REARM =
   'The recurring cron fires the next tick automatically — do not call LoopWakeup from this tick.';
@@ -70,8 +70,8 @@ If you see earlier autonomous checks in this conversation, adjust your scope acc
 Read and analyze freely — understanding the state of things has no blast radius. Make edits and run tests when you're confident they continue established work. Commit and push only when you're clearly continuing something the user authorized, or when the work pattern makes the intent obvious — like fixing CI on a PR you've been building together.`;
 
 export class AutonomousLoopTickResolver {
-  #lastContent: string | null = null;
-  #pendingContent: string | null = null;
+  #lastContent: typeof AUTONOMOUS_PREAMBLE_MARKER | null = null;
+  #pendingContent: typeof AUTONOMOUS_PREAMBLE_MARKER | null = null;
 
   resetCache(): void {
     this.#lastContent = null;

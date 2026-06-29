@@ -133,10 +133,10 @@ describe('LoopTickResolver', () => {
     expect(tick.transientError).toBeFalsy();
     expect(tick.modelText).toContain('# Autonomous loop check');
     expect(tick.modelText).toContain('loop.md is not currently present');
-    // The converged-absent tick says "run the autonomous check", NOT an
-    // unconditional no-op (which would contradict the prepended preamble).
     expect(tick.modelText).toContain('Run the autonomous check');
-    expect(tick.modelText).not.toContain('Treat this as a no-op tick');
+    expect(tick.modelText).toContain(
+      'If you cannot find them, treat this as a no-op tick and stop immediately.',
+    );
     // The project candidate was never read (untrusted), so the absent message
     // must not claim it was checked — only the home candidate is named, via a
     // leak-safe label (this fixture's homeDir is a temp dir outside the real
@@ -757,6 +757,16 @@ describe('LoopTickResolver', () => {
     );
   });
 
+  it('does not confuse loop.md content with the autonomous preamble marker', async () => {
+    await writeProject('__autonomous_preamble__');
+    expect((await resolver.resolve('dynamic')).full).toBe(true);
+    resolver.markDelivered();
+
+    const autonomous = resolver.resolveAutonomous('dynamic');
+    expect(autonomous.full).toBe(true);
+    expect(autonomous.modelText).toContain('# Autonomous loop check');
+  });
+
   it('re-delivers the autonomous preamble after resetCache (compaction)', () => {
     resolver.resolveAutonomous('cron');
     resolver.markDelivered();
@@ -795,10 +805,10 @@ describe('LoopTickResolver', () => {
     expect(absent.autonomous).toBe(true);
     expect(absent.modelText).not.toContain('# Autonomous loop check');
     expect(absent.modelText).toContain('loop.md is not currently present');
-    // Even the deduped short absent tick says "run the autonomous check" (not a
-    // no-op), and re-arms the LOOP.MD sentinel so a recreated file is picked up.
     expect(absent.modelText).toContain('Run the autonomous check');
-    expect(absent.modelText).not.toContain('Treat this as a no-op tick');
+    expect(absent.modelText).toContain(
+      'If you cannot find them, treat this as a no-op tick and stop immediately.',
+    );
     expect(absent.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
   });
 
