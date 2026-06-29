@@ -127,10 +127,12 @@ describe('remember memory helper', () => {
     expect(runForkedAgent).toHaveBeenCalledTimes(1);
     const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
       config: Config;
+      extraHistory?: unknown[];
       systemPrompt: string;
       taskPrompt: string;
       tools: string[];
     };
+    expect(params.extraHistory).toEqual([]);
     expect(params.tools).toEqual([
       'read_file',
       'grep_search',
@@ -161,6 +163,30 @@ describe('remember memory helper', () => {
     expect(params.systemPrompt).toContain('managed auto-memory system only');
     expect(params.taskPrompt).toContain('Remember the project uses vitest.');
     expect(params.taskPrompt).toContain('<user-content>');
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
+  it('classifies only successful memory writes', async () => {
+    const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved project memory.',
+      filesTouched: [path.join(projectRoot, 'README.md'), projectFile],
+      filesWritten: [projectFile],
+    } satisfies ForkedAgentResult);
+
+    const result = await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember write-only paths.',
+      contextMode: 'workspace',
+    });
+
+    expect(result).toEqual({
+      summary: 'Saved project memory.',
+      filesTouched: [projectFile],
+      touchedScopes: ['project'],
+    });
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 

@@ -55,6 +55,20 @@ import {
   SESS_A,
 } from './internal/testUtils.js';
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('createAcpSessionBridge', () => {
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
     // Smoke: positive finite integers are accepted; the underlying
@@ -502,6 +516,55 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
+
+  it('keeps the channel alive when availability probes overlap a remember run', async () => {
+    const rememberRelease = deferred<void>();
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: async (method) => {
+            if (method === 'qwen/control/workspace/memory/remember') {
+              await rememberRelease.promise;
+              return {
+                summary: 'saved',
+                filesTouched: ['/mem/MEMORY.md'],
+                touchedScopes: ['project'],
+              };
+            }
+            if (
+              method === 'qwen/control/workspace/memory/remember/availability'
+            ) {
+              return { available: true };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const remember = bridge.runWorkspaceMemoryRemember({
+      content: 'Remember the workspace uses vitest.',
+      contextMode: 'workspace',
+    });
+
+    await vi.waitFor(() => {
+      expect(handles[0]?.agent.extMethodCalls).toHaveLength(1);
+    });
+
+    await expect(bridge.isWorkspaceMemoryRememberAvailable()).resolves.toBe(
+      true,
+    );
+    expect(handles[0]?.killed).toBe(false);
+
+    rememberRelease.resolve();
+    await expect(remember).resolves.toMatchObject({ summary: 'saved' });
+    expect(handles[0]?.killed).toBe(true);
 
     await bridge.shutdown();
   });

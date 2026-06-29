@@ -168,6 +168,7 @@ export async function runManagedRememberByAgent(params: {
     systemPrompt: buildRememberSystemPrompt(memoryPrompt),
     maxTurns: 6,
     maxTimeMinutes: 5,
+    extraHistory: params.contextMode === 'clean' ? [] : undefined,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
@@ -185,10 +186,8 @@ export async function runManagedRememberByAgent(params: {
     throw new Error(result.terminateReason || 'Remember agent cancelled');
   }
 
-  const touchedScopes = classifyTouchedScopes(
-    result.filesTouched,
-    params.projectRoot,
-  );
+  const filesWritten = result.filesWritten ?? result.filesTouched;
+  const touchedScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
   await Promise.all([
     touchedScopes.includes('project')
       ? rebuildManagedAutoMemoryIndex(params.projectRoot)
@@ -204,7 +203,7 @@ export async function runManagedRememberByAgent(params: {
 
   return {
     summary: result.finalText,
-    filesTouched: result.filesTouched,
+    filesTouched: filesWritten,
     touchedScopes,
   };
 }

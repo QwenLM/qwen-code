@@ -8,6 +8,10 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { Config as ConfigImpl, ApprovalMode } from '../config/config.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
+import {
+  AgentEventType,
+  type AgentEventEmitter,
+} from '../agents/runtime/agent-events.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 import type { ModelConfig } from '../agents/runtime/agent-types.js';
 import { runForkedAgent } from './forkedAgent.js';
@@ -131,6 +135,103 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     expect(captured.config!.getApprovalMode()).toBe(ApprovalMode.YOLO);
     // 3. Hand out a different ToolRegistry instance from the parent
     expect(captured.config!.getToolRegistry()).not.toBe(parentRegistry);
+  });
+
+  it('reports filesWritten from successful mutating tool results only', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async () => {
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'read-1',
+              name: ToolNames.READ_FILE,
+              args: { file_path: '/repo/README.md' },
+              description: 'read',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'read-1',
+              name: ToolNames.READ_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              args: { file_path: '/repo/outside.md' },
+              description: 'edit',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              success: false,
+              timestamp: Date.now(),
+            });
+          }),
+          getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+          getFinalText: vi.fn().mockReturnValue('done'),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+      });
+
+      expect(result.filesTouched).toEqual([
+        '/repo/README.md',
+        '/repo/.qwen/memories/project.md',
+        '/repo/outside.md',
+      ]);
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('binds EditTool from the wrapper registry to the wrapper Config (not the parent)', async () => {

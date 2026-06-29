@@ -181,6 +181,8 @@ interface ChannelInfo {
    * restore fails while another is still healthy.
    */
   pendingRestoreIds: Set<string>;
+  /** Workspace-level control calls that use the shared channel without a session. */
+  workspaceControlInFlight: number;
   /**
    * Cached channel-close race for workspace-scoped status requests. Workspace
    * status can be polled frequently by dashboards, so keep one promise per
@@ -970,7 +972,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     cancelIdleTimer();
     idleTimer = setTimeout(() => {
       idleTimer = undefined;
-      if (ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+      if (hasNoChannelWork(ci)) {
         writeStderrLine(
           `qwen serve: idle timeout (${timeoutMs}ms) expired, killing channel`,
         );
@@ -978,6 +980,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     }, timeoutMs);
     idleTimer.unref();
+  }
+
+  function hasNoChannelWork(ci: ChannelInfo): boolean {
+    return (
+      ci.sessionIds.size === 0 &&
+      ci.pendingRestoreIds.size === 0 &&
+      ci.workspaceControlInFlight === 0
+    );
+  }
+
+  async function withWorkspaceControl<T>(
+    ci: ChannelInfo,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    ci.workspaceControlInFlight++;
+    try {
+      return await fn();
+    } finally {
+      ci.workspaceControlInFlight = Math.max(
+        0,
+        ci.workspaceControlInFlight - 1,
+      );
+    }
   }
 
   function startSessionReaper(): void {
@@ -1309,6 +1334,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         client,
         sessionIds: new Set(),
         pendingRestoreIds: new Set(),
+        workspaceControlInFlight: 0,
         isDying: false,
         handshakeComplete: false,
       };
@@ -1540,7 +1566,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Only reap when this newSession was the channel's first/only
       // attempt — a populated channel keeps running for its other
       // live sessions.
-      if (ci.sessionIds.size === 0) {
+      if (hasNoChannelWork(ci)) {
         // Mark dying SYNCHRONOUSLY so a concurrent `spawnOrAttach`
         // calling `ensureChannel()` between this point and the
         // `channel.exited` cleanup spawns a fresh channel instead of
@@ -2399,7 +2425,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (
           ci.sessionIds.size === 0 &&
           ci.pendingRestoreIds.size === 1 &&
-          ci.pendingRestoreIds.has(req.sessionId)
+          ci.pendingRestoreIds.has(req.sessionId) &&
+          ci.workspaceControlInFlight === 0
         ) {
           ci.isDying = true;
           await ci.channel.kill().catch(() => {
@@ -2599,7 +2626,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     } catch {
       /* no active prompt or session already torn down */
     }
-    if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+    if (ci && hasNoChannelWork(ci)) {
       await startIdleTimer(ci, `closeSession "${sessionId}"`);
     }
   }
@@ -3880,16 +3907,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async isWorkspaceMemoryRememberAvailable(): Promise<boolean> {
       const info = await ensureChannel();
       try {
-        const response = await withTimeout(
-          Promise.race([
-            info.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
-              { cwd: boundWorkspace },
-            ),
-            getChannelClosedReject(info),
-          ]),
-          initTimeoutMs,
-          SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
+                { cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
+          ),
         );
         return (
           response !== null &&
@@ -3897,7 +3926,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           (response as Record<string, unknown>)['available'] === true
         );
       } finally {
-        if (info.sessionIds.size === 0 && info.pendingRestoreIds.size === 0) {
+        if (hasNoChannelWork(info)) {
           await startIdleTimer(info, 'workspace memory remember availability');
         }
       }
@@ -3908,20 +3937,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ): Promise<BridgeWorkspaceMemoryRememberResult> {
       const info = await ensureChannel();
       try {
-        const response = await withTimeout(
-          Promise.race([
-            info.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
-              { ...request, cwd: boundWorkspace },
-            ),
-            getChannelClosedReject(info),
-          ]),
-          WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
-          SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
+                { ...request, cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
+          ),
         );
         return parseWorkspaceMemoryRememberResult(response);
       } finally {
-        if (info.sessionIds.size === 0 && info.pendingRestoreIds.size === 0) {
+        if (hasNoChannelWork(info)) {
           await startIdleTimer(info, 'workspace memory remember');
         }
       }
@@ -5226,7 +5257,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `sessionIds`. Killing the channel out from under them would
       // SIGTERM the restore mid-flight and 500 the caller for a
       // failure orthogonal to their request.
-      if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+      if (ci && hasNoChannelWork(ci)) {
         await startIdleTimer(ci, `killSession "${sessionId}"`);
       }
     },
@@ -5401,11 +5432,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (shuttingDown) return;
       const ci = await ensureChannel();
       const idleMs = resolvedChannelIdleTimeoutMs();
-      if (
-        idleMs > 0 &&
-        ci.sessionIds.size === 0 &&
-        ci.pendingRestoreIds.size === 0
-      ) {
+      if (idleMs > 0 && hasNoChannelWork(ci)) {
         await startIdleTimer(ci);
       }
     },
