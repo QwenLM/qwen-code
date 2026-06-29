@@ -481,6 +481,7 @@ export async function createApprovalModeOverride(
   const override = Object.create(base) as any;
   const baseApprovalMode = base.getApprovalMode();
   override.approvalMode = mode;
+  override.getApprovalMode = Config.prototype.getApprovalMode;
   override.prePlanMode =
     mode === ApprovalMode.PLAN
       ? baseApprovalMode === ApprovalMode.PLAN
