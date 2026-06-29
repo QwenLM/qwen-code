@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  checkServeFastPathBundle,
   findServeFastPathBundleOffenders,
   formatServeFastPathBundleOffenders,
   normalizeMetafilePath,
@@ -45,6 +46,13 @@ function output({ inputs = [], imports = [], bytes = 1 } = {}) {
     ),
     imports,
   };
+}
+
+function writeMetafile(tempDir, metafile) {
+  mkdirSync(join(tempDir, 'dist'));
+  const metafilePath = join(tempDir, 'dist', 'esbuild.json');
+  writeFileSync(metafilePath, JSON.stringify(metafile));
+  return metafilePath;
 }
 
 function staticImport(path) {
@@ -147,6 +155,26 @@ describe('serve fast-path bundle check', () => {
     expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
   });
 
+  it('ignores external imports in the static closure', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [
+          {
+            path: 'dist/chunks/acp-runtime.js',
+            kind: 'import-statement',
+            external: true,
+          },
+        ],
+      }),
+      'dist/chunks/acp-runtime.js': output({
+        inputs: ['packages/acp-bridge/src/bridge.ts'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
+  });
+
   it('reports vendor packages reached through the core runtime chunk', () => {
     const metafile = makeMetafile({
       'dist/chunks/run-qwen-serve.js': output({
@@ -197,24 +225,78 @@ describe('serve fast-path bundle check', () => {
     expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
   });
 
+  it('throws when serve pre-listen roots are missing', () => {
+    const metafile = {
+      outputs: {
+        'dist/chunks/unrelated.js': output({
+          inputs: ['packages/cli/src/unrelated.ts'],
+        }),
+      },
+    };
+
+    expect(() => findServeFastPathBundleOffenders(metafile)).toThrow(
+      /Could not find bundled outputs for serve pre-listen roots/,
+    );
+  });
+
+  it('reads a metafile path and returns bundle offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/run-qwen-serve.js': output({
+            inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+            imports: [staticImport('dist/chunks/acp-runtime.js')],
+          }),
+          'dist/chunks/acp-runtime.js': output({
+            inputs: ['packages/acp-bridge/src/bridge.ts'],
+          }),
+        }),
+      );
+
+      expect(checkServeFastPathBundle({ metafilePath })).toEqual({
+        ok: false,
+        offenders: [
+          expect.objectContaining({
+            label: 'ACP bridge runtime',
+            matchedInput: 'packages/acp-bridge/src/bridge.ts',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the checked metafile path is missing', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      expect(() =>
+        checkServeFastPathBundle({
+          metafilePath: join(tempDir, 'dist', 'esbuild.json'),
+        }),
+      ).toThrow(/Missing esbuild metafile/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('exits non-zero with CLI diagnostics for bundle offenders', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
     try {
-      mkdirSync(join(tempDir, 'dist'));
-      writeFileSync(
-        join(tempDir, 'dist', 'esbuild.json'),
-        JSON.stringify(
-          makeMetafile({
-            'dist/chunks/run-qwen-serve.js': output({
-              inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
-              imports: [staticImport('dist/chunks/acp-runtime.js')],
-            }),
-            'dist/chunks/acp-runtime.js': output({
-              bytes: 179_129,
-              inputs: ['packages/acp-bridge/src/bridge.ts'],
-            }),
+      writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/run-qwen-serve.js': output({
+            inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+            imports: [staticImport('dist/chunks/acp-runtime.js')],
           }),
-        ),
+          'dist/chunks/acp-runtime.js': output({
+            bytes: 179_129,
+            inputs: ['packages/acp-bridge/src/bridge.ts'],
+          }),
+        }),
       );
 
       expect(() =>
