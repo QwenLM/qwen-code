@@ -162,6 +162,14 @@ function envFlagDisabled(raw: string | undefined): boolean {
   return normalized === '0' || normalized === 'false';
 }
 
+function hasChromeExtensionOrigin(origins: readonly string[] | undefined) {
+  return (
+    origins?.some((origin) =>
+      origin.trim().toLowerCase().startsWith('chrome-extension://'),
+    ) === true
+  );
+}
+
 function createDaemonTelemetryRuntimeConfig(
   telemetry: TelemetrySettings,
   cliVersion: string,
@@ -1092,17 +1100,20 @@ export async function runQwenServe(
       QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV,
       process.env[QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV],
     );
+  const clientMcpOverWsEnv = process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV];
+  const cdpTunnelOverWsEnv = process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV];
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     clientMcpOverWs:
-      optsIn.clientMcpOverWs ??
-      !envFlagDisabled(process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV]),
+      optsIn.clientMcpOverWs ?? !envFlagDisabled(clientMcpOverWsEnv),
     cdpTunnelOverWs:
       optsIn.cdpTunnelOverWs ??
-      !envFlagDisabled(process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV]),
+      (!envFlagDisabled(cdpTunnelOverWsEnv) &&
+        (cdpTunnelOverWsEnv !== undefined ||
+          hasChromeExtensionOrigin(optsIn.allowOrigins))),
   };
   validateRateLimitOptions(opts);
 

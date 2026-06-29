@@ -87,6 +87,8 @@ beforeAll(async () => {
                 'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
                 'QWEN_SERVE_RATE_LIMIT',
                 'QWEN_SERVE_NO_MCP_POOL',
+                'QWEN_SERVE_CLIENT_MCP_OVER_WS',
+                'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
               ].includes(k),
           ),
         ),
@@ -224,14 +226,15 @@ describe('qwen serve — capabilities envelope', () => {
     // Conditional tags absent under this suite's spawn flags (no
     // `--require-auth` / `--allow-origin` / deadline env vars /
     // rate-limit opt-in, no configured batch ASR model): `require_auth`,
-    // `allow_origin`, `prompt_absolute_deadline`, `writer_idle_timeout`,
-    // `workspace_voice_transcription`, `rate_limit`.
+    // `allow_origin`, `cdp_tunnel_over_ws`, `prompt_absolute_deadline`,
+    // `writer_idle_timeout`, `workspace_voice_transcription`, `rate_limit`.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
     // `workspace_trust`, `workspace_github_setup`, and
-    // `workspace_reload` (the CLI serve path always wires
-    // `persistSetting`, the workspace service, and route-local
+    // `workspace_reload`. `client_mcp_over_ws` is also present by
+    // default. The CLI serve path always wires `persistSetting`,
+    // the workspace service, and route-local
     // workspace helpers).
     expect(caps.features).toEqual([
       'health',
@@ -301,6 +304,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_extensions',
       'session_branch',
       'workspace_reload',
+      'client_mcp_over_ws',
       'voice_transcribe',
     ]);
   });

@@ -569,6 +569,57 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  async function readBrowserMcpFeatureFlagsForEnv(raw: string) {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
+    );
+    const originalClientMcpOverWs =
+      process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    const originalCdpTunnelOverWs =
+      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = raw;
+    process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = raw;
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+      throw new Error('runtime boom');
+    });
+
+    const chromeOrigin = 'chrome-extension://qwen-test-extension';
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        allowOrigins: [chromeOrigin],
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      const capabilitiesRes = await fetch(`${handle.url}/capabilities`, {
+        headers: { Origin: chromeOrigin },
+      });
+      expect(capabilitiesRes.status).toBe(200);
+      return ((await capabilitiesRes.json()) as { features: string[] })
+        .features;
+    } finally {
+      if (originalClientMcpOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = originalClientMcpOverWs;
+      }
+      if (originalCdpTunnelOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
+      await handle.close();
+    }
+  }
+
   it('rejects the embedded run handle by default when the runtime fails to mount', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
@@ -615,6 +666,30 @@ describe('runQwenServe runtime startup failures', () => {
       }),
     ).rejects.toThrow();
   });
+
+  it.each([
+    ['0', false],
+    ['false', false],
+    ['FALSE', false],
+    [' 0 ', false],
+    ['1', true],
+    ['true', true],
+    ['anything', true],
+  ] as const)(
+    'normalizes browser MCP env flag %j',
+    async (raw, shouldEnable) => {
+      const features = await readBrowserMcpFeatureFlagsForEnv(raw);
+
+      if (shouldEnable) {
+        expect(features).toEqual(
+          expect.arrayContaining(['client_mcp_over_ws', 'cdp_tunnel_over_ws']),
+        );
+      } else {
+        expect(features).not.toContain('client_mcp_over_ws');
+        expect(features).not.toContain('cdp_tunnel_over_ws');
+      }
+    },
+  );
 
   it('bounds shutdown waiting when runtime startup never settles', async () => {
     const daemonLog = { warn: vi.fn() };
@@ -968,7 +1043,8 @@ describe('runQwenServe runtime startup failures', () => {
         headers: { Origin: handle.url },
       });
       expect(capabilitiesRes.status).toBe(200);
-      expect(await capabilitiesRes.json()).toMatchObject({
+      const capabilitiesBody = await capabilitiesRes.json();
+      expect(capabilitiesBody).toMatchObject({
         v: 1,
         protocolVersions: { current: 'v1', supported: ['v1'] },
         mode: 'http-bridge',
@@ -978,7 +1054,6 @@ describe('runQwenServe runtime startup failures', () => {
           'workspace_settings',
           'workspace_reload',
           'client_mcp_over_ws',
-          'cdp_tunnel_over_ws',
         ]),
         modelServices: [],
         workspaceCwd: boundWorkspace,
@@ -986,6 +1061,7 @@ describe('runQwenServe runtime startup failures', () => {
         policy: { permission: 'first-responder' },
         limits: { maxPendingPromptsPerSession: 5 },
       });
+      expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
 
       const port = new URL(handle.url).port;
       for (const origin of [

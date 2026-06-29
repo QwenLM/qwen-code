@@ -254,14 +254,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // reusing the SDK-MCP-server control-plane pattern. Inbound WS frame types:
   // `mcp_register` { server }, `mcp_message` { id, server, payload }
   // (bidirectional, request/response correlated by `id`), `mcp_unregister`
-  // { server }. Advertised CONDITIONALLY — only when the operator opts in
-  // (the public contract is still settling per #5626), so clients pre-flight
-  // this tag before attempting to register a client-hosted server.
+  // { server }. Advertised CONDITIONALLY so clients pre-flight this tag before
+  // attempting to register a client-hosted server. `runQwenServe` enables it by
+  // default unless the caller or env disables it.
   client_mcp_over_ws: { since: 'v1' },
   // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
   // where a loopback puppeteer client (chrome-devtools-mcp) drives ONE real tab
   // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
-  // frames. Advertised only when the operator opts in (contract still settling).
+  // frames. Advertised when explicitly enabled or when the daemon is serving a
+  // Chrome extension origin.
   cdp_tunnel_over_ws: { since: 'v1' },
   // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
   // streams raw PCM, the daemon transcribes server-side via the configured
@@ -295,14 +296,12 @@ export interface AdvertiseFeatureToggles {
   reloadAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
-   * (`client_mcp_over_ws`, issue #5626). Opt-in: the contract is still
-   * settling, so the tag is advertised only when explicitly enabled.
+   * (`client_mcp_over_ws`, issue #5626).
    */
   clientMcpOverWsEnabled?: boolean;
   /**
    * Whether the daemon exposes the Plan C `/cdp` tunnel endpoint
-   * (`cdp_tunnel_over_ws`, issue #5626). Opt-in: the contract is still
-   * settling, so the tag is advertised only when explicitly enabled.
+   * (`cdp_tunnel_over_ws`, issue #5626).
    */
   cdpTunnelOverWsEnabled?: boolean;
   voiceWsAvailable?: boolean;
