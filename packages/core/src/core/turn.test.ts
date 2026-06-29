@@ -23,6 +23,8 @@ import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
+const mockGetHistoryLength = vi.fn();
+const mockGetHistoryTailShallow = vi.fn();
 const mockMaybeIncludeSchemaDepthContext = vi.fn();
 
 vi.mock('@google/genai', async (importOriginal) => {
@@ -30,6 +32,8 @@ vi.mock('@google/genai', async (importOriginal) => {
   const MockChat = vi.fn().mockImplementation(() => ({
     sendMessageStream: mockSendMessageStream,
     getHistory: mockGetHistory,
+    getHistoryLength: mockGetHistoryLength,
+    getHistoryTailShallow: mockGetHistoryTailShallow,
     maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
   }));
   return {
@@ -96,6 +100,8 @@ describe('Turn', () => {
   type MockedChatInstance = {
     sendMessageStream: typeof mockSendMessageStream;
     getHistory: typeof mockGetHistory;
+    getHistoryLength: typeof mockGetHistoryLength;
+    getHistoryTailShallow: typeof mockGetHistoryTailShallow;
     maybeIncludeSchemaDepthContext: typeof mockMaybeIncludeSchemaDepthContext;
   };
   let mockChatInstance: MockedChatInstance;
@@ -105,10 +111,14 @@ describe('Turn', () => {
     mockChatInstance = {
       sendMessageStream: mockSendMessageStream,
       getHistory: mockGetHistory,
+      getHistoryLength: mockGetHistoryLength,
+      getHistoryTailShallow: mockGetHistoryTailShallow,
       maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
     };
     turn = new Turn(mockChatInstance as unknown as GeminiChat, 'prompt-id-1');
     mockGetHistory.mockReturnValue([]);
+    mockGetHistoryLength.mockReturnValue(0);
+    mockGetHistoryTailShallow.mockReturnValue([]);
     mockSendMessageStream.mockResolvedValue((async function* () {})());
   });
 
@@ -365,7 +375,8 @@ describe('Turn', () => {
       const historyContent: Content[] = [
         { role: 'model', parts: [{ text: 'Previous history' }] },
       ];
-      mockGetHistory.mockReturnValue(historyContent);
+      mockGetHistoryLength.mockReturnValue(historyContent.length);
+      mockGetHistoryTailShallow.mockReturnValue(historyContent);
       mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
       const events = [];
       for await (const event of turn.run(
@@ -385,7 +396,65 @@ describe('Turn', () => {
       expect(reportError).toHaveBeenCalledWith(
         error,
         'Error when talking to API',
-        [...historyContent, reqParts],
+        {
+          history: {
+            length: 1,
+            tail: [{ role: 'model', partCount: 1 }],
+          },
+          request: { partCount: 1 },
+        },
+        'Turn.run-sendMessageStream',
+      );
+    });
+
+    it('should report API errors without cloning full history', async () => {
+      const error = new Error('API Error');
+      const largeText = 'x'.repeat(1024 * 1024);
+      const reqParts: Part[] = [{ text: 'Trigger error' }];
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistory.mockImplementation(() => {
+        throw new Error('full history clone should not be used');
+      });
+      mockGetHistoryLength.mockReturnValue(100);
+      mockGetHistoryTailShallow.mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { functionResponse: { name: 'tool', response: { largeText } } },
+          ],
+        },
+        { role: 'model', parts: [{ text: largeText }] },
+      ] satisfies Content[]);
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(mockGetHistory).not.toHaveBeenCalled();
+      expect(mockGetHistoryLength).toHaveBeenCalled();
+      expect(mockGetHistoryTailShallow).toHaveBeenCalledWith(8, true);
+      const reportedContext = vi.mocked(reportError).mock.calls[0]?.[2];
+      expect(JSON.stringify(reportedContext)).not.toContain(largeText);
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            length: 100,
+            tail: [
+              { role: 'user', partCount: 1 },
+              { role: 'model', partCount: 1 },
+            ],
+          },
+          request: { partCount: 1 },
+        },
         'Turn.run-sendMessageStream',
       );
     });
