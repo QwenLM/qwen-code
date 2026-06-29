@@ -31,6 +31,7 @@ import {
   NativeLspService,
   isBareMode,
   isToolEnabled,
+  isTlsVerificationDisabled,
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
@@ -1410,6 +1411,22 @@ export async function loadCliConfig(
   // with QWEN_TLS_INSECURE / NODE_TLS_REJECT_UNAUTHORIZED=0.
   if (argv.insecure) {
     process.env['QWEN_TLS_INSECURE'] = '1';
+  }
+  // When opting out of TLS verification, also set NODE_TLS_REJECT_UNAUTHORIZED
+  // process-wide. The custom undici dispatcher handles the Node path, but this
+  // makes the opt-out effective on runtimes/paths it does not cover (the Bun
+  // runtime, and the proxy-creation fallback that uses the built-in fetch), and
+  // surfaces a single explicit warning. Skipped when the user already set it,
+  // since Node emits its own warning in that case.
+  if (
+    isTlsVerificationDisabled() &&
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] !== '0'
+  ) {
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    // eslint-disable-next-line no-console
+    console.error(
+      'WARNING: TLS certificate verification is disabled (--insecure / QWEN_TLS_INSECURE). API connections are vulnerable to man-in-the-middle attacks.',
+    );
   }
 
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR

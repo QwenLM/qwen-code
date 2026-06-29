@@ -14,4 +14,13 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes QWEN_TLS_INSECURE so a project .env cannot disable TLS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_TLS_INSECURE');
   });
+
+  // isTlsVerificationDisabled() also honors NODE_TLS_REJECT_UNAUTHORIZED=0, and
+  // the initial .env load only consults this list, so it must be blocked here
+  // too — otherwise a project .env could bypass TLS via the Node-native var.
+  it('excludes NODE_TLS_REJECT_UNAUTHORIZED so a project .env cannot disable TLS', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'NODE_TLS_REJECT_UNAUTHORIZED',
+    );
+  });
 });

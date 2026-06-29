@@ -206,8 +206,10 @@ const NO_DISPATCHER_FALLBACK = {
  * @param proxyUrl - Proxy URL used to create a cached ProxyAgent
  * @returns A cached undici ProxyAgent dispatcher
  */
-export function getOrCreateSharedDispatcher(proxyUrl: string): Dispatcher {
-  const insecure = isTlsVerificationDisabled();
+export function getOrCreateSharedDispatcher(
+  proxyUrl: string,
+  insecure: boolean = isTlsVerificationDisabled(),
+): Dispatcher {
   // Secure and insecure dispatchers must not share a cache entry, otherwise a
   // preconnect warmed without the flag could hand a verifying dispatcher to a
   // client that expects verification disabled (or vice versa).
@@ -663,7 +665,7 @@ function buildFetchOptionsWithDispatcher(
   }
 
   try {
-    const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
+    const dispatcher = getOrCreateSharedDispatcher(proxyUrl, insecure);
     // Pin fetch to undici's own implementation so the dispatcher and fetch
     // come from the same undici version. Node's bundled undici may differ in
     // major version from the project's bundled one (e.g. v8 vs v6), which

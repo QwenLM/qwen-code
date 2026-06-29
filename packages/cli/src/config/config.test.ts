@@ -970,30 +970,38 @@ describe('loadCliConfig', () => {
   });
 
   describe('--insecure flag', () => {
-    let savedInsecure: string | undefined;
+    const savedEnv: Record<string, string | undefined> = {};
 
     beforeEach(() => {
-      savedInsecure = process.env['QWEN_TLS_INSECURE'];
-      delete process.env['QWEN_TLS_INSECURE'];
+      for (const key of ['QWEN_TLS_INSECURE', 'NODE_TLS_REJECT_UNAUTHORIZED']) {
+        savedEnv[key] = process.env[key];
+        delete process.env[key];
+      }
+      // Silence the intentional MITM warning loadCliConfig emits.
+      vi.spyOn(console, 'error').mockImplementation(() => {});
     });
 
     afterEach(() => {
-      if (savedInsecure === undefined) delete process.env['QWEN_TLS_INSECURE'];
-      else process.env['QWEN_TLS_INSECURE'] = savedInsecure;
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     });
 
-    it('sets QWEN_TLS_INSECURE=1 when --insecure is passed', async () => {
+    it('sets QWEN_TLS_INSECURE=1 and NODE_TLS_REJECT_UNAUTHORIZED=0 when --insecure is passed', async () => {
       process.argv = ['node', 'script.js', '--insecure'];
       const argv = await parseArguments();
       await loadCliConfig({}, argv);
       expect(process.env['QWEN_TLS_INSECURE']).toBe('1');
+      expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe('0');
     });
 
-    it('leaves QWEN_TLS_INSECURE unset without --insecure', async () => {
+    it('leaves TLS env vars unset without --insecure', async () => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
       await loadCliConfig({}, argv);
       expect(process.env['QWEN_TLS_INSECURE']).toBeUndefined();
+      expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBeUndefined();
     });
   });
 
