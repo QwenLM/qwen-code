@@ -487,7 +487,11 @@ export async function tryRunServeFastPath(
       resolveOnListen: true,
       deferRuntimeUntilFirstHealth: true,
     });
-    emitHeadlessYoloWarning(settings);
+    try {
+      emitHeadlessYoloWarning(settings);
+    } catch {
+      // Keep the warning best-effort, matching the yargs serve handler.
+    }
     await maybeOpenWebShellBrowser(handle, parsed.open);
   } catch (err) {
     writeStderrLine(

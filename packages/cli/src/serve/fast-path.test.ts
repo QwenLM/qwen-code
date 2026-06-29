@@ -41,6 +41,7 @@ import {
   resetTrustedFoldersForTesting,
   TrustLevel,
 } from '../config/trustedFolders.js';
+import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
 import * as runQwenServeModule from './run-qwen-serve.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import type { Settings } from '../config/settingsSchema.js';
@@ -873,6 +874,66 @@ describe('serve fast path environment bootstrap', () => {
 
     expect(stderrWrites.join('')).toContain('qwen serve: listen boom');
     expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('keeps headless yolo warning best-effort after listening', async () => {
+    const originalSandbox = process.env['SANDBOX'];
+    const originalSuppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+    delete process.env['SANDBOX'];
+    delete process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+    const qwenHome = useTempQwenHome();
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ tools: { approvalMode: 'yolo', sandbox: false } }),
+    );
+    const runtimeReady = Promise.reject(new Error('runtime boom'));
+    void runtimeReady.catch(() => undefined);
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(runQwenServeModule, 'runQwenServe').mockResolvedValue({
+      runtimeReady,
+      close,
+    } as unknown as Awaited<
+      ReturnType<typeof runQwenServeModule.runQwenServe>
+    >);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      const text = String(chunk);
+      stderrWrites.push(text);
+      if (text.includes(HEADLESS_YOLO_NO_SANDBOX_WARNING)) {
+        throw new Error('stderr closed');
+      }
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    try {
+      await expect(
+        tryRunServeFastPath(['serve', '--port', '0', '--no-open', '--no-web']),
+      ).rejects.toThrow('process.exit(1)');
+
+      expect(stderrWrites.join('')).toContain(HEADLESS_YOLO_NO_SANDBOX_WARNING);
+      expect(stderrWrites.join('')).toContain(
+        'qwen serve: runtime startup failed after listener was ready: runtime boom',
+      );
+      expect(stderrWrites.join('')).not.toContain('qwen serve: stderr closed');
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(process.exit).toHaveBeenCalledWith(1);
+    } finally {
+      if (originalSandbox === undefined) {
+        delete process.env['SANDBOX'];
+      } else {
+        process.env['SANDBOX'] = originalSandbox;
+      }
+      if (originalSuppress === undefined) {
+        delete process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+      } else {
+        process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'] = originalSuppress;
+      }
+    }
   });
 
   it('rejects malformed user settings so the full settings loader can handle it', async () => {
