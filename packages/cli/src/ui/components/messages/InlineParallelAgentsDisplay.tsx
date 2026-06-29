@@ -12,11 +12,17 @@
  * progress information into a count.
  *
  * Each row shows: status glyph · agent name · elapsed · tokens.
- * Rendered in the committed phase only; during the live phase
- * `LiveAgentPanel` below the composer owns the per-agent roster.
- * Elapsed and token data fall back to
- * `AgentResultDisplay.executionSummary` when the registry entry has
- * been unregistered.
+ * Rendered in BOTH phases via `ToolGroupMessage`'s `inlineToolCalls`
+ * hand-off. During the live phase only terminal (completed / failed /
+ * cancelled) agents render here — running / background ones are owned by
+ * `LiveAgentPanel` below the composer — and an `availableTerminalHeight`
+ * windowing backstop caps the panel height so the non-`<Static>` live
+ * frame can't overflow and trigger ink's scroll snap-back. In the
+ * committed phase the full roster renders with no cap, as the persistent
+ * scrollback record. `totalAgentCount` keeps the header tally honest when
+ * the rendered rows are a live-phase subset. Elapsed and token data fall
+ * back to `AgentResultDisplay.executionSummary` when the registry entry
+ * has been unregistered.
  */
 
 import type React from 'react';
