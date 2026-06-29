@@ -779,7 +779,7 @@ export function useQueuedPrompts({
       restoreTextToEditor(queuedText, target.images, target.sessionId);
       return true;
     }
-    if (target.serverState !== 'queued') return true;
+    if (target.serverState !== 'queued') return false;
     if (editingServerPromptIdsRef.current.has(target.serverPromptId)) {
       return true;
     }
@@ -838,54 +838,83 @@ export function useQueuedPrompts({
     for (const controller of submitAbortControllersRef.current) {
       controller.abort();
     }
-    for (const prompt of clearablePrompts) {
-      if (prompt.serverPromptId) {
-        const targetSessionId = prompt.sessionId;
-        removingServerPromptIdsRef.current.add(prompt.serverPromptId);
-        sessionActions
-          .removePendingPrompt(prompt.serverPromptId, {
-            sessionId: targetSessionId,
-          })
-          .then(
-            async (result) => {
-              if (result.removed) {
-                removingServerPromptIdsRef.current.delete(
-                  prompt.serverPromptId!,
-                );
-                completionCallbacksRef.current.delete(prompt.serverPromptId!);
-                return;
-              }
-              removingServerPromptIdsRef.current.delete(prompt.serverPromptId!);
-              if (!(await refreshPendingPrompts(targetSessionId))) {
-                restoreQueuedPrompts([prompt]);
-              }
-              reportError(
-                new Error('Prompt could not be removed from queue'),
-                t('queue.deleteFailed'),
-              );
-            },
-            async (error: unknown) => {
-              removingServerPromptIdsRef.current.delete(prompt.serverPromptId!);
-              if (!(await refreshPendingPrompts(targetSessionId))) {
-                restoreQueuedPrompts([prompt]);
-              }
-              reportError(error, t('queue.deleteFailed'));
-            },
-          );
-      }
+    const serverPrompts = clearablePrompts.filter(
+      (prompt) => prompt.serverPromptId,
+    );
+    if (serverPrompts.length === 0) {
+      queuedPromptsRef.current = [];
+      setQueuedPrompts([]);
+      store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
+      return true;
     }
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
+
+    const clearIds = new Set(
+      queuedPromptsRef.current.map((prompt) => prompt.id),
+    );
+    const serverPromptIds = new Set(
+      serverPrompts
+        .map((prompt) => prompt.serverPromptId)
+        .filter((id): id is string => Boolean(id)),
+    );
+    for (const promptId of serverPromptIds) {
+      removingServerPromptIdsRef.current.add(promptId);
+    }
+
+    const removingQueue = queuedPromptsRef.current
+      .filter((prompt) => !clearIds.has(prompt.id))
+      .concat(serverPrompts.map((prompt) => ({ ...prompt, isRemoving: true })));
+    queuedPromptsRef.current = removingQueue;
+    setQueuedPrompts(removingQueue);
+
+    void (async () => {
+      const failedPrompts: QueuedPrompt[] = [];
+      await Promise.all(
+        serverPrompts.map(async (prompt) => {
+          const promptId = prompt.serverPromptId!;
+          try {
+            const result = await sessionActions.removePendingPrompt(promptId, {
+              sessionId: prompt.sessionId,
+            });
+            if (result.removed) {
+              completionCallbacksRef.current.delete(promptId);
+              return;
+            }
+            failedPrompts.push(prompt);
+          } catch {
+            failedPrompts.push(prompt);
+          } finally {
+            removingServerPromptIdsRef.current.delete(promptId);
+          }
+        }),
+      );
+
+      const restoredPrompts = failedPrompts.map((prompt) => ({
+        ...prompt,
+        isRemoving: false,
+      }));
+      const next = queuedPromptsRef.current
+        .filter((prompt) => {
+          if (prompt.serverPromptId) {
+            return !serverPromptIds.has(prompt.serverPromptId);
+          }
+          return !clearIds.has(prompt.id);
+        })
+        .concat(restoredPrompts);
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+
+      if (failedPrompts.length > 0) {
+        reportError(
+          new Error('Some prompts could not be removed from queue'),
+          t('queue.deleteFailed'),
+        );
+        void refreshPendingPrompts(failedPrompts[0]?.sessionId);
+        return;
+      }
+      store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
+    })();
     return true;
-  }, [
-    refreshPendingPrompts,
-    reportError,
-    restoreQueuedPrompts,
-    store,
-    t,
-    sessionActions,
-  ]);
+  }, [refreshPendingPrompts, reportError, store, t, sessionActions]);
 
   const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
     useDaemonMidTurnInjected();
