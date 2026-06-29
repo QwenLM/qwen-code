@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FC } from 'react';
-import { useCallback, useMemo, useRef } from 'react';
+import { memo, useCallback, useMemo, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import { AlternateScreen } from './AlternateScreen.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
+import { ErrorBoundary } from './shared/ErrorBoundary.js';
 import {
   ScrollableList,
   SCROLL_TO_ITEM_END,
@@ -57,11 +57,11 @@ function estimateTranscriptItemHeight(item: HistoryItem): number {
 const keyExtractor = (item: HistoryItem) =>
   item.id >= 0 ? `t-${item.id}` : `tp-${-item.id - 1}`;
 
-export const TranscriptView: FC<TranscriptViewProps> = ({
+const TranscriptViewImpl = ({
   items,
   onClose,
   useAlternateScreen = true,
-}) => {
+}: TranscriptViewProps) => {
   const { rows, columns } = useTerminalSize();
   const listRef = useRef<ScrollableListRef<HistoryItem>>(null);
 
@@ -112,6 +112,25 @@ export const TranscriptView: FC<TranscriptViewProps> = ({
     [items, renderItem, estimatedItemHeight, contentHeight],
   );
 
+  // fullDetail rendering exercises paths the normal view never hits (forced
+  // thinking expansion, every tool group expanded, full result blocks). An
+  // unexpected item shape would otherwise throw uncaught and crash the CLI, so
+  // contain it: show a fallback and let the user press Esc/q to close.
+  const errorFallback = useCallback(
+    (error: Error) => (
+      <Box flexDirection="column" paddingX={1}>
+        <Text color={theme.status.error} bold>
+          {t('Failed to render transcript.')}
+        </Text>
+        <Text color={theme.text.secondary}>{error.message}</Text>
+        <Text dimColor italic>
+          Esc/q {t('to close')}
+        </Text>
+      </Box>
+    ),
+    [],
+  );
+
   return (
     <AlternateScreen disabled={!useAlternateScreen}>
       <Box flexDirection="column" height={rows} width={columns}>
@@ -121,7 +140,7 @@ export const TranscriptView: FC<TranscriptViewProps> = ({
           </Text>
         </Box>
         <Box flexDirection="column" flexGrow={1}>
-          {content}
+          <ErrorBoundary fallback={errorFallback}>{content}</ErrorBoundary>
         </Box>
         <Box justifyContent="center">
           <Text dimColor italic>
@@ -134,3 +153,12 @@ export const TranscriptView: FC<TranscriptViewProps> = ({
     </AlternateScreen>
   );
 };
+
+/**
+ * Memoized so the frozen transcript doesn't re-reconcile on every AppContainer
+ * re-render while streaming continues underneath. AppContainer hands a stable
+ * `items` reference (memoized from the freeze snapshot) and stable `onClose`,
+ * so the default shallow prop compare is enough.
+ */
+export const TranscriptView = memo(TranscriptViewImpl);
+TranscriptView.displayName = 'TranscriptView';

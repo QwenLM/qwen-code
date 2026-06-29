@@ -565,6 +565,52 @@ describe('<ToolGroupMessage />', () => {
       expect(frame).toContain('MockTool[m2]');
       expect(frame).toContain('[forceShow]');
     });
+
+    it('renders a pure parallel-agent group as individual ToolMessages (not the dense panel) when fullDetail', () => {
+      const completedAgent = (name: string): AgentResultDisplay => ({
+        type: 'task_execution',
+        subagentName: name,
+        taskDescription: `${name} task`,
+        taskPrompt: `Run ${name}`,
+        status: 'completed',
+        toolCalls: [
+          {
+            callId: `${name}-read-1`,
+            name: 'read_file',
+            status: 'success',
+            description: 'Read file',
+          },
+        ],
+      });
+      const toolCalls = [
+        createToolCall({
+          callId: 'agent-1',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          resultDisplay: completedAgent('reviewer'),
+        }),
+        createToolCall({
+          callId: 'agent-2',
+          name: 'agent',
+          status: ToolCallStatus.Success,
+          resultDisplay: completedAgent('planner'),
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          isPending={false}
+          fullDetail
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // fullDetail must bypass isPureParallelAgentGroup → each agent gets its
+      // own full ToolMessage (mocked as MockSubagent[id]) instead of the dense
+      // InlineParallelAgentsDisplay panel.
+      expect(frame).toContain('MockSubagent[agent-1]');
+      expect(frame).toContain('MockSubagent[agent-2]');
+    });
   });
 
   describe('isUserInitiated', () => {

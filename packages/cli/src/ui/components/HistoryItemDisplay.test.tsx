@@ -424,6 +424,61 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Inspecting the repository');
   });
 
+  it('fullDetail forces a committed thought expanded even when context/prop are collapsed', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 1200,
+    };
+
+    // No ThoughtExpandedProvider (context defaults to false) and thoughtExpanded
+    // is not passed — fullDetail alone must win and show the full text. This is
+    // the transcript's forced-expansion path.
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay
+        item={item}
+        terminalWidth={100}
+        isPending={false}
+        fullDetail
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for');
+    expect(output).toContain('Inspecting the repository');
+  });
+
+  it('forwards fullDetail to ToolGroupMessage for tool_group items', () => {
+    vi.mocked(ToolGroupMessage).mockClear();
+    const item: HistoryItem = {
+      id: 1,
+      type: 'tool_group',
+      tools: [
+        {
+          callId: '123',
+          name: 'run_shell_command',
+          description: 'Run a shell command',
+          resultDisplay: 'done',
+          status: ToolCallStatus.Success,
+          confirmationDetails: undefined,
+        },
+      ],
+    };
+
+    renderWithProviders(
+      <HistoryItemDisplay
+        item={item}
+        terminalWidth={80}
+        isPending={false}
+        fullDetail
+      />,
+    );
+
+    const passedProps = vi.mocked(ToolGroupMessage).mock.calls[0][0];
+    expect(passedProps.fullDetail).toBe(true);
+  });
+
   describe('showTimestamps', () => {
     const timestampItem: HistoryItem = {
       ...baseItem,

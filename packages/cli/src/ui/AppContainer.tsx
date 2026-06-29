@@ -241,6 +241,10 @@ import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
 
+// Stable empty reference for the transcript items memo when no snapshot is
+// frozen, so the memo never hands TranscriptView a fresh [] each render.
+const EMPTY_HISTORY_ITEMS: HistoryItem[] = [];
+
 export function isRenderModeToggleKey(key: Key): boolean {
   return (
     keyMatchers[Command.TOGGLE_RENDER_MODE](key) ||
@@ -483,6 +487,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const [thinkingViewerData, setThinkingViewerData] =
     useState<ThinkingViewerData | null>(null);
   const openThinkingViewer = useCallback((data: ThinkingViewerData) => {
+    // The transcript owns the whole screen and renders ahead of the thinking
+    // viewer; opening the viewer underneath it would queue a stale popup that
+    // surfaces the instant the transcript closes.
+    if (isTranscriptOpenRef.current) return;
     setThinkingViewerData(data);
   }, []);
   const closeThinkingViewer = useCallback(() => {
@@ -490,12 +498,16 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // Transcript full-detail screen (Ctrl+O). Freezes a snapshot of the
-  // conversation: committed history is stored as a length (sliced at render so
-  // we don't clone the whole array), while the streaming `pendingHistoryItems`
-  // are stored as a shallow copy (the pending region is transient and gets
-  // rewritten/cleared, so a copy is needed to pin that moment's shape).
+  // conversation at entry time. Both committed history and the streaming
+  // `pendingHistoryItems` are stored as shallow copies (`.slice()` / spread):
+  // the snapshot must stay stable while open, but `useMemoryMonitor` →
+  // `compactOldItems` can replace `historyManager.history` with a rewritten
+  // array (collapsed tool groups, merged thoughts, shifted indices) mid-view.
+  // Re-slicing the live array at render would let that rewrite visibly corrupt
+  // the "frozen" transcript, so we pin the array of item references here. A
+  // shallow copy is cheap (references only) even for long sessions.
   const [transcriptFreeze, setTranscriptFreeze] = useState<{
-    historyLength: number;
+    committedItems: HistoryItem[];
     pendingItems: HistoryItemWithoutId[];
   } | null>(null);
   const isTranscriptOpen = transcriptFreeze != null;
@@ -995,11 +1007,15 @@ export const AppContainer = (props: AppContainerProps) => {
   // flushed — deferred a tick so the buffer switch lands first, and run outside
   // the during-transcript guard above (which has already cleared by now). VP
   // mode keeps its own scrollback via the React tree, so this is non-VP only.
+  // Snapshot the previous-render value during render (not inside the effect),
+  // so React.StrictMode's double-invoke of the effect can't read a value the
+  // effect itself just wrote — `wasOpenPrevRender` is always a true previous
+  // render snapshot.
   const prevTranscriptOpenRef = useRef(isTranscriptOpen);
+  const wasOpenPrevRender = prevTranscriptOpenRef.current;
+  prevTranscriptOpenRef.current = isTranscriptOpen;
   useEffect(() => {
-    const wasOpen = prevTranscriptOpenRef.current;
-    prevTranscriptOpenRef.current = isTranscriptOpen;
-    if (!wasOpen || isTranscriptOpen || useTerminalBuffer) {
+    if (!wasOpenPrevRender || isTranscriptOpen || useTerminalBuffer) {
       return undefined;
     }
     const id = setTimeout(() => {
@@ -1007,7 +1023,13 @@ export const AppContainer = (props: AppContainerProps) => {
       remountStaticHistory();
     }, 0);
     return () => clearTimeout(id);
-  }, [isTranscriptOpen, useTerminalBuffer, stdout, remountStaticHistory]);
+  }, [
+    wasOpenPrevRender,
+    isTranscriptOpen,
+    useTerminalBuffer,
+    stdout,
+    remountStaticHistory,
+  ]);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -2148,11 +2170,32 @@ export const AppContainer = (props: AppContainerProps) => {
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
   const openTranscript = useCallback(() => {
+    // Clear any pending thinking viewer so it can't resurface as a stale popup
+    // when the transcript closes (the transcript renders ahead of it).
+    setThinkingViewerData(null);
     setTranscriptFreeze({
-      historyLength: historyManager.history.length,
+      committedItems: historyManager.history.slice(),
       pendingItems: [...pendingHistoryItems],
     });
   }, [historyManager.history, pendingHistoryItems]);
+
+  // Build the transcript item list from the frozen snapshot only. Recomputes
+  // on open/close (when `transcriptFreeze` flips), not on every streaming tick,
+  // so the array reference stays stable while open — combined with the
+  // React.memo'd TranscriptView this avoids re-running its VirtualizedList
+  // offset/render memos on every AppContainer re-render during streaming.
+  const transcriptItems = useMemo<HistoryItem[]>(() => {
+    if (!transcriptFreeze) return EMPTY_HISTORY_ITEMS;
+    return [
+      ...transcriptFreeze.committedItems,
+      // Pending snapshot gets negative ids (mirrors MainContent's `id: -(i+1)`)
+      // so keys never collide with committed history items.
+      ...transcriptFreeze.pendingItems.map((item, i) => ({
+        ...item,
+        id: -(i + 1),
+      })),
+    ];
+  }, [transcriptFreeze]);
 
   const rawStickyTodos = useMemo(
     () => getStickyTodos(historyManager.history, pendingHistoryItems),
@@ -3321,8 +3364,13 @@ export const AppContainer = (props: AppContainerProps) => {
           keyMatchers[Command.ESCAPE](key) ||
           key.name === 'q' ||
           keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key) ||
           keyMatchers[Command.TOGGLE_TRANSCRIPT](key)
         ) {
+          // Esc / q / Ctrl+C / Ctrl+D / Ctrl+O all just close the transcript.
+          // EXIT (Ctrl+D) is included so it isn't silently swallowed by the
+          // blanket return below — the transcript is a transient overlay, so we
+          // close it rather than fall through to app exit.
           closeTranscript();
         }
         return;
@@ -4184,19 +4232,7 @@ export const AppContainer = (props: AppContainerProps) => {
                     <ShellFocusContext.Provider value={isFocused}>
                       {transcriptFreeze ? (
                         <TranscriptView
-                          items={[
-                            ...historyManager.history.slice(
-                              0,
-                              transcriptFreeze.historyLength,
-                            ),
-                            // Pending snapshot gets negative ids (mirrors
-                            // MainContent's `id: -(i+1)`) so keys never collide
-                            // with committed history items.
-                            ...transcriptFreeze.pendingItems.map((item, i) => ({
-                              ...item,
-                              id: -(i + 1),
-                            })),
-                          ]}
+                          items={transcriptItems}
                           onClose={closeTranscript}
                           useAlternateScreen={!useTerminalBuffer}
                         />

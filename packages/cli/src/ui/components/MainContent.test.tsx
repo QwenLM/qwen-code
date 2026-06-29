@@ -16,6 +16,7 @@ import {
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
+import { ToolCallStatus } from '../types.js';
 
 // Global compact mode was removed (#5666). Type-based tool rendering no longer
 // consumes a compact-mode context, so these tests use a local no-op provider
@@ -26,7 +27,6 @@ const CompactModeProvider = ({
   children?: React.ReactNode;
   value?: unknown;
 }) => <>{children}</>;
-import { ToolCallStatus } from '../types.js';
 
 const staticPropsSpy = vi.fn();
 const staticItemsSpy = vi.fn();
