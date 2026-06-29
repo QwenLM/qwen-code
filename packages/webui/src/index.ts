@@ -12,7 +12,6 @@ import './styles/timeline.css';
 import './styles/components.css';
 
 // Shared UI Components Export
-// Export all shared components from this package
 
 // Context
 export {
@@ -78,6 +77,8 @@ export type {
   AssistantMessageProps,
   AssistantMessageStatus,
 } from './components/messages/Assistant/AssistantMessage';
+export { InsightProgressCard } from './components/messages/InsightProgressCard.js';
+export type { InsightProgressCardProps } from './components/messages/InsightProgressCard.js';
 export {
   CollapsibleFileContent,
   parseContentWithFileReferences,
@@ -152,6 +153,9 @@ export {
   // Business ToolCall components
   ThinkToolCall,
   GenericToolCall,
+  AgentToolCall,
+  isAgentExecutionRawOutput,
+  isAgentExecutionToolCall,
   EditToolCall,
   WriteToolCall,
   SearchToolCall,
@@ -160,9 +164,15 @@ export {
   ReadToolCall,
   WebFetchToolCall,
   CheckboxDisplay,
+  getToolCallComponent,
 } from './components/toolcalls';
 export type {
   ToolCallContainerProps,
+  AgentExecutionRawOutput,
+  AgentExecutionStatus,
+  AgentExecutionSummary,
+  AgentExecutionToolCall,
+  AgentToolCallStatus,
   ToolCallContent,
   ToolCallData,
   BaseToolCallProps,
@@ -250,6 +260,10 @@ export type { CompletionItem, CompletionItemType } from './types/completion';
 // Utils
 export { groupSessionsByDate, getTimeAgo } from './utils/sessionGrouping';
 export type { SessionGroup } from './utils/sessionGrouping';
+export {
+  ZERO_WIDTH_SPACE,
+  stripZeroWidthSpaces,
+} from './utils/inputPlaceholder';
 
 // Adapters - for normalizing different data formats
 export {

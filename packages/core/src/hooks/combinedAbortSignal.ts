@@ -30,11 +30,12 @@ export function createCombinedAbortSignal(
   }
 
   // Listen to external signal
+  let abortHandler: (() => void) | undefined;
   if (externalSignal) {
     if (externalSignal.aborted) {
       controller.abort();
     } else {
-      const abortHandler = () => {
+      abortHandler = () => {
         controller.abort();
       };
       externalSignal.addEventListener('abort', abortHandler, { once: true });
@@ -45,6 +46,10 @@ export function createCombinedAbortSignal(
     if (timeoutId !== undefined) {
       clearTimeout(timeoutId);
       timeoutId = undefined;
+    }
+    if (externalSignal && abortHandler) {
+      externalSignal.removeEventListener('abort', abortHandler);
+      abortHandler = undefined;
     }
   };
 

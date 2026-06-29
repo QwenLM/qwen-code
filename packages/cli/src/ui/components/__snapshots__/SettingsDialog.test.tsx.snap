@@ -6,7 +6,7 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -28,7 +28,7 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -50,7 +50,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -72,7 +72,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -94,7 +94,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -116,7 +116,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -138,7 +138,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -160,7 +160,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -182,7 +182,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │
@@ -204,7 +204,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Tool Approval Mode                                                                     Default │
+│ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
 │   Theme                                                                              Qwen Dark ▸ │

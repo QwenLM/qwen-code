@@ -7,9 +7,11 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
+  ServerGeminiStreamEvent,
   ToolCallRequestInfo,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
+import { GeminiEventType } from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -37,16 +39,19 @@ export class StreamJsonOutputAdapter
   implements JsonOutputAdapterInterface
 {
   private mainTurnMessageStartEmitted = false;
+  private readonly outputStream: NodeJS.WritableStream;
 
   constructor(
     config: Config,
     private readonly includePartialMessages: boolean,
+    outputStream?: NodeJS.WritableStream,
   ) {
     super(config);
+    this.outputStream = outputStream ?? process.stdout;
   }
 
   /**
-   * Emits message immediately to stdout (stream mode).
+   * Emits message immediately to the output stream (stream mode).
    */
   protected emitMessageImpl(message: CLIMessage | ControlMessage): void {
     // Track assistant messages for result generation
@@ -60,7 +65,15 @@ export class StreamJsonOutputAdapter
     }
 
     // Emit messages immediately in stream mode
-    process.stdout.write(`${JSON.stringify(message)}\n`);
+    this.outputStream.write(`${JSON.stringify(message)}\n`);
+  }
+
+  /**
+   * Control-plane messages (control_request / control_response) share the
+   * same transport as data messages in stream mode.
+   */
+  protected override emitControlMessageImpl(message: ControlMessage): void {
+    this.outputStream.write(`${JSON.stringify(message)}\n`);
   }
 
   /**
@@ -109,6 +122,24 @@ export class StreamJsonOutputAdapter
 
   send(message: CLIMessage | ControlMessage): void {
     this.emitMessage(message);
+  }
+
+  override processEvent(event: ServerGeminiStreamEvent): void {
+    // Active goal updates are session-level metadata, not message content.
+    // They intentionally bypass the base finalized guard so late goal state
+    // changes can still reach stream consumers.
+    if (event.type === GeminiEventType.ActiveGoal) {
+      this.emitStreamEventIfEnabled(
+        {
+          type: 'active_goal',
+          active_goal: event.value,
+        },
+        null,
+      );
+      return;
+    }
+
+    super.processEvent(event);
   }
 
   /**

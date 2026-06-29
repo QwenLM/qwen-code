@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
-import { HookPlanner } from './hookPlanner.js';
+import { getHookMatcherTarget, HookPlanner } from './hookPlanner.js';
 import { HookEventName, HookType, HooksConfigSource } from './types.js';
 
 describe('HookPlanner', () => {
@@ -18,6 +18,96 @@ describe('HookPlanner', () => {
       getHooksForEvent: vi.fn(),
     } as unknown as HookRegistry;
     planner = new HookPlanner(mockRegistry);
+  });
+
+  describe('getHookMatcherTarget', () => {
+    it('returns tool name targets for tool events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.PreToolUse, {
+          toolName: 'shell',
+        }),
+      ).toEqual({ kind: 'toolName', target: 'shell' });
+      expect(getHookMatcherTarget(HookEventName.PostToolUse)).toEqual({
+        kind: 'toolName',
+        target: '',
+      });
+      expect(
+        getHookMatcherTarget(HookEventName.PermissionDenied, {
+          toolName: 'Bash',
+        }),
+      ).toEqual({ kind: 'toolName', target: 'Bash' });
+      // PermissionDenied is permission-related, so it uses the same tool-name
+      // matcher as PermissionRequest rather than a classifier-reason matcher.
+    });
+
+    it('returns agent type targets for subagent events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.SubagentStart, {
+          agentType: 'explorer',
+        }),
+      ).toEqual({ kind: 'agentType', target: 'explorer' });
+    });
+
+    it('returns trigger targets for compact events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.PreCompact, {
+          trigger: 'manual',
+        }),
+      ).toEqual({ kind: 'trigger', target: 'manual' });
+    });
+
+    it('returns session trigger targets for session events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.SessionStart, {
+          trigger: 'startup',
+        }),
+      ).toEqual({ kind: 'sessionTrigger', target: 'startup' });
+    });
+
+    it('returns error targets for stop failure events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.StopFailure, {
+          error: 'rate_limit',
+        }),
+      ).toEqual({ kind: 'error', target: 'rate_limit' });
+    });
+
+    it('returns notification type targets for notification events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.Notification, {
+          notificationType: 'permission_prompt',
+        }),
+      ).toEqual({
+        kind: 'notificationType',
+        target: 'permission_prompt',
+      });
+    });
+
+    it('returns file path targets for instruction load events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.InstructionsLoaded, {
+          filePath: '/repo/.qwen/QWEN.local.md',
+        }),
+      ).toEqual({
+        kind: 'filePath',
+        target: '/repo/.qwen/QWEN.local.md',
+      });
+    });
+
+    it('returns command name targets for user prompt expansion events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.UserPromptExpansion, {
+          commandName: 'goal',
+        }),
+      ).toEqual({ kind: 'commandName', target: 'goal' });
+    });
+
+    it('returns undefined for events without matcher semantics', () => {
+      expect(getHookMatcherTarget(HookEventName.UserPromptSubmit)).toBe(
+        undefined,
+      );
+      expect(getHookMatcherTarget(HookEventName.PostToolBatch)).toBe(undefined);
+    });
   });
 
   describe('createExecutionPlan', () => {
@@ -104,6 +194,78 @@ describe('HookPlanner', () => {
       const result = planner.createExecutionPlan(HookEventName.PreToolUse);
 
       expect(result!.hookConfigs).toHaveLength(1);
+    });
+
+    it('should not deduplicate prompt hooks that only share the first 50 characters', () => {
+      const sharedPrefix = 'a'.repeat(50);
+      const entry1: HookRegistryEntry = {
+        config: {
+          type: HookType.Prompt,
+          prompt: `${sharedPrefix}-first prompt`,
+        },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.UserPromptSubmit,
+        enabled: true,
+      };
+      const entry2: HookRegistryEntry = {
+        config: {
+          type: HookType.Prompt,
+          prompt: `${sharedPrefix}-second prompt`,
+        },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.UserPromptSubmit,
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        entry1,
+        entry2,
+      ]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.UserPromptSubmit,
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.hookConfigs).toHaveLength(2);
+      expect(result!.hookConfigs).toEqual([entry1.config, entry2.config]);
+    });
+
+    it('matches user prompt expansion hooks by command name', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.UserPromptExpansion,
+        matcher: 'goal',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.UserPromptExpansion,
+        { commandName: 'goal' },
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.hookConfigs).toEqual([entry.config]);
+    });
+
+    it('matches user prompt expansion command names with invalid-regex fallback', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.UserPromptExpansion,
+        matcher: '[invalid(regex',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.UserPromptExpansion,
+        { commandName: '[invalid(regex' },
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.hookConfigs).toEqual([entry.config]);
     });
   });
 
@@ -412,6 +574,46 @@ describe('HookPlanner', () => {
       });
 
       expect(result).not.toBeNull();
+    });
+
+    it('should match instruction loaded file paths with regex', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.InstructionsLoaded,
+        matcher: '\\.qwen/QWEN\\.local\\.md$',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.InstructionsLoaded,
+        {
+          filePath: '/repo/.qwen/QWEN.local.md',
+        },
+      );
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should not match unrelated instruction loaded file paths', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.InstructionsLoaded,
+        matcher: '\\.qwen/QWEN\\.local\\.md$',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.InstructionsLoaded,
+        {
+          filePath: '/repo/QWEN.md',
+        },
+      );
+
+      expect(result).toBeNull();
     });
 
     it('should match auth_success notification type', () => {

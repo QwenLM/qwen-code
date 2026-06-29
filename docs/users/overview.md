@@ -9,21 +9,29 @@
 
 ### Install Qwen Code:
 
+The recommended installer uses a standalone archive when one is available for
+your platform. If it falls back to npm, Node.js 22 or later with npm must be
+available on PATH.
+
 **Linux / macOS**
 
 ```sh
-curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash
 ```
 
-**Windows (Run as Administrator)**
+**Windows**
 
-```cmd
-powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+```powershell
+irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex
 ```
 
 > [!note]
 >
-> It's recommended to restart your terminal after installation to ensure environment variables take effect. If the installation fails, please refer to [Manual Installation](./quickstart#manual-installation) in the Quickstart guide.
+> It's recommended to restart your terminal after installation if `qwen` is not
+> immediately available on PATH. If the installation fails, please refer to
+> [Manual Installation](./quickstart#manual-installation) in the Quickstart
+> guide. For offline installation, download a release archive and run the
+> installer with `--archive PATH`; keep `SHA256SUMS` next to the archive.
 
 ### Start using Qwen Code:
 
@@ -32,7 +40,7 @@ cd your-project
 qwen
 ```
 
-Choose your authentication method — **API Key** or **[Alibaba Cloud Coding Plan](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index)** ([intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)) — and follow the prompts to configure. See the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)) for step-by-step instructions. Then let's start with understanding your codebase. Try one of these commands:
+On first launch you'll be prompted to connect a model provider. The menu offers **Alibaba ModelStudio** (Coding Plan, Token Plan, or Standard API Key), **Third-party Providers** (built-in providers such as DeepSeek, MiniMax, Z.AI, and OpenRouter, connected with an API key), and **Custom Provider** (a local server, proxy, or unsupported provider). For the [Alibaba Cloud Coding Plan](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) ([intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)), choose **Alibaba ModelStudio → Coding Plan**; to use a ModelStudio API key, choose **Alibaba ModelStudio → Standard API Key** and follow the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)). Then let's start with understanding your codebase. Try one of these commands:
 
 ```
 what does this project do?

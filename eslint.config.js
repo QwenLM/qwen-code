@@ -14,6 +14,8 @@ import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
 // For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
 import storybook from 'eslint-plugin-storybook';
+import checkFile from 'eslint-plugin-check-file';
+import { legacyFilenames } from './eslint.legacy-filenames.mjs';
 
 export default tseslint.config(
   {
@@ -26,9 +28,12 @@ export default tseslint.config(
       '.integration-tests/**',
       'packages/**/.integration-test/**',
       'dist/**',
+      'demo/**/dist/**',
       'docs-site/.next/**',
       'docs-site/out/**',
       '.qwen/**',
+      'packages/desktop/**',
+      'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
     ],
   },
   eslint.configs.recommended,
@@ -121,6 +126,7 @@ export default tseslint.config(
             'react-dom/test-utils',
             'react-dom/client',
             'memfs/lib/volume.js',
+            'mime/lite',
             'yargs/**',
             'msw/node',
             '**/generated/**',
@@ -164,9 +170,32 @@ export default tseslint.config(
     },
   },
   {
+    // Enforce kebab-case filenames
+    files: ['packages/core/src/**/*.ts', 'packages/cli/src/**/*.ts'],
+    ignores: legacyFilenames.flatMap((name) => [
+      `**/${name}.ts`,
+      `**/${name}.*.ts`,
+    ]),
+    plugins: {
+      'check-file': checkFile,
+    },
+    rules: {
+      'check-file/filename-naming-convention': [
+        'error',
+        { '**/*.ts': 'KEBAB_CASE' },
+        { ignoreMiddleExtensions: true },
+      ],
+    },
+  },
+  {
     files: ['packages/*/src/**/*.test.{ts,tsx}', 'packages/**/test/**/*.test.{ts,tsx}'],
     plugins: {
       vitest,
+    },
+    languageOptions: {
+      globals: {
+        ...globals.vitest,
+      },
     },
     rules: {
       ...vitest.configs.recommended.rules,
@@ -185,10 +214,20 @@ export default tseslint.config(
   },
   // extra settings for scripts that we run directly with node
   {
-    files: ['./scripts/**/*.js', 'esbuild.config.js', 'packages/*/scripts/**/*.js'],
+    files: [
+      './scripts/**/*.js',
+      './scripts/**/*.mjs',
+      'esbuild.config.js',
+      'packages/*/scripts/**/*.js',
+      // Verification reproducer scripts under docs/ also run with `node`.
+      'docs/**/*.mjs',
+      // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
+      'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
+    ],
     languageOptions: {
       globals: {
         ...globals.node,
+        ...globals.browser,
         process: 'readonly',
         console: 'readonly',
       },
@@ -230,6 +269,13 @@ export default tseslint.config(
   // WebUI package - UI component library with Storybook
   {
     files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
+    rules: { 'no-console': 'off' },
+  },
+  // Chrome extension (chrome-extension) - the MV3 background service
+  // worker and content scripts run in the browser with no stdio; console is
+  // the only logging / debugging channel available there.
+  {
+    files: ['packages/chrome-extension/**/*.ts', 'packages/chrome-extension/**/*.tsx'],
     rules: { 'no-console': 'off' },
   },
   // Specific CLI files that intentionally wrap console usage

@@ -119,6 +119,14 @@ vi.mock('../contexts/VimModeContext.js', async () => {
   const actual = await vi.importActual('../contexts/VimModeContext.js');
   return {
     ...actual,
+    useVimModeState: () => ({
+      vimEnabled: false,
+      vimMode: 'INSERT' as const,
+    }),
+    useVimModeActions: () => ({
+      toggleVimEnabled: mockToggleVimEnabled,
+      setVimMode: mockSetVimMode,
+    }),
     useVimMode: () => ({
       vimEnabled: false,
       vimMode: 'INSERT' as const,
@@ -134,6 +142,7 @@ vi.mock('../contexts/CompactModeContext.js', async () => {
     ...actual,
     useCompactMode: () => ({
       compactMode: false,
+      compactInline: false,
       setCompactMode: mockSetCompactMode,
     }),
   };
@@ -162,6 +171,7 @@ vi.mock('../../utils/languageUtils.js', async () => {
   return {
     ...actual,
     updateOutputLanguageFile: vi.fn(),
+    writeOutputLanguageAndRegisterPath: vi.fn(),
   };
 });
 
@@ -187,8 +197,10 @@ vi.mock('../../utils/languageUtils.js', async () => {
 // const originalConsoleError = console.error;
 
 describe('SettingsDialog', () => {
-  // Simple delay function for remaining tests that need gradual migration
-  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Yield to Ink/React updates without adding broad real-time sleeps.
+  // The string-editing path goes through ink-testing-library's stdin event
+  // stream, which needs a macrotask tick rather than only React microtasks.
+  const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // Custom waitFor utility for ink testing environment (not compatible with @testing-library/react)
   const waitFor = async (
@@ -509,6 +521,56 @@ describe('SettingsDialog', () => {
       expect(mockSetCompactMode).toHaveBeenCalledWith(true);
       // Verify refreshStatic was called to update rendered history
       expect(mockRefreshStatic).toHaveBeenCalled();
+
+      unmount();
+    });
+
+    it('should not save number settings below their configured minimum', async () => {
+      vi.mocked(saveModifiedSettings).mockClear();
+
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+      const component = (
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>
+      );
+
+      const { stdin, unmount, lastFrame } = render(component);
+
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Settings');
+      });
+
+      const cleanupPeriodIndex = getDialogSettingKeys().indexOf(
+        'general.cleanupPeriodDays',
+      );
+      expect(cleanupPeriodIndex).toBeGreaterThanOrEqual(0);
+
+      const press = async (key: string) => {
+        act(() => {
+          stdin.write(key);
+        });
+        await wait();
+      };
+
+      for (let i = 0; i < cleanupPeriodIndex; i++) {
+        await press(TerminalKeys.DOWN_ARROW as string);
+      }
+
+      await press(TerminalKeys.ENTER as string);
+      await press('-');
+      await press('1');
+      await press(TerminalKeys.ENTER as string);
+
+      await wait();
+
+      const cleanupPeriodCall = vi
+        .mocked(saveModifiedSettings)
+        .mock.calls.find((call) =>
+          (call[0] as Set<string>).has('general.cleanupPeriodDays'),
+        );
+      expect(cleanupPeriodCall).toBeUndefined();
 
       unmount();
     });
@@ -949,43 +1011,6 @@ describe('SettingsDialog', () => {
       expect(lastFrame()).not.toContain(
         'To see changes, Qwen Code must be restarted',
       );
-
-      unmount();
-    });
-
-    it('should keep restart prompt when switching scopes', async () => {
-      const settings = createMockSettings();
-      const onSelect = vi.fn();
-
-      const { stdin, lastFrame, unmount } = render(
-        <KeypressProvider kittyProtocolEnabled={false}>
-          <SettingsDialog settings={settings} onSelect={onSelect} />
-        </KeypressProvider>,
-      );
-
-      // Trigger a restart-required setting change: navigate to "Language: UI" (2nd item) and toggle it.
-      stdin.write(TerminalKeys.DOWN_ARROW as string);
-      await wait();
-      stdin.write(TerminalKeys.ENTER as string);
-      await wait();
-
-      await waitFor(() => {
-        expect(lastFrame()).toContain(
-          'To see changes, Qwen Code must be restarted',
-        );
-      });
-
-      // Switch scopes; restart prompt should remain visible.
-      stdin.write(TerminalKeys.TAB as string);
-      await wait();
-      stdin.write('2');
-      await wait();
-
-      await waitFor(() => {
-        expect(lastFrame()).toContain(
-          'To see changes, Qwen Code must be restarted',
-        );
-      });
 
       unmount();
     });

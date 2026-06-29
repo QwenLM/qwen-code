@@ -17,11 +17,12 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
+import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { isAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import {
   FileEncoding,
   needsUtf8Bom,
@@ -29,7 +30,9 @@ import {
 } from '../services/fileSystemService.js';
 import type { LineEnding } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
@@ -43,6 +46,7 @@ import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
@@ -50,6 +54,8 @@ import {
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
+
+const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
 export function applyReplacement(
   currentContent: string | null,
@@ -152,6 +158,41 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let useBOM = false;
     let detectedEncoding = 'utf-8';
     let detectedLineEnding: LineEnding = 'lf';
+    // Prior-read enforcement runs before any content is read so that
+    // the read pipeline below (and the content-derived error codes
+    // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
+    // NO_CHANGE) cannot be used as a read-less content oracle on a
+    // file the model has never legitimately Read.
+    //
+    // Run unconditionally (not gated on `fileExists`): checkPriorRead
+    // re-stats so a file that sprang into existence between
+    // isFilefileExists() and here — the same TOCTOU window WriteFile
+    // had — is now caught. ENOENT (genuinely absent) returns ok:true
+    // and falls through to the new-file path; an existing file that
+    // appeared in the race window is rejected as unread.
+    if (!this.config.getFileReadCacheDisabled()) {
+      const decision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        params.file_path,
+        'editing',
+      );
+      if (!decision.ok) {
+        return {
+          currentContent: null,
+          newContent: '',
+          occurrences: 0,
+          error: {
+            display: decision.displayMessage,
+            raw: decision.rawMessage,
+            type: decision.type,
+          },
+          isNewFile: false,
+          encoding: 'utf-8',
+          bom: false,
+          lineEnding: 'lf',
+        };
+      }
+    }
     if (fileExists) {
       try {
         const fileInfo = await this.config
@@ -177,6 +218,48 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           throw err;
         }
         fileExists = false;
+      }
+    }
+
+    // Post-read freshness re-check. The pre-read checkPriorRead above
+    // and readTextFile are two separate syscalls; if the file is
+    // modified between them, currentContent reflects post-write bytes
+    // the model never saw and any edit applied to it would still be
+    // a stale-write. Re-running checkPriorRead here closes the TOCTOU
+    // window: a stale state now (mtime/size drifted) means we read
+    // bytes the cache no longer trusts, and we reject before
+    // returning a CalculatedEdit that the call sites would honour.
+    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+      const postDecision = await checkPriorRead(
+        this.config.getFileReadCache(),
+        params.file_path,
+        'editing',
+        { expectExisting: true },
+      );
+      if (!postDecision.ok) {
+        // Forensic trail for post-read TOCTOU rejections. These are
+        // rare ("file changed between stat and read") and the model
+        // self-heals by re-reading, so without a debug record an
+        // operator investigating "why did this Edit fail once?" has
+        // nothing to grep.
+        debugLogger.warn('post-read TOCTOU rejection', {
+          path: params.file_path,
+          reason: postDecision.type,
+        });
+        return {
+          currentContent: null,
+          newContent: '',
+          occurrences: 0,
+          error: {
+            display: postDecision.displayMessage,
+            raw: postDecision.rawMessage,
+            type: postDecision.type,
+          },
+          isNewFile: false,
+          encoding: 'utf-8',
+          bom: false,
+          lineEnding: 'lf',
+        };
       }
     }
 
@@ -259,6 +342,35 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       };
     }
 
+    // Scan the full resulting content, not just new_string, so a secret split
+    // across multiple edits (each fragment alone undetectable) is still caught.
+    if (!error) {
+      const teamMemoryError = checkTeamMemorySecrets(
+        params.file_path,
+        newContent,
+        this.config.getProjectRoot(),
+      );
+      if (teamMemoryError) {
+        // If the secret is already in the on-disk file, this edit can't clear it
+        // — tell the user to remove the committed secret, not just retry.
+        const preExisting =
+          currentContent !== null &&
+          checkTeamMemorySecrets(
+            params.file_path,
+            currentContent,
+            this.config.getProjectRoot(),
+          ) !== null;
+        const message = preExisting
+          ? `${teamMemoryError} Note: the secret already exists in the current file content, so removing it from your edit alone is not enough — delete the committed secret from the file.`
+          : teamMemoryError;
+        error = {
+          display: message,
+          raw: message,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        };
+      }
+    }
+
     return {
       currentContent,
       newContent,
@@ -272,12 +384,20 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   }
 
   /**
-   * Edit operations always need user confirmation, except for managed
-   * auto-memory files which are written autonomously by the model.
+   * Edit operations always need user confirmation, except for the private
+   * managed auto-memory files (user/project) which are written autonomously.
+   * Team memory is shared and committed to the repo, so it is NOT auto-allowed
+   * like the private tiers — edits default to 'ask'. (In AUTO_EDIT/YOLO the user
+   * has globally opted into auto-approval; team writes still surface in the git
+   * diff for review before commit.)
    */
   async getDefaultPermission(): Promise<PermissionDecision> {
     const projectRoot = this.config.getProjectRoot();
-    if (isAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+    const filePath = path.resolve(this.params.file_path);
+    if (isTeamAutoMemPath(filePath, projectRoot)) {
+      return 'ask';
+    }
+    if (isAnyAutoMemPath(filePath, projectRoot)) {
       return 'allow';
     }
     return 'ask';
@@ -301,7 +421,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     if (editData.error) {
-      throw new Error(`Edit error: ${editData.error.display}`);
+      // Use the full `raw` message, not the short `display` form:
+      // the scheduler propagates `error.message` straight into the
+      // model-facing tool response. `raw` carries the remediation
+      // detail (file path, stale-vs-unread distinction, "without
+      // offset / limit / pages" hint) that `execute()` already
+      // surfaces — confirmation-required flows should not lose it.
+      throw new StructuredToolError(editData.error.raw, editData.error.type);
     }
 
     const fileName = path.basename(this.params.file_path);
@@ -339,17 +465,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       return `Create ${shortenPath(relativePath)}`;
     }
 
-    const oldStringSnippet =
-      this.params.old_string.split('\n')[0].substring(0, 30) +
-      (this.params.old_string.length > 30 ? '...' : '');
-    const newStringSnippet =
-      this.params.new_string.split('\n')[0].substring(0, 30) +
-      (this.params.new_string.length > 30 ? '...' : '');
-
     if (this.params.old_string === this.params.new_string) {
       return `No file changes to ${shortenPath(relativePath)}`;
     }
-    return `${shortenPath(relativePath)}: ${oldStringSnippet} => ${newStringSnippet}`;
+    return shortenPath(relativePath);
   }
 
   /**
@@ -388,6 +507,96 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     try {
+      // Backup the pre-edit content BEFORE the final freshness check.
+      // Mirrors the upstream `claude-code/src/tools/FileEditTool` ordering,
+      // which has an explicit comment on the equivalent block:
+      //
+      //   "These awaits must stay OUTSIDE the critical section below — a
+      //    yield between the staleness check and writeTextContent lets
+      //    concurrent edits interleave."
+      //
+      // `trackEdit` does `stat` + `copyFile` and on large files can take
+      // hundreds of milliseconds. The previous ordering ran it AFTER
+      // `checkPriorRead` and before `writeTextFile`, which widened the
+      // already-acknowledged stat-then-write window from "two adjacent
+      // syscalls" to "freshness check → potentially-multi-second backup →
+      // write". An external mutation landing inside the backup window was
+      // therefore no longer detected before the write clobbered it.
+      //
+      // Backing up first is safe: backups are idempotent (deterministic
+      // `{hash}@v{version}` filename) and per-snapshot. If the freshness
+      // check below then rejects the edit, we keep an unused-but-correct
+      // backup of the pre-edit state — not corrupt state. The next
+      // makeSnapshot will reuse it if the file is unchanged.
+      try {
+        await this.config
+          .getFileHistoryService()
+          .trackEdit(this.params.file_path);
+      } catch {
+        // File history is best-effort; never block core tool operations.
+      }
+
+      // Final pre-write freshness check. calculateEdit() ran a
+      // post-read check, but execute() can be called arbitrarily
+      // long after that (user approval, modify-and-confirm, etc.).
+      // Between the post-read check and the writeTextFile below,
+      // an external mutation could land and be silently overwritten.
+      // This last guard tightens the window from "post-read →
+      // writeTextFile (unbounded)" to "stat → writeTextFile (two
+      // adjacent syscalls)".
+      //
+      // It does NOT eliminate the race. A concurrent writer that
+      // lands between this stat and the writeTextFile call below
+      // can still be clobbered — that residual is an OS-level
+      // limitation of the stat-then-write pattern, and the only
+      // way to close it is an atomic write (write to a temp file,
+      // then rename) or a content-hash post-check that re-reads
+      // the bytes after the write. Both are deferred to a follow-up
+      // PR; operators who care about strict overwrite-protection
+      // should set `fileReadCacheDisabled: true` and rely on
+      // application-level locking.
+      //
+      // Run unconditionally (not gated on `editData.isNewFile`):
+      // `isNewFile` was decided back in calculateEdit, but a file
+      // could be created in the gap between then and now and a
+      // confirmation-pending Edit would otherwise clobber it
+      // without enforcement. ENOENT inside checkPriorRead returns
+      // ok:true so genuine new-file creation is unaffected.
+      if (!this.config.getFileReadCacheDisabled()) {
+        const writeDecision = await checkPriorRead(
+          this.config.getFileReadCache(),
+          this.params.file_path,
+          'editing',
+          // For an in-place edit (`!isNewFile`), the file existed at
+          // read time and must still exist now — an ENOENT here
+          // means the original target disappeared and we should
+          // reject rather than fall through to a new-file write
+          // that would silently re-create a file from stale bytes.
+          // For genuine new-file creation, ENOENT is the expected
+          // pre-write state (ok:true → writeTextFile creates).
+          { expectExisting: !editData.isNewFile },
+        );
+        if (!writeDecision.ok) {
+          debugLogger.warn('pre-write TOCTOU rejection', {
+            path: this.params.file_path,
+            reason: writeDecision.type,
+          });
+          return {
+            llmContent: writeDecision.rawMessage,
+            returnDisplay: `Error: ${writeDecision.displayMessage}`,
+            error: {
+              message: writeDecision.rawMessage,
+              type: writeDecision.type,
+            },
+          };
+        }
+      }
+
+      // Create parent directories AFTER the pre-write enforcement
+      // check passes. Doing it before would leak intermediate
+      // directories on the failure path — a real (if minor) FS
+      // litter that the previous order created on every rejected
+      // edit.
       this.ensureParentDirectoriesExist(this.params.file_path);
 
       // For new files, apply default file encoding setting
@@ -418,6 +627,34 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
             lineEnding: editData.lineEnding,
           },
         });
+      }
+
+      // Track AI contribution for commit attribution
+      if (!this.params.modified_by_user) {
+        CommitAttributionService.getInstance().recordEdit(
+          this.params.file_path,
+          editData.currentContent,
+          editData.newContent,
+        );
+      }
+
+      // Mark the cache entry written, capturing the post-write stats
+      // so a follow-up Read sees `lastReadAt < lastWriteAt` and falls
+      // through to the full pipeline instead of returning the
+      // pre-edit placeholder. Best-effort: a stat failure here does
+      // not undo the successful write — the next Read will simply
+      // re-stat and treat the cache entry as stale.
+      try {
+        const postWriteStats = fs.statSync(this.params.file_path);
+        this.config
+          .getFileReadCache()
+          .recordWrite(this.params.file_path, postWriteStats);
+      } catch {
+        // Non-fatal: leaving a stale entry is preferable to failing
+        // the user-visible Edit on a transient stat failure. The
+        // entry's mtime/size still does not match the on-disk bytes
+        // post-write, so the next ReadFile will report stale and
+        // refresh the entry.
       }
 
       const fileName = path.basename(this.params.file_path);
@@ -572,12 +809,25 @@ Expectation for required parameters:
   protected override validateToolParamValues(
     params: EditToolParams,
   ): string | null {
+    // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
+    // that may reach the LLM via at-completion or manual typing.
+    params.file_path = unescapePath(params.file_path.trim());
+
     if (!params.file_path) {
       return "The 'file_path' parameter must be non-empty.";
     }
 
     if (!path.isAbsolute(params.file_path)) {
       return `File path must be absolute: ${params.file_path}`;
+    }
+
+    const teamMemoryError = checkTeamMemorySecrets(
+      params.file_path,
+      params.new_string ?? '',
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return teamMemoryError;
     }
 
     return null;
@@ -587,6 +837,29 @@ Expectation for required parameters:
     params: EditToolParams,
   ): ToolInvocation<EditToolParams, ToolResult> {
     return new EditToolInvocation(this.config, params);
+  }
+
+  override toAutoClassifierInput(
+    params: EditToolParams,
+  ): Record<string, unknown> {
+    const oldStr = params.old_string ?? '';
+    const newStr = params.new_string ?? '';
+    // 300 chars is enough headroom for the classifier to spot a malicious
+    // registry / shell / env line that hides behind a benign-looking
+    // prefix (~80 chars). In-workspace edits take the acceptEdits fast-
+    // path and never reach this projection; the preview is therefore
+    // only consulted for the smaller set of out-of-workspace writes
+    // (~/.npmrc, /etc/hosts, etc.) — exactly the case where the
+    // classifier needs the longer window.
+    return {
+      file_path: params.file_path,
+      old_string_preview: oldStr.slice(0, 300),
+      new_string_preview: newStr.slice(0, 300),
+      old_string_truncated: oldStr.length > 300,
+      new_string_truncated: newStr.length > 300,
+      lines_changed:
+        (newStr.match(/\n/g)?.length ?? 0) - (oldStr.match(/\n/g)?.length ?? 0),
+    };
   }
 
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {

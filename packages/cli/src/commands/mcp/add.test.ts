@@ -5,8 +5,10 @@
  */
 
 import yargs from 'yargs';
+import type { Argv } from 'yargs';
 import { addCommand } from './add.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
+import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -27,10 +29,13 @@ vi.mock('fs/promises', async (importOriginal) => {
   };
 });
 
-vi.mock('os', () => {
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
   const homedir = vi.fn(() => '/home/user');
   return {
+    ...actual,
     default: {
+      ...actual,
       homedir,
     },
     homedir,
@@ -45,11 +50,11 @@ vi.mock('../../config/settings.js', async () => {
   };
 });
 
-const mockedLoadSettings = loadSettings as vi.Mock;
+const mockedLoadSettings = loadSettings as Mock;
 
 describe('mcp add command', () => {
-  let parser: yargs.Argv;
-  let mockSetValue: vi.Mock;
+  let parser: Argv;
+  let mockSetValue: Mock;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -79,6 +84,17 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should preserve equals signs in env values', async () => {
+    await parser.parseAsync('add my-server /path/to/server -e TOKEN=a=b=c');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        command: '/path/to/server',
+        env: { TOKEN: 'a=b=c' },
+      }),
+    });
+  });
+
   it('should auto-detect http transport when commandOrUrl is an https URL', async () => {
     await parser.parseAsync('add http-server https://example.com/mcp');
 
@@ -95,6 +111,16 @@ describe('mcp add command', () => {
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'http-server': {
         httpUrl: 'http://localhost:8080/mcp',
+      },
+    });
+  });
+
+  it('should auto-detect http transport when commandOrUrl uses an uppercase URL scheme', async () => {
+    await parser.parseAsync('add http-server HTTPS://example.com/mcp');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'http-server': {
+        httpUrl: 'HTTPS://example.com/mcp',
       },
     });
   });
@@ -245,7 +271,7 @@ describe('mcp add command', () => {
           .spyOn(process, 'exit')
           .mockImplementation((() => {
             throw new Error('process.exit called');
-          }) as (code?: number) => never);
+          }) as typeof process.exit);
 
         await expect(
           parser.parseAsync(`add --scope project ${serverName} ${command}`),
@@ -363,6 +389,118 @@ describe('mcp add command', () => {
           [serverName]: expect.objectContaining({
             command: updatedCommand,
             args: updatedArgs,
+          }),
+        }),
+      );
+    });
+  });
+
+  describe('OAuth configuration', () => {
+    it('should add OAuth config when OAuth options are provided', async () => {
+      await parser.parseAsync(
+        'add oauth-server https://example.com/mcp --transport http ' +
+          '--oauth-client-id test-client-id ' +
+          '--oauth-client-secret test-client-secret ' +
+          '--oauth-redirect-uri https://example.com/oauth/callback ' +
+          '--oauth-authorization-url https://provider.example.com/authorize ' +
+          '--oauth-token-url https://provider.example.com/token ' +
+          '--oauth-scopes read,write',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'oauth-server': expect.objectContaining({
+            httpUrl: 'https://example.com/mcp',
+            oauth: {
+              enabled: true,
+              clientId: 'test-client-id',
+              clientSecret: 'test-client-secret',
+              redirectUri: 'https://example.com/oauth/callback',
+              authorizationUrl: 'https://provider.example.com/authorize',
+              tokenUrl: 'https://provider.example.com/token',
+              scopes: ['read', 'write'],
+            },
+          }),
+        }),
+      );
+    });
+
+    it('should add OAuth config with only redirect URI', async () => {
+      await parser.parseAsync(
+        'add oauth-server https://example.com/mcp --transport sse ' +
+          '--oauth-redirect-uri https://example.com/oauth/callback',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'oauth-server': expect.objectContaining({
+            url: 'https://example.com/mcp',
+            oauth: {
+              enabled: true,
+              redirectUri: 'https://example.com/oauth/callback',
+            },
+          }),
+        }),
+      );
+    });
+
+    it('should not include oauth field when no OAuth options are provided', async () => {
+      await parser.parseAsync(
+        'add my-server https://example.com/mcp --transport http',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'my-server': expect.objectContaining({
+            httpUrl: 'https://example.com/mcp',
+          }),
+        }),
+      );
+    });
+
+    it('should reject OAuth options when transport is stdio', async () => {
+      const mockProcessExit = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((() => {
+          throw new Error('process.exit called');
+        }) as typeof process.exit);
+
+      await expect(
+        parser.parseAsync(
+          'add stdio-server /usr/bin/my-server --transport stdio ' +
+            '--oauth-client-id id',
+        ),
+      ).rejects.toThrow('process.exit called');
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'OAuth options (--oauth-*) are only supported with --transport sse or --transport http.',
+        ),
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+      expect(mockSetValue).not.toHaveBeenCalled();
+    });
+
+    it('should split comma-separated scopes and trim whitespace', async () => {
+      await parser.parseAsync(
+        'add oauth-server https://example.com/mcp --transport http ' +
+          '--oauth-scopes "read, write , admin"',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'oauth-server': expect.objectContaining({
+            oauth: expect.objectContaining({
+              scopes: ['read', 'write', 'admin'],
+            }),
           }),
         }),
       );

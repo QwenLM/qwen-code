@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { resolveEnvVars, parseChannelConfig } from './config-utils.js';
 
 // Mock the channel-registry so we don't pull in real plugins
@@ -65,6 +67,29 @@ describe('parseChannelConfig', () => {
     await expect(
       parseChannelConfig('bot', { type: 'telegram' }),
     ).rejects.toThrow('requires "token"');
+  });
+
+  it('throws a clear error when token is not a string', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'telegram', token: 123 }),
+    ).rejects.toThrow('Channel "bot" field "token" must be a string.');
+  });
+
+  it('throws a clear error when dingtalk credentials are not strings', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 123,
+        clientSecret: 'secret',
+      }),
+    ).rejects.toThrow('Channel "bot" field "clientId" must be a string.');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: false,
+      }),
+    ).rejects.toThrow('Channel "bot" field "clientSecret" must be a string.');
   });
 
   it('parses minimal valid config with defaults', async () => {
@@ -136,5 +161,38 @@ describe('parseChannelConfig', () => {
       customField: 42,
     });
     expect((result as Record<string, unknown>)['customField']).toBe(42);
+  });
+
+  it('expands tilde in cwd (~/x → $HOME/x)', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: '~/xomo',
+    });
+    expect(result.cwd).toBe(path.join(os.homedir(), 'xomo'));
+  });
+
+  it('expands bare tilde (~) in cwd to home directory', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: '~',
+    });
+    expect(result.cwd).toBe(os.homedir());
+  });
+
+  it('resolves relative cwd against process.cwd', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: 'relative/dir',
+    });
+    expect(result.cwd).toBe(path.resolve('relative/dir'));
+  });
+
+  it('leaves absolute cwd unchanged', async () => {
+    const abs = path.resolve('/custom');
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: abs,
+    });
+    expect(result.cwd).toBe(abs);
   });
 });

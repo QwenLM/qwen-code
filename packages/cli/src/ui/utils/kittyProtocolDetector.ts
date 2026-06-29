@@ -86,9 +86,11 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
           protocolSupported = true;
           protocolEnabled = true;
 
-          // Set up cleanup on exit
+          // Set up cleanup on exit (exit covers process.exit() calls,
+          // SIGTERM/SIGINT cover signal-based terminations).
           process.on('exit', disableProtocol);
           process.on('SIGTERM', disableProtocol);
+          process.on('SIGINT', disableProtocol);
         }
 
         detectionComplete = true;
@@ -114,6 +116,15 @@ function disableProtocol() {
     process.stdout.write('\x1b[<u');
     protocolEnabled = false;
   }
+}
+
+/**
+ * Explicitly disables the Kitty keyboard protocol. Should be called during
+ * application cleanup before process.exit() to ensure the terminal is restored
+ * even if the 'exit' event handler does not fire in time (e.g. on SIGKILL).
+ */
+export function disableKittyProtocol(): void {
+  disableProtocol();
 }
 
 export function isKittyProtocolEnabled(): boolean {

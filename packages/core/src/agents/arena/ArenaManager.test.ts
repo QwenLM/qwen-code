@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import { ArenaManager } from './ArenaManager.js';
 import { ArenaEventType } from './arena-events.js';
 import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
+import { AgentStatus } from '../runtime/agent-types.js';
 
 const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
 const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
@@ -28,7 +29,19 @@ vi.mock('../index.js', async (importOriginal) => {
 
 // Mock GitWorktreeService to avoid real git operations.
 // The class mock includes static methods used by ArenaManager.
-vi.mock('../../services/gitWorktreeService.js', () => {
+//
+// Preserve every other export via `importActual` so unrelated
+// consumers of the module (e.g. `worktreeCleanup.ts` →
+// `AGENT_WORKTREE_SLUG_PATTERN`, `worktreeBranchForSlug`,
+// `generateAgentWorktreeSlug`, `WORKTREE_BRANCH_PREFIX`,
+// session-marker helpers) keep working. Without this, vitest replaces
+// the entire module surface and any static import of those constants
+// elsewhere in the dependency graph blows up at load time.
+vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../services/gitWorktreeService.js')
+    >();
   const MockClass = vi.fn().mockImplementation(() => ({
     checkGitAvailable: vi.fn().mockResolvedValue({ available: true }),
     isGitRepository: vi.fn().mockResolvedValue(true),
@@ -46,7 +59,7 @@ vi.mock('../../services/gitWorktreeService.js', () => {
   (MockClass as unknown as Record<string, unknown>)['getWorktreesDir'] = (
     sessionId: string,
   ) => path.join(os.tmpdir(), 'arena-mock', sessionId, 'worktrees');
-  return { GitWorktreeService: MockClass };
+  return { ...actual, GitWorktreeService: MockClass };
 });
 
 // Mock the Config class
@@ -374,6 +387,134 @@ describe('ArenaManager', () => {
   });
 
   describe('active session lifecycle', () => {
+    it('collects diff summaries and fallback approach summaries', async () => {
+      const manager = new ArenaManager(mockConfig as never);
+      mockBackend.setAutoExit(false);
+      hoistedMockGetWorktreeDiff.mockResolvedValue(`diff --git a/src/auth.ts b/src/auth.ts
+index 111..222 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -1 +1,2 @@
+-old
++new
++extra`);
+
+      const startPromise = manager.start(createValidStartOptions());
+      await waitForCondition(
+        () => mockBackend.spawnAgent.mock.calls.length >= 2,
+      );
+
+      const agentsDir = path.join(
+        os.tmpdir(),
+        'arena-mock',
+        'testsess',
+        'agents',
+      );
+      await fs.mkdir(agentsDir, { recursive: true });
+      for (const modelId of ['model-1', 'model-2']) {
+        await fs.writeFile(
+          path.join(agentsDir, `${modelId}.json`),
+          JSON.stringify({
+            agentId: modelId,
+            status: AgentStatus.COMPLETED,
+            updatedAt: Date.now(),
+            rounds: 1,
+            stats: {
+              rounds: 1,
+              totalTokens: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              durationMs: 0,
+              toolCalls: 0,
+              successfulToolCalls: 0,
+              failedToolCalls: 0,
+            },
+            finalSummary: null,
+            error: null,
+          }),
+          'utf-8',
+        );
+      }
+
+      const result = await startPromise;
+
+      expect(result.agents).toHaveLength(2);
+      expect(result.agents[0]?.modifiedFiles).toEqual(['src/auth.ts']);
+      expect(result.agents[0]?.diffSummary).toEqual({
+        files: [{ path: 'src/auth.ts', additions: 2, deletions: 1 }],
+        additions: 2,
+        deletions: 1,
+      });
+      expect(result.agents[0]?.approachSummary).toBe(
+        'Changed 1 file with 0 tool calls (+2/-1).',
+      );
+    });
+
+    it('routes all approach summaries through the chokepoint, not per-agent generators', async () => {
+      const summaryGenerateText = vi
+        .fn()
+        .mockResolvedValueOnce({
+          text: JSON.stringify({
+            summary: 'Model 1 used a strategy pattern.',
+          }),
+          usage: undefined,
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify({
+            summary: 'Model 2 made inline edits.',
+          }),
+          usage: undefined,
+        });
+      const config = {
+        ...mockConfig,
+        getBaseLlmClient: () => ({
+          generateText: summaryGenerateText,
+        }),
+      };
+      mockBackend.type = 'in-process';
+      mockBackend.setAutoExit(false);
+      const agentInteractives = new Map<
+        string,
+        ReturnType<typeof createMockInteractive>
+      >();
+      mockBackend.getAgent.mockImplementation((agentId: string) =>
+        agentInteractives.get(agentId),
+      );
+      mockBackend.spawnAgent.mockImplementation(
+        async (config: { agentId: string }) => {
+          agentInteractives.set(
+            config.agentId,
+            createMockInteractive(config.agentId),
+          );
+        },
+      );
+      const manager = new ArenaManager(config as never);
+
+      const result = await manager.start(createValidStartOptions());
+
+      // Both summaries should hit the single chokepoint generator.
+      expect(summaryGenerateText).toHaveBeenCalledTimes(2);
+
+      const callPrompts = summaryGenerateText.mock.calls.map(
+        (call: unknown[]) => {
+          const options = call[0] as {
+            contents: Array<{ parts: Array<{ text: string }> }>;
+          };
+          return options.contents[0]?.parts[0]?.text ?? '';
+        },
+      );
+      const allPrompts = callPrompts.join('\n');
+      expect(allPrompts).toContain('"agentId": "model-1"');
+      expect(allPrompts).toContain('"agentId": "model-2"');
+
+      expect(result.agents[0]?.approachSummary).toBe(
+        'Model 1 used a strategy pattern.',
+      );
+      expect(result.agents[1]?.approachSummary).toBe(
+        'Model 2 made inline edits.',
+      );
+    });
+
     it('cancel should stop backend and move session to CANCELLED', async () => {
       const manager = new ArenaManager(mockConfig as never);
 
@@ -434,7 +575,7 @@ function createMockBackend() {
   let autoExit = true;
 
   const backend = {
-    type: 'tmux' as const,
+    type: 'tmux' as 'tmux' | 'in-process',
     init: vi.fn().mockResolvedValue(undefined),
     spawnAgent: vi.fn(async (config: { agentId: string }) => {
       // By default, simulate immediate agent termination so tests
@@ -461,12 +602,43 @@ function createMockBackend() {
     writeToAgent: vi.fn().mockReturnValue(false),
     resizeAll: vi.fn(),
     getAttachHint: vi.fn().mockReturnValue(null),
+    getAgent: vi.fn().mockReturnValue(undefined),
     /** Disable automatic agent exit for tests that need to control timing. */
     setAutoExit(value: boolean) {
       autoExit = value;
     },
   };
   return backend;
+}
+
+function createMockInteractive(agentId: string) {
+  const emitter = {
+    on: vi.fn(),
+    off: vi.fn(),
+  };
+  return {
+    getMessages: vi.fn().mockReturnValue([
+      {
+        role: 'assistant',
+        content: `${agentId} final response`,
+        timestamp: Date.now(),
+      },
+    ]),
+    getStatus: vi.fn().mockReturnValue(AgentStatus.IDLE),
+    getStats: vi.fn().mockReturnValue({
+      rounds: 1,
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalToolCalls: 0,
+      successfulToolCalls: 0,
+      failedToolCalls: 0,
+      totalDurationMs: 1,
+    }),
+    getLastRoundError: vi.fn().mockReturnValue(undefined),
+    getError: vi.fn().mockReturnValue(undefined),
+    getEventEmitter: vi.fn().mockReturnValue(emitter),
+  };
 }
 
 function createValidStartOptions() {

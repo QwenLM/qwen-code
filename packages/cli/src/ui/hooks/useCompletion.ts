@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+
+export interface UseCompletionOptions {
+  /** When the completion query changes, the dismissed flag is cleared
+   *  (unless dismissCompletion was just called). */
+  query?: string | null;
+}
 
 export interface UseCompletionReturn {
   suggestions: Suggestion[];
@@ -16,18 +22,23 @@ export interface UseCompletionReturn {
   showSuggestions: boolean;
   isLoadingSuggestions: boolean;
   isPerfectMatch: boolean;
+  dismissed: boolean;
   setSuggestions: React.Dispatch<React.SetStateAction<Suggestion[]>>;
   setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   setVisibleStartIndex: React.Dispatch<React.SetStateAction<number>>;
   setIsLoadingSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   setIsPerfectMatch: React.Dispatch<React.SetStateAction<boolean>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
+  /** Dismisses the completion dropdown and prevents re-open until query changes. */
+  dismissCompletion: () => void;
   resetCompletionState: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
 }
 
-export function useCompletion(): UseCompletionReturn {
+export function useCompletion(
+  options: UseCompletionOptions = {},
+): UseCompletionReturn {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [activeSuggestionIndex, setActiveSuggestionIndex] =
     useState<number>(-1);
@@ -36,6 +47,12 @@ export function useCompletion(): UseCompletionReturn {
   const [isLoadingSuggestions, setIsLoadingSuggestions] =
     useState<boolean>(false);
   const [isPerfectMatch, setIsPerfectMatch] = useState<boolean>(false);
+  const [dismissed, setDismissed] = useState<boolean>(false);
+  // Skip the next clearDismissed call when the query changes due to an
+  // accepted suggestion (dismissCompletion).  Accepting a suggestion also
+  // mutates the buffer → changes the query, but we don't want to reset
+  // dismissed in that case.
+  const skipNextClearRef = useRef<boolean>(false);
 
   const resetCompletionState = useCallback(() => {
     setSuggestions([]);
@@ -44,7 +61,29 @@ export function useCompletion(): UseCompletionReturn {
     setShowSuggestions(false);
     setIsLoadingSuggestions(false);
     setIsPerfectMatch(false);
+    setDismissed(false);
   }, []);
+
+  const dismissCompletion = useCallback(() => {
+    resetCompletionState();
+    setDismissed(true);
+    skipNextClearRef.current = true;
+  }, [resetCompletionState]);
+
+  // Clear dismissed flag when the completion query changes (user typed more).
+  // Skip the clear on the render immediately following a dismiss, since
+  // accepting a suggestion also changes the query.
+  const prevQueryRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (options.query !== prevQueryRef.current) {
+      if (skipNextClearRef.current) {
+        skipNextClearRef.current = false;
+      } else {
+        setDismissed(false);
+      }
+      prevQueryRef.current = options.query;
+    }
+  }, [options.query]);
 
   const navigateUp = useCallback(() => {
     if (suggestions.length === 0) return;
@@ -104,6 +143,7 @@ export function useCompletion(): UseCompletionReturn {
       return newActiveIndex;
     });
   }, [suggestions.length]);
+
   return {
     suggestions,
     activeSuggestionIndex,
@@ -111,6 +151,7 @@ export function useCompletion(): UseCompletionReturn {
     showSuggestions,
     isLoadingSuggestions,
     isPerfectMatch,
+    dismissed,
 
     setSuggestions,
     setShowSuggestions,
@@ -120,6 +161,7 @@ export function useCompletion(): UseCompletionReturn {
     setIsPerfectMatch,
 
     resetCompletionState,
+    dismissCompletion,
     navigateUp,
     navigateDown,
   };

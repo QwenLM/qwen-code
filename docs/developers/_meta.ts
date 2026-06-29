@@ -10,8 +10,9 @@ export default {
     title: 'Agent SDK',
     type: 'separator',
   },
-  'sdk-typescript': 'Typescript SDK',
-  'sdk-java': 'Java SDK(alpha)',
+  'sdk-typescript': 'TypeScript SDK',
+  'sdk-python': 'Python SDK (alpha)',
+  'sdk-java': 'Java SDK (alpha)',
   'Dive Into Qwen Code': {
     title: 'Dive Into Qwen Code',
     type: 'separator',
@@ -19,6 +20,8 @@ export default {
 
   'channel-plugins': 'Channel Plugin Guide',
   tools: 'Tools',
+  'qwen-serve-protocol': 'qwen serve HTTP protocol',
+  daemon: 'Daemon Mode (Developer Deep Dive)',
 
   examples: {
     display: 'hidden',

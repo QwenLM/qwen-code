@@ -10,6 +10,82 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MCP_OAUTH');
 
+function splitAuthParams(value: string): string[] {
+  const params: string[] = [];
+  let start = 0;
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (quote) {
+      if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      const beforeQuote = value.slice(start, i).trimEnd();
+      if (beforeQuote.endsWith('=')) {
+        quote = char;
+      }
+      continue;
+    }
+
+    if (char === ',') {
+      params.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+
+  params.push(value.slice(start).trim());
+  return params;
+}
+
+function parseResourceMetadataParam(rawParam: string): string | null {
+  const param = rawParam.replace(/^Bearer\s+/i, '').trim();
+  const prefix = /^resource_metadata\s*=\s*/.exec(param);
+  if (!prefix) {
+    return null;
+  }
+
+  const rest = param.slice(prefix[0].length).trim();
+  const quote = rest[0];
+  if (quote !== '"' && quote !== "'") {
+    return null;
+  }
+
+  let value = '';
+  let escaped = false;
+  for (let i = 1; i < rest.length; i++) {
+    const char = rest[i];
+    if (escaped) {
+      value += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === quote) {
+      return rest.slice(i + 1).trim() === '' && value.length > 0 ? value : null;
+    }
+    value += char;
+  }
+
+  return null;
+}
+
 /**
  * OAuth authorization server metadata as per RFC 8414.
  */
@@ -297,10 +373,11 @@ export class OAuthUtils {
    * @returns The resource metadata URI if found
    */
   static parseWWWAuthenticateHeader(header: string): string | null {
-    // Parse Bearer realm and resource_metadata
-    const match = header.match(/resource_metadata="([^"]+)"/);
-    if (match) {
-      return match[1];
+    for (const rawParam of splitAuthParams(header)) {
+      const resourceMetadata = parseResourceMetadataParam(rawParam);
+      if (resourceMetadata !== null) {
+        return resourceMetadata;
+      }
     }
     return null;
   }

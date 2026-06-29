@@ -13,7 +13,12 @@ import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { getCacheSafeParams, runForkedAgent } from '@qwen-code/qwen-code-core';
+import {
+  BTW_MAX_INPUT_LENGTH,
+  buildBtwCacheSafeParams,
+  buildBtwPrompt,
+  runForkedAgent,
+} from '@qwen-code/qwen-code-core';
 
 function formatBtwError(error: unknown): string {
   return t('Failed to answer btw question: {{error}}', {
@@ -22,29 +27,12 @@ function formatBtwError(error: unknown): string {
   });
 }
 
-/**
- * Wrap the user's side question with constraints so the model knows it must
- * answer without tools in a single response.
- *
- * The system-reminder is embedded in the user message rather than overriding
- * systemInstruction, because runForkedAgent inherits systemInstruction from
- * CacheSafeParams (changing it would bust the prompt cache).
- */
-function buildBtwPrompt(question: string): string {
-  return [
-    '<system-reminder>',
-    'This is a side question from the user. Answer directly in a single response.',
-    '',
-    'CRITICAL CONSTRAINTS:',
-    '- You have NO tools available — you cannot read files, run commands, or take any actions.',
-    '- You can ONLY use information already present in the conversation context.',
-    '- NEVER promise to look something up or investigate further.',
-    '- If you do not know the answer, say so.',
-    '- The main conversation is NOT interrupted; you are a separate, lightweight fork.',
-    '</system-reminder>',
-    '',
-    question,
-  ].join('\n');
+function getBtwCacheSafeParams(context: CommandContext) {
+  const { config } = context.services;
+  if (config) {
+    return buildBtwCacheSafeParams(config);
+  }
+  return null;
 }
 
 /**
@@ -63,7 +51,7 @@ async function askBtw(
   const { config } = context.services;
   if (!config) throw new Error('Config not loaded');
 
-  const cacheSafeParams = getCacheSafeParams();
+  const cacheSafeParams = getBtwCacheSafeParams(context);
   if (!cacheSafeParams)
     throw new Error(t('No conversation context available for /btw'));
 
@@ -85,19 +73,28 @@ export const btwCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
     const question = args.trim();
-    const executionMode = context.executionMode ?? 'interactive';
-    const abortSignal = context.abortSignal ?? new AbortController().signal;
 
     if (!question) {
       return {
         type: 'message',
         messageType: 'error',
         content: t('Please provide a question. Usage: /btw <your question>'),
+      };
+    }
+
+    if (question.length > BTW_MAX_INPUT_LENGTH) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Question too long (max {{max}} chars)', {
+          max: String(BTW_MAX_INPUT_LENGTH),
+        }),
       };
     }
 
@@ -112,41 +109,24 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    // ACP mode: return a stream_messages async generator
-    if (executionMode === 'acp') {
-      const messages = async function* () {
-        try {
-          yield {
-            messageType: 'info' as const,
-            content: t('Thinking...'),
-          };
-
-          const answer = await askBtw(context, question, abortSignal);
-
-          yield {
-            messageType: 'info' as const,
-            content: `btw> ${question}\n${answer}`,
-          };
-        } catch (error) {
-          yield {
-            messageType: 'error' as const,
-            content: formatBtwError(error),
-          };
-        }
+    const model = config.getModel();
+    if (!model) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('No model configured.'),
       };
-
-      return { type: 'stream_messages', messages: messages() };
     }
 
-    // Non-interactive mode: return a simple message result
-    if (executionMode === 'non_interactive') {
+    const executionMode = context.executionMode ?? 'interactive';
+    if (executionMode !== 'interactive') {
       try {
-        const answer = await askBtw(context, question, abortSignal);
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: `btw> ${question}\n${answer}`,
-        };
+        const answer = await askBtw(
+          context,
+          question,
+          context.abortSignal ?? new AbortController().signal,
+        );
+        return { type: 'message', messageType: 'info', content: answer };
       } catch (error) {
         return {
           type: 'message',
@@ -158,7 +138,6 @@ export const btwCommand: SlashCommand = {
 
     // Interactive mode: use dedicated btwItem state for the fixed bottom area.
     // This does NOT occupy pendingItem, so the main conversation is never blocked.
-
     // Cancel any previous in-flight btw before starting a new one.
     ui.cancelBtw();
 

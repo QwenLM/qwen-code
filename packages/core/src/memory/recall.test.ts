@@ -20,6 +20,11 @@ vi.mock('./scan.js', async (importOriginal) => {
   return {
     ...actual,
     scanAutoMemoryTopicDocuments: vi.fn(),
+    // Explicit mock — recall now unions user-level docs into the pool, so
+    // leaving this on the real implementation would silently fall through
+    // to the filesystem (only "works" because the path doesn't exist and
+    // listMarkdownFiles swallows ENOENT). Defaults to an empty pool.
+    scanUserAutoMemoryTopicDocuments: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -57,6 +62,40 @@ const docs: ScannedAutoMemoryDocument[] = [
     description: 'User preferences',
     body: '# User Memory\n\n- User prefers terse responses.',
     mtimeMs: 1,
+  },
+];
+
+const activeToolDocs: ScannedAutoMemoryDocument[] = [
+  {
+    type: 'reference',
+    filePath: '/tmp/ata-tool.md',
+    relativePath: 'ata-tool.md',
+    filename: 'ata-tool.md',
+    title: 'ATA tool schema notes',
+    description:
+      'article-list-query parameter schema and failed tool-call attempts',
+    body: '# ATA tool schema notes\n\n- ata::article-list-query failed with guessed field mappings.',
+    mtimeMs: 4,
+  },
+  {
+    type: 'reference',
+    filePath: '/tmp/ata-gotcha.md',
+    relativePath: 'ata-gotcha.md',
+    filename: 'ata-gotcha.md',
+    title: 'ATA tool gotcha',
+    description: 'article-list-query known workaround for transient failures',
+    body: '# ATA tool gotcha\n\n- mcp__ata__article-list-query can return systemError during index rotation; retry after checking the ATA oncall note.',
+    mtimeMs: 6,
+  },
+  {
+    type: 'reference',
+    filePath: '/tmp/ata-owner.md',
+    relativePath: 'ata-owner.md',
+    filename: 'ata-owner.md',
+    title: 'ATA escalation',
+    description: 'ATA service owner and escalation path',
+    body: '# ATA escalation\n\n- Ask the ATA oncall when the service returns systemError.',
+    mtimeMs: 5,
   },
 ];
 
@@ -127,6 +166,33 @@ describe('auto-memory relevant recall', () => {
     );
     expect(result.selectedDocs.map((doc) => doc.filePath)).not.toContain(
       '/tmp/user.md',
+    );
+  });
+
+  it('keeps active tool schemas out of heuristic fallback', async () => {
+    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue(activeToolDocs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
+      new Error('selector failed'),
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'read the ATA article with article-list-query',
+      {
+        config: {} as Config,
+        recentTools: ['mcp__ata__article-list-query'],
+      },
+    );
+
+    expect(result.strategy).toBe('heuristic');
+    expect(result.selectedDocs.map((doc) => doc.filePath)).not.toContain(
+      '/tmp/ata-tool.md',
+    );
+    expect(result.selectedDocs.map((doc) => doc.filePath)).toContain(
+      '/tmp/ata-gotcha.md',
+    );
+    expect(result.selectedDocs.map((doc) => doc.filePath)).toContain(
+      '/tmp/ata-owner.md',
     );
   });
 });

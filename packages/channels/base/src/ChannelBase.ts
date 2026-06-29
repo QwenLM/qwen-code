@@ -13,6 +13,13 @@ export interface ChannelBaseOptions {
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
 type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
+type ActivePrompt = {
+  cancelled: boolean;
+  cancelRequested?: Promise<boolean>;
+  done: Promise<void>;
+  resolve: () => void;
+  stopStreaming?: () => void;
+};
 
 export abstract class ChannelBase {
   protected config: ChannelConfig;
@@ -29,10 +36,7 @@ export abstract class ChannelBase {
   private sessionQueues: Map<string, Promise<void>> = new Map();
 
   /** Per-session active prompt tracking for dispatch modes. */
-  private activePrompts: Map<
-    string,
-    { cancelled: boolean; done: Promise<void>; resolve: () => void }
-  > = new Map();
+  private activePrompts: Map<string, ActivePrompt> = new Map();
   /** Per-session message buffer for collect mode. */
   private collectBuffers: Map<
     string,
@@ -142,6 +146,57 @@ export abstract class ChannelBase {
     this.commands.set(name.toLowerCase(), handler);
   }
 
+  protected registerCancelCommand(name = 'cancel'): void {
+    this.registerCommand(name, async (envelope) => {
+      const activeSessionId = this.findActiveSessionId(envelope);
+      if (!activeSessionId) {
+        await this.sendMessage(
+          envelope.chatId,
+          'No request is currently running.',
+        );
+        return true;
+      }
+
+      const active = this.activePrompts.get(activeSessionId);
+      if (!active) {
+        await this.sendMessage(
+          envelope.chatId,
+          'No request is currently running.',
+        );
+        return true;
+      }
+
+      const cancelRequested =
+        active.cancelRequested ??
+        this.bridge.cancelSession(activeSessionId).then(
+          () => true,
+          (err) => {
+            process.stderr.write(
+              `[${this.name}] cancelSession failed for session=${activeSessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+            active.cancelRequested = undefined;
+            return false;
+          },
+        );
+      active.cancelRequested = cancelRequested;
+
+      const cancelSucceeded = await cancelRequested;
+      if (!cancelSucceeded) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Failed to cancel current request.',
+        );
+        return true;
+      }
+
+      active.cancelled = true;
+      active.stopStreaming?.();
+      this.collectBuffers.delete(activeSessionId);
+      await this.sendMessage(envelope.chatId, 'Cancelled current request.');
+      return true;
+    });
+  }
+
   /** Register shared slash commands. Called from constructor. */
   private registerSharedCommands(): void {
     const clearHandler: CommandHandler = async (envelope) => {
@@ -223,6 +278,18 @@ export abstract class ChannelBase {
     return parsed !== null && this.commands.has(parsed.command);
   }
 
+  private findActiveSessionId(envelope: Envelope): string | undefined {
+    const sessionId = this.router.getSession(
+      this.name,
+      envelope.senderId,
+      envelope.chatId,
+      envelope.threadId,
+    );
+    return sessionId && this.activePrompts.has(sessionId)
+      ? sessionId
+      : undefined;
+  }
+
   /**
    * Parse a slash command from message text.
    * Returns { command, args } or null if not a slash command.
@@ -269,6 +336,48 @@ export abstract class ChannelBase {
       envelope.threadId,
       this.config.cwd,
     );
+
+    // 3.5. Bang (!) shell command — direct execution, no LLM
+    if (envelope.text.startsWith('!')) {
+      const cmd = envelope.text.slice(1).trim();
+      const bridgeShellCommand = (
+        this.bridge as unknown as Record<string, unknown>
+      )['shellCommand'];
+      if (cmd && typeof bridgeShellCommand === 'function') {
+        try {
+          const result = (await bridgeShellCommand(sessionId, cmd)) as {
+            exitCode: number | null;
+            output: string;
+            aborted: boolean;
+          };
+          const longestRun = Math.max(
+            0,
+            ...Array.from(
+              (result.output || '').matchAll(/`+/g),
+              (m) => m[0].length,
+            ),
+          );
+          const fence = '`'.repeat(Math.max(3, longestRun + 1));
+          const output = result.output
+            ? `${fence}\n${result.output}\n${fence}`
+            : '(no output)';
+          const exitLine =
+            result.exitCode !== null && result.exitCode !== 0
+              ? `\nExit code: ${result.exitCode}`
+              : '';
+          await this.sendMessage(
+            envelope.chatId,
+            `$ ${cmd}\n${output}${exitLine}`,
+          );
+        } catch (error) {
+          await this.sendMessage(
+            envelope.chatId,
+            `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        return;
+      }
+    }
 
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
@@ -357,7 +466,11 @@ export abstract class ChannelBase {
       const done = new Promise<void>((r) => {
         doneResolve = r;
       });
-      const promptState = { cancelled: false, done, resolve: doneResolve };
+      const promptState: ActivePrompt = {
+        cancelled: false,
+        done,
+        resolve: doneResolve,
+      };
       this.activePrompts.set(sessionId, promptState);
 
       this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
@@ -370,9 +483,10 @@ export abstract class ChannelBase {
             send: (text) => this.sendMessage(envelope.chatId, text),
           })
         : null;
+      promptState.stopStreaming = () => streamer?.stop();
 
       const onChunk = (sid: string, chunk: string) => {
-        if (sid === sessionId) {
+        if (sid === sessionId && !promptState.cancelled) {
           this.onResponseChunk(envelope.chatId, chunk, sessionId);
           streamer?.push(chunk);
         }
@@ -385,7 +499,11 @@ export abstract class ChannelBase {
           imageMimeType,
         });
 
-        // If cancelled (steer mode), skip sending the response
+        if (promptState.cancelRequested && !promptState.cancelled) {
+          promptState.cancelled = await promptState.cancelRequested;
+        }
+
+        // If cancelled, skip sending the response
         if (!promptState.cancelled && response) {
           if (streamer) {
             await streamer.flush();
@@ -395,6 +513,7 @@ export abstract class ChannelBase {
         }
       } finally {
         this.bridge.off('textChunk', onChunk);
+        streamer?.stop();
         this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
         this.activePrompts.delete(sessionId);
         // Signal any steer waiter that we're done

@@ -180,6 +180,7 @@ export const useToolCalls = () => {
           title: safeTitle(update.title),
           status: update.status || 'pending',
           rawInput: update.rawInput as string | object | undefined,
+          rawOutput: update.rawOutput,
           content,
           locations: update.locations,
           timestamp: resolveTimestamp(update),
@@ -216,6 +217,9 @@ export const useToolCalls = () => {
             ...(update.kind && { kind: update.kind }),
             ...(update.title && { title: safeTitle(update.title) }),
             ...(update.status && { status: update.status }),
+            ...(update.rawOutput !== undefined && {
+              rawOutput: update.rawOutput,
+            }),
             content: mergedContent,
             ...(update.locations && { locations: update.locations }),
             timestamp: nextTimestamp,
@@ -227,6 +231,7 @@ export const useToolCalls = () => {
             title: update.title ? safeTitle(update.title) : '',
             status: update.status || 'pending',
             rawInput: update.rawInput as string | object | undefined,
+            rawOutput: update.rawOutput,
             content: updatedContent,
             locations: update.locations,
             timestamp: resolveTimestamp(update),
@@ -243,6 +248,18 @@ export const useToolCalls = () => {
    */
   const clearToolCalls = useCallback(() => {
     setToolCalls(new Map());
+  }, []);
+
+  const rewindToolCallsToTimestamp = useCallback((cutoffTimestamp: number) => {
+    setToolCalls((prevToolCalls) => {
+      const next = new Map<string, ToolCallData>();
+      for (const [id, toolCall] of prevToolCalls) {
+        if ((toolCall.timestamp ?? 0) < cutoffTimestamp) {
+          next.set(id, toolCall);
+        }
+      }
+      return next;
+    });
   }, []);
 
   /**
@@ -267,5 +284,6 @@ export const useToolCalls = () => {
     completedToolCalls,
     handleToolCallUpdate,
     clearToolCalls,
+    rewindToolCallsToTimestamp,
   };
 };

@@ -26,12 +26,12 @@ import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOu
 import {
   normalizePartList,
   extractPartsFromUserMessage,
-  extractUsageFromGeminiClient,
   computeUsageFromMetrics,
   buildSystemMessage,
   createToolProgressHandler,
   createAgentToolProgressHandler,
   functionResponsePartsToString,
+  insertAfterFunctionResponses,
   toolResultContent,
 } from './nonInteractiveHelpers.js';
 
@@ -40,26 +40,36 @@ vi.mock('../nonInteractiveCliCommands.js', () => ({
   getAvailableCommands: vi
     .fn()
     .mockImplementation(
-      async (
-        _config: unknown,
-        _signal: AbortSignal,
-        allowedBuiltinCommandNames?: string[],
-      ) => {
-        const allowedSet = new Set(allowedBuiltinCommandNames ?? []);
+      async (_config: unknown, _signal: AbortSignal, mode: string = 'acp') => {
         const allCommands = [
-          { name: 'help', kind: 'built-in' },
-          { name: 'commit', kind: 'file' },
-          { name: 'memory', kind: 'built-in' },
-          { name: 'init', kind: 'built-in' },
-          { name: 'summary', kind: 'built-in' },
-          { name: 'compress', kind: 'built-in' },
-        ];
+          {
+            name: 'help',
+            supportedModes: ['interactive'] as const,
+          },
+          {
+            name: 'commit',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+          {
+            name: 'memory',
+            supportedModes: ['interactive'] as const,
+          },
+          {
+            name: 'init',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+          {
+            name: 'summary',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+          {
+            name: 'compress',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+        ] as const;
 
-        // Filter commands: always include file commands, only include allowed built-in commands
-        return allCommands.filter(
-          (cmd) =>
-            cmd.kind === 'file' ||
-            (cmd.kind === 'built-in' && allowedSet.has(cmd.name)),
+        return allCommands.filter((cmd) =>
+          (cmd.supportedModes as readonly string[]).includes(mode),
         );
       },
     ),
@@ -230,104 +240,6 @@ describe('extractPartsFromUserMessage', () => {
   });
 });
 
-describe('extractUsageFromGeminiClient', () => {
-  it('should return undefined for null client', () => {
-    expect(extractUsageFromGeminiClient(null)).toBeUndefined();
-  });
-
-  it('should return undefined for non-object client', () => {
-    expect(extractUsageFromGeminiClient('not an object')).toBeUndefined();
-  });
-
-  it('should return undefined when getChat is not a function', () => {
-    const client = { getChat: 'not a function' };
-    expect(extractUsageFromGeminiClient(client)).toBeUndefined();
-  });
-
-  it('should return undefined when chat does not have getDebugResponses', () => {
-    const client = {
-      getChat: vi.fn().mockReturnValue({}),
-    };
-    expect(extractUsageFromGeminiClient(client)).toBeUndefined();
-  });
-
-  it('should extract usage from latest response with usageMetadata', () => {
-    const client = {
-      getChat: vi.fn().mockReturnValue({
-        getDebugResponses: vi.fn().mockReturnValue([
-          { usageMetadata: { promptTokenCount: 50 } },
-          {
-            usageMetadata: {
-              promptTokenCount: 100,
-              candidatesTokenCount: 200,
-              totalTokenCount: 300,
-              cachedContentTokenCount: 10,
-            },
-          },
-        ]),
-      }),
-    };
-    const result = extractUsageFromGeminiClient(client);
-    expect(result).toEqual({
-      input_tokens: 100,
-      output_tokens: 200,
-      total_tokens: 300,
-      cache_read_input_tokens: 10,
-    });
-  });
-
-  it('should return default values when metadata values are not numbers', () => {
-    const client = {
-      getChat: vi.fn().mockReturnValue({
-        getDebugResponses: vi.fn().mockReturnValue([
-          {
-            usageMetadata: {
-              promptTokenCount: 'not a number',
-              candidatesTokenCount: null,
-            },
-          },
-        ]),
-      }),
-    };
-    const result = extractUsageFromGeminiClient(client);
-    expect(result).toEqual({
-      input_tokens: 0,
-      output_tokens: 0,
-    });
-  });
-
-  it('should handle errors gracefully', () => {
-    const client = {
-      getChat: vi.fn().mockImplementation(() => {
-        throw new Error('Test error');
-      }),
-    };
-    const result = extractUsageFromGeminiClient(client);
-    expect(result).toBeUndefined();
-  });
-
-  it('should skip responses without usageMetadata', () => {
-    const client = {
-      getChat: vi.fn().mockReturnValue({
-        getDebugResponses: vi.fn().mockReturnValue([
-          { someOtherData: 'value' },
-          {
-            usageMetadata: {
-              promptTokenCount: 50,
-              candidatesTokenCount: 75,
-            },
-          },
-        ]),
-      }),
-    };
-    const result = extractUsageFromGeminiClient(client);
-    expect(result).toEqual({
-      input_tokens: 50,
-      output_tokens: 75,
-    });
-  });
-});
-
 describe('computeUsageFromMetrics', () => {
   it('should compute usage from SessionMetrics with single model', () => {
     const metrics: SessionMetrics = {
@@ -340,8 +252,8 @@ describe('computeUsageFromMetrics', () => {
             total: 150,
             cached: 10,
             thoughts: 0,
-            tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -382,8 +294,8 @@ describe('computeUsageFromMetrics', () => {
             total: 150,
             cached: 10,
             thoughts: 0,
-            tool: 0,
           },
+          bySource: {},
         },
         'model-2': {
           api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
@@ -393,8 +305,8 @@ describe('computeUsageFromMetrics', () => {
             total: 200,
             cached: 15,
             thoughts: 0,
-            tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -435,8 +347,8 @@ describe('computeUsageFromMetrics', () => {
             total: 0,
             cached: 10,
             thoughts: 0,
-            tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -520,12 +432,10 @@ describe('buildSystemMessage', () => {
   });
 
   it('should build system message with all fields', async () => {
-    const allowedBuiltinCommands = ['init', 'summary', 'compress'];
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      allowedBuiltinCommands,
     );
 
     expect(result).toEqual({
@@ -557,7 +467,6 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.tools).toEqual([]);
@@ -573,7 +482,6 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.mcp_servers).toEqual([]);
@@ -589,36 +497,38 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.qwen_code_version).toBe('unknown');
   });
 
-  it('should only include allowed built-in commands and all file commands', async () => {
-    const allowedBuiltinCommands = ['init', 'summary'];
+  it('should include local commands with ACP supportedModes and prompt commands', async () => {
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      allowedBuiltinCommands,
     );
 
-    // Should include: 'commit' (FILE), 'init' (BUILT_IN, allowed), 'summary' (BUILT_IN, allowed)
-    // Should NOT include: 'help', 'memory', 'compress' (BUILT_IN but not in allowed set)
-    expect(result.slash_commands).toEqual(['commit', 'init', 'summary']);
+    // Should include: 'commit' (prompt), 'compress', 'init', 'summary' (local+ACP)
+    // Should NOT include: 'help' (local-jsx), 'memory' (local without ACP supportedModes)
+    expect(result.slash_commands).toEqual([
+      'commit',
+      'compress',
+      'init',
+      'summary',
+    ]);
   });
 
-  it('should include only file commands when no built-in commands are allowed', async () => {
+  it('should exclude interactive-only commands from system message', async () => {
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      [], // Empty array - no built-in commands allowed
     );
 
-    // Should only include 'commit' (FILE command)
-    expect(result.slash_commands).toEqual(['commit']);
+    // 'help' (local-jsx) and 'memory' (local without ACP) should be excluded
+    expect(result.slash_commands).not.toContain('help');
+    expect(result.slash_commands).not.toContain('memory');
   });
 });
 
@@ -819,6 +729,64 @@ describe('createAgentToolProgressHandler', () => {
       expect.objectContaining({
         callId: 'tool-1',
         resultDisplay: 'Success result',
+      }),
+      'parent-tool-id',
+    );
+  });
+
+  it('forwards subagent tool args and response parts for JSON output', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          name: 'test_tool',
+          id: 'tool-1',
+          response: { output: 'Success from responseParts' },
+        },
+      },
+    ];
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: { arg1: 'value1' },
+          status: 'success',
+          responseParts,
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+        status: 'executing',
+      }),
+      'parent-tool-id',
+    );
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+      }),
+      expect.objectContaining({
+        callId: 'tool-1',
+        responseParts,
       }),
       'parent-tool-id',
     );
@@ -1293,5 +1261,42 @@ describe('toolResultContent', () => {
       errorType: undefined,
     };
     expect(toolResultContent(response)).toBeUndefined();
+  });
+});
+
+describe('insertAfterFunctionResponses', () => {
+  const fr = (id: string): Part => ({
+    functionResponse: { id, name: 'tool', response: { ok: true } },
+  });
+
+  it('inserts additions before the first non-functionResponse part', () => {
+    const parts: Part[] = [fr('a'), { text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([fr('a'), { text: 'reminder' }, { text: 'prompt' }]);
+  });
+
+  it('appends additions when every part is a functionResponse', () => {
+    const parts: Part[] = [fr('a'), fr('b')];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([fr('a'), fr('b'), { text: 'reminder' }]);
+  });
+
+  it('prepends additions when the first part is not a functionResponse', () => {
+    const parts: Part[] = [{ text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([{ text: 'reminder' }, { text: 'prompt' }]);
+  });
+
+  it('is a no-op shape with empty additions and does not mutate the input', () => {
+    const parts: Part[] = [fr('a'), { text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, []);
+    expect(result).toEqual([fr('a'), { text: 'prompt' }]);
+    expect(result).not.toBe(parts);
+  });
+
+  it('returns just the additions for empty parts', () => {
+    expect(insertAfterFunctionResponses([], [{ text: 'reminder' }])).toEqual([
+      { text: 'reminder' },
+    ]);
   });
 });
