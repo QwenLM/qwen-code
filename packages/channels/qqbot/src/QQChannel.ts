@@ -20,7 +20,7 @@ import {
 import type {
   ChannelConfig,
   ChannelBaseOptions,
-  AcpBridge,
+  ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -151,7 +151,7 @@ export class QQChannel extends ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig & Record<string, unknown>,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     const safeName = name.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -449,15 +449,16 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Workaround for SessionRouter.restoreSessions() storing undefined sessionIds
-   * when ACP bridge.loadSession() fails to return a session_id.
+   * Compatibility repair for legacy restored session state where older router
+   * code could keep an empty session id after bridge.loadSession() failed to
+   * return a session_id.
    *
    * **Fragile**: accesses SessionRouter's private `toSession`/`toTarget`/`toCwd`
    * maps via type coercion. If SessionRouter internals change, this breaks
    * silently. The only signal will be cross-server conversations failing to
    * restore after daemon restart — no crash, no log.
    *
-   * If upstream SessionRouter adds a public fix for this, remove this method.
+   * Keep this while old persisted files may still exist.
    */
   private fixRestoredSessions(): void {
     try {

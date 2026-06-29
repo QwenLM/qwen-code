@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { ChannelAgentBridge } from '@qwen-code/channel-base';
 import { isValidChatId, hasMarkdownSyntax, splitText } from './QQChannel.js';
 
 const {
@@ -277,7 +278,7 @@ describe('session persistence paths', () => {
         appID: 'test-app-id',
         appSecret: 'test-secret',
       },
-      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+      {} as unknown as ChannelAgentBridge,
       options,
     );
   }
@@ -328,7 +329,7 @@ describe('sendMessage', () => {
         appID: 'test-app-id',
         appSecret: 'test-secret',
       },
-      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+      {} as unknown as ChannelAgentBridge,
     );
 
     // Set internal state for sendMessage preconditions.
@@ -622,7 +623,7 @@ describe('gateway reconnect timer', () => {
         appID: 'test-app-id',
         appSecret: 'test-secret',
       },
-      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+      {} as unknown as ChannelAgentBridge,
     );
   }
 

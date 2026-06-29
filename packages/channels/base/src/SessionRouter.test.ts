@@ -1,10 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionRouter } from './SessionRouter.js';
-import type { AcpBridge } from './AcpBridge.js';
+import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 
 let sessionCounter = 0;
 
-function mockBridge(): AcpBridge {
+function mockBridge(): ChannelAgentBridge {
   return {
     newSession: vi.fn().mockImplementation(() => `session-${++sessionCounter}`),
     loadSession: vi.fn().mockImplementation((id: string) => id),
@@ -12,15 +21,40 @@ function mockBridge(): AcpBridge {
     off: vi.fn(),
     emit: vi.fn(),
     availableCommands: [],
-  } as unknown as AcpBridge;
+  } as unknown as ChannelAgentBridge;
+}
+
+function writePersistedSession(persistPath: string): void {
+  writeFileSync(
+    persistPath,
+    JSON.stringify({
+      key1: {
+        sessionId: 'old-session',
+        target: {
+          channelName: 'ch',
+          senderId: 'alice',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+      },
+    }),
+  );
 }
 
 describe('SessionRouter', () => {
-  let bridge: AcpBridge;
+  let bridge: ChannelAgentBridge;
+  let tempDirs: string[] = [];
 
   beforeEach(() => {
     sessionCounter = 0;
     bridge = mockBridge();
+    tempDirs = [];
+  });
+
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   describe('routing key scopes', () => {
@@ -226,6 +260,89 @@ describe('SessionRouter', () => {
       const sid = await router.resolve('ch', 'alice', 'chat1');
       router.removeSession('ch', 'alice', 'chat1');
       expect(router.getTarget(sid)).toBeUndefined();
+    });
+
+    it('removes a thread-scoped session using threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sid = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.removeSession('ch', 'alice', 'chat1', 'thread1')).toEqual([
+        sid,
+      ]);
+      expect(router.getTarget(sid)).toBeUndefined();
+    });
+
+    it('reports thread-scoped sessions using threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.hasSession('ch', 'bob', 'chat1', 'thread1')).toBe(true);
+      expect(router.hasSession('ch', 'bob', 'chat1', 'thread2')).toBe(false);
+    });
+  });
+
+  describe('removeSessionId', () => {
+    it('removes mappings by daemon session id', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+
+      expect(router.removeSessionId(sid)).toBe(true);
+      expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
+      expect(router.getTarget(sid)).toBeUndefined();
+      expect(router.removeSessionId('missing')).toBe(false);
+    });
+
+    it('persists after removing by daemon session id', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+
+      expect(existsSync(persistPath)).toBe(true);
+      expect(router.removeSessionId(sid)).toBe(true);
+
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+  });
+
+  describe('restoreSessions', () => {
+    it('treats falsy restored session ids as failed restores', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath);
+      bridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockResolvedValue(''),
+      } as unknown as ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+      expect(router.getAll()).toEqual([]);
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('treats non-string restored session ids as failed restores', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath);
+      bridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+      expect(router.getAll()).toEqual([]);
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
     });
   });
 

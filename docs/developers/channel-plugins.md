@@ -8,9 +8,11 @@ Your plugin sits in the Platform Adapter layer. You handle platform-specific con
 
 ```
 Your Plugin  →  builds Envelope  →  handleInbound()
-ChannelBase  →  gates → commands → routing → AcpBridge.prompt()
+ChannelBase  →  gates → commands → routing → ChannelAgentBridge.prompt()
 ChannelBase  →  calls your sendMessage() with the agent's response
 ```
+
+`ChannelAgentBridge` is the adapter-facing bridge contract. The current standalone `qwen channel start` path provides an `AcpBridge`, but plugin code should type constructor parameters as `ChannelAgentBridge` so the same adapter can run behind other bridge implementations later.
 
 ## The Plugin Object
 
@@ -35,9 +37,23 @@ Extend `ChannelBase` and implement three methods:
 
 ```typescript
 import { ChannelBase } from '@qwen-code/channel-base';
-import type { Envelope } from '@qwen-code/channel-base';
+import type {
+  ChannelBaseOptions,
+  ChannelAgentBridge,
+  ChannelConfig,
+  Envelope,
+} from '@qwen-code/channel-base';
 
 export class MyChannel extends ChannelBase {
+  constructor(
+    name: string,
+    config: ChannelConfig,
+    bridge: ChannelAgentBridge,
+    options?: ChannelBaseOptions,
+  ) {
+    super(name, config, bridge, options);
+  }
+
   async connect(): Promise<void> {
     // Connect to your platform, register message handlers
     // When a message arrives:

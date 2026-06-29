@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import type { SessionScope, SessionTarget } from './types.js';
-import type { AcpBridge } from './AcpBridge.js';
+import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 
 interface PersistedEntry {
   sessionId: string;
@@ -13,14 +13,14 @@ export class SessionRouter {
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
 
-  private bridge: AcpBridge;
+  private bridge: ChannelAgentBridge;
   private defaultCwd: string;
   private defaultScope: SessionScope;
   private channelScopes: Map<string, SessionScope> = new Map();
   private persistPath: string | undefined;
 
   constructor(
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     defaultCwd: string,
     scope: SessionScope = 'user',
     persistPath?: string,
@@ -32,7 +32,7 @@ export class SessionRouter {
   }
 
   /** Replace the bridge instance (used after crash recovery restart). */
-  setBridge(bridge: AcpBridge): void {
+  setBridge(bridge: ChannelAgentBridge): void {
     this.bridge = bridge;
   }
 
@@ -106,11 +106,18 @@ export class SessionRouter {
     );
   }
 
-  hasSession(channelName: string, senderId: string, chatId?: string): boolean {
+  hasSession(
+    channelName: string,
+    senderId: string,
+    chatId?: string,
+    threadId?: string,
+  ): boolean {
     // If chatId is provided, do an exact lookup; otherwise prefix-scan for any
     // session belonging to this sender on this channel.
     if (chatId) {
-      return this.toSession.has(this.routingKey(channelName, senderId, chatId));
+      return this.toSession.has(
+        this.routingKey(channelName, senderId, chatId, threadId),
+      );
     }
     const prefix = this.senderPrefix(channelName, senderId);
     for (const k of this.toSession.keys()) {
@@ -126,10 +133,11 @@ export class SessionRouter {
     channelName: string,
     senderId: string,
     chatId?: string,
+    threadId?: string,
   ): string[] {
     const removedIds: string[] = [];
     if (chatId) {
-      const key = this.routingKey(channelName, senderId, chatId);
+      const key = this.routingKey(channelName, senderId, chatId, threadId);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
     } else {
@@ -144,6 +152,27 @@ export class SessionRouter {
     }
     if (removedIds.length > 0) this.persist();
     return removedIds;
+  }
+
+  /** Remove a session mapping by daemon/ACP session ID. */
+  removeSessionId(sessionId: string): boolean {
+    let removed = false;
+    for (const [key, mappedSessionId] of [...this.toSession.entries()]) {
+      if (mappedSessionId === sessionId) {
+        this.toSession.delete(key);
+        removed = true;
+      }
+    }
+    if (this.toTarget.delete(sessionId)) {
+      removed = true;
+    }
+    if (this.toCwd.delete(sessionId)) {
+      removed = true;
+    }
+    if (removed) {
+      this.persist();
+    }
+    return removed;
   }
 
   private deleteByKey(key: string): string | null {
@@ -200,6 +229,10 @@ export class SessionRouter {
           entry.sessionId,
           entry.cwd,
         );
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          failed++;
+          continue;
+        }
         this.toSession.set(key, sessionId);
         this.toTarget.set(sessionId, entry.target);
         this.toCwd.set(sessionId, entry.cwd);

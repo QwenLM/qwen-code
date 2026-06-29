@@ -4,7 +4,10 @@ import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
-import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
+import type {
+  ChannelAgentBridge,
+  ToolCallEvent,
+} from './ChannelAgentBridge.js';
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -23,7 +26,7 @@ type ActivePrompt = {
 
 export abstract class ChannelBase {
   protected config: ChannelConfig;
-  protected bridge: AcpBridge;
+  protected bridge: ChannelAgentBridge;
   protected groupGate: GroupGate;
   protected gate: SenderGate;
   protected router: SessionRouter;
@@ -46,7 +49,7 @@ export abstract class ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     this.name = name;
@@ -86,7 +89,7 @@ export abstract class ChannelBase {
   abstract disconnect(): void;
 
   /** Replace the bridge instance (used after crash recovery restart). */
-  setBridge(bridge: AcpBridge): void {
+  setBridge(bridge: ChannelAgentBridge): void {
     this.bridge = bridge;
   }
 
@@ -204,6 +207,7 @@ export abstract class ChannelBase {
         this.name,
         envelope.senderId,
         envelope.chatId,
+        envelope.threadId,
       );
       if (removedIds.length > 0) {
         for (const id of removedIds) {
@@ -260,6 +264,7 @@ export abstract class ChannelBase {
         this.name,
         envelope.senderId,
         envelope.chatId,
+        envelope.threadId,
       );
       const policy = this.config.senderPolicy;
       const lines = [
@@ -340,16 +345,9 @@ export abstract class ChannelBase {
     // 3.5. Bang (!) shell command — direct execution, no LLM
     if (envelope.text.startsWith('!')) {
       const cmd = envelope.text.slice(1).trim();
-      const bridgeShellCommand = (
-        this.bridge as unknown as Record<string, unknown>
-      )['shellCommand'];
-      if (cmd && typeof bridgeShellCommand === 'function') {
+      if (cmd && this.bridge.shellCommand) {
         try {
-          const result = (await bridgeShellCommand(sessionId, cmd)) as {
-            exitCode: number | null;
-            output: string;
-            aborted: boolean;
-          };
+          const result = await this.bridge.shellCommand(sessionId, cmd);
           const longestRun = Math.max(
             0,
             ...Array.from(

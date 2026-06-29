@@ -1,10 +1,11 @@
 export { getGlobalQwenDir, resolvePath } from './paths.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
-  AcpBridgeOptions,
   AvailableCommand,
+  ChannelAgentBridge,
   ToolCallEvent,
-} from './AcpBridge.js';
+} from './ChannelAgentBridge.js';
+export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
   DaemonChannelBridgeOptions,

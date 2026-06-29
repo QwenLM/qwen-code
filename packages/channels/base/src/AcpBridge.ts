@@ -13,6 +13,12 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import type {
+  AvailableCommand,
+  ChannelAgentBridge,
+  ToolCallEvent,
+} from './ChannelAgentBridge.js';
+export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
@@ -20,22 +26,7 @@ export interface AcpBridgeOptions {
   model?: string;
 }
 
-export interface AvailableCommand {
-  name: string;
-  description: string;
-  input?: { hint: string } | null;
-}
-
-export interface ToolCallEvent {
-  sessionId: string;
-  toolCallId: string;
-  kind: string;
-  title: string;
-  status: string;
-  rawInput?: Record<string, unknown>;
-}
-
-export class AcpBridge extends EventEmitter {
+export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private child: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
   private options: AcpBridgeOptions;

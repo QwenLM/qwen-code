@@ -1,14 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FeishuChannel } from './FeishuAdapter.js';
-import type { ChannelConfig, AcpBridge } from '@qwen-code/channel-base';
+import type {
+  ChannelAgentBridge,
+  ChannelConfig,
+} from '@qwen-code/channel-base';
 
-function createMockBridge(): AcpBridge {
+function createMockBridge(): ChannelAgentBridge {
   return {
-    prompt: vi.fn().mockResolvedValue(undefined),
+    prompt: vi.fn().mockResolvedValue(''),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     on: vi.fn(),
     off: vi.fn(),
-  } as unknown as AcpBridge;
+    availableCommands: [],
+    newSession: vi.fn().mockResolvedValue('session-1'),
+    loadSession: vi.fn().mockImplementation((id: string) => id),
+  } as unknown as ChannelAgentBridge;
 }
 
 function createConfig(overrides?: Partial<ChannelConfig>): ChannelConfig {
@@ -392,7 +398,7 @@ describe('FeishuChannel', () => {
       });
 
       // Mock bridge
-      const bridge = getPrivateMethod<AcpBridge>(channel, 'bridge');
+      const bridge = getPrivateMethod<ChannelAgentBridge>(channel, 'bridge');
       const cancelSessionSpy = vi
         .spyOn(bridge, 'cancelSession')
         .mockResolvedValue(undefined);

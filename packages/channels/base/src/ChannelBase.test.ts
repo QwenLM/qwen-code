@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChannelConfig, Envelope } from './types.js';
-import type { AcpBridge } from './AcpBridge.js';
+import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import { ChannelBase } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 
@@ -48,7 +48,7 @@ class TestChannel extends ChannelBase {
   }
 }
 
-function createBridge(): AcpBridge {
+function createBridge(): ChannelAgentBridge {
   const emitter = new EventEmitter();
   let sessionCounter = 0;
   const bridge = Object.assign(emitter, {
@@ -62,7 +62,7 @@ function createBridge(): AcpBridge {
     availableCommands: [],
     setBridge: vi.fn(),
   });
-  return bridge as unknown as AcpBridge;
+  return bridge as unknown as ChannelAgentBridge;
 }
 
 function defaultConfig(overrides: Partial<ChannelConfig> = {}): ChannelConfig {
@@ -94,7 +94,7 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
 }
 
 describe('ChannelBase', () => {
-  let bridge: AcpBridge;
+  let bridge: ChannelAgentBridge;
 
   beforeEach(() => {
     bridge = createBridge();
@@ -729,6 +729,41 @@ describe('ChannelBase', () => {
       // The channel should use the new bridge for future messages
       // (this mainly ensures no crash)
       expect(() => ch.setBridge(newBridge)).not.toThrow();
+    });
+  });
+
+  describe('shell commands', () => {
+    it('runs ! commands through the bridge shellCommand hook when present', async () => {
+      const shellCommand = vi.fn().mockResolvedValue({
+        exitCode: 0,
+        output: 'hello',
+        aborted: false,
+      });
+      bridge = Object.assign(new EventEmitter(), {
+        ...bridge,
+        shellCommand,
+      }) as unknown as ChannelAgentBridge;
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ text: '!echo hello' }));
+
+      expect(shellCommand).toHaveBeenCalledWith('s-1', 'echo hello');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)).toEqual({
+        chatId: 'chat1',
+        text: '$ echo hello\n```\nhello\n```',
+      });
+    });
+
+    it('forwards ! messages to the agent when shellCommand is absent', async () => {
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ text: '!echo hello' }));
+
+      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '!echo hello', {
+        imageBase64: undefined,
+        imageMimeType: undefined,
+      });
     });
   });
 

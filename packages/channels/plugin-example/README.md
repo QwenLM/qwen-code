@@ -78,7 +78,7 @@ Mock Server (HTTP + WS)
   ↕ WebSocket
 MockPluginChannel (this package)
   → Envelope → ChannelBase.handleInbound()
-    → SenderGate → SessionRouter → AcpBridge.prompt()
+    → SenderGate → SessionRouter → ChannelAgentBridge.prompt()
       → qwen-code agent → model API
     ← response
   ← sendMessage() → WebSocket → Mock Server
@@ -91,8 +91,11 @@ See `src/MockPluginChannel.ts` for a working example. The key points:
 
 1. Extend `ChannelBase` and implement `connect()`, `sendMessage()`, `disconnect()`
 2. Build an `Envelope` from incoming platform messages and call `this.handleInbound(envelope)`
-3. Export a `plugin` object conforming to `ChannelPlugin`
-4. Add a `qwen-extension.json` manifest
+3. Type the adapter constructor bridge parameter as `ChannelAgentBridge`
+4. Export a `plugin` object conforming to `ChannelPlugin`
+5. Add a `qwen-extension.json` manifest
+
+`AcpBridge` is still the current standalone `qwen channel start` implementation. Plugin adapters should depend on the `ChannelAgentBridge` abstraction provided by `@qwen-code/channel-base`.
 
 ### Features you get for free
 

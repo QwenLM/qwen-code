@@ -7,6 +7,7 @@ import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
 import type {
+  ChannelAgentBridge,
   ChannelBase,
   ChannelPlugin,
   ToolCallEvent,
@@ -140,7 +141,7 @@ async function loadChannelsFromExtensions(): Promise<number> {
 async function createChannel(
   name: string,
   config: Awaited<ReturnType<typeof parseChannelConfig>>,
-  bridge: AcpBridge,
+  bridge: ChannelAgentBridge,
   options?: { router?: SessionRouter; proxy?: string },
 ): Promise<ChannelBase> {
   const channelPlugin = await getPlugin(config.type);
@@ -151,7 +152,7 @@ async function createChannel(
 }
 
 function registerToolCallDispatch(
-  bridge: AcpBridge,
+  bridge: ChannelAgentBridge,
   router: SessionRouter,
   channels: Map<string, ChannelBase>,
 ): void {
