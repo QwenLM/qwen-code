@@ -1034,6 +1034,56 @@ describe('runQwenServe runtime startup failures', () => {
     );
   });
 
+  it('does not retry deferred runtime after startup failure and later health probe', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-fail-once-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const firstHealthRes = await fetch(`${handle.url}/health`);
+      expect(firstHealthRes.status).toBe(200);
+      expect(await firstHealthRes.json()).toEqual({ status: 'ok' });
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+
+      const secondHealthRes = await fetch(`${handle.url}/health`);
+      expect(secondHealthRes.status).toBe(503);
+      expect(await secondHealthRes.json()).toMatchObject({
+        status: 'degraded',
+        error: 'runtime boom',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(createBridge).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('flushes runtime startup failures to the daemon log when closing', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-log-')),
