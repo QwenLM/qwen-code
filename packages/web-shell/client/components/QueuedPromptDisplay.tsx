@@ -54,8 +54,10 @@ export function QueuedPromptDisplay({
         const imageCount = prompt.images?.length ?? 0;
         const isCommand = isCommandPrompt(prompt.text);
         const isSubmitting = prompt.serverState === 'submitting';
+        const isRunning = prompt.serverState === 'running';
         const isRemoving = prompt.isRemoving === true;
-        const isBusy = isSubmitting || prompt.isEditing === true || isRemoving;
+        const isBusy =
+          isSubmitting || isRunning || prompt.isEditing === true || isRemoving;
         let insertTitle = t('queue.insertTip');
         if (isBusy) {
           insertTitle = t('queue.submittingDisabled');

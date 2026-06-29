@@ -3454,6 +3454,27 @@ describe('createAcpSessionBridge', () => {
       resolveFirst!();
       await p1;
       await p2;
+      await vi.waitFor(() => {
+        expect(
+          events.filter((e) => e.type === 'pending_prompt_started'),
+        ).toHaveLength(1);
+        expect(
+          events.filter(
+            (e) =>
+              e.type === 'pending_prompt_completed' &&
+              (e as BridgeEvent & { data: { state: string } }).data.state ===
+                'completed',
+          ),
+        ).toHaveLength(1);
+      });
+      const startedEvents = events.filter(
+        (e) => e.type === 'pending_prompt_started',
+      );
+      expect(startedEvents).toHaveLength(1);
+      expect(
+        (startedEvents[0] as BridgeEvent & { data: { text: string } }).data
+          .text,
+      ).toBe('queued behind first');
       expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
       sub.catch(() => {});
       await bridge.shutdown();

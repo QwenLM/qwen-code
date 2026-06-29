@@ -464,8 +464,10 @@ const EN: Messages = {
   'queue.submittingDisabled': 'Submitting queued message...',
   'queue.shellBlocked':
     "Shell commands can't be queued while a turn is running.",
+  'queue.queueFailed': 'Failed to queue message',
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.deleteFailed': 'Failed to move message out of queue',
+  'queue.editFailed': 'Failed to edit queued message',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
@@ -1663,8 +1665,10 @@ const ZH: Messages = {
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.shellBlocked': '当前回合运行时，Shell 命令不能进入排队。',
+  'queue.queueFailed': '排队消息失败',
   'queue.insertFailed': '插入排队消息失败',
   'queue.deleteFailed': '移出队列失败',
+  'queue.editFailed': '编辑排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
   'queue.more': (v) => `...（还有 ${v?.count ?? 0} 条）`,

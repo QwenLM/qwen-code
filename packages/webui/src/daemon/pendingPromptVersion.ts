@@ -107,8 +107,7 @@ export function publishPendingPromptEvent(event: unknown): boolean {
   if (
     parsed.type === PENDING_PROMPT_ADDED_EVENT ||
     parsed.type === PENDING_PROMPT_STARTED_EVENT ||
-    (parsed.type === PENDING_PROMPT_COMPLETED_EVENT &&
-      parsed.data.state === 'removed')
+    parsed.type === PENDING_PROMPT_COMPLETED_EVENT
   ) {
     bumpPendingPromptVersion();
   }

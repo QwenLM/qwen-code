@@ -1255,6 +1255,10 @@ export function App({
     },
     [pushToast],
   );
+  const notifySuccess = useCallback(
+    (message: string) => pushToast('success', message),
+    [pushToast],
+  );
 
   const {
     queuedPrompts,
@@ -1274,7 +1278,7 @@ export function App({
     store,
     editorRef,
     reportError,
-    notifySuccess: (message) => pushToast('success', message),
+    notifySuccess,
     t,
   });
 

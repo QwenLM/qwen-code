@@ -52,6 +52,27 @@ interface UseQueuedPromptsArgs {
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
 
+function areQueuedPromptsEqual(
+  left: readonly QueuedPrompt[],
+  right: readonly QueuedPrompt[],
+): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((prompt, index) => {
+    const other = right[index];
+    return (
+      other !== undefined &&
+      prompt.id === other.id &&
+      prompt.sessionId === other.sessionId &&
+      prompt.text === other.text &&
+      prompt.serverPromptId === other.serverPromptId &&
+      prompt.serverState === other.serverState &&
+      prompt.isEditing === other.isEditing &&
+      prompt.isRemoving === other.isRemoving &&
+      (prompt.images?.length ?? 0) === (other.images?.length ?? 0)
+    );
+  });
+}
+
 function toStoreImages(
   images: readonly PromptImage[] | undefined,
 ): Array<{ data: string; mimeType: string }> | undefined {
@@ -101,8 +122,10 @@ export function useQueuedPrompts({
   const completionCallbacksRef = useRef<Map<string, () => void>>(new Map());
   const completedPromptIdsRef = useRef<Set<string>>(new Set());
   const completedPromptIdOrderRef = useRef<string[]>([]);
+  const latestStreamingStateRef = useRef(streamingState);
 
   latestSessionIdRef.current = sessionId;
+  latestStreamingStateRef.current = streamingState;
 
   const queuedTexts = useMemo(
     () => queuedPrompts.map((prompt) => prompt.text),
@@ -165,6 +188,7 @@ export function useQueuedPrompts({
           serverState: serverPrompt.state,
         });
       }
+      if (areQueuedPromptsEqual(queuedPromptsRef.current, next)) return;
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
     },
@@ -181,7 +205,9 @@ export function useQueuedPrompts({
         });
         if (latestSessionIdRef.current !== targetSessionId) return false;
         syncServerQueuedPrompts(
-          result.pendingPrompts.filter((p) => p.state === 'queued'),
+          result.pendingPrompts.filter(
+            (p) => p.state === 'queued' || p.state === 'running',
+          ),
           targetSessionId,
         );
         return true;
@@ -328,7 +354,11 @@ export function useQueuedPrompts({
           event.data.state === 'removed')
       ) {
         displayedServerPromptIdsRef.current.delete(promptId);
+        const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
+        if (event.type === 'turn_error') {
+          callback?.();
+        }
         completedPromptIdsRef.current.delete(promptId);
         completedPromptIdOrderRef.current =
           completedPromptIdOrderRef.current.filter((id) => id !== promptId);
@@ -372,6 +402,32 @@ export function useQueuedPrompts({
                 sessionId: targetSessionId,
               })
               .catch(() => {});
+            return;
+          }
+          if (latestStreamingStateRef.current === 'idle') {
+            if (!displayedServerPromptIdsRef.current.has(result.promptId)) {
+              displayedServerPromptIdsRef.current.add(result.promptId);
+              store.appendLocalUserMessage(
+                trimmed,
+                toStoreImages(queuedImages),
+              );
+            }
+            const next = queuedPromptsRef.current.filter(
+              (prompt) => prompt.id !== localId,
+            );
+            queuedPromptsRef.current = next;
+            setQueuedPrompts(next);
+            if (onComplete) {
+              if (completedPromptIdsRef.current.delete(result.promptId)) {
+                completedPromptIdOrderRef.current =
+                  completedPromptIdOrderRef.current.filter(
+                    (id) => id !== result.promptId,
+                  );
+                onComplete();
+              } else {
+                completionCallbacksRef.current.set(result.promptId, onComplete);
+              }
+            }
             return;
           }
           const current = queuedPromptsRef.current;
@@ -422,11 +478,18 @@ export function useQueuedPrompts({
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
           restoreTextToEditor(trimmed, queuedImages, targetSessionId);
-          reportError(error, 'Failed to queue message');
+          reportError(error, t('queue.queueFailed'));
         });
       return true;
     },
-    [refreshPendingPrompts, reportError, restoreTextToEditor, sessionActions],
+    [
+      refreshPendingPrompts,
+      reportError,
+      restoreTextToEditor,
+      sessionActions,
+      store,
+      t,
+    ],
   );
 
   useEffect(() => {
@@ -625,6 +688,10 @@ export function useQueuedPrompts({
         if (prompt.serverPromptId) {
           restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
         }
+        reportError(
+          new Error('Queued message was not accepted for insertion'),
+          t('queue.insertFailed'),
+        );
         return;
       }
       if (!prompt.serverPromptId) {
@@ -653,7 +720,7 @@ export function useQueuedPrompts({
         const removed = await removeServerPromptForAction(
           target,
           { isEditing: true },
-          'Failed to edit queued message',
+          t('queue.editFailed'),
         );
         if (!removed) return;
         restoreTextToEditor(target.text, target.images, target.sessionId);
@@ -663,7 +730,12 @@ export function useQueuedPrompts({
       if (!queuedText) return;
       restoreTextToEditor(queuedText, target.images, target.sessionId);
     },
-    [popQueuedPromptForEdit, removeServerPromptForAction, restoreTextToEditor],
+    [
+      popQueuedPromptForEdit,
+      removeServerPromptForAction,
+      restoreTextToEditor,
+      t,
+    ],
   );
 
   const editLastQueuedPrompt = useCallback((): boolean => {
@@ -720,7 +792,7 @@ export function useQueuedPrompts({
           if (!(await refreshPendingPrompts(target.sessionId))) {
             restoreQueuedPrompts([target]);
           }
-          reportError(error, 'Failed to edit queued message');
+          reportError(error, t('queue.editFailed'));
         },
       );
     return true;
@@ -732,17 +804,17 @@ export function useQueuedPrompts({
     restoreTextToEditor,
     sessionActions,
     setQueuedPromptFlags,
+    t,
   ]);
 
   const clearQueuedPrompts = useCallback((): boolean => {
     if (queuedPromptsRef.current.length === 0) return false;
-    const submittingPrompts = queuedPromptsRef.current.filter(
-      (prompt) => prompt.serverState === 'submitting',
-    );
     const clearablePrompts = queuedPromptsRef.current.filter(
       (prompt) => prompt.serverState !== 'submitting',
     );
-    if (clearablePrompts.length === 0) return false;
+    for (const controller of submitAbortControllersRef.current) {
+      controller.abort();
+    }
     for (const prompt of clearablePrompts) {
       if (prompt.serverPromptId) {
         const targetSessionId = prompt.sessionId;
@@ -764,21 +836,33 @@ export function useQueuedPrompts({
               if (!(await refreshPendingPrompts(targetSessionId))) {
                 restoreQueuedPrompts([prompt]);
               }
+              reportError(
+                new Error('Prompt could not be removed from queue'),
+                t('queue.deleteFailed'),
+              );
             },
-            async () => {
+            async (error: unknown) => {
               removingServerPromptIdsRef.current.delete(prompt.serverPromptId!);
               if (!(await refreshPendingPrompts(targetSessionId))) {
                 restoreQueuedPrompts([prompt]);
               }
+              reportError(error, t('queue.deleteFailed'));
             },
           );
       }
     }
-    queuedPromptsRef.current = submittingPrompts;
-    setQueuedPrompts(submittingPrompts);
+    queuedPromptsRef.current = [];
+    setQueuedPrompts([]);
     store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
     return true;
-  }, [refreshPendingPrompts, restoreQueuedPrompts, store, t, sessionActions]);
+  }, [
+    refreshPendingPrompts,
+    reportError,
+    restoreQueuedPrompts,
+    store,
+    t,
+    sessionActions,
+  ]);
 
   const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
     useDaemonMidTurnInjected();

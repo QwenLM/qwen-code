@@ -662,6 +662,7 @@ export function registerSessionRoutes(
       });
       return;
     }
+    res.off('close', onResClose);
 
     promptPromise
       .then(
