@@ -82,6 +82,7 @@ const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 
 type DingTalkClientInternals = DWClient & {
+  debug: boolean;
   onDownStream(data: unknown): void;
   onSystem(message: DWClientDownStream): void;
   onEvent(message: DWClientDownStream): void;
@@ -118,6 +119,9 @@ export class DingtalkChannel extends ChannelBase {
 
   private installStructuredDownstreamHandler(): void {
     const client = this.client as DingTalkClientInternals;
+    client.debug = false;
+    // Keep raw SDK downstream frames off stdout; this switch mirrors the SDK
+    // dispatch table and should be checked when upgrading the DingTalk SDK.
     client.onDownStream = (raw: unknown) => {
       this.onDownStream(raw, client);
     };
@@ -144,21 +148,21 @@ export class DingtalkChannel extends ChannelBase {
       );
       return;
     }
+    const headers: Record<string, unknown> =
+      msg.headers && typeof msg.headers === 'object' ? msg.headers : {};
+    const type = typeof msg.type === 'string' ? msg.type : '';
+    const topic = typeof headers['topic'] === 'string' ? headers['topic'] : '';
+    const messageId =
+      typeof headers['messageId'] === 'string' ? headers['messageId'] : '';
 
     process.stderr.write(
-      `[DingTalk:${this.name}] downstream type=${sanitizeLogText(
-        msg.type || '',
-        40,
-      )} topic=${sanitizeLogText(
-        msg.headers?.topic || '',
+      `[DingTalk:${this.name}] downstream type=${sanitizeLogText(type, 40)} topic=${sanitizeLogText(
+        topic,
         80,
-      )} messageId=${sanitizeLogText(
-        msg.headers?.messageId || '',
-        80,
-      )} bytes=${decoded.bytes}\n`,
+      )} messageId=${sanitizeLogText(messageId, 80)} bytes=${decoded.bytes}\n`,
     );
 
-    switch (msg.type) {
+    switch (type) {
       case 'SYSTEM':
         this.callDownStreamHandler(client, 'onSystem', msg);
         break;
@@ -171,7 +175,7 @@ export class DingtalkChannel extends ChannelBase {
       default:
         process.stderr.write(
           `[DingTalk:${this.name}] Ignoring downstream type ${sanitizeLogText(
-            msg.type || 'unknown',
+            type || 'unknown',
             40,
           )}.\n`,
         );

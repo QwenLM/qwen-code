@@ -267,6 +267,7 @@ describe('DingtalkChannel downstream logging', () => {
     expect(logged).toContain(
       `[DingTalk:test-dingtalk] downstream type=CALLBACK topic=robot messageId=message-1 bytes=${raw.length}`,
     );
+    expect(client.debug).toBe(false);
     expect(client.onCallback).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'CALLBACK',
@@ -276,7 +277,6 @@ describe('DingtalkChannel downstream logging', () => {
         }),
       }),
     );
-    expect(channel).toBeInstanceOf(DingtalkChannel);
   });
 
   it('sanitizes malformed downstream parse errors and skips dispatch', () => {
@@ -362,6 +362,44 @@ describe('DingtalkChannel downstream logging', () => {
     expect(logged).toContain('[DingTalk:test-dingtalk] onCallback failed:');
     expect(logged).not.toContain('callback failed\n');
     expect(logged).not.toContain('\n[DingTalk:fake]');
+  });
+
+  it('ignores downstream frames with non-string routing fields', () => {
+    createChannel();
+    const client = latestMockClient() as {
+      onDownStream(data: Buffer): void;
+      onSystem: ReturnType<typeof vi.fn>;
+      onEvent: ReturnType<typeof vi.fn>;
+      onCallback: ReturnType<typeof vi.fn>;
+    };
+    const raw = Buffer.from(
+      JSON.stringify({
+        specVersion: '1.0',
+        type: { forged: 'CALLBACK' },
+        headers: {
+          messageId: { value: 'message-1' },
+          topic: ['robot'],
+        },
+        data: '{"msgId":"m1"}',
+      }),
+    );
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    expect(() => client.onDownStream(raw)).not.toThrow();
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    writeSpy.mockRestore();
+
+    expect(logged).toContain(
+      `[DingTalk:test-dingtalk] downstream type= topic= messageId= bytes=${raw.length}`,
+    );
+    expect(logged).toContain(
+      '[DingTalk:test-dingtalk] Ignoring downstream type unknown.',
+    );
+    expect(client.onSystem).not.toHaveBeenCalled();
+    expect(client.onEvent).not.toHaveBeenCalled();
+    expect(client.onCallback).not.toHaveBeenCalled();
   });
 });
 
