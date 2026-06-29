@@ -2072,7 +2072,11 @@ export async function runQwenServe(
         )
           return;
         runtimeStartupSettled = true;
-        markRuntimeReady();
+        const error = new Error(
+          'Daemon runtime cancelled: server closed before startup.',
+        );
+        runtimeStartupError = error.message;
+        markRuntimeFailed(error);
       };
       const shutdownBridgeAfterFailedStartup = async (
         bridge: AcpSessionBridge | undefined,

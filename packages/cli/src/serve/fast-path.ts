@@ -196,12 +196,21 @@ function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
 }
 
+const RUNTIME_STARTUP_CANCELLED_MESSAGE =
+  'Daemon runtime cancelled: server closed before startup.';
+
 export async function waitForServeRuntimeOrExit(
   handle: Pick<RunHandle, 'runtimeReady' | 'close'>,
 ): Promise<void> {
   try {
     await handle.runtimeReady;
   } catch (err) {
+    if (
+      err instanceof Error &&
+      err.message === RUNTIME_STARTUP_CANCELLED_MESSAGE
+    ) {
+      return;
+    }
     writeStderrLine(
       `qwen serve: runtime startup failed after listener was ready: ${
         err instanceof Error ? err.message : String(err)

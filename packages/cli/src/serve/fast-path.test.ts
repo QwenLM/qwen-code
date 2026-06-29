@@ -798,6 +798,35 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.exit).toHaveBeenCalledWith(1);
   });
 
+  it('does not report startup failure when runtime startup is cancelled by close', async () => {
+    const stderrWrites: string[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    await expect(
+      waitForServeRuntimeOrExit({
+        runtimeReady: Promise.reject(
+          new Error('Daemon runtime cancelled: server closed before startup.'),
+        ),
+        close,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(close).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).not.toContain(
+      'runtime startup failed after listener was ready',
+    );
+    expect(exit).not.toHaveBeenCalled();
+  });
+
   it('validates rate limit env after settings bootstrap enables rate limiting', async () => {
     useTempQwenHome();
     tempWorkspace = realpathSync(

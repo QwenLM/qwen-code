@@ -950,7 +950,9 @@ describe('runQwenServe runtime startup failures', () => {
     await new Promise((resolve) => setTimeout(resolve, 1100));
 
     expect(createBridge).not.toHaveBeenCalled();
-    await expect(handle.runtimeReady).resolves.toBeUndefined();
+    await expect(handle.runtimeReady).rejects.toThrow(
+      'Daemon runtime cancelled: server closed before startup.',
+    );
   });
 
   it('does not start deferred runtime after close following first health', async () => {
@@ -992,7 +994,9 @@ describe('runQwenServe runtime startup failures', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(createBridge).not.toHaveBeenCalled();
-    await expect(handle.runtimeReady).resolves.toBeUndefined();
+    await expect(handle.runtimeReady).rejects.toThrow(
+      'Daemon runtime cancelled: server closed before startup.',
+    );
   });
 
   it('does not cancel deferred runtime once startup is already running', async () => {
