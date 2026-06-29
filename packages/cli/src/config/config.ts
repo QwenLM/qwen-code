@@ -31,6 +31,7 @@ import {
   NativeLspService,
   isBareMode,
   isToolEnabled,
+  isTlsVerificationDisabled,
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
@@ -165,6 +166,7 @@ export interface CliArgs {
   openaiBaseUrl: string | undefined;
   openaiLoggingDir: string | undefined;
   proxy: string | undefined;
+  insecure?: boolean | undefined;
   includeDirectories: string[] | undefined;
   screenReader: boolean | undefined;
   inputFormat?: string | undefined;
@@ -620,6 +622,12 @@ export async function parseArguments(): Promise<CliArgs> {
       'proxy',
       'Use the "proxy" setting in settings.json instead. This flag will be removed in a future version.',
     )
+    .option('insecure', {
+      type: 'boolean',
+      description:
+        'Skip TLS certificate verification for API connections (for self-signed certs in trusted/lab environments). Equivalent to setting QWEN_TLS_INSECURE=1. WARNING: removes protection against man-in-the-middle attacks.',
+      default: false,
+    })
     .option('chat-recording', {
       type: 'boolean',
       description:
@@ -1396,6 +1404,35 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
+
+  // Surface `--insecure` as an env var so it reaches the undici dispatcher
+  // layer (which controls TLS verification) without threading a flag through
+  // every content generator and the preconnect path. Resolution there ORs this
+  // with QWEN_TLS_INSECURE / NODE_TLS_REJECT_UNAUTHORIZED=0.
+  if (argv.insecure) {
+    process.env['QWEN_TLS_INSECURE'] = '1';
+  }
+  // When opting out of TLS verification, also set NODE_TLS_REJECT_UNAUTHORIZED
+  // process-wide. The custom undici dispatcher handles the Node path, but this
+  // makes the opt-out effective on runtimes/paths it does not cover (the Bun
+  // runtime, and the proxy-creation fallback that uses the built-in fetch), and
+  // surfaces a single explicit warning. Skipped when the user already set it,
+  // since Node emits its own warning in that case.
+  if (
+    isTlsVerificationDisabled() &&
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] !== '0'
+  ) {
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    // The setting is process-wide, so the blast radius is every outbound HTTPS
+    // connection (model API, OAuth, MCP servers, and child processes that
+    // inherit the env), not just model calls. Log to the debug file too, so the
+    // state is discoverable after the terminal scrollback is gone.
+    const tlsWarning =
+      'TLS certificate verification is disabled (--insecure / QWEN_TLS_INSECURE). All HTTPS connections in this process (API calls, OAuth, MCP servers, child processes) are vulnerable to man-in-the-middle attacks.';
+    debugLogger.warn(tlsWarning);
+    // eslint-disable-next-line no-console
+    console.error(`WARNING: ${tlsWarning}`);
+  }
 
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
   // is auto-detected inside getRuntimeBaseDir() at each call site).
