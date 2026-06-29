@@ -394,10 +394,11 @@ if (chromeDevtoolsMcpPackageJson) {
   if (!installRoot || !existsSync(patchDir)) {
     process.exit(0);
   }
+  const relativePatchDir = path.relative(installRoot, patchDir) || '.';
   const patchPackageBin = require.resolve('patch-package/index.js');
   const result = spawnSync(
     process.execPath,
-    [patchPackageBin, '--patch-dir', patchDir, '--error-on-fail'],
+    [patchPackageBin, '--patch-dir', relativePatchDir, '--error-on-fail'],
     { cwd: installRoot, stdio: 'inherit' },
   );
   if (result.signal) {
