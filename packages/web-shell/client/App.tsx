@@ -1344,6 +1344,14 @@ export function App({
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const nextQueuedPromptIdRef = useRef(1);
   const drainingQueueRef = useRef(false);
+  // After a drained prompt is submitted, block the next drain until its turn has
+  // actually started. `streamingState` flips asynchronously (daemon round-trip),
+  // so without this gate a second queued prompt fires in the window before the
+  // first registers as streaming — both land back-to-back and the first is lost.
+  const awaitingTurnStartRef = useRef(false);
+  const awaitingTurnStartTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -1403,6 +1411,11 @@ export function App({
     queuedPromptsRef.current = [];
     setQueuedPrompts([]);
     drainingQueueRef.current = false;
+    awaitingTurnStartRef.current = false;
+    if (awaitingTurnStartTimerRef.current) {
+      clearTimeout(awaitingTurnStartTimerRef.current);
+      awaitingTurnStartTimerRef.current = null;
+    }
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
     btwAbortControllerRef.current?.abort();
@@ -3131,6 +3144,7 @@ export function App({
 
   useEffect(() => {
     if (drainingQueueRef.current) return;
+    if (awaitingTurnStartRef.current) return;
     if (!connected) return;
     if (streamingState !== 'idle') return;
     if (interactionBlocked) return;
@@ -3147,6 +3161,27 @@ export function App({
     }
     popNextQueuedPrompt();
 
+    // Arm the gate SYNCHRONOUSLY, before the setState in popNextQueuedPrompt
+    // triggers a re-render: the daemon flips `streamingState` asynchronously, so
+    // without this the effect re-runs in the same tick and pops a second prompt
+    // before the first registers as streaming — both fire back-to-back and the
+    // first is lost. Cleared once this prompt's turn starts (streamingState
+    // effect), with a safety-net timer for a prompt that never streams (e.g. a
+    // queued slash command).
+    awaitingTurnStartRef.current = true;
+    if (awaitingTurnStartTimerRef.current) {
+      clearTimeout(awaitingTurnStartTimerRef.current);
+    }
+    const TURN_START_GATE_SAFETY_MS = 2500;
+    awaitingTurnStartTimerRef.current = setTimeout(() => {
+      awaitingTurnStartRef.current = false;
+      awaitingTurnStartTimerRef.current = null;
+      // Opening the gate touched only a ref. Nudge a re-render (same queue
+      // contents) so the drain effect re-evaluates and picks up anything still
+      // queued behind a prompt that never streamed (e.g. a local command).
+      setQueuedPrompts((prev) => [...prev]);
+    }, TURN_START_GATE_SAFETY_MS);
+
     drainingQueueRef.current = true;
     let sent = false;
     const timer = window.setTimeout(() => {
@@ -3159,15 +3194,16 @@ export function App({
       }
     }, 0);
     return () => {
-      if (!sent) {
-        // Cleanup ran before timeout fired — put the prompt back at the
-        // front of the queue so it's not lost. This can happen when any
-        // dependency (e.g. handleSubmit, streamingState) changes between
-        // popNextQueuedPrompt() and the setTimeout firing.
-        queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
-        setQueuedPrompts(queuedPromptsRef.current);
+      // While the gate is armed the re-run is already blocked, so let the
+      // pending submit fire — don't cancel it or re-queue. Only when unarmed
+      // (a genuine dependency change before submit) restore the prompt.
+      if (!awaitingTurnStartRef.current) {
+        if (!sent) {
+          queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
+          setQueuedPrompts(queuedPromptsRef.current);
+        }
+        window.clearTimeout(timer);
       }
-      window.clearTimeout(timer);
       drainingQueueRef.current = false;
     };
   }, [
@@ -3181,6 +3217,19 @@ export function App({
     queuedPrompts,
     streamingState,
   ]);
+
+  // The drained prompt's turn has started — release the drain gate. From here
+  // the `streamingState !== 'idle'` guard holds the next prompt until this turn
+  // settles, so the queue advances one turn at a time.
+  useEffect(() => {
+    if (streamingState !== 'idle') {
+      awaitingTurnStartRef.current = false;
+      if (awaitingTurnStartTimerRef.current) {
+        clearTimeout(awaitingTurnStartTimerRef.current);
+        awaitingTurnStartTimerRef.current = null;
+      }
+    }
+  }, [streamingState]);
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
