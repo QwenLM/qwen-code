@@ -316,8 +316,16 @@ export class AcpHttpTransport implements DaemonTransport {
       existingPump.abort.abort();
       this.sessionReplyPumps.delete(sessionId);
     }
+    let subscriptionError: Error | undefined;
     try {
       yield* this.subscribeEventsInner(sessionId, opts);
+    } catch (err) {
+      // Capture WHY the subscription ended so the sweep below can reject with
+      // the real cause. On the fast-fail path (401 / wrong content-type thrown
+      // before the inner read loop) this wrapper finally is the ONLY sweep that
+      // fires, so a generic message would hide the actual failure (M4DWx parity).
+      subscriptionError = err instanceof Error ? err : new Error(String(err));
+      throw err;
     } finally {
       const n = (this.activeSessionSubscriptions.get(sessionId) ?? 1) - 1;
       if (n <= 0) this.activeSessionSubscriptions.delete(sessionId);
@@ -332,9 +340,12 @@ export class AcpHttpTransport implements DaemonTransport {
       // fast-fail path the inner read-loop finally cannot. Mirrors the
       // reply-pump and connection-stream sweeps.
       if (!this._disposed && n <= 0 && !this.sessionReplyPumps.has(sessionId)) {
+        const reason =
+          subscriptionError ??
+          new Error('Session SSE stream closed unexpectedly');
         for (const [id, entry] of this.pending) {
           if (entry.sessionId !== sessionId) continue;
-          entry.reject(new Error('Session SSE stream closed unexpectedly'));
+          entry.reject(reason);
           this.pending.delete(id);
         }
       }

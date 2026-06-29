@@ -816,7 +816,69 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
 
     await expect(collect(t, 'sess-1')).rejects.toThrow();
     expect(reject).toHaveBeenCalledTimes(1); // swept by the wrapper finally
+    // ...and with the REAL cause (the 401), not a generic message (M4W9a).
+    const reason = reject.mock.calls[0][0] as Error;
+    expect(reason.message).toMatch(/401/);
     expect(pending.has(7)).toBe(false);
+    t.dispose();
+  });
+
+  it('does not resolve a pending scoped to a DIFFERENT session — cross-session guard, consumer path (M4W9e)', async () => {
+    // A reply with id 7 arrives on sess-1's stream, but pending 7 belongs to
+    // sess-2. The scope guard must not cross-deliver it.
+    const { fetch } = sessionStreamFetch([
+      frame(undefined, { jsonrpc: '2.0', id: 7, result: { ok: true } }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const resolve = vi.fn();
+    pending.set(7, { resolve, reject: () => {}, sessionId: 'sess-2' });
+
+    await collect(t, 'sess-1');
+
+    expect(resolve).not.toHaveBeenCalled();
+    expect(pending.has(7)).toBe(true); // untouched — wrong session
+    t.dispose();
+  });
+
+  it('pumpSessionReplies does not resolve a pending scoped to a different session — cross-session guard, pump path (M4W9e)', async () => {
+    const { fetch } = sessionStreamFetch([
+      frame(undefined, { jsonrpc: '2.0', id: 7, result: { ok: true } }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const internals = t as unknown as {
+      pending: Map<
+        number,
+        {
+          resolve: (r: unknown) => void;
+          reject: (e: Error) => void;
+          sessionId?: string;
+        }
+      >;
+      pumpSessionReplies: (s: string, sig: AbortSignal) => Promise<void>;
+    };
+    const resolve = vi.fn();
+    internals.pending.set(7, {
+      resolve,
+      reject: () => {},
+      sessionId: 'sess-2',
+    });
+
+    await internals.pumpSessionReplies('sess-1', new AbortController().signal);
+
+    expect(resolve).not.toHaveBeenCalled();
+    expect(internals.pending.has(7)).toBe(true);
     t.dispose();
   });
 
@@ -1153,12 +1215,14 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     ) as unknown as typeof globalThis.fetch;
 
     const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    // The rejection must carry the pump's actual cause (content-type guard),
+    // not a generic "closed unexpectedly" — proves pumpError reaches the caller.
     await expect(
       t.fetch('http://d/session/sess-1/prompt', {
         method: 'POST',
         body: JSON.stringify({ prompt: [{ type: 'text', text: 'hi' }] }),
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/expected content-type/i);
     t.dispose();
   });
 
