@@ -1514,11 +1514,14 @@ export const useGeminiStream = (
     [addItem, clearRetryCountdown],
   );
 
+  const autonomousLoopTickResolverRef = useRef<LoopTickResolver | null>(null);
+
   const handleChatCompressionEvent = useCallback(
     (
       eventValue: ServerGeminiChatCompressedEvent['value'],
       userMessageTimestamp: number,
     ) => {
+      autonomousLoopTickResolverRef.current?.resetCache();
       if (pendingHistoryItemRef.current) {
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -2096,7 +2099,11 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
-      metadata?: { notificationDisplayText?: string },
+      metadata?: {
+        notificationDisplayText?: string;
+        onDelivered?: () => void;
+        onDeliveryFailed?: () => void;
+      },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -2111,6 +2118,7 @@ export const useGeminiStream = (
         submitType !== SendMessageType.ToolResult &&
         !allowConcurrentBtwDuringResponse
       ) {
+        metadata?.onDeliveryFailed?.();
         return;
       }
 
@@ -2119,8 +2127,10 @@ export const useGeminiStream = (
           streamingState === StreamingState.WaitingForConfirmation) &&
         submitType !== SendMessageType.ToolResult &&
         !allowConcurrentBtwDuringResponse
-      )
+      ) {
+        metadata?.onDeliveryFailed?.();
         return;
+      }
 
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
@@ -2215,6 +2225,7 @@ export const useGeminiStream = (
 
         if (!shouldProceed || queryToSend === null) {
           isSubmittingQueryRef.current = false;
+          metadata?.onDeliveryFailed?.();
           return;
         }
 
@@ -2318,6 +2329,7 @@ export const useGeminiStream = (
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
+            metadata?.onDeliveryFailed?.();
             return;
           }
 
@@ -2346,6 +2358,12 @@ export const useGeminiStream = (
           if (loopDetectedRef.current) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
+          }
+
+          if (lastPromptErroredRef.current) {
+            metadata?.onDeliveryFailed?.();
+          } else {
+            metadata?.onDelivered?.();
           }
 
           // If the turn was initiated by a submit_prompt with an onComplete
@@ -2379,6 +2397,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -3128,9 +3147,10 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      onDelivered?: () => void;
+      onDeliveryFailed?: () => void;
     }>
   >([]);
-  const autonomousLoopTickResolverRef = useRef<LoopTickResolver | null>(null);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
 
   const getAutonomousLoopTickResolver = useCallback(() => {
@@ -3149,6 +3169,7 @@ export const useGeminiStream = (
     }
     notificationQueueSessionIdRef.current = sessionStates.sessionId;
     notificationQueueRef.current = [];
+    autonomousLoopTickResolverRef.current?.resetCache();
   }, [sessionStates.sessionId]);
 
   // Current sessionId for the cron effect, read through a ref so the
@@ -3208,9 +3229,17 @@ export const useGeminiStream = (
           if (autonomousMode) {
             const resolver = getAutonomousLoopTickResolver();
             const tick = resolver.resolveAutonomous(autonomousMode);
-            resolver.markDelivered();
             label = 'Autonomous loop tick';
             modelText = tick.modelText;
+            notificationQueueRef.current.push({
+              displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+              modelText,
+              sendMessageType: SendMessageType.Cron,
+              onDelivered: () => resolver.markDelivered(),
+              onDeliveryFailed: () => resolver.resetCache(),
+            });
+            setNotificationTrigger((n) => n + 1);
+            return;
           }
           notificationQueueRef.current.push({
             displayText: `${job.missed ? 'Missed' : source}: ${label}`,
@@ -3310,6 +3339,8 @@ export const useGeminiStream = (
         );
         submitQuery(item.modelText, item.sendMessageType, undefined, {
           notificationDisplayText: item.displayText,
+          onDelivered: item.onDelivered,
+          onDeliveryFailed: item.onDeliveryFailed,
         });
         return;
       }

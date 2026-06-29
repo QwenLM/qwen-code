@@ -741,6 +741,9 @@ describe('useGeminiStream', () => {
   });
 
   it('expands autonomous loop wakeup sentinels before queuing them', async () => {
+    let schedulerCallback:
+      | ((job: { prompt: string; cronExpr?: string; missed?: boolean }) => void)
+      | null = null;
     const scheduler = {
       hasPendingWork: true,
       enableDurable: vi.fn().mockResolvedValue(undefined),
@@ -752,6 +755,7 @@ describe('useGeminiStream', () => {
             missed?: boolean;
           }) => void,
         ) => {
+          schedulerCallback = callback;
           callback({
             prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
             cronExpr: '@wakeup',
@@ -773,7 +777,7 @@ describe('useGeminiStream', () => {
       );
     });
     await waitFor(() => {
-      expect(mockSendMessageStream).toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
     const sent = String(mockSendMessageStream.mock.calls[0][0]);
     expect(sent).toContain('# Autonomous loop check');
@@ -782,6 +786,23 @@ describe('useGeminiStream', () => {
     expect(sent).toContain(
       `prompt set to the literal sentinel \`${AUTONOMOUS_SENTINEL_DYNAMIC}\``,
     );
+
+    await waitFor(() => {
+      expect(schedulerCallback).not.toBeNull();
+    });
+    await act(async () => {
+      schedulerCallback?.({
+        prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+        cronExpr: '@wakeup',
+      });
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    const secondSent = String(mockSendMessageStream.mock.calls[1][0]);
+    expect(secondSent).not.toContain('# Autonomous loop check');
+    expect(secondSent).toContain('# Autonomous loop tick (dynamic pacing)');
   });
 
   it('renders teammate reports as a compact notification, not a raw envelope bubble', async () => {
