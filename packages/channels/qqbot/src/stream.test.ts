@@ -385,12 +385,12 @@ describe('onResponseComplete', () => {
     expect(streamState(ch).has('sess-1')).toBe(false);
   });
 
-  it('does nothing when there is no streamState for the session', async () => {
+  it('falls back to fullText when there is no streamState for the session', async () => {
     const ch = makeChannel();
 
     await onResponseComplete(ch, 'test-chat', 'nothing', 'sess-none');
 
-    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(mockSendQQMessage).toHaveBeenCalled();
   });
 
   it('does not send when buffer is empty', async () => {

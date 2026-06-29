@@ -503,7 +503,7 @@ export class QQChannel extends ChannelBase {
       clearTimeout(state.timer);
       state.timer = null;
     }
-    const remaining = state?.buffer || _fullText;
+    const remaining = state?.buffer ?? _fullText;
     this.streamState.delete(sessionId);
     if (remaining) {
       await super.onResponseComplete(chatId, remaining, sessionId);
