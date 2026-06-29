@@ -20,6 +20,7 @@ import {
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -951,7 +952,7 @@ describe('runQwenServe runtime startup failures', () => {
 
     expect(createBridge).not.toHaveBeenCalled();
     await expect(handle.runtimeReady).rejects.toThrow(
-      'Daemon runtime cancelled: server closed before startup.',
+      RUNTIME_STARTUP_CANCELLED_MESSAGE,
     );
   });
 
@@ -995,7 +996,7 @@ describe('runQwenServe runtime startup failures', () => {
 
     expect(createBridge).not.toHaveBeenCalled();
     await expect(handle.runtimeReady).rejects.toThrow(
-      'Daemon runtime cancelled: server closed before startup.',
+      RUNTIME_STARTUP_CANCELLED_MESSAGE,
     );
   });
 

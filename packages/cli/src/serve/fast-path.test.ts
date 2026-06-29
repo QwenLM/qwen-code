@@ -37,6 +37,7 @@ import {
   getGlobalQwenDirLite,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/storage-paths-lite.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import {
   resetTrustedFoldersForTesting,
   TrustLevel,
@@ -814,7 +815,7 @@ describe('serve fast path environment bootstrap', () => {
     await expect(
       waitForServeRuntimeOrExit({
         runtimeReady: Promise.reject(
-          new Error('Daemon runtime cancelled: server closed before startup.'),
+          new Error(RUNTIME_STARTUP_CANCELLED_MESSAGE),
         ),
         close,
       }),

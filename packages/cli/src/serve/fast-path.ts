@@ -7,6 +7,7 @@
 import type { RunHandle } from './run-qwen-serve.js';
 import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import type { ServeOptions } from './types.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
 
@@ -195,9 +196,6 @@ function getServeFastPathValidationError(
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
 }
-
-const RUNTIME_STARTUP_CANCELLED_MESSAGE =
-  'Daemon runtime cancelled: server closed before startup.';
 
 export async function waitForServeRuntimeOrExit(
   handle: Pick<RunHandle, 'runtimeReady' | 'close'>,

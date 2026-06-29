@@ -32,6 +32,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import {
   allowOriginCors,
@@ -2072,9 +2073,7 @@ export async function runQwenServe(
         )
           return;
         runtimeStartupSettled = true;
-        const error = new Error(
-          'Daemon runtime cancelled: server closed before startup.',
-        );
+        const error = new Error(RUNTIME_STARTUP_CANCELLED_MESSAGE);
         runtimeStartupError = error.message;
         markRuntimeFailed(error);
       };
