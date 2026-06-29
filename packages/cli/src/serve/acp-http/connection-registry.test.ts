@@ -524,6 +524,51 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('holds an UNANCHORED deferred reply during replay (Branch A) and releases it once the boundary clears replayPending (Branch B) (M3w6e)', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+      const s = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s, new AbortController(), 5); // replayPending
+
+      // An unanchored reply (anchorId undefined — the getSessionLastEventId
+      // teardown-race fallback) buffered during replay.
+      conn.sendSessionReply('sess-1', { promptResult: true });
+
+      // Branch A: replayPending true → a watermark release must NOT emit it
+      // (releasing mid-replay would risk landing it ahead of replay content).
+      conn.releaseDeferredSessionReplies('sess-1', 99);
+      expect(s.sent).toEqual([]);
+
+      // Branch B: the boundary clears replayPending → the unanchored reply is
+      // released unconditionally.
+      conn.endReplayDeferral('sess-1', 5);
+      expect(s.sent).toEqual([
+        { message: { promptResult: true }, id: undefined },
+      ]);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('clearGraceTimer resets connGraceExpired so a stale expiry verdict cannot carry into a new window (M3w6f)', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      // Simulate the conn grace timer having fired earlier.
+      conn.connGraceExpired = true;
+      // A reconnect (attachConnStream) cancels the pending reap via clearGraceTimer.
+      conn.attachConnStream(new FakeStream('sse'));
+      expect(conn.connGraceExpired).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('invokes onSessionGraceExpired when a session reclaim grace expires (drives the deferred connection reap, MsyIs)', () => {
     vi.useFakeTimers();
     const registry = new ConnectionRegistry();

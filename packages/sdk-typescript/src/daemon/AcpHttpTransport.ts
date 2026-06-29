@@ -303,7 +303,19 @@ export class AcpHttpTransport implements DaemonTransport {
     // skipped on abort) — otherwise its dying `.finally` would re-scan `pending`
     // and spuriously reject the very `session/prompt` this consumer is taking
     // over delivery of. The consumer now owns reply routing for this session.
-    this.sessionReplyPumps.get(sessionId)?.abort.abort();
+    //
+    // Delete the map entry SYNCHRONOUSLY (not just abort and let the pump's
+    // async `.finally` remove it). Otherwise, if this subscription exits before
+    // that microtask runs, BOTH stranded-pending guards miss: the consumer sweep
+    // (`subscribeEventsInner` finally) sees the entry still present and defers to
+    // the pump, while the pump's own sweep is skipped because its signal is
+    // aborted — leaving a live `session/prompt` in `pending` forever. Removing it
+    // here makes the consumer sweep deterministically responsible.
+    const existingPump = this.sessionReplyPumps.get(sessionId);
+    if (existingPump) {
+      existingPump.abort.abort();
+      this.sessionReplyPumps.delete(sessionId);
+    }
     try {
       yield* this.subscribeEventsInner(sessionId, opts);
     } finally {
@@ -536,6 +548,15 @@ export class AcpHttpTransport implements DaemonTransport {
             if (typeof rid === 'number') {
               const pending = this.pending.get(rid);
               if (pending) {
+                // Defense-in-depth: don't let a reply on this session's stream
+                // resolve a pending scoped to a different session (mirror of the
+                // reply-pump guard).
+                if (
+                  pending.sessionId !== undefined &&
+                  pending.sessionId !== sessionId
+                ) {
+                  continue;
+                }
                 this.pending.delete(rid);
                 pending.resolve(msg as unknown as JsonRpcResponse);
               }
@@ -1147,6 +1168,16 @@ export class AcpHttpTransport implements DaemonTransport {
           if (typeof rid !== 'number') continue;
           const pending = this.pending.get(rid);
           if (pending) {
+            // Defense-in-depth: a reply arriving on THIS session's stream must
+            // not resolve a pending scoped to a different session. The daemon
+            // enforces session ownership on `/acp`, but a future routing
+            // regression must not silently cross-deliver across the SDK boundary.
+            if (
+              pending.sessionId !== undefined &&
+              pending.sessionId !== sessionId
+            ) {
+              continue;
+            }
             this.pending.delete(rid);
             pending.resolve(msg as unknown as JsonRpcResponse);
           }

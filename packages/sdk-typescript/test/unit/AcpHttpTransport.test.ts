@@ -746,6 +746,16 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     expect(events[0].id).toBe(11);
   });
 
+  it('throws when an SSE reader buffer exceeds MAX_SSE_BUF_CHARS without a frame boundary (M3w6g)', async () => {
+    // A server/proxy that streams bytes without ever emitting a `\n\n` boundary
+    // would grow the buffer unbounded (OOM). The 16 MiB cap must fire.
+    const oversized = 'a'.repeat(16 * 1024 * 1024 + 1); // one chunk, no boundary
+    const { fetch } = sessionStreamFetch([oversized]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    await expect(collect(t, 'sess-1')).rejects.toThrow(/exceeded/i);
+    t.dispose();
+  });
+
   it('rejects in-flight session-scoped pendings when the subscription stream closes (M2iHz) — a session/prompt caller does not hang', async () => {
     const { fetch } = sessionStreamFetch([]); // stream closes with no frames
     const t = new AcpHttpTransport('http://d', undefined, fetch);
@@ -786,26 +796,62 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     t.dispose();
   });
 
-  it('aborts an existing background reply pump when a consumer subscription starts, without rejecting its in-flight pending (M3BYa)', async () => {
+  type ReplyPumpInternals = {
+    sessionReplyPumps: Map<string, { abort: AbortController; refs: number }>;
+    pending: Map<
+      number,
+      {
+        resolve: (r: unknown) => void;
+        reject: (e: Error) => void;
+        sessionId?: string;
+      }
+    >;
+  };
+
+  it('a consumer subscription that takes over from a reply pump aborts+removes it synchronously and DELIVERS the reply (M3BYa/M3w6Y happy path)', async () => {
     // The session stream is single-reader: a consumer GET makes the daemon
-    // detach an earlier no-iter reply pump. Aborting that pump up front means
-    // its teardown sweep is skipped, so it can't spuriously reject the prompt
-    // the consumer is taking over delivery of.
-    const { fetch } = sessionStreamFetch([]); // consumer stream opens then closes
+    // detach an earlier no-iter reply pump. The consumer now owns delivery — its
+    // stream carries the prompt reply, which must resolve the pending.
+    const { fetch } = sessionStreamFetch([
+      frame(undefined, {
+        jsonrpc: '2.0',
+        id: 7,
+        result: { stopReason: 'end_turn' },
+      }),
+    ]);
     const t = new AcpHttpTransport('http://d', undefined, fetch);
-    const internals = t as unknown as {
-      sessionReplyPumps: Map<string, { abort: AbortController; refs: number }>;
-      pending: Map<
-        number,
-        {
-          resolve: (r: unknown) => void;
-          reject: (e: Error) => void;
-          sessionId?: string;
-        }
-      >;
-    };
-    // Simulate a reply pump started earlier by a no-iter session/prompt, plus its
-    // in-flight session-scoped pending.
+    const internals = t as unknown as ReplyPumpInternals;
+    const pumpAbort = new AbortController();
+    internals.sessionReplyPumps.set('sess-1', { abort: pumpAbort, refs: 1 });
+    let resolved: unknown;
+    internals.pending.set(7, {
+      resolve: (r) => {
+        resolved = r;
+      },
+      reject: () => {},
+      sessionId: 'sess-1',
+    });
+
+    await collect(t, 'sess-1');
+
+    expect(pumpAbort.signal.aborted).toBe(true); // pump aborted...
+    expect(internals.sessionReplyPumps.has('sess-1')).toBe(false); // ...AND removed synchronously
+    expect(resolved).toMatchObject({
+      id: 7,
+      result: { stopReason: 'end_turn' },
+    });
+    expect(internals.pending.has(7)).toBe(false);
+    t.dispose();
+  });
+
+  it('a consumer that exits WITHOUT delivering rejects the taken-over pending instead of stranding it (M3w6Y)', async () => {
+    // The async-cleanup race: if the pump entry were only aborted (not deleted
+    // synchronously), the consumer sweep would defer to the still-present entry
+    // while the pump's own sweep skips on abort — stranding the pending forever.
+    // Synchronous removal makes the consumer sweep reject it.
+    const { fetch } = sessionStreamFetch([]); // consumer stream opens then closes empty
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const internals = t as unknown as ReplyPumpInternals;
     const pumpAbort = new AbortController();
     internals.sessionReplyPumps.set('sess-1', { abort: pumpAbort, refs: 1 });
     const reject = vi.fn();
@@ -815,12 +861,12 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
       sessionId: 'sess-1',
     });
 
-    // A consumer subscribes to the same session (and drains the empty stream).
     await collect(t, 'sess-1');
 
-    expect(pumpAbort.signal.aborted).toBe(true); // pump torn down up front
-    expect(reject).not.toHaveBeenCalled(); // its pending NOT spuriously rejected
-    expect(internals.pending.has(7)).toBe(true);
+    expect(pumpAbort.signal.aborted).toBe(true);
+    expect(internals.sessionReplyPumps.has('sess-1')).toBe(false);
+    expect(reject).toHaveBeenCalledTimes(1); // rejected, NOT stranded
+    expect(internals.pending.has(7)).toBe(false);
     t.dispose();
   });
 

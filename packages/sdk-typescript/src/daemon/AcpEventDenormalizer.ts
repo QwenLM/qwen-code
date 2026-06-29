@@ -122,8 +122,14 @@ export function denormalizeAcpNotification(
   // `kind`-tagged notify isn't silently dropped (which would, e.g., starve the
   // SDK of the ring-overflow `state_resync_required` signal during a resume).
   if (notification.method === '_qwen/notify') {
+    // Prefer a NON-EMPTY `type`; otherwise fall back to `kind`. An empty-string
+    // `type` (e.g. a proxy that strips it to '') must not win over a valid
+    // `kind` and drop the event on the length guard below — that would starve
+    // the SDK of state_resync_required/replay_complete/stream_error on resume.
     const type =
-      typeof params['type'] === 'string' ? params['type'] : params['kind'];
+      typeof params['type'] === 'string' && params['type'].length > 0
+        ? params['type']
+        : params['kind'];
     if (typeof type !== 'string' || type.length === 0) return undefined;
     return {
       id: nextSyntheticId++,
