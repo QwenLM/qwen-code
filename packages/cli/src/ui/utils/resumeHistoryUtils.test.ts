@@ -494,6 +494,93 @@ describe('resumeHistoryUtils', () => {
     expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
     expect(items[0]).not.toHaveProperty('sentToModel');
   });
+
+  describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
+    type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
+    const firstTool = (items: HistoryItem[]) =>
+      (items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined)
+        ?.tools[0];
+
+    const buildWithToolResult = (toolResult: Record<string, unknown>) => {
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: { id: 'call-1', name: 'replace', args: {} },
+                } as unknown as Part,
+              ],
+            },
+          },
+          { type: 'tool_result', ...toolResult },
+        ],
+      } as unknown as ConversationRecord;
+      return buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ replace: mockTool }),
+        10,
+      );
+    };
+
+    it('derives detailedDisplay from toolCallResult.responseParts', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Read 1 file',
+          status: 'success',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'FULL FILE CONTENTS' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.resultDisplay).toBe('Read 1 file');
+      expect(tool?.detailedDisplay).toBe('FULL FILE CONTENTS');
+    });
+
+    it('falls back to message.parts when responseParts is absent (older records)', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Found 2 matches',
+          status: 'success',
+        },
+        message: {
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'match line 1\nmatch line 2' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.detailedDisplay).toBe('match line 1\nmatch line 2');
+    });
+
+    it('leaves detailedDisplay undefined when neither source carries output', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'ok',
+          status: 'success',
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+  });
 });
 
 describe('stripSuppressOnRestore', () => {
