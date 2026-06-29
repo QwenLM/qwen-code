@@ -19,9 +19,11 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 | Stage 2 | Code review + test results (with screenshots) |
 | Stage 3 | Reflection + verdict                          |
 
-**Terminal gate exception:** if Stage 1a template check fails, submit exactly
-one `CHANGES_REQUESTED` review and stop. Do not also post or update a Stage 1
-issue comment, and do not continue to Stage 2, Stage 3, or approval.
+**Terminal gate exception:** if any terminal exit triggers (Stage 0b hard
+block, Stage 1a template failure, Stage 1b problem-does-not-exist, or
+direction escalation), submit exactly one `CHANGES_REQUESTED` review and
+stop. Do not also post or update a Stage 1 issue comment, and do not
+continue to Stage 2, Stage 3, or approval.
 
 **Re-runs:** if the triage runs again on the same PR, update each comment in place:
 
@@ -45,9 +47,15 @@ Default posture: **skepticism**. Burden of proof is on the author. Distinguish *
 
 ### Stage 0b: Core Module Protection (two-tier check)
 
-Core infrastructure: `packages/core/src/**`, auth, providers, models, config, tools, services, cross-package changes.
+Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`, or cross-package changes spanning multiple `packages/*/`.
 
-**Tier 1 — Large-scope changes to core → HARD BLOCK.** If the PR touches 10+ files or 500+ lines in core paths → reject immediately. No evaluation, no Stage 1. Reply: "This change touches core infrastructure at scale. Core refactors must be maintainer-initiated — please open an issue to discuss the design first." Then **stop**. This is a wall, not a guideline.
+**Tier 1 — Large-scope changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). If the PR touches 10+ files or 500+ lines (additions + deletions combined) in core paths → reject immediately. No evaluation, no Stage 1.
+
+```bash
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This change touches core infrastructure at scale. Core refactors must be maintainer-initiated — please open an issue to discuss the design first."
+```
+
+Then **stop**. This is a wall, not a guideline.
 
 **Tier 2 — Small-scope changes to core → evaluate with 100% confidence.** If the PR touches fewer files but still hits core paths, you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
 
@@ -129,7 +137,7 @@ Direction: <state your honest assessment — aligned and why, or concerns and wh
 Approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
 
 <If passing:> Moving on to code review. 🔍
-<If problem does not exist:> Closing — no demonstrated failure. Feel free to reopen with a reproduction case.
+<If problem does not exist:> Requesting changes — no demonstrated failure. Please provide a reproduction case to proceed.
 <If concerns:> Flagging these for discussion before diving deeper.
 
 <details>
@@ -146,7 +154,7 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。><如果 diff 夹带了无关改动或顺手重构，点名并建议拆成单独 PR。>
 
 <如果通过：> 进入代码审查 🔍
-<如果问题不存在：> 关闭——未展示实际故障。欢迎带上复现案例重新打开。
+<如果问题不存在：> 请求修改——未展示实际故障。请提供复现案例后继续。
 <如果有顾虑：> 先提出来讨论，再深入看代码。
 
 </details>
@@ -156,6 +164,7 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 
 Save this comment's ID. Terminal exits — stop here if any applies:
 
+- Core module hard block (Stage 0b) → rejected, do not proceed.
 - Template failure → stopped in 1a.
 - Problem does not exist → request changes in 1b, do not proceed to Stage 2.
 - Direction escalated → stop here.
@@ -265,7 +274,7 @@ Step back and look at the whole picture — the motivation, the implementation, 
 - If I had to maintain this in six months, would I curse the author or thank them?
 - Am I approving this because it's genuinely good, or because I ran out of reasons to say no?
 - **Did I verify the problem actually exists?** Or did I accept the PR's framing ("this value could be passed") without asking "has this ever happened?" If the PR has no before/after reproduction, I should not be this far in the pipeline.
-- **Is this part of a batch?** If this PR met the Stage 0 batch threshold (3+ similar PRs from the same author), am I evaluating each one on merit, or being worn down by volume?
+- **Is this part of a pattern?** If the same author has multiple similar PRs open, am I evaluating each one on merit, or being worn down by volume?
 - **Am I being a pushover?** If I feel "this is probably fine but I'm not sure it's needed" — that feeling IS the signal. The gate's job is to say no to things that are not clearly needed.
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
