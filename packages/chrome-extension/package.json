@@ -24,17 +24,17 @@
     "README.md"
   ],
   "scripts": {
-    "dev": "node scripts/dev-watch.js",
+    "dev": "cross-env EXTENSION_OUT_DIR=dist/extension node scripts/dev-watch.js",
     "debug:mac": "./scripts/debug.sh",
     "sync:extension": "node scripts/sync-extension.js",
     "build:bg": "node scripts/sync-extension.js && node config/esbuild.background.config.js",
     "build:bg:watch": "node scripts/sync-extension.js && node config/esbuild.background.config.js --watch",
-    "build": "node scripts/sync-extension.js && node config/esbuild.background.config.js --production",
+    "build": "cross-env EXTENSION_OUT_DIR=dist/extension npm run clean && cross-env EXTENSION_OUT_DIR=dist/extension node scripts/sync-extension.js && cross-env EXTENSION_OUT_DIR=dist/extension node config/esbuild.background.config.js --production",
     "test": "vitest run --config vitest.config.ts",
     "test:ci": "vitest run --config vitest.config.ts",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/dist/extension --auto-open-devtools-for-tabs",
     "package": "npm run build && cd dist/extension && zip -r ../../chrome-extension.zip .",
-    "clean": "./scripts/clean.sh",
+    "clean": "node -e \"require('node:fs').rmSync(process.env.EXTENSION_OUT_DIR || 'dist/extension', { recursive: true, force: true })\"",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

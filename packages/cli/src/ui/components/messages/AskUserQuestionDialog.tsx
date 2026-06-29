@@ -135,13 +135,16 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     const trimmedValue = currentCustomInputValue.trim();
 
     if (isMultiSelect) {
-      // Toggle custom input checked state, then submit/advance if non-empty
       setCustomInputChecked((prev) => ({
         ...prev,
         [currentQuestionIndex]: trimmedValue.length > 0,
       }));
       if (trimmedValue) {
-        handleMultiSelectSubmit();
+        const selections = [
+          ...(multiSelectedOptions[currentQuestionIndex] ?? []),
+          trimmedValue,
+        ];
+        selectAndAdvance(selections.join(', '));
       }
       return;
     }
@@ -172,6 +175,10 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         }
         if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
           void onConfirm(ToolConfirmationOutcome.Cancel);
+          return;
+        }
+        if (key.name === 'return') {
+          handleCustomInputSubmit();
           return;
         }
         return;
@@ -484,7 +491,6 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                     [currentQuestionIndex]: value,
                   }));
                 }}
-                onSubmit={handleCustomInputSubmit}
                 placeholder={t('Type something...')}
                 isActive={true}
                 inputWidth={50}

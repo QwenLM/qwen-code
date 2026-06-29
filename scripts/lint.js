@@ -8,14 +8,16 @@
 
 import { execSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
 const YAMLLINT_VERSION = '1.35.1';
 
-const TEMP_DIR = join(tmpdir(), 'qwen-code-linters');
+const TEMP_DIR = join(
+  process.env.RUNNER_TEMP || process.env.TMPDIR || '/tmp',
+  'qwen-code-linters',
+);
 
 function getPlatformArch() {
   const platform = process.platform;
