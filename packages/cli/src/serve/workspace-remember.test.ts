@@ -59,6 +59,7 @@ function buildBridgeStub(opts: {
   rememberImpl?: (
     req: BridgeWorkspaceMemoryRememberRequest,
   ) => Promise<BridgeWorkspaceMemoryRememberResult>;
+  publishImpl?: (event: RecordedEvent) => void;
 }): AcpSessionBridge & {
   events: RecordedEvent[];
   rememberCalls: BridgeWorkspaceMemoryRememberRequest[];
@@ -81,6 +82,10 @@ function buildBridgeStub(opts: {
     events,
     rememberCalls,
     publishWorkspaceEvent(event: RecordedEvent) {
+      if (opts.publishImpl) {
+        opts.publishImpl(event);
+        return;
+      }
       events.push(event);
     },
     knownClientIds() {
@@ -385,7 +390,6 @@ describe('workspace memory remember routes', () => {
       filesTouched: [],
       touchedScopes: [],
     });
-    await waitFor(() => bridge.events.length === 2);
 
     await request(app)
       .get(`/workspace/memory/remember/${postOne.body.taskId}`)
@@ -395,6 +399,53 @@ describe('workspace memory remember routes', () => {
       .get(`/workspace/memory/remember/${postTwo.body.taskId}`)
       .expect(200)
       .expect((res) => expect(res.body.status).toBe('completed'));
+    expect(bridge.events).toHaveLength(0);
+  });
+
+  it('does not publish memory_changed for no-op remember results', async () => {
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => ({
+        summary: 'nothing to save',
+        filesTouched: [],
+        touchedScopes: [],
+      })),
+    });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'no-op' })
+      .expect(202);
+
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/remember/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => expect(res.body.status).toBe('completed'));
+    expect(bridge.events).toHaveLength(0);
+  });
+
+  it('keeps the task completed when memory_changed publishing fails', async () => {
+    const bridge = buildBridgeStub({
+      publishImpl: vi.fn(() => {
+        throw new Error('event bus failed');
+      }),
+    });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember this' })
+      .expect(202);
+
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/remember/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('completed');
+        expect(res.body.error).toBeUndefined();
+      });
   });
 
   it('returns 409 when managed memory is unavailable', async () => {

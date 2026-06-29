@@ -166,18 +166,6 @@ class WorkspaceRememberTaskLane {
         task.status = 'completed';
         task.result = result;
         task.updatedAt = nowIso();
-        this.bridge.publishWorkspaceEvent({
-          type: 'memory_changed',
-          data: {
-            scope: 'managed',
-            source: 'workspace_memory_remember',
-            taskId: task.taskId,
-            touchedScopes: result.touchedScopes,
-          },
-          ...(params.originatorClientId
-            ? { originatorClientId: params.originatorClientId }
-            : {}),
-        });
       } catch (err) {
         const code = errorCode(err);
         task.status = 'failed';
@@ -188,6 +176,28 @@ class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } finally {
         this.evictTerminalTasks();
+      }
+      if (
+        task.status === 'completed' &&
+        task.result &&
+        task.result.touchedScopes.length > 0
+      ) {
+        try {
+          this.bridge.publishWorkspaceEvent({
+            type: 'memory_changed',
+            data: {
+              scope: 'managed',
+              source: 'workspace_memory_remember',
+              taskId: task.taskId,
+              touchedScopes: task.result.touchedScopes,
+            },
+            ...(params.originatorClientId
+              ? { originatorClientId: params.originatorClientId }
+              : {}),
+          });
+        } catch (err) {
+          debugLogger.error('Failed to publish memory_changed event:', err);
+        }
       }
     };
 
