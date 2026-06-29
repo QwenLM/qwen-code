@@ -755,4 +755,12 @@ describe('acpRouteTable – query param coercion', () => {
       sessionId: 's1',
     });
   });
+
+  it('GET context-usage with present-but-empty detail (`?detail=`) omits it, not `false`', () => {
+    // Mirror the numeric `?maxBytes=` rule: an empty value is "not set", so we
+    // must not forward `{ detail: false }` for a param the caller never set.
+    const { params } = extract('/session/s1/context-usage?detail=', 'GET');
+    expect(params).toEqual({ sessionId: 's1' });
+    expect('detail' in params).toBe(false);
+  });
 });

@@ -70,7 +70,9 @@ function boolParam(
   name: string,
 ): Record<string, boolean> {
   const v = q?.get(name);
-  return v == null ? {} : { [name]: v === 'true' };
+  // Treat an empty value (`?detail=`) as absent, mirroring `numParam`, so we
+  // don't forward `{ detail: false }` for a param the caller never set.
+  return v == null || v === '' ? {} : { [name]: v === 'true' };
 }
 
 export interface RouteEntry {

@@ -381,7 +381,12 @@ export class AcpConnection {
     if (binding.stream && !binding.stream.isClosed) {
       void binding.stream.send(frame, id);
     } else {
-      pushCapped(binding.buffer, { frame, id }, `session ${sessionId}`);
+      pushCapped(
+        binding.buffer,
+        { frame, id },
+        `session ${sessionId}`,
+        (e) => e.id,
+      );
     }
   }
 
@@ -423,6 +428,7 @@ export class AcpConnection {
       binding.buffer,
       { frame, id: undefined, anchorId },
       `session ${sessionId}`,
+      (e) => e.id,
     );
   }
 
@@ -544,7 +550,12 @@ export class AcpConnection {
         `qwen serve: /acp replay deferral armed (${logSafe(sessionId)}, from id ${resumeFromEventId})`,
       );
     }
-    for (const entry of binding.buffer.splice(0)) {
+    // Drain the gap buffer into a separate array first: on the resume path the
+    // loop pushes id-less entries BACK into `binding.buffer`, so iterating the
+    // live buffer would be re-entrant. `splice(0)` snapshots + clears in one
+    // step; the explicit local makes the copy-semantics invariant visible.
+    const gap = binding.buffer.splice(0);
+    for (const entry of gap) {
       if (resumeFromEventId === undefined) {
         void stream.send(entry.frame, entry.id); // fresh connect: flush all now
       } else if (entry.id !== undefined) {
@@ -753,11 +764,32 @@ export class AcpConnection {
   }
 }
 
-function pushCapped<T>(buf: T[], frame: T, label = 'stream'): void {
+function pushCapped<T>(
+  buf: T[],
+  frame: T,
+  label = 'stream',
+  getId?: (entry: T) => number | undefined,
+): void {
   if (buf.length >= MAX_BUFFERED_FRAMES) {
-    buf.shift();
+    // Prefer evicting a REPLAYABLE id-bearing frame over an irreplaceable
+    // id-less one. On the session buffer, id-bearing entries are EventBus
+    // events the ring redelivers on reconnect, while id-less entries are
+    // deferred JSON-RPC replies (`sendSessionReply`) the ring does NOT track —
+    // dropping one would hang the `session/prompt` caller forever. So under a
+    // content flood during a detach gap, evict the oldest id-bearing frame and
+    // keep the reply. Only when every entry is id-less (or no accessor is
+    // given, e.g. the connection buffer) do we fall back to dropping the oldest
+    // — the cap must still hold.
+    let dropIndex = 0;
+    if (getId) {
+      const replayable = buf.findIndex((e) => getId(e) !== undefined);
+      if (replayable !== -1) dropIndex = replayable;
+    }
+    const [dropped] = buf.splice(dropIndex, 1);
+    const droppedId = getId?.(dropped);
     writeStderrLine(
-      `qwen serve: /acp pre-attach buffer full (${label}), dropped oldest frame`,
+      `qwen serve: /acp pre-attach buffer full (${label}), dropped frame` +
+        (droppedId !== undefined ? ` id ${droppedId}` : ' (id-less)'),
     );
   }
   buf.push(frame);

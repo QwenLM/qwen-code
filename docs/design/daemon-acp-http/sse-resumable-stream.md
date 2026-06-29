@@ -233,3 +233,23 @@ operator logging can't drift.
   not a ring event.
 - Consumer-side `supportsReplay` flip in the external `agent-web`
   `AcpHttpTransport` (lives in a different repo; unblocked by this PR).
+- **Permission voting through the exported SDK transports.** The exported
+  `AcpHttpTransport`/`AcpWsTransport` surface `session/request_permission` as a
+  `permission_request` event, but the SDK's vote APIs
+  (`respondToPermission` / `respondToSessionPermission`) map to a
+  `session/permission` request the ACP daemon has no handler for — it only
+  accepts a permission vote as the JSON-RPC *response* echoing the outbound
+  `_qwen_perm_N` id. Wiring the vote round-trip is part of the §1.7
+  permission-coordination follow-up.
+- **Session RPCs issued from inside the `subscribeEvents` loop on the exported
+  `AcpHttpTransport`.** The session `/acp` stream is single-reader: while a
+  consumer's async generator is parked between `yield`s, the reader is not
+  draining. If the consumer `await`s a session-routed RPC (`session/set_model`,
+  `session/prompt`, …) from within its own event-handling loop, `sendRequest`
+  suppresses the background reply pump (a subscription is "active") yet the
+  parked generator never reads the reply — the call hangs until the consumer
+  pulls the next event. The robust fix is to make the session reader a
+  background pump that always drains JSON-RPC replies and queues only
+  `DaemonEvent`s for the iterator; deferred as a focused follow-up since it is a
+  structural change to an opt-in, newly-exported transport and does not affect
+  the default REST transport.

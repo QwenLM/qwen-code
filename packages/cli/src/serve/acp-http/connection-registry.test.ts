@@ -201,6 +201,40 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('under a content flood the pre-attach buffer evicts id-bearing (ring-replayable) frames and keeps the irreplaceable id-less reply', () => {
+    // The buffer cap (256) is shared between id-bearing bus events (the ring
+    // redelivers them on reconnect) and id-less deferred JSON-RPC replies (the
+    // ring does NOT track them). A fast model flooding content during a detach
+    // gap must not evict the `session/prompt` reply — that would hang the
+    // caller. Eviction must prefer the replayable id-bearing frames.
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      // One irreplaceable id-less reply lands first, then a flood of id-bearing
+      // content frames well past the 256 cap.
+      conn.sendSessionReply('sess-1', { promptResult: true });
+      for (let i = 1; i <= 400; i++)
+        conn.sendSession('sess-1', { chunk: i }, i);
+
+      // Fresh reconnect flushes whatever survived. The id-less reply must be
+      // among the flushed frames (id-bearing frames were evicted preferentially).
+      const s = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s, new AbortController());
+      const replyDelivered = s.sent.some(
+        (x) =>
+          (x.message as { promptResult?: boolean }).promptResult === true &&
+          x.id === undefined,
+      );
+      expect(replyDelivered).toBe(true);
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('detachSessionStream is a no-op for a stale stream after reclaim (identity guard)', () => {
     // The CONTRACT at the attach site marks this guard load-bearing: once a
     // reclaim installs s2, the OLD stream s1 closing must NOT tear down or

@@ -767,17 +767,22 @@ export class AcpHttpTransport implements DaemonTransport {
 
     // Fire-and-forget: pump the SSE stream in the background.
     void this.pumpConnStream(headers, abort.signal)
-      .catch(() => {
+      .catch((err) => {
         // Stream ended or errored — reject remaining CONNECTION-scoped pendings
         // only. Session-scoped replies ride the session stream / its reply pump,
         // which owns their lifecycle; sweeping them here would reject a
         // `session/prompt` the session stream is about to resolve (§W2 race).
+        // Carry the pump's real error (HTTP 401/503, network drop) as the reject
+        // reason — mirroring `ensureSessionReplyPump` — so a caller can tell an
+        // auth failure from a generic close instead of a one-size-fits-all msg.
         if (!this._disposed) {
+          const reason =
+            err instanceof Error
+              ? err
+              : new Error('Connection SSE stream closed unexpectedly');
           for (const [id, entry] of this.pending) {
             if (entry.sessionId !== undefined) continue;
-            entry.reject(
-              new Error('Connection SSE stream closed unexpectedly'),
-            );
+            entry.reject(reason);
             this.pending.delete(id);
           }
         }
@@ -822,17 +827,19 @@ export class AcpHttpTransport implements DaemonTransport {
     // pre-built ReadableStream that isn't wired to the signal).
     // Race each read against a signal-based rejection so dispose()
     // can unblock a hanging `reader.read()`.
+    // Keep the abort listener in a named ref and remove it in the `finally`:
+    // on a clean drain that never aborts, an anonymous `{ once: true }` listener
+    // would otherwise leak on a long-lived signal reused across reconnects
+    // (mirrors `subscribeEventsInner` / `pumpSessionReplies`).
+    let onAbort: (() => void) | undefined;
     const abortPromise = new Promise<never>((_, reject) => {
       if (signal.aborted) {
         reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
         return;
       }
-      signal.addEventListener(
-        'abort',
-        () =>
-          reject(signal.reason ?? new DOMException('Aborted', 'AbortError')),
-        { once: true },
-      );
+      onAbort = () =>
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      signal.addEventListener('abort', onAbort, { once: true });
     });
     // No-op catch so a synchronous reject (signal already aborted) can't surface
     // as an unhandledrejection if the read loop throws before the race sees it.
@@ -904,6 +911,7 @@ export class AcpHttpTransport implements DaemonTransport {
       if (signal.aborted) return;
       throw err;
     } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
       // Best-effort cancel with a timeout guard — some ReadableStream
       // implementations (especially in test environments) can hang on
       // cancel() if the underlying source never closes.
@@ -1051,6 +1059,7 @@ export class AcpHttpTransport implements DaemonTransport {
 
     // Handle abort signal: if the caller aborts, reject the pending
     // request and clean up.
+    let removeAbortHandler: (() => void) | undefined;
     if (signal) {
       const abortHandler = () => {
         const entry = this.pending.get(req.id);
@@ -1062,13 +1071,23 @@ export class AcpHttpTransport implements DaemonTransport {
         }
       };
       signal.addEventListener('abort', abortHandler, { once: true });
+      // `{ once: true }` self-removes only when the signal FIRES. On the happy
+      // path (request resolves normally) the listener would otherwise stay
+      // attached, so a long-lived caller signal reused across many requests
+      // accumulates one closure per call. Remove it explicitly on settle.
+      removeAbortHandler = () =>
+        signal.removeEventListener('abort', abortHandler);
     }
 
-    // Release the background reply pump once the request settles (resolved by
-    // the pump, rejected by abort/stream-close) — the pump closes when its last
-    // in-flight request drains.
-    return releaseSessionPump
-      ? responsePromise.finally(releaseSessionPump)
+    // Release the background reply pump AND drop the abort listener once the
+    // request settles (resolved by the pump, rejected by abort/stream-close) —
+    // the pump closes when its last in-flight request drains.
+    const cleanup = () => {
+      removeAbortHandler?.();
+      releaseSessionPump?.();
+    };
+    return removeAbortHandler || releaseSessionPump
+      ? responsePromise.finally(cleanup)
       : responsePromise;
   }
 
