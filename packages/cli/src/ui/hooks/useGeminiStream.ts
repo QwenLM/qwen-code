@@ -63,7 +63,7 @@ import {
   createDuplicateProviderToolCallResponse,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
-  LoopTickResolver,
+  AutonomousLoopTickResolver,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -1514,7 +1514,8 @@ export const useGeminiStream = (
     [addItem, clearRetryCountdown],
   );
 
-  const autonomousLoopTickResolverRef = useRef<LoopTickResolver | null>(null);
+  const autonomousLoopTickResolverRef =
+    useRef<AutonomousLoopTickResolver | null>(null);
 
   const handleChatCompressionEvent = useCallback(
     (
@@ -3154,11 +3155,7 @@ export const useGeminiStream = (
   const [notificationTrigger, setNotificationTrigger] = useState(0);
 
   const getAutonomousLoopTickResolver = useCallback(() => {
-    autonomousLoopTickResolverRef.current ??= new LoopTickResolver({
-      projectRoot: '',
-      homeDir: '',
-      allowProjectFile: () => false,
-    });
+    autonomousLoopTickResolverRef.current ??= new AutonomousLoopTickResolver();
     return autonomousLoopTickResolverRef.current;
   }, []);
   const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
@@ -3236,7 +3233,6 @@ export const useGeminiStream = (
               modelText,
               sendMessageType: SendMessageType.Cron,
               onDelivered: () => resolver.markDelivered(),
-              onDeliveryFailed: () => resolver.resetCache(),
             });
             setNotificationTrigger((n) => n + 1);
             return;
