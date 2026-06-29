@@ -9076,6 +9076,51 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       abort.abort();
       await bridge.shutdown();
     });
+
+    it('emits only approval_mode_changed when useLegacyApprovalModeEmit is false', async () => {
+      // When the IDE companion ships an `approval_mode_changed` handler,
+      // set `useLegacyApprovalModeEmit: false` to drop the legacy dual-emit.
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        useLegacyApprovalModeEmit: false,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModeId: 'auto-edit',
+      });
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (e.type === 'approval_mode_changed') break;
+      }
+      expect(collected.map((c) => c.type)).toEqual(['approval_mode_changed']);
+      expect(collected).toHaveLength(1);
+      abort.abort();
+      await bridge.shutdown();
+    });
   });
 
   describe('A5 — session snapshot on attach', () => {

@@ -366,4 +366,17 @@ export interface BridgeOptions {
    * Default: 1_800_000 (30 minutes). `0` or `Infinity` disables.
    */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Emit the legacy `session_update{current_mode_update}` frame alongside
+   * the canonical `approval_mode_changed` event when the agent switches
+   * approval mode in-session. The VS Code IDE companion currently
+   * handles only `current_mode_update`; once it ships an
+   * `approval_mode_changed` handler, set this to `false` to drop the
+   * legacy dual-emit. Defaults to `true` (dual-emit enabled).
+   *
+   * TODO(dual-emit-removal): remove this flag and the legacy emit path
+   * once the IDE companion has handled `approval_mode_changed` for at
+   * least one release cycle.
+   */
+  useLegacyApprovalModeEmit?: boolean;
 }

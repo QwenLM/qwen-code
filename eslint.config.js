@@ -129,6 +129,7 @@ export default tseslint.config(
             'yargs/**',
             'msw/node',
             '**/generated/**',
+            '**/internal/**',
             './styles/tailwind.css',
             './styles/App.css',
             './styles/style.css'

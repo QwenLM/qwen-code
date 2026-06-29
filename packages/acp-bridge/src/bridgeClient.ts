@@ -321,6 +321,13 @@ export class BridgeClient implements Client {
       modeId: string,
       originatorClientId: string | undefined,
     ) => void,
+    /**
+     * §2.3 compat: emit the legacy `session_update{current_mode_update}`
+     * frame alongside `approval_mode_changed` when `true`. The IDE
+     * companion handles only `current_mode_update`; set to `false` once
+     * it ships an `approval_mode_changed` handler. Defaults to `true`.
+     */
+    private readonly useLegacyApprovalModeEmit: boolean = true,
   ) {}
 
   async requestPermission(
@@ -848,11 +855,9 @@ export class BridgeClient implements Client {
           : {}),
       });
     }
-    // TODO(dual-emit-removal): also emit the legacy generic
-    // `session_update{current_mode_update}` for one release cycle so the
-    // VS Code IDE companion's existing `case 'current_mode_update'`
-    // handler keeps working. Remove this block (and its tracking issue)
-    // once the companion ships an `approval_mode_changed` handler.
+    // TODO(dual-emit-removal): remove this block (and its tracking issue)
+    // once the IDE companion ships an `approval_mode_changed` handler.
+    // Controlled by `useLegacyApprovalModeEmit` (defaults to `true`).
     //
     // Skip it when the producer already sent the legacy frame itself: the
     // `exit_plan_mode` path (`Session.sendCurrentModeUpdateNotification`)
@@ -870,30 +875,36 @@ export class BridgeClient implements Client {
     // switch, and (b) collide structurally with the real `session_update`
     // the agent already emits on the `exit_plan_mode` path — leaving two
     // incompatible shapes on the bus for one change.
-    if (params['legacyFrameSent'] === true) {
-      writeStderrLine(
-        `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId} legacy_frame=skipped`,
-      );
-      return;
-    }
-    // `EventBus.publish` never throws (closed bus → undefined no-op); per its
-    // documented contract we don't wrap it in try/catch.
-    entry.events.publish({
-      type: 'session_update',
-      data: {
-        sessionId,
-        update: {
-          sessionUpdate: 'current_mode_update',
-          currentModeId,
+    if (this.useLegacyApprovalModeEmit) {
+      if (params['legacyFrameSent'] === true) {
+        writeStderrLine(
+          `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId} legacy_frame=skipped`,
+        );
+        return;
+      }
+      // `EventBus.publish` never throws (closed bus → undefined no-op); per its
+      // documented contract we don't wrap it in try/catch.
+      entry.events.publish({
+        type: 'session_update',
+        data: {
+          sessionId,
+          update: {
+            sessionUpdate: 'current_mode_update',
+            currentModeId,
+          },
         },
-      },
-      ...(entry.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
-    });
-    writeStderrLine(
-      `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId}`,
-    );
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
+      });
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId}`,
+      );
+    } else {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId} legacy_frame=disabled`,
+      );
+    }
   }
 
   /**

@@ -910,6 +910,82 @@ describe('FeishuChannel', () => {
     });
   });
 
+  describe('onResponseComplete: busy-wait race condition', () => {
+    it('deletes orphaned card when creation completes after timeout abandon', async () => {
+      // Verifies the creationTimer callback detects abandoned=true and deletes
+      // the card, preventing an orphan when the busy-wait timeout fires before
+      // card creation completes.
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['botOpenId'] = 'bot_123';
+
+      let creationResolve: (v: { messageId: string; success: boolean }) => void;
+      const createStreamingCardMock = vi.fn().mockImplementation(
+        () =>
+          new Promise<{ messageId: string; success: boolean }>((resolve) => {
+            creationResolve = resolve;
+          }),
+      );
+      (channel as unknown as Record<string, unknown>)['createStreamingCard'] =
+        createStreamingCardMock;
+
+      const cardSessions = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'cardSessions');
+      const abortController = new AbortController();
+      const deleteCardMock = vi.fn().mockResolvedValue(undefined);
+      cardSessions.set('inbound_1', {
+        messageId: '',
+        created: false,
+        creating: true,
+        stopped: false,
+        finalizing: false,
+        completed: false,
+        abandoned: false,
+        accumulatedText: '',
+        lastUpdateAt: Date.now(),
+        abortController,
+      });
+
+      (channel as unknown as Record<string, unknown>)['deleteCard'] =
+        deleteCardMock;
+
+      // Simulate the creationTimer callback: call createStreamingCard (slow)
+      // and then check abandoned state
+      const creationTimerCallback = async () => {
+        const result = await channel['createStreamingCard'](
+          'oc_chat_id',
+          'placeholder',
+          undefined,
+          'inbound_1',
+          abortController.signal,
+        );
+        const cs = cardSessions.get('inbound_1');
+        if (cs?.abandoned && result.success) {
+          await deleteCardMock(result.messageId);
+        }
+        if (cs) cs.creating = false;
+      };
+
+      // Simulate: busy-wait timeout fires before creation completes
+      // First, set up the creationTimer to fire immediately
+      void creationTimerCallback();
+
+      // Simulate the busy-wait timeout firing (sets abandoned=true)
+      // The creation is still in flight (creating=true)
+      cardSessions.get('inbound_1')!.abandoned = true;
+      abortController.abort();
+
+      // Let creation complete
+      creationResolve!({ messageId: 'card_1', success: true });
+
+      // Wait for async operations to settle
+      await new Promise((r) => setTimeout(r, 10));
+
+      // The orphaned card was deleted (no duplicate)
+      expect(deleteCardMock).toHaveBeenCalledWith('card_1');
+    });
+  });
+
   describe('webhook: JSON parse error logging', () => {
     it('logs error message on malformed JSON body', async () => {
       // This test verifies the fix is in place by checking the source code

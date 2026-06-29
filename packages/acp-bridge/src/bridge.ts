@@ -85,6 +85,7 @@ import type {
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
+
 import { writeStderrLine } from './internal/stderrLine.js';
 import { BridgeClient, KNOWN_APPROVAL_MODES } from './bridgeClient.js';
 import {
@@ -1233,6 +1234,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             originator,
           );
         },
+        opts.useLegacyApprovalModeEmit ?? true,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
