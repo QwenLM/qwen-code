@@ -171,8 +171,8 @@ export class AcpWsTransport implements DaemonTransport {
       );
       const notifMeta = extractHeaderMeta(init.headers);
       if (notifMeta) {
-        params._meta = {
-          ...(isRecord(params._meta) ? params._meta : {}),
+        params['_meta'] = {
+          ...(isRecord(params['_meta']) ? params['_meta'] : {}),
           ...notifMeta,
         };
       }
@@ -193,8 +193,8 @@ export class AcpWsTransport implements DaemonTransport {
     // carry natively.
     const headerMeta = extractHeaderMeta(init.headers);
     if (headerMeta) {
-      params._meta = {
-        ...(isRecord(params._meta) ? params._meta : {}),
+      params['_meta'] = {
+        ...(isRecord(params['_meta']) ? params['_meta'] : {}),
         ...headerMeta,
       };
     }
