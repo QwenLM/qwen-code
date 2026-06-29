@@ -223,7 +223,7 @@ describe('SessionRouter', () => {
       });
 
       await expect(router.resolve('ch', 'alice', 'chat1')).rejects.toThrow(
-        'Session died before routing completed',
+        'Session dead-session died before routing completed (2/2 attempts, key ch:alice:chat1)',
       );
 
       expect(newSession).toHaveBeenCalledTimes(2);
@@ -646,7 +646,7 @@ describe('SessionRouter', () => {
       expect(router.getTarget('session-2')).toBeUndefined();
     });
 
-    it('keeps pending dead session ids across the whole restore batch', async () => {
+    it('keeps dead session ids within the active restore window', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);
       const persistPath = join(dir, 'sessions.json');

@@ -15,13 +15,14 @@ interface SessionReservation {
   reject: (error: unknown) => void;
 }
 
+type SessionLoadWindow = Set<string>;
+
 export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
   private creatingSessions: Map<string, Promise<string>> = new Map();
-  private pendingDeadSessionIds: Set<string> = new Set();
-  private loadingSessions = 0;
+  private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
 
   private bridge: ChannelAgentBridge;
   private defaultCwd: string;
@@ -104,9 +105,13 @@ export class SessionRouter {
       // bridge can emit sessionDied synchronously while creating the session.
       const created = Promise.resolve().then(async () => {
         const sessionCwd = cwd || this.defaultCwd;
-        this.beginSessionLoad();
+        const loadWindow = this.beginSessionLoad();
         try {
-          const sessionId = await this.createLiveSession(sessionCwd);
+          const sessionId = await this.createLiveSession(
+            sessionCwd,
+            loadWindow,
+            key,
+          );
           this.toSession.set(key, sessionId);
           this.toTarget.set(sessionId, {
             channelName,
@@ -118,7 +123,7 @@ export class SessionRouter {
           this.persist();
           return sessionId;
         } finally {
-          this.endSessionLoad();
+          this.endSessionLoad(loadWindow);
         }
       });
       this.creatingSessions.set(key, created);
@@ -214,8 +219,10 @@ export class SessionRouter {
     if (this.toCwd.delete(sessionId)) {
       removed = true;
     }
-    if (!removed && this.loadingSessions > 0) {
-      this.pendingDeadSessionIds.add(sessionId);
+    if (!removed && this.sessionLoadWindows.size > 0) {
+      for (const loadWindow of this.sessionLoadWindows) {
+        loadWindow.add(sessionId);
+      }
     }
     if (removed) {
       this.persist();
@@ -283,7 +290,7 @@ export class SessionRouter {
       reservations.set(key, reservation);
     }
 
-    this.beginSessionLoad();
+    const loadWindow = this.beginSessionLoad();
     try {
       for (const [key, entry] of Object.entries(entries)) {
         const reservation = reservations.get(key);
@@ -296,7 +303,7 @@ export class SessionRouter {
           if (typeof sessionId !== 'string' || sessionId.length === 0) {
             throw new Error('Invalid restored session ID');
           }
-          if (this.pendingDeadSessionIds.delete(sessionId)) {
+          if (loadWindow.delete(sessionId)) {
             throw new Error('Restored session died before routing completed');
           }
           this.toSession.set(key, sessionId);
@@ -312,7 +319,9 @@ export class SessionRouter {
           process.stderr.write(
             `[SessionRouter] Failed to restore session ${entry.sessionId} for key ${key}: ${reason}\n`,
           );
-          reservation.reject(new Error('Session restore failed'));
+          reservation.reject(
+            new Error('Session restore failed', { cause: err }),
+          );
           // Session can't be loaded — will create fresh on next message
           failed++;
           changed = true;
@@ -323,7 +332,7 @@ export class SessionRouter {
         }
       }
     } finally {
-      this.endSessionLoad();
+      this.endSessionLoad(loadWindow);
     }
 
     // Update persist file to only include successfully restored sessions
@@ -340,8 +349,7 @@ export class SessionRouter {
     this.toTarget.clear();
     this.toCwd.clear();
     this.creatingSessions.clear();
-    this.pendingDeadSessionIds.clear();
-    this.loadingSessions = 0;
+    this.sessionLoadWindows.clear();
     if (this.persistPath && existsSync(this.persistPath)) {
       try {
         unlinkSync(this.persistPath);
@@ -373,19 +381,29 @@ export class SessionRouter {
     }
   }
 
-  private async createLiveSession(cwd: string): Promise<string> {
+  private async createLiveSession(
+    cwd: string,
+    loadWindow: SessionLoadWindow,
+    routingKey: string,
+  ): Promise<string> {
     const maxAttempts = 2;
+    let lastDeadSessionId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const sessionId = await this.bridge.newSession(cwd);
-      if (!this.pendingDeadSessionIds.delete(sessionId)) {
+      if (!loadWindow.delete(sessionId)) {
         return sessionId;
       }
+      lastDeadSessionId = sessionId;
     }
-    throw new Error('Session died before routing completed');
+    throw new Error(
+      `Session ${lastDeadSessionId ?? 'unknown'} died before routing completed (${maxAttempts}/${maxAttempts} attempts, key ${routingKey})`,
+    );
   }
 
-  private beginSessionLoad(): void {
-    this.loadingSessions++;
+  private beginSessionLoad(): SessionLoadWindow {
+    const loadWindow: SessionLoadWindow = new Set();
+    this.sessionLoadWindows.add(loadWindow);
+    return loadWindow;
   }
 
   private createSessionReservation(): SessionReservation {
@@ -402,12 +420,7 @@ export class SessionRouter {
     };
   }
 
-  private endSessionLoad(): void {
-    if (this.loadingSessions > 0) {
-      this.loadingSessions--;
-    }
-    if (this.loadingSessions === 0) {
-      this.pendingDeadSessionIds.clear();
-    }
+  private endSessionLoad(loadWindow: SessionLoadWindow): void {
+    this.sessionLoadWindows.delete(loadWindow);
   }
 }

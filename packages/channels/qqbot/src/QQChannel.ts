@@ -17,6 +17,7 @@ import {
   SessionRouter,
   getGlobalQwenDir,
   sanitizeSenderName,
+  sanitizePromptText,
   sanitizeLogText,
 } from '@qwen-code/channel-base';
 import type {
@@ -993,8 +994,11 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] Slash cmd from ${safeName} (${chatId}): ${loggedCmd}\n`,
       );
     }
-    // Don't prefix slash commands, keep [safeName] for normal messages
-    const text = isSlash ? cleanText : `[${safeName}]: ${cleanText}`;
+    // Don't prefix slash commands; for normal messages, sanitize the body here
+    // because alreadyPrefixed tells ChannelBase not to rewrite the prefix.
+    const text = isSlash
+      ? cleanText
+      : `[${safeName}]: ${sanitizePromptText(cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId: event.author.user_openid || event.author.id,

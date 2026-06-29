@@ -69,9 +69,13 @@ export function sanitizeQuotedText(text: string, maxLen: number): string {
 }
 
 export function sanitizePromptText(text: string): string {
-  return text
-    .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
-    .replace(/^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm, '$1$2$3');
+  return (
+    text
+      .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+      .replace(/^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm, '$1$2$3')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+  );
 }
 
 /**
