@@ -374,12 +374,6 @@ export {
 export * from './extension/index.js';
 export * from './prompts/mcp-prompts.js';
 export * from './skills/index.js';
-export {
-  AUTONOMOUS_SENTINEL_CRON,
-  AUTONOMOUS_SENTINEL_DYNAMIC,
-  AutonomousLoopTickResolver,
-  detectAutonomousSentinel,
-} from './skills/bundled/loop/autonomous-loop.js';
 export * from './skills/bundled/loop/loop-task-file.js';
 export * from './skills/bundled/loop/loop-tick-resolver.js';
 export * from './subagents/index.js';
