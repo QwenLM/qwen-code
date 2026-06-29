@@ -1327,4 +1327,71 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     expect(pending.has(7)).toBe(false);
     t.dispose();
   });
+
+  it('rejects conn-scoped pendings and reopens the stream when GET /acp returns 500 (no silent hang)', async () => {
+    // A non-2xx conn stream must NOT resolve the pump silently: that would
+    // leave connection-scoped pendings hung forever AND leave `connStreamAbort`
+    // non-null so the next request never reopens the stream.
+    let getCalls = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (url.endsWith('/acp')) {
+        getCalls++;
+        return new Response('nope', {
+          status: 500,
+          statusText: 'Server Error',
+        });
+      }
+      return jsonResponse(200, { ok: true });
+    }) as unknown as typeof globalThis.fetch;
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+
+    const internals = t as unknown as {
+      pending: Map<
+        number,
+        {
+          resolve: (r: unknown) => void;
+          reject: (e: Error) => void;
+          sessionId?: string;
+        }
+      >;
+      connStreamAbort: AbortController | undefined;
+      openConnStream: () => void;
+      ensureConnStream: () => void;
+    };
+    const connReject = vi.fn();
+    const sessionReject = vi.fn();
+    internals.pending.set(1, {
+      resolve: () => {},
+      reject: connReject,
+      sessionId: undefined,
+    });
+    internals.pending.set(2, {
+      resolve: () => {},
+      reject: sessionReject,
+      sessionId: 'sess-1',
+    });
+
+    internals.openConnStream();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Conn-scoped pending rejected; session-scoped one left for its own stream.
+    expect(connReject).toHaveBeenCalledTimes(1);
+    expect(internals.pending.has(1)).toBe(false);
+    expect(sessionReject).not.toHaveBeenCalled();
+    expect(internals.pending.has(2)).toBe(true);
+
+    // `connStreamAbort` cleared → the next request reopens rather than hanging.
+    expect(internals.connStreamAbort).toBeUndefined();
+    internals.ensureConnStream();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(getCalls).toBe(2);
+
+    t.dispose();
+  });
 });

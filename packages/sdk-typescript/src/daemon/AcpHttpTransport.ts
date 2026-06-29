@@ -766,19 +766,32 @@ export class AcpHttpTransport implements DaemonTransport {
     }
 
     // Fire-and-forget: pump the SSE stream in the background.
-    void this.pumpConnStream(headers, abort.signal).catch(() => {
-      // Stream ended or errored — reject remaining CONNECTION-scoped pendings
-      // only. Session-scoped replies ride the session stream / its reply pump,
-      // which owns their lifecycle; sweeping them here would reject a
-      // `session/prompt` the session stream is about to resolve (§W2 race).
-      if (!this._disposed) {
-        for (const [id, entry] of this.pending) {
-          if (entry.sessionId !== undefined) continue;
-          entry.reject(new Error('Connection SSE stream closed unexpectedly'));
-          this.pending.delete(id);
+    void this.pumpConnStream(headers, abort.signal)
+      .catch(() => {
+        // Stream ended or errored — reject remaining CONNECTION-scoped pendings
+        // only. Session-scoped replies ride the session stream / its reply pump,
+        // which owns their lifecycle; sweeping them here would reject a
+        // `session/prompt` the session stream is about to resolve (§W2 race).
+        if (!this._disposed) {
+          for (const [id, entry] of this.pending) {
+            if (entry.sessionId !== undefined) continue;
+            entry.reject(
+              new Error('Connection SSE stream closed unexpectedly'),
+            );
+            this.pending.delete(id);
+          }
         }
-      }
-    });
+      })
+      .finally(() => {
+        // The pump has settled (clean close, error, or abort). Clear the
+        // controller so the NEXT connection-scoped request reopens the stream
+        // via `ensureConnStream` — without this, a stream that 500s, serves no
+        // body, or closes leaves `connStreamAbort` non-null forever and every
+        // later 202 request hangs with no pump to deliver its reply. Guard on
+        // identity so a newer `openConnStream` that already replaced the
+        // controller isn't clobbered.
+        if (this.connStreamAbort === abort) this.connStreamAbort = undefined;
+      });
   }
 
   private async pumpConnStream(
@@ -790,7 +803,15 @@ export class AcpHttpTransport implements DaemonTransport {
       signal,
     });
 
-    if (!res.ok || !res.body) return;
+    // A non-2xx response or a missing body is a HARD failure, not a silent
+    // no-op: throwing lets `openConnStream`'s catch reject the connection-scoped
+    // pendings (otherwise a 202 request would hang forever waiting for a reply
+    // on a stream that never opened).
+    if (!res.ok || !res.body) {
+      throw new Error(
+        `Connection SSE stream failed: HTTP ${res.status} ${res.statusText}`,
+      );
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -874,8 +895,14 @@ export class AcpHttpTransport implements DaemonTransport {
           }
         }
       }
-    } catch {
-      // Abort or read error — fall through to cleanup.
+    } catch (err) {
+      // An intentional abort (dispose / reconnect) is a clean shutdown — the
+      // aborter owns pending cleanup, so swallow it. Any OTHER error (read
+      // failure, mid-stream socket drop) must PROPAGATE so `openConnStream`'s
+      // catch rejects the connection-scoped pendings rather than leaving them
+      // hung on a dead stream.
+      if (signal.aborted) return;
+      throw err;
     } finally {
       // Best-effort cancel with a timeout guard — some ReadableStream
       // implementations (especially in test environments) can hang on
