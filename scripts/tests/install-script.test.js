@@ -1723,6 +1723,7 @@ describe('standalone release packaging', () => {
       expect(shim).toContain(
         '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
       );
+      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(2);
       expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
         'qwen-code-win-x64.zip',
       );

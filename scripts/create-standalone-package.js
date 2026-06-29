@@ -80,6 +80,8 @@ const DIST_ALLOWED_ENTRIES = new Set([
 const DIST_ALLOWED_ENTRY_PATTERNS = [
   /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,
 ];
+// Emitted into dist/ by prepare-package.js for npm publishing only;
+// standalone archives must not copy them into lib/.
 const DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set(['postinstall.js', 'patches']);
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
 
