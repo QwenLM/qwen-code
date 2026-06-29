@@ -16,10 +16,8 @@ import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import { AlternateScreen } from './AlternateScreen.js';
 import type { ThinkingViewerData } from '../contexts/ThinkingViewerContext.js';
-import {
-  THINKING_ICON,
-  wrapToVisualLines,
-} from './messages/ConversationMessages.js';
+import { THINKING_ICON } from './messages/ConversationMessages.js';
+import { wrapToVisualLines } from '../utils/textUtils.js';
 import { formatDuration } from '../utils/displayUtils.js';
 
 interface ThinkingViewerProps {
