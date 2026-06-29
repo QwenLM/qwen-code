@@ -49,6 +49,7 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'budget_would_exceed',
 ]);
 
+const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
 const MAX_DETAILS_LENGTH = 4096;
 
 export function normalizeDaemonEvent(
@@ -1104,14 +1105,17 @@ function normalizeMemoryChanged(
     const touchedScopes = (event.data as Record<string, unknown> | undefined)?.[
       'touchedScopes'
     ];
-    if (!Array.isArray(touchedScopes)) {
-      return fallbackDebug(event, base, 'malformed memory_changed payload');
+    if (
+      !(source && taskId && Array.isArray(touchedScopes)) ||
+      touchedScopes.some((scope) => scope !== 'user' && scope !== 'project')
+    ) {
+      return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
     }
     return [
       {
         ...base,
         type: 'workspace.memory.changed',
-        scope: 'managed',
+        scope,
         source,
         taskId,
         touchedScopes: touchedScopes as Array<'user' | 'project'>,
@@ -1134,7 +1138,7 @@ function normalizeMemoryChanged(
     (mode !== 'append' && mode !== 'replace') ||
     bytesWritten === undefined
   ) {
-    return fallbackDebug(event, base, 'malformed memory_changed payload');
+    return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
   }
   return [
     {

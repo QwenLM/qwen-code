@@ -65,6 +65,11 @@ import type {
   DaemonVoiceMode,
   DaemonVoiceModelDescriptor,
   DaemonVoiceTransport,
+  DaemonWorkspaceMemoryRememberContextMode,
+  DaemonWorkspaceMemoryRememberOptions,
+  DaemonWorkspaceMemoryRememberResult,
+  DaemonWorkspaceMemoryRememberTask,
+  DaemonWorkspaceMemoryRememberTaskStatus,
   DaemonWorkspaceVoiceStatus,
   DaemonWorkspaceVoiceTranscribeOptions,
   DaemonWorkspaceVoiceTranscriptionResult,
@@ -158,6 +163,11 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonWorkspaceVoiceTranscribeOptions>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceVoiceTranscriptionResult>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceVoiceUpdate>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryRememberContextMode>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryRememberOptions>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryRememberResult>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryRememberTask>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryRememberTaskStatus>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupCompletedData>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupCompletedEvent>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupGitignoreResult>().not.toBeNever();

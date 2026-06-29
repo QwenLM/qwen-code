@@ -65,7 +65,10 @@ function buildBridgeStub(opts: {
 } {
   const events: RecordedEvent[] = [];
   const rememberCalls: BridgeWorkspaceMemoryRememberRequest[] = [];
-  const known = new Set<string>(opts.knownIds ?? []);
+  const known =
+    opts.knownIds instanceof Set
+      ? opts.knownIds
+      : new Set<string>(opts.knownIds ?? []);
   const rememberImpl =
     opts.rememberImpl ??
     (async () => ({
@@ -292,6 +295,25 @@ describe('workspace memory remember routes', () => {
       .expect(404);
     await request(app)
       .get(`/workspace/memory/remember/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(200);
+  });
+
+  it('allows the original owner to poll after the client detaches', async () => {
+    const knownIds = new Set(['client-1']);
+    const bridge = buildBridgeStub({ knownIds });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ content: 'Remember this' })
+      .expect(202);
+
+    knownIds.clear();
+
+    await request(app)
+      .get(`/workspace/memory/remember/${post.body.taskId}`)
       .set('X-Qwen-Client-Id', 'client-1')
       .expect(200);
   });

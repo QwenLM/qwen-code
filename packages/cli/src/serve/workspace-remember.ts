@@ -314,7 +314,7 @@ export function mountWorkspaceMemoryRememberRoutes(
     '/workspace/memory/remember/:taskId',
     deps.mutate({ strict: true }),
     (req, res) => {
-      const requesterClientId = validateOriginatorClientId(deps, req, res);
+      const requesterClientId = deps.parseClientId(req, res);
       if (requesterClientId === null) return;
       const task = lane.get(req.params['taskId'], requesterClientId);
       if (!task) {

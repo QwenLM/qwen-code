@@ -2203,6 +2203,25 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('rejects malformed managed memory_changed payloads', () => {
+    for (const data of [
+      {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        touchedScopes: ['project'],
+      },
+      {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['bad'],
+      },
+    ]) {
+      const events = normalizeDaemonEvent(envelopeOf('memory_changed', data));
+      expect(events[0]).toMatchObject({ type: 'debug' });
+    }
+  });
+
   it('normalizes agent_changed for create/update/delete', () => {
     for (const change of ['created', 'updated', 'deleted'] as const) {
       const events = normalizeDaemonEvent(
