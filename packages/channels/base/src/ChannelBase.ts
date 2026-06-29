@@ -107,8 +107,8 @@ export abstract class ChannelBase {
   setBridge(bridge: ChannelAgentBridge): void {
     if (this.registerBridgeEvents) {
       this.detachBridgeEvents(this.bridge);
-      this.router.setBridge(bridge);
     }
+    this.router.setBridge(bridge);
     this.bridge = bridge;
     if (this.registerBridgeEvents) {
       this.attachBridgeEvents(bridge);

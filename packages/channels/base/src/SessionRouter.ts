@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import process from 'node:process';
 import type { SessionScope, SessionTarget } from './types.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 
@@ -76,6 +77,7 @@ export class SessionRouter {
     cwd?: string,
   ): Promise<string> {
     const key = this.routingKey(channelName, senderId, chatId, threadId);
+    let failedCreateWaits = 0;
     for (;;) {
       const existing = this.toSession.get(key);
       if (existing) {
@@ -86,9 +88,13 @@ export class SessionRouter {
       if (creating) {
         try {
           return await creating;
-        } catch {
+        } catch (err) {
           if (this.creatingSessions.get(key) === creating) {
             this.creatingSessions.delete(key);
+          }
+          failedCreateWaits++;
+          if (failedCreateWaits > 3) {
+            throw err;
           }
           continue;
         }
@@ -245,7 +251,7 @@ export class SessionRouter {
   /**
    * Restore session mappings from a previous bridge.
    * Called after bridge restart — attempts loadSession for each saved mapping.
-   * Failed loads are silently dropped (new session on next message).
+   * Failed loads are dropped (new session on next message).
    */
   async restoreSessions(): Promise<{
     restored: number;
@@ -301,7 +307,11 @@ export class SessionRouter {
             changed = true;
           }
           restored++;
-        } catch {
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          process.stderr.write(
+            `[SessionRouter] Failed to restore session ${entry.sessionId} for key ${key}: ${reason}\n`,
+          );
           reservation.reject(new Error('Session restore failed'));
           // Session can't be loaded — will create fresh on next message
           failed++;

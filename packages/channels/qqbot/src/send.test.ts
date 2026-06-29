@@ -92,8 +92,8 @@ vi.mock('@qwen-code/channel-base', () => ({
       this.name = name;
       this.config = config;
       this.bridge = bridge;
-      this.router = options?.router ?? {};
-      this.baseOptions = options ?? {};
+      this.router = (options?.['router'] ?? {}) as Record<string, unknown>;
+      this.baseOptions = options ?? ({} as Record<string, unknown>);
     }
     protected handleInbound(_env: unknown): Promise<void> {
       return Promise.resolve();

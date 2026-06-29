@@ -270,6 +270,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         removeSessionId: vi.fn(),
+        setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -313,6 +314,20 @@ describe('ChannelBase', () => {
 
       expect(ch.toolCalls).toEqual([]);
       expect(router.removeSessionId).not.toHaveBeenCalled();
+    });
+
+    it('updates a supplied router bridge even when events are gateway-owned', () => {
+      const router = {
+        getTarget: vi.fn(),
+        removeSessionId: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
+      const newBridge = createBridge();
+
+      ch.setBridge(newBridge);
+
+      expect(router.setBridge).toHaveBeenCalledWith(newBridge);
     });
 
     it('moves direct bridge events and router bridge on setBridge', () => {

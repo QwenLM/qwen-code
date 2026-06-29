@@ -171,9 +171,9 @@ function registerSessionCleanup(
   bridge: ChannelAgentBridge,
   router: SessionRouter,
 ): void {
-  bridge.on('sessionDied', (event: { sessionId: string }) => {
+  bridge.on('sessionDied', (event: { sessionId: string; reason?: string }) => {
     writeStderrLine(
-      `[Channel] Session ${event.sessionId} died, removing routing state`,
+      `[Channel] Session ${event.sessionId} died${event.reason ? ` (${event.reason})` : ''}, removing routing state`,
     );
     router.removeSessionId(event.sessionId);
   });
