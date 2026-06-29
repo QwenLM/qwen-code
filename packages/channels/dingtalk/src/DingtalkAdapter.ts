@@ -618,7 +618,12 @@ export class DingtalkChannel extends ChannelBase {
         typeof downstream.data === 'string'
           ? JSON.parse(downstream.data)
           : (downstream.data as DingTalkMessageData);
-      const msgId = data.msgId || downstream.headers.messageId;
+      const msgId =
+        typeof data.msgId === 'string'
+          ? data.msgId
+          : typeof downstream.headers.messageId === 'string'
+            ? downstream.headers.messageId
+            : undefined;
 
       // Dedup: DingTalk retries unACKed messages
       if (msgId && this.seenMessages.has(msgId)) {
@@ -629,9 +634,21 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       const isGroup = data.conversationType === '2';
-      const sessionWebhook = data.sessionWebhook;
-      const conversationId = data.conversationId;
+      const sessionWebhook =
+        typeof data.sessionWebhook === 'string'
+          ? data.sessionWebhook
+          : undefined;
+      const conversationId =
+        typeof data.conversationId === 'string'
+          ? data.conversationId
+          : undefined;
       const isMentioned = Boolean(data.isInAtList);
+      const senderNick =
+        typeof data.senderNick === 'string' ? data.senderNick : undefined;
+      const senderStaffId =
+        typeof data.senderStaffId === 'string' ? data.senderStaffId : undefined;
+      const senderIdValue =
+        typeof data.senderId === 'string' ? data.senderId : undefined;
 
       if (!sessionWebhook) {
         process.stderr.write(
@@ -651,7 +668,7 @@ export class DingtalkChannel extends ChannelBase {
           `[DingTalk:${this.name}] Group message has no conversationId, skipping (msgId=${
             msgId || 'unknown'
           }, sender=${sanitizeSenderName(
-            data.senderNick || data.senderStaffId || 'unknown',
+            senderNick || senderStaffId || 'unknown',
           )})\n`,
         );
         return;
@@ -670,12 +687,12 @@ export class DingtalkChannel extends ChannelBase {
           conversationId || '',
           120,
         )} isGroup=${isGroup} isMentioned=${isMentioned} senderNick=${sanitizeLogText(
-          data.senderNick || '',
+          senderNick || '',
           80,
         )} senderStaffId=${sanitizeLogText(
-          data.senderStaffId || '',
+          senderStaffId || '',
           80,
-        )} senderId=${sanitizeLogText(data.senderId || '', 80)}\n`,
+        )} senderId=${sanitizeLogText(senderIdValue || '', 80)}\n`,
       );
 
       // Extract text and media info from message
@@ -696,8 +713,8 @@ export class DingtalkChannel extends ChannelBase {
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
       const envelopeText = isMentioned ? cleanText : cleanText || content.text;
-      const senderId = data.senderStaffId || data.senderId || '';
-      const senderName = data.senderNick || senderId || 'Unknown';
+      const senderId = senderStaffId || senderIdValue || '';
+      const senderName = senderNick || senderId || 'Unknown';
 
       const envelope: Envelope = {
         channelName: this.name,

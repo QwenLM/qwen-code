@@ -238,8 +238,9 @@ describe('DingtalkChannel parsed-message logging', () => {
 
 describe('DingtalkChannel downstream logging', () => {
   it('replaces raw SDK Buffer logging with a structured downstream summary', () => {
-    const channel = createChannel();
+    createChannel();
     const client = latestMockClient() as {
+      debug: boolean;
       onDownStream(data: Buffer): void;
       onCallback: ReturnType<typeof vi.fn>;
     };
@@ -440,6 +441,40 @@ describe('DingtalkChannel sender attribution', () => {
         senderId: 'staff-1',
         senderName: 'staff-1',
       }),
+    );
+  });
+
+  it('ignores non-string message metadata when logging parsed JSON', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: { value: 'm1' },
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: { value: 'Alice' },
+        senderStaffId: ['staff-1'],
+        senderId: 123,
+        isInAtList: true,
+        text: { content: '@qwen-code hello' },
+      }),
+      headers: { messageId: 'header-m1' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    expect(() =>
+      (
+        channel as unknown as { onMessage(d: DWClientDownStream): void }
+      ).onMessage(downstream),
+    ).not.toThrow();
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    writeSpy.mockRestore();
+
+    expect(logged).toContain(
+      '[DingTalk:test-dingtalk] message msgId=header-m1 conversationId=cid123 isGroup=true isMentioned=true senderNick= senderStaffId= senderId=',
     );
   });
 });
