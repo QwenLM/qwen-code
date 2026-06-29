@@ -3855,6 +3855,69 @@ describe('GeminiChat', async () => {
       // service cheap-gate.
       expect(compressSpy.mock.calls[0][1].reservedOutputTokens).toBe(65_536);
     });
+
+    it('sources reservedOutputTokens from QWEN_CODE_MAX_OUTPUT_TOKENS env var when no config override is present', async () => {
+      // When QWEN_CODE_MAX_OUTPUT_TOKENS is set (32000) and there is no
+      // samplingParams.max_tokens nor params.config.maxOutputTokens, the env
+      // var value becomes effectiveReservedOutput.
+      // With 200K window: contextLimit = 200000 - 32000 = 168000
+      // computeThresholds(168000): effectiveWindow = 148000, hard = 145000
+      // Without the fix (raw 200K): hard = 177000, and 150K would NOT exceed.
+      // Setting lastPromptTokenCount to 150000 triggers hard-rescue ONLY when
+      // the env var budget is correctly subtracted.
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'] = '32000';
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          contextWindowSize: 200_000,
+        });
+
+        const compressSpy = vi
+          .spyOn(ChatCompressionService.prototype, 'compress')
+          .mockResolvedValueOnce({
+            newHistory: [
+              { role: 'user', parts: [{ text: 'summary' }] },
+              { role: 'model', parts: [{ text: 'ack' }] },
+            ],
+            info: {
+              originalTokenCount: 150_000,
+              newTokenCount: 40_000,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          });
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          makeStreamResponse('after env-var rescue'),
+        );
+
+        const chatInstance = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          undefined,
+          uiTelemetryService,
+        );
+        chatInstance.setLastPromptTokenCount(150_000);
+
+        const stream = await chatInstance.sendMessageStream(
+          'test-model',
+          { message: 'hi' },
+          'prompt-env-var-output-budget',
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+
+        // Compression must have been triggered with force=true (hard-rescue)
+        // proving that the adjusted threshold (145000) was used, not the raw
+        // threshold (177K) which 150K would NOT exceed.
+        expect(compressSpy).toHaveBeenCalledTimes(1);
+        expect(compressSpy.mock.calls[0][1].force).toBe(true);
+        expect(compressSpy.mock.calls[0][1].reservedOutputTokens).toBe(32_000);
+      } finally {
+        delete process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+      }
+    });
   });
 
   describe('addHistory', () => {
