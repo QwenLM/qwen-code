@@ -264,7 +264,7 @@ export const AssistantMessageContent: React.FC<
 
 const MAX_STREAMING_THINKING_VISUAL_LINES = 4;
 
-function wrapToVisualLines(text: string, width: number): string[] {
+export function wrapToVisualLines(text: string, width: number): string[] {
   if (width <= 0) {
     return [''];
   }

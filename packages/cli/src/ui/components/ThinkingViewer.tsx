@@ -16,7 +16,10 @@ import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import { AlternateScreen } from './AlternateScreen.js';
 import type { ThinkingViewerData } from '../contexts/ThinkingViewerContext.js';
-import { THINKING_ICON } from './messages/ConversationMessages.js';
+import {
+  THINKING_ICON,
+  wrapToVisualLines,
+} from './messages/ConversationMessages.js';
 import { formatDuration } from '../utils/displayUtils.js';
 
 interface ThinkingViewerProps {
@@ -33,14 +36,25 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({
   onClose,
   useAlternateScreen = true,
 }) => {
-  const { rows } = useTerminalSize();
+  const { rows, columns } = useTerminalSize();
   const [scrollOffset, setScrollOffset] = useState(0);
 
   const headerHeight = 2;
   const footerHeight = 2;
   const contentHeight = Math.max(rows - headerHeight - footerHeight, 1);
 
-  const lines = useMemo(() => data.text.split('\n'), [data.text]);
+  // The thought text is frequently a single long paragraph with no explicit
+  // newlines. Splitting on '\n' alone yields one logical line that, rendered
+  // with `wrap="truncate-end"`, collapsed to a single ellipsised row above an
+  // empty box (and `maxScroll` stayed 0, so it could not scroll). Pre-wrap to
+  // visual rows at the inner content width — border (1 each side) + paddingX
+  // (1 each side) = 4 columns — so scrolling and rendering operate on the same
+  // rows the user actually sees.
+  const contentWidth = Math.max(1, columns - 4);
+  const lines = useMemo(
+    () => wrapToVisualLines(data.text, contentWidth),
+    [data.text, contentWidth],
+  );
   const maxScroll = Math.max(0, lines.length - contentHeight);
 
   useEffect(() => {
