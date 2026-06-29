@@ -778,7 +778,10 @@ describe('useGeminiStream', () => {
     const sent = String(mockSendMessageStream.mock.calls[0][0]);
     expect(sent).toContain('# Autonomous loop check');
     expect(sent).toContain('# Autonomous loop tick (dynamic pacing)');
-    expect(sent).not.toContain(AUTONOMOUS_SENTINEL_DYNAMIC);
+    expect(sent).not.toBe(AUTONOMOUS_SENTINEL_DYNAMIC);
+    expect(sent).toContain(
+      `prompt set to the literal sentinel \`${AUTONOMOUS_SENTINEL_DYNAMIC}\``,
+    );
   });
 
   it('renders teammate reports as a compact notification, not a raw envelope bubble', async () => {
