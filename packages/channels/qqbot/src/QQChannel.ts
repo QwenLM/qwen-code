@@ -335,7 +335,10 @@ export class QQChannel extends ChannelBase {
         process.stderr.write(
           `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${msgId ? sentSeq : '-'}): ${errBody.slice(0, 200)}\n`,
         );
-        if (msgId) this.msgSeqMap.set(msgId, nextSeq - 1);
+        if (msgId) {
+          this.msgSeqMap.set(msgId, nextSeq - 1);
+          this.saveQQState();
+        }
         return;
       }
 
