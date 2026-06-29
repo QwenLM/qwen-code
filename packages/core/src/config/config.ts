@@ -636,16 +636,36 @@ export function isGatedMcpScope(scope: McpServerScope | undefined): boolean {
  * glob semantics: `*` matches any sequence of characters (including empty),
  * `?` matches exactly one character. A pattern without glob characters is
  * compared as an exact string (no behavior change for existing configs).
+ * Uses an iterative two-pointer algorithm — O(n×m) worst case, no regex,
+ * no backtracking vulnerability.
  */
 export function matchesServerPattern(name: string, pattern: string): boolean {
   if (!pattern.includes('*') && !pattern.includes('?')) {
     return name === pattern;
   }
-  const escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*')
-    .replace(/\?/g, '.');
-  return new RegExp(`^${escaped}$`).test(name);
+  let ni = 0;
+  let pi = 0;
+  let starNi = -1;
+  let starPi = -1;
+  while (ni < name.length) {
+    if (
+      pi < pattern.length &&
+      (pattern[pi] === '?' || pattern[pi] === name[ni])
+    ) {
+      ni++;
+      pi++;
+    } else if (pi < pattern.length && pattern[pi] === '*') {
+      starPi = pi++;
+      starNi = ni;
+    } else if (starPi !== -1) {
+      pi = starPi + 1;
+      ni = ++starNi;
+    } else {
+      return false;
+    }
+  }
+  while (pi < pattern.length && pattern[pi] === '*') pi++;
+  return pi === pattern.length;
 }
 
 /**
