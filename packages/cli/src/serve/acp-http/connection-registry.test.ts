@@ -618,6 +618,33 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('grace-expiry swallows a throwing onSessionGraceExpired callback (M4i9z) — the setTimeout never crashes the process', () => {
+    vi.useFakeTimers();
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const s1 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s1, new AbortController());
+      const onExpired = vi.fn(() => {
+        throw new Error('boom');
+      });
+      conn.onSessionGraceExpired = onExpired;
+      conn.detachSessionStream('sess-1', s1, 10_000);
+
+      // onSessionGraceExpired runs from the bare setTimeout; its own try/catch
+      // must contain a throw so it can't take the daemon down.
+      expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+      expect(onExpired).toHaveBeenCalledTimes(1);
+      // Teardown still completed (the callback runs after it).
+      expect(conn.sessions.has('sess-1')).toBe(false);
+    } finally {
+      registry.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('aborts the connection signal when the connection is deleted', () => {
     const registry = new ConnectionRegistry();
     try {

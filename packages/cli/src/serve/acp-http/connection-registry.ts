@@ -654,8 +654,20 @@ export class AcpConnection {
         );
       }
       // Grace expiry may have removed the last recoverable session that was
-      // blocking a pending connection reap; let the owner re-check.
-      this.onSessionGraceExpired?.();
+      // blocking a pending connection reap; let the owner re-check. Guard it in
+      // its OWN try/catch (separate from the teardown above, so it runs even if
+      // teardown threw): this callback is owner-supplied and still runs from the
+      // bare `setTimeout`, so an uncaught throw here would equally crash the
+      // daemon.
+      try {
+        this.onSessionGraceExpired?.();
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: /acp onSessionGraceExpired failed during grace expiry ` +
+            `(${logSafe(sessionId)}): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
     }, graceMs);
     binding.graceTimer.unref?.();
   }
