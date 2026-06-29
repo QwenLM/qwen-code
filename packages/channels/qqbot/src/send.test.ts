@@ -108,6 +108,7 @@ vi.mock('@qwen-code/channel-base', () => ({
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
+type QQChannelInstance = InstanceType<typeof QQChannel>;
 type QQChannelOptions = ConstructorParameters<typeof QQChannel>[3];
 type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
 
@@ -265,7 +266,10 @@ describe('splitText', () => {
 });
 
 describe('session persistence paths', () => {
-  function makeChannel(name: string, options?: QQChannelOptions): QQChannel {
+  function makeChannel(
+    name: string,
+    options?: QQChannelOptions,
+  ): QQChannelInstance {
     return new QQChannel(
       name,
       {
@@ -285,11 +289,11 @@ describe('session persistence paths', () => {
     );
   }
 
-  function getGlobalSessionsPath(ch: QQChannel): string {
+  function getGlobalSessionsPath(ch: QQChannelInstance): string {
     return (ch as unknown as { globalSessionsPath: string }).globalSessionsPath;
   }
 
-  function getBaseOptions(ch: QQChannel): Record<string, unknown> {
+  function getBaseOptions(ch: QQChannelInstance): Record<string, unknown> {
     return (ch as unknown as { baseOptions: Record<string, unknown> })
       .baseOptions;
   }
@@ -339,7 +343,7 @@ describe('sendMessage', () => {
     chatType?: 'c2c' | 'group';
     replyMsgId?: string;
     tokenExpiresAt?: number;
-  }): QQChannel {
+  }): QQChannelInstance {
     const ch = new QQChannel(
       'test-bot',
       {
@@ -633,7 +637,7 @@ describe('sendMessage', () => {
 });
 
 describe('gateway reconnect timer', () => {
-  function makeChannel(): QQChannel {
+  function makeChannel(): QQChannelInstance {
     return new QQChannel(
       'test-bot',
       {

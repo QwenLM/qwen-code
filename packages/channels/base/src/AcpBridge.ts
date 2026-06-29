@@ -71,6 +71,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       process.stderr.write(
         `[AcpBridge] Process exited (code=${code}, signal=${signal})\n`,
       );
+      // Do not emit sessionDied here: a full ACP process exit is handled by
+      // channel start crash recovery, which reloads the persisted sessions.
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);

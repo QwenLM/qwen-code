@@ -178,8 +178,8 @@ export class SessionRouter {
       if (sessionId) removedIds.push(sessionId);
     } else {
       // No chatId: remove all sessions for this sender on this channel.
-      for (const [k, sessionId] of [...this.toSession.entries()]) {
-        const target = this.toTarget.get(sessionId);
+      for (const [k, mappedSessionId] of [...this.toSession.entries()]) {
+        const target = this.toTarget.get(mappedSessionId);
         if (
           target?.channelName === channelName &&
           target.senderId === senderId

@@ -1024,14 +1024,12 @@ describe('ChannelBase', () => {
         return Promise.resolve('steered response');
       });
 
-      // Add cancelSession mock
-      (bridge as unknown as Record<string, unknown>).cancelSession = vi
-        .fn()
-        .mockImplementation(() => {
-          // Simulate cancellation — resolve the first prompt
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
           resolveFirst('cancelled partial');
           return Promise.resolve();
-        });
+        },
+      );
 
       const ch = createChannel({ dispatchMode: 'steer' });
 
@@ -1050,10 +1048,7 @@ describe('ChannelBase', () => {
       await p1;
       await p2;
 
-      // cancelSession should have been called
-      expect(
-        (bridge as unknown as Record<string, () => unknown>).cancelSession,
-      ).toHaveBeenCalledTimes(1);
+      expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
 
       // First prompt's response should NOT have been sent (it was cancelled)
       expect(ch.sent).not.toEqual(
@@ -1129,13 +1124,12 @@ describe('ChannelBase', () => {
         return Promise.resolve('steered response');
       });
 
-      // Add cancelSession mock
-      (bridge as unknown as Record<string, unknown>).cancelSession = vi
-        .fn()
-        .mockImplementation(() => {
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
           resolveFirst('cancelled');
           return Promise.resolve();
-        });
+        },
+      );
 
       // No dispatchMode set — should default to steer
       const ch = createChannel();
@@ -1149,10 +1143,7 @@ describe('ChannelBase', () => {
       await p1;
       await p2;
 
-      // cancelSession should have been called (steer behavior)
-      expect(
-        (bridge as unknown as Record<string, () => unknown>).cancelSession,
-      ).toHaveBeenCalledTimes(1);
+      expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
 
       // Both prompts ran
       expect(callCount).toBe(2);

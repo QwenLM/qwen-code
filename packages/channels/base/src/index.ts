@@ -3,6 +3,7 @@ export { AcpBridge } from './AcpBridge.js';
 export type {
   AvailableCommand,
   ChannelAgentBridge,
+  SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';

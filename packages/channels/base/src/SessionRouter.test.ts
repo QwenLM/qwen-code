@@ -181,8 +181,8 @@ describe('SessionRouter', () => {
     });
 
     it('retries if a new session dies before the route is stored', async () => {
-      let router!: SessionRouter;
       let calls = 0;
+      const router = new SessionRouter(mockBridge(), '/default');
       const newSession = vi.fn(async () => {
         calls++;
         const sessionId = calls === 1 ? 'dead-session' : 'live-session';
@@ -191,11 +191,10 @@ describe('SessionRouter', () => {
         }
         return sessionId;
       });
-      bridge = {
+      router.setBridge({
         ...mockBridge(),
         newSession,
-      };
-      router = new SessionRouter(bridge, '/default');
+      });
 
       await expect(router.resolve('ch', 'alice', 'chat1')).resolves.toBe(
         'live-session',
@@ -213,16 +212,15 @@ describe('SessionRouter', () => {
     });
 
     it('does not store a route if session creation keeps dying', async () => {
-      let router!: SessionRouter;
+      const router = new SessionRouter(mockBridge(), '/default');
       const newSession = vi.fn(async () => {
         router.removeSessionId('dead-session');
         return 'dead-session';
       });
-      bridge = {
+      router.setBridge({
         ...mockBridge(),
         newSession,
-      };
-      router = new SessionRouter(bridge, '/default');
+      });
 
       await expect(router.resolve('ch', 'alice', 'chat1')).rejects.toThrow(
         'Session died before routing completed',
@@ -498,15 +496,16 @@ describe('SessionRouter', () => {
       tempDirs.push(dir);
       const persistPath = join(dir, 'sessions.json');
       writePersistedSession(persistPath, 'ch:alice:chat1');
-      let router!: SessionRouter;
+      const state: { router?: SessionRouter } = {};
       bridge = {
         ...mockBridge(),
         loadSession: vi.fn(async () => {
-          router.removeSessionId('dead-restored-session');
+          state.router?.removeSessionId('dead-restored-session');
           return 'dead-restored-session';
         }),
       };
-      router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      state.router = router;
 
       await expect(router.restoreSessions()).resolves.toEqual({
         restored: 0,
