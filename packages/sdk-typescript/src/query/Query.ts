@@ -5,6 +5,8 @@
  * Implements AsyncIterator protocol for message consumption.
  */
 
+/* eslint-disable import-x/no-internal-modules */
+
 const DEFAULT_CAN_USE_TOOL_TIMEOUT = 60_000;
 const DEFAULT_MCP_REQUEST_TIMEOUT = 60_000;
 const DEFAULT_CONTROL_REQUEST_TIMEOUT = 60_000;
@@ -641,7 +643,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   }
 
   private async sendControlRequest(
-    subtype: string,
+    subtype: ControlRequestType,
     data: Record<string, unknown> = {},
   ): Promise<Record<string, unknown> | null> {
     if (this.closed) {
@@ -664,7 +666,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       type: 'control_request',
       request_id: requestId,
       request: {
-        subtype: subtype as never,
+        subtype,
         ...data,
       } as CLIControlRequest['request'],
     };

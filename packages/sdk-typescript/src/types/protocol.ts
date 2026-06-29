@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-
+/* eslint-disable import-x/no-internal-modules */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 export interface Annotation {
   type: string;
@@ -532,7 +532,7 @@ export function isControlCancel(msg: any): msg is ControlCancelRequest {
     msg &&
     typeof msg === 'object' &&
     msg.type === 'control_cancel_request' &&
-    'request_id' in msg
+    (!('request_id' in msg) || typeof msg.request_id === 'string')
   );
 }
 

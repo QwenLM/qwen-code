@@ -12,7 +12,7 @@ export interface Transport {
 
   waitForExit(): Promise<void>;
 
-  write(message: string): void;
+  write(message: string): Promise<void>;
 
   readMessages(): AsyncGenerator<unknown, void, unknown>;
 

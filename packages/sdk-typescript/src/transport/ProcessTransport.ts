@@ -416,7 +416,7 @@ export class ProcessTransport implements Transport {
     });
   }
 
-  write(message: string): void {
+  write(message: string): Promise<void> {
     if (this.abortController.signal.aborted) {
       throw new AbortError('Cannot write: operation aborted');
     }
@@ -458,12 +458,20 @@ export class ProcessTransport implements Transport {
     try {
       const written = this.childStdin.write(message);
       if (!written) {
-        logger.warn(
-          `Write buffer full (${message.length} bytes), data queued. Waiting for drain event...`,
-        );
-      } else {
-        logger.debug(`Write successful (${message.length} bytes)`);
+        // Backpressure: wait for drain event with a timeout.
+        return new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            this.childStdin!.removeListener('drain', onDrain);
+            reject(new Error('Write drain timeout after 5000ms'));
+          }, 5000);
+          const onDrain = () => {
+            clearTimeout(timeout);
+            resolve();
+          };
+          this.childStdin!.once('drain', onDrain);
+        });
       }
+      return Promise.resolve();
     } catch (error) {
       // Check if this is a stream-closed error (EPIPE, ERR_STREAM_WRITE_AFTER_END, etc.)
       const errorMsg = error instanceof Error ? error.message : String(error);
