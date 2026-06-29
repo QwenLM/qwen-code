@@ -61,7 +61,9 @@ const fakeWorkspace = {} as unknown as DaemonWorkspaceService;
  */
 class AgentSideProvider implements ClientMcpServerProvider {
   readonly clients = new Map<string, Client>();
-  lastToolList: Awaited<ReturnType<Client['listTools']>> | undefined;
+  lastToolList:
+    | Awaited<ReturnType<Client['listTools']>>
+    | undefined;
 
   async registerClientMcpServer(
     serverName: string,
@@ -143,10 +145,7 @@ function answerHandshakeFrame(frame: {
         payload: {
           jsonrpc: '2.0',
           id: payload.id,
-          error: {
-            code: -32601,
-            message: `method not found: ${payload.method}`,
-          },
+          error: { code: -32601, message: `method not found: ${payload.method}` },
         } as JSONRPCMessage,
       };
   }
@@ -178,7 +177,9 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
         workspace: fakeWorkspace,
         enabled: true,
         clientMcpOverWs: opts.clientMcpOverWs ?? true,
-        ...(opts.withProvider === false ? {} : { clientMcpProvider: provider }),
+        ...(opts.withProvider === false
+          ? {}
+          : { clientMcpProvider: provider }),
       });
       server = app.listen(0, '127.0.0.1', () => {
         port = (server.address() as AddressInfo).port;
@@ -249,7 +250,9 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
       });
     });
 
-    ws.send(JSON.stringify({ type: 'mcp_register', server: 'chrome-tools' }));
+    ws.send(
+      JSON.stringify({ type: 'mcp_register', server: 'chrome-tools' }),
+    );
 
     const ack = await registered;
     // (a) daemon registered the runtime server, with the discovered catalog.

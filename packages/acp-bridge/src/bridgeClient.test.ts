@@ -818,9 +818,7 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
    * the serve layer). The registrar pushes outbound frames to `onFrame` so the
    * test can answer them like the extension's WS would.
    */
-  function makeClientWithRegistrar(
-    registrar: ClientMcpRegistrar,
-  ): BridgeClient {
+  function makeClientWithRegistrar(registrar: ClientMcpRegistrar): BridgeClient {
     const sender: ClientMcpMessageSender = (serverName: string) =>
       registrar.hasServer(serverName)
         ? (payload: unknown) =>
