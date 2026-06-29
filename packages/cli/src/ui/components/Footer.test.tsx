@@ -54,6 +54,7 @@ const createMockConfig = (overrides = {}) => ({
   getProjectRoot: vi.fn(() => '/test/project'),
   getSessionId: vi.fn(() => 'test-session'),
   getMemoryManager: vi.fn(createMockMemoryManager),
+  isSafeMode: vi.fn(() => false),
   ...overrides,
 });
 
