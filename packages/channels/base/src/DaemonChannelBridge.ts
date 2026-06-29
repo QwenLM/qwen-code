@@ -102,7 +102,16 @@ function getSessionUpdate(data: unknown): Record<string, unknown> | undefined {
 }
 
 function isAvailableCommand(value: unknown): value is AvailableCommand {
-  return isRecord(value) && typeof value['name'] === 'string';
+  if (!isRecord(value) || typeof value['name'] !== 'string') return false;
+  // altNames is optional; when present it MUST be a string[] (so the type guard is
+  // honest). A malformed wire payload — e.g. `altNames: 5` — would otherwise survive
+  // onto the command and throw at the downstream `altNames.some(...)` recognition
+  // site in ChannelBase.matchAgentCommand.
+  const altNames = value['altNames'];
+  return (
+    altNames === undefined ||
+    (Array.isArray(altNames) && altNames.every((n) => typeof n === 'string'))
+  );
 }
 
 function isPermissionRequestData(

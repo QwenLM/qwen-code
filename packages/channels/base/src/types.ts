@@ -84,8 +84,13 @@ export interface Envelope {
   /** Structured attachments (images, files, audio, video). */
   attachments?: Attachment[];
   /**
-   * Set on a synthetic re-entry envelope whose text already carries per-message
-   * [sender] prefixes (collect-mode coalescing) — suppresses re-prefixing.
+   * Marks an envelope whose `text` ALREADY carries its `[sender]` attribution, so
+   * handleInbound must NOT re-prefix it. Set in two places: on a synthetic
+   * collect-mode re-entry (coalesced text already carries each message's prefix), AND
+   * by the QQ adapter on a REAL inbound it self-prefixes as `[name]: …`. QQ
+   * neutralizes that embedded name with sanitizeSenderName at the source (QQChannel),
+   * so the self-prefixed name reaching the prompt is already sanitized — setting this
+   * flag does not bypass sanitization.
    */
   alreadyPrefixed?: true;
 }

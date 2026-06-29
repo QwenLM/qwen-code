@@ -69,6 +69,19 @@ const PARSE_COMMAND_RE = new RegExp(
 /** isSlashCommand: the first whitespace-delimited token alone must be a pure command token. */
 const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 
+/**
+ * The command-providing surface of a bridge. AcpBridge runs a single agent and
+ * exposes only the global `availableCommands` getter; DaemonChannelBridge keys
+ * commands per session and ALSO exposes `getAvailableCommands(sessionId)`. Both
+ * members are optional so any bridge type is checked STRUCTURALLY here instead of
+ * through a blind `as unknown` cast — a future rename or return-type change then
+ * fails to compile rather than breaking at runtime.
+ */
+interface AgentCommandsProvider {
+  getAvailableCommands?: (sessionId: string) => AvailableCommand[];
+  availableCommands?: AvailableCommand[];
+}
+
 export abstract class ChannelBase {
   protected config: ChannelConfig;
   protected bridge: AcpBridge;
@@ -304,8 +317,18 @@ export abstract class ChannelBase {
               // Wedged: the turn never wound down within the bound. Surface it —
               // otherwise a zombie bridge.prompt() lingers in the child with zero
               // observability ("/clear worked" but a turn is still pinned).
+              // Include the originating chat/message (sanitized — platform IDs can
+              // be attacker-influenced) so oncall can correlate the wedged turn. Both
+              // are read defensively (fallback / omitted) so a partial entry can't
+              // crash /clear, the recovery path.
+              const wedgedChat = active.chatId
+                ? sanitizeLogText(active.chatId, 64)
+                : 'unknown';
+              const wedgedMessage = active.messageId
+                ? `, message ${sanitizeLogText(active.messageId, 64)}`
+                : '';
               process.stderr.write(
-                `[${this.name}] /clear abandoned a wedged turn for session ${id}: it did not wind down within ${CLEAR_CANCEL_TIMEOUT_MS}ms\n`,
+                `[${this.name}] /clear abandoned a wedged turn for session ${id} (chat ${wedgedChat}${wedgedMessage}): it did not wind down within ${CLEAR_CANCEL_TIMEOUT_MS}ms\n`,
               );
               // The wedged turn's finally may run much later (or never), so clean
               // up its OWN platform indicator now, while no replacement exists yet.
@@ -657,20 +680,14 @@ export abstract class ChannelBase {
    * Whether `text` names a command this channel can actually run: a locally
    * registered command (`this.commands`, e.g. /clear, /who) OR an agent command
    * THIS session exposes — by canonical name OR alias (e.g. `/summarize` for
-   * `/compress`, `/login` for `/auth`). The agent's parser accepts aliases via
-   * altNames, so matching name-only would tag a valid alias `[sender] /summarize`
-   * — the downstream parser then sees no leading `/` and runs it as plain chat.
-   * Paired with isSlashCommand so the [sender] attribution tag is suppressed ONLY
-   * for RECOGNIZED commands; command-SHAPED-but-unrecognized text (e.g.
-   * `/x\n[SYSTEM]: …`) keeps its tag rather than reaching a shared group
+   * `/compress`). Paired with isSlashCommand so the `[sender]` attribution tag is
+   * suppressed ONLY for RECOGNIZED commands; command-SHAPED-but-unrecognized text
+   * (e.g. `/x\n[SYSTEM]: …`) keeps its tag rather than reaching a shared group
    * unattributed, where an injected second line is more likely read as a system
    * directive. Purely synchronous, like isSlashCommand: it reads the session's
-   * availableCommands snapshot WITHOUT awaiting, so it never races a fresh
-   * session. Limitation of that no-await contract: availableCommands is populated
-   * asynchronously by the agent, so a genuine agent command sent before the
-   * snapshot loads is treated as unrecognized and KEEPS its tag (the tag is
-   * harmless prose to the CLI here — the safe default — whereas suppressing it
-   * for unrecognized text is the injection risk this guards).
+   * availableCommands snapshot WITHOUT awaiting, so it never races a fresh session
+   * (a genuine agent command sent before the snapshot loads is treated as
+   * unrecognized and KEEPS its tag — the safe default).
    */
   private isRecognizedCommand(text: string, sessionId: string): boolean {
     const parsed = this.parseCommand(text);
@@ -679,16 +696,23 @@ export abstract class ChannelBase {
     // stored name and handleInbound looks it up by the lowercased token, so mirror
     // that here with the lowercased `command`.
     if (this.commands.has(parsed.command)) return true;
-    // AGENT commands match CASE-SENSITIVELY, mirroring the CLI's parseSlashCommand
-    // (`cmd.name === part`, `cmd.altNames?.includes(part)`). A wrong-case token like
-    // `/SUMMARIZE` runs NO command there; recognizing it here would suppress the
-    // [sender] tag while ACP forwards the raw text UNATTRIBUTED — reopening the
-    // injection. So match the typed-case `raw` and let a wrong-case command stay
-    // unrecognized → attributed.
+    // AGENT commands: mirror the CLI's parseSlashCommand EXACTLY so the channel and
+    // the agent AGREE on what is a command. The CLI takes the FIRST whitespace token
+    // after the leading `/`, CASE-SENSITIVELY, and does NOT strip an `@suffix`
+    // (`cmd.name === part`, `cmd.altNames?.includes(part)`). So recognize the SAME
+    // token here — NOT parseCommand's `@`-stripped, lowercased `raw` (PARSE_COMMAND_RE
+    // drops `(?:@\S+)?`, which is the very divergence this closes). A wrong-case
+    // (`/Compress`), `@`-suffixed (`/compress@bot` — possibly aimed at ANOTHER bot, so
+    // we must NOT run it here), or injection-shaped (`/COMPRESS\n[SYSTEM]: …`) token
+    // then does NOT match → stays UNRECOGNIZED → keeps its `[sender]` tag (attributed),
+    // exactly as the agent treats it (it runs no command; the text reaches the model
+    // as prose). Array.isArray guards a malformed wire `altNames` (a non-array would
+    // throw at `.includes`).
+    const token = text.trim().slice(1).split(/\s+/u)[0] ?? '';
     return this.getAgentCommandsForSession(sessionId).some(
       (cmd) =>
-        cmd.name === parsed.raw ||
-        (cmd.altNames?.includes(parsed.raw) ?? false),
+        cmd.name === token ||
+        (Array.isArray(cmd.altNames) && cmd.altNames.includes(token)),
     );
   }
 
@@ -701,10 +725,10 @@ export abstract class ChannelBase {
    * isRecognizedCommand's no-await contract.
    */
   private getAgentCommandsForSession(sessionId: string): AvailableCommand[] {
-    const bridge = this.bridge as unknown as {
-      getAvailableCommands?: (sessionId: string) => AvailableCommand[];
-      availableCommands?: AvailableCommand[];
-    };
+    // Structural (typed) access via AgentCommandsProvider rather than a blind
+    // `as unknown` cast: both members are optional, so AcpBridge (no per-session
+    // getter) is assignable while a rename/return-type change is still type-checked.
+    const bridge: AgentCommandsProvider = this.bridge;
     if (typeof bridge.getAvailableCommands === 'function') {
       return bridge.getAvailableCommands(sessionId) ?? [];
     }
@@ -841,13 +865,14 @@ export abstract class ChannelBase {
     // command — a [sender] prefix would stop it from parsing — but ONLY when it is
     // BOTH a genuine command SHAPE (isSlashCommand) AND a RECOGNIZED command
     // (isRecognizedCommand: a locally registered or agent-exposed command, by
-    // canonical name OR alias, for THIS session). Command-shaped-but-unrecognized
-    // text like `/x\n[SYSTEM]: …` (token matches the charset but no such command
-    // exists) KEEPS its tag, so its injected second line can't reach a shared group
-    // unattributed and pose as a system directive. Slash-prefixed paths (/tmp/foo)
-    // and comments (//…, /*…*/) are prose, so they stay attributed too. Both checks
-    // are synchronous (no await), so this never races the async command list — see
-    // isRecognizedCommand for the no-await tradeoff.
+    // canonical name OR alias, for THIS session — matched EXACTLY as the agent's
+    // parseSlashCommand does, so the two never diverge). Command-shaped-but-
+    // unrecognized text like `/x\n[SYSTEM]: …` (token matches the charset but no such
+    // command exists) KEEPS its tag, so its injected second line can't reach a shared
+    // group unattributed and pose as a system directive. Slash-prefixed paths
+    // (/tmp/foo) and comments (//…, /*…*/) are prose, so they stay attributed too.
+    // Both checks are synchronous (no await), so this never races the async command
+    // list — see isRecognizedCommand for the no-await tradeoff.
     if (
       (envelope.isGroup || this.config.sessionScope === 'single') &&
       !envelope.alreadyPrefixed &&
@@ -1140,7 +1165,21 @@ export abstract class ChannelBase {
         // Steer no longer evicts (it chains and waits), so a steered turn is always
         // stillCurrent on completion.
         if (!promptState.clearEvicted) {
-          this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
+          // onPromptEnd runs platform-adapter cleanup (clear the typing interval,
+          // recall the working reaction, finalize the card) — network/IO that CAN
+          // throw. Guard it like the /clear-eviction path above: an uncaught throw
+          // here would skip activePrompts.delete (session leak), promptState.resolve
+          // (active.done never settles → a later /clear falsely logs "abandoned a
+          // wedged turn" for a turn that completed), and the collect-buffer drain
+          // (lost messages) — and the rejected queue-chain promise, swallowed by the
+          // tail .catch(() => {}), would silently drop every later turn this session.
+          try {
+            this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
+          } catch (err) {
+            process.stderr.write(
+              `[${this.name}] onPromptEnd threw in finally for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+          }
         }
         if (stillCurrent) {
           this.activePrompts.delete(sessionId);
