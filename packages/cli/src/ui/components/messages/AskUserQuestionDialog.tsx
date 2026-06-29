@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   type ToolAskUserQuestionConfirmationDetails,
@@ -39,6 +39,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   const [customInputValues, setCustomInputValues] = useState<
     Record<number, string>
   >({});
+  const customInputValuesRef = useRef<Record<number, string>>({});
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [multiSelectedOptions, setMultiSelectedOptions] = useState<
     Record<number, string[]>
@@ -68,6 +69,9 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     selectedIndex === currentQuestion.options.length;
 
   const currentCustomInputValue = customInputValues[currentQuestionIndex] ?? '';
+  const getCurrentCustomInputValue = () =>
+    customInputValuesRef.current[currentQuestionIndex] ??
+    currentCustomInputValue;
   const isCustomInputAnswer =
     !isSubmitTab &&
     currentQuestion &&
@@ -122,7 +126,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   const handleMultiSelectSubmit = () => {
     if (!currentQuestion) return;
     const selections = [...(multiSelectedOptions[currentQuestionIndex] ?? [])];
-    const customValue = currentCustomInputValue.trim();
+    const customValue = getCurrentCustomInputValue().trim();
     if (customInputChecked[currentQuestionIndex] && customValue) {
       selections.push(customValue);
     }
@@ -132,7 +136,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   };
 
   const handleCustomInputSubmit = () => {
-    const trimmedValue = currentCustomInputValue.trim();
+    const trimmedValue = getCurrentCustomInputValue().trim();
 
     if (isMultiSelect) {
       setCustomInputChecked((prev) => ({
@@ -478,6 +482,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 value={currentCustomInputValue}
                 initialCursorOffset={currentCustomInputValue.length}
                 onChange={(value: string) => {
+                  customInputValuesRef.current[currentQuestionIndex] = value;
                   const oldValue =
                     customInputValues[currentQuestionIndex] ?? '';
                   if (isMultiSelect && value !== oldValue) {
@@ -491,6 +496,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                     [currentQuestionIndex]: value,
                   }));
                 }}
+                onSubmit={handleCustomInputSubmit}
                 placeholder={t('Type something...')}
                 isActive={true}
                 inputWidth={50}
