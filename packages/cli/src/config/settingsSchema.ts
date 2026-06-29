@@ -2416,7 +2416,8 @@ const SETTINGS_SCHEMA = {
         // restart-required.
         requiresRestart: false,
         default: undefined as string[] | undefined,
-        description: 'A list of MCP servers to allow.',
+        description:
+          'A list of MCP servers to allow. Supports glob patterns (e.g. "*puppeteer*").',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
@@ -2429,7 +2430,8 @@ const SETTINGS_SCHEMA = {
         // restart-required.
         requiresRestart: false,
         default: undefined as string[] | undefined,
-        description: 'A list of MCP servers to exclude.',
+        description:
+          'A list of MCP servers to exclude. Supports glob patterns (e.g. "*puppeteer*"). Takes precedence over mcp.allowed.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },

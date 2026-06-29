@@ -630,6 +630,35 @@ export function isGatedMcpScope(scope: McpServerScope | undefined): boolean {
   return scope === 'project' || scope === 'workspace';
 }
 
+/**
+ * Test whether a server name matches a single pattern. Patterns use simple
+ * glob semantics: `*` matches any sequence of characters (including empty),
+ * `?` matches exactly one character. A pattern without glob characters is
+ * compared as an exact string (no behavior change for existing configs).
+ */
+export function matchesServerPattern(name: string, pattern: string): boolean {
+  if (!pattern.includes('*') && !pattern.includes('?')) {
+    return name === pattern;
+  }
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`).test(name);
+}
+
+/**
+ * Test whether a server name matches any pattern in the given list.
+ * Returns false for an empty or undefined list.
+ */
+export function matchesAnyServerPattern(
+  name: string,
+  patterns: string[] | undefined,
+): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  return patterns.some((p) => matchesServerPattern(name, p));
+}
+
 export class MCPServerConfig {
   constructor(
     // For stdio transport
@@ -3724,7 +3753,7 @@ export class Config {
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
         Object.entries(mcpServers).filter(([key]) =>
-          this.allowedMcpServers?.includes(key),
+          matchesAnyServerPattern(key, this.allowedMcpServers),
         ),
       );
     }
@@ -3745,7 +3774,8 @@ export class Config {
   }
 
   isMcpServerDisabled(serverName: string): boolean {
-    if (this.excludedMcpServers?.includes(serverName)) return true;
+    if (matchesAnyServerPattern(serverName, this.excludedMcpServers))
+      return true;
     // Extension-bundled servers can be disabled individually via extension
     // preferences. Only the extension that actually contributed the server is
     // consulted, so a same-named server from another source (e.g. a shadowing
@@ -3897,11 +3927,12 @@ export class Config {
     if (!(serverName in this.getMergedMcpServers())) return undefined;
     if (
       this.allowedMcpServers &&
-      !this.allowedMcpServers.includes(serverName)
+      !matchesAnyServerPattern(serverName, this.allowedMcpServers)
     ) {
       return 'not_allowed';
     }
-    if (this.excludedMcpServers?.includes(serverName)) return 'excluded';
+    if (matchesAnyServerPattern(serverName, this.excludedMcpServers))
+      return 'excluded';
     if (this.isMcpServerPendingApproval(serverName)) return 'pending_approval';
     return undefined;
   }
