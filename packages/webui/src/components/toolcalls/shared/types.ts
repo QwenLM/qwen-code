@@ -36,27 +36,18 @@ export interface ToolCallLocation {
  * Tool call status type
  */
 export type ToolCallStatus =
-  | 'pending'
-  | 'in_progress'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+  'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
 
 export type AgentExecutionStatus =
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+  'running' | 'completed' | 'failed' | 'cancelled';
 
 export type AgentToolCallStatus =
-  | 'executing'
-  | 'awaiting_approval'
-  | 'success'
-  | 'failed';
+  'executing' | 'awaiting_approval' | 'success' | 'failed';
 
 export interface AgentExecutionSummary {
   totalToolCalls: number;
   totalTokens: number;
+  outputTokens?: number;
   totalDurationMs: number;
   successfulToolCalls?: number;
   failedToolCalls?: number;
@@ -132,11 +123,7 @@ export interface GroupedContent {
  * Container status type for styling
  */
 export type ContainerStatus =
-  | 'success'
-  | 'error'
-  | 'warning'
-  | 'loading'
-  | 'default';
+  'success' | 'error' | 'warning' | 'loading' | 'default';
 
 /**
  * Plan entry status type

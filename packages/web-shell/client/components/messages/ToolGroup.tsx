@@ -392,8 +392,7 @@ function getAgentDisplayInfo(
     0;
 
   const stats = taskExec?.['executionSummary'] as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDurationMs(stats['totalDurationMs'])
@@ -403,17 +402,17 @@ function getAgentDisplayInfo(
             (tool.status === 'in_progress' && now ? now : undefined),
         );
 
-  const totalTokens =
+  const outputTokens =
     taskExec &&
     typeof taskExec['tokenCount'] === 'number' &&
     taskExec['tokenCount'] > 0
       ? (taskExec['tokenCount'] as number)
       : stats &&
-          typeof stats['totalTokens'] === 'number' &&
-          stats['totalTokens'] > 0
-        ? (stats['totalTokens'] as number)
+          typeof stats['outputTokens'] === 'number' &&
+          stats['outputTokens'] > 0
+        ? (stats['outputTokens'] as number)
         : 0;
-  const tokens = totalTokens > 0 ? formatTokenCount(totalTokens) : '';
+  const tokens = outputTokens > 0 ? formatTokenCount(outputTokens) : '';
 
   return {
     agentType,

@@ -401,8 +401,8 @@ const SubagentScrollbackSummary: React.FC<{
       formatDuration(stats.totalDurationMs, { hideTrailingZeros: true }),
     );
   }
-  if (stats?.totalTokens && stats.totalTokens > 0) {
-    parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
+  if (stats?.outputTokens && stats.outputTokens > 0) {
+    parts.push(`${formatTokenCount(stats.outputTokens)} tokens`);
   }
   // Sanitize every user/LLM-controlled string before it reaches Ink.
   // `subagentName` is subagent config (user-authored or model-chosen),
