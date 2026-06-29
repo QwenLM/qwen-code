@@ -294,6 +294,17 @@ describe('<InlineParallelAgentsDisplay />', () => {
       expect(frame).not.toContain('more agent');
     });
 
+    it('with a generous budget, renders every agent (backstop is a no-op)', () => {
+      // 10 agents + header = 11 rows < budget 20, so the `rows.length + 1 >
+      // budget` guard is false and windowing must NOT kick in. Pins the `>`
+      // boundary: a regression to `>=` (or an off-by-one) would truncate here
+      // even though there is room.
+      const { lastFrame } = renderCapped(manyAgents(10), 20);
+      const frame = lastFrame() ?? '';
+      expect(frame.split('\n').length).toBe(11);
+      expect(frame).not.toContain('more agent');
+    });
+
     it('with a budget, windows to the most recent rows + "+N more" and never exceeds the budget', () => {
       const budget = 6;
       const { lastFrame } = renderCapped(manyAgents(10), budget);

@@ -283,7 +283,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         toolCalls={inlineToolCalls}
         contentWidth={contentWidth}
         totalAgentCount={toolCalls.length}
-        availableTerminalHeight={availableTerminalHeight}
+        // The height backstop guards only the live, non-`<Static>` frame. Once
+        // committed (`isPending=false`) the rows live in `<Static>` with no
+        // snap-back risk, and MainContent passes `staticAreaMaxItemHeight`
+        // (>=100) here — forwarding that would let the cap fire on scrollback
+        // and permanently hide completed agents behind "+N more". Pass
+        // undefined (no cap) when committed, per the component's contract.
+        availableTerminalHeight={isPending ? availableTerminalHeight : undefined}
       />
     );
   }
