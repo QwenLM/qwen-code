@@ -110,6 +110,7 @@ describe('remember memory helper', () => {
       status: 'completed',
       finalText: 'Saved project memory.',
       filesTouched: [touched],
+      filesWritten: [touched],
     } satisfies ForkedAgentResult);
 
     const result = await runManagedRememberByAgent({
@@ -128,11 +129,13 @@ describe('remember memory helper', () => {
     const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
       config: Config;
       extraHistory?: unknown[];
+      preserveEmptyExtraHistory?: boolean;
       systemPrompt: string;
       taskPrompt: string;
       tools: string[];
     };
     expect(params.extraHistory).toEqual([]);
+    expect(params.preserveEmptyExtraHistory).toBe(true);
     expect(params.tools).toEqual([
       'read_file',
       'grep_search',
@@ -195,6 +198,7 @@ describe('remember memory helper', () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [touched],
+      filesWritten: [touched],
     } satisfies ForkedAgentResult);
 
     await runManagedRememberByAgent({
@@ -220,6 +224,7 @@ describe('remember memory helper', () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [userFile, projectFile],
+      filesWritten: [userFile, projectFile],
     } satisfies ForkedAgentResult);
 
     const result = await runManagedRememberByAgent({
@@ -244,6 +249,7 @@ describe('remember memory helper', () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [touched],
+      filesWritten: [touched],
     } satisfies ForkedAgentResult);
 
     const result = await runManagedRememberByAgent({
@@ -273,6 +279,7 @@ describe('remember memory helper', () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [path.join(projectRoot, 'README.md')],
+      filesWritten: [path.join(projectRoot, 'README.md')],
     } satisfies ForkedAgentResult);
 
     await expect(

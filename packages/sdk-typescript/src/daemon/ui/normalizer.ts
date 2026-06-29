@@ -1107,7 +1107,7 @@ function normalizeMemoryChanged(
     ];
     if (
       !(source && taskId && Array.isArray(touchedScopes)) ||
-      touchedScopes.some((scope) => scope !== 'user' && scope !== 'project')
+      touchedScopes.some((s) => s !== 'user' && s !== 'project')
     ) {
       return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
     }

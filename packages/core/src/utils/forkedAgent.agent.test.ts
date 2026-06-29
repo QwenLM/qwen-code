@@ -13,7 +13,10 @@ import {
   type AgentEventEmitter,
 } from '../agents/runtime/agent-events.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
-import type { ModelConfig } from '../agents/runtime/agent-types.js';
+import type {
+  ModelConfig,
+  PromptConfig,
+} from '../agents/runtime/agent-types.js';
 import { runForkedAgent } from './forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
@@ -80,19 +83,27 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
   // doesn't reliably forward `export *` re-exports through `...actual`,
   // and stubbing the full surface manually is brittle.
   function captureAgentHeadlessConfig(): {
-    captured: { config: Config | undefined };
+    captured: {
+      config: Config | undefined;
+      promptConfig: PromptConfig | undefined;
+    };
     restore: () => void;
   } {
-    const captured: { config: Config | undefined } = { config: undefined };
+    const captured: {
+      config: Config | undefined;
+      promptConfig: PromptConfig | undefined;
+    } = { config: undefined, promptConfig: undefined };
     const spy = vi
       .spyOn(AgentHeadless, 'create')
       .mockImplementation(
         async (
           _name: string,
           config: Config,
+          promptConfig: PromptConfig,
           ..._rest: unknown[]
         ): Promise<AgentHeadless> => {
           captured.config = config;
+          captured.promptConfig = promptConfig;
           return {
             execute: vi.fn().mockResolvedValue(undefined),
             getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
@@ -103,6 +114,55 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
       );
     return { captured, restore: () => spy.mockRestore() };
   }
+
+  it('does not treat empty extraHistory as caller-owned initial messages by default', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const { captured, restore } = captureAgentHeadlessConfig();
+    try {
+      await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+        extraHistory: [],
+      });
+    } finally {
+      restore();
+    }
+
+    expect(captured.promptConfig?.initialMessages).toBeUndefined();
+  });
+
+  it('can preserve empty extraHistory when the caller intentionally owns history', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const { captured, restore } = captureAgentHeadlessConfig();
+    try {
+      await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+        extraHistory: [],
+        preserveEmptyExtraHistory: true,
+      });
+    } finally {
+      restore();
+    }
+
+    expect(captured.promptConfig?.initialMessages).toEqual([]);
+  });
 
   it('passes a Config with the rebuilt-registry marker and YOLO approval mode to AgentHeadless.create', async () => {
     const parent = new ConfigImpl(baseParams);

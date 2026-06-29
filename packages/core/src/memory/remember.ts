@@ -169,6 +169,7 @@ export async function runManagedRememberByAgent(params: {
     maxTurns: 6,
     maxTimeMinutes: 5,
     extraHistory: params.contextMode === 'clean' ? [] : undefined,
+    preserveEmptyExtraHistory: params.contextMode === 'clean',
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
@@ -186,7 +187,7 @@ export async function runManagedRememberByAgent(params: {
     throw new Error(result.terminateReason || 'Remember agent cancelled');
   }
 
-  const filesWritten = result.filesWritten ?? result.filesTouched;
+  const filesWritten = result.filesWritten ?? [];
   const touchedScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
   await Promise.all([
     touchedScopes.includes('project')

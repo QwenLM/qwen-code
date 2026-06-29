@@ -333,6 +333,13 @@ export interface AgentPathParams {
    * Must end with a `model` role entry; call buildAgentHistory() to enforce this.
    */
   extraHistory?: Content[];
+  /**
+   * Preserve an explicit empty `extraHistory` as caller-owned history.
+   * Most callers use [] to mean "no prior history"; keep that as undefined so
+   * AgentCore still bootstraps workspace env context. Clean remember sets this
+   * to intentionally suppress that bootstrap.
+   */
+  preserveEmptyExtraHistory?: boolean;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
 }
@@ -515,9 +522,14 @@ export async function runForkedAgent(
     }
   });
 
+  const initialMessages =
+    params.extraHistory &&
+    (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
+      ? params.extraHistory
+      : undefined;
   const promptConfig: PromptConfig = {
     systemPrompt: params.systemPrompt,
-    initialMessages: params.extraHistory,
+    initialMessages,
   };
   const modelSelector =
     params.model ?? params.config.getFastModel?.() ?? params.config.getModel();
