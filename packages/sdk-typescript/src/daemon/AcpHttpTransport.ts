@@ -893,8 +893,17 @@ export class AcpHttpTransport implements DaemonTransport {
             ) {
               const pending = this.pending.get(parsed.id);
               if (pending) {
-                this.pending.delete(parsed.id);
-                pending.resolve(parsed);
+                // Defense-in-depth scope guard, mirroring `subscribeEventsInner`
+                // and `pumpSessionReplies`: the CONNECTION stream only carries
+                // conn-scoped replies, so never resolve a SESSION-scoped pending
+                // here — a daemon routing regression that mis-delivered a
+                // session reply on the conn stream must not cross session
+                // boundaries (matches the `openConnStream` error sweep, which
+                // also skips `entry.sessionId !== undefined`).
+                if (pending.sessionId === undefined) {
+                  this.pending.delete(parsed.id);
+                  pending.resolve(parsed);
+                }
               }
             }
           } catch {
@@ -1098,6 +1107,17 @@ export class AcpHttpTransport implements DaemonTransport {
    * `/acp` stream and routes JSON-RPC *responses* to `pending` (mirroring
    * `pumpConnStream`); it ignores events (no consumer) — a consumer that wants
    * events uses `subscribeEvents`, which suppresses this pump entirely.
+   *
+   * NOTE (daemon-side attach semantics): the pump opens `GET /acp` with
+   * `Acp-Session-Id` but NO `Last-Event-ID`, so the daemon does a fresh
+   * (non-resumptive) session attach — content events produced before the pump
+   * attaches are delivered live, not replayed. A later `subscribeEvents`
+   * consumer that resumes with a `Last-Event-ID` therefore won't see those
+   * pre-pump content events replayed (they were live-delivered to a pump that
+   * only routes JSON-RPC *responses* and drops events). This is fine for the
+   * pump's job — resolving a no-subscriber `session/prompt` reply — but a
+   * consumer that needs the full event history should open `subscribeEvents`
+   * before issuing session RPCs.
    */
   private ensureSessionReplyPump(sessionId: string): () => void {
     let entry = this.sessionReplyPumps.get(sessionId);

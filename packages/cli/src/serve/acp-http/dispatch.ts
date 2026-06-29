@@ -2770,18 +2770,25 @@ export class AcpDispatcher {
       // `ring_evicted` paths fall through to the replay loop + `replay_complete`).
       // It is id-less, so the per-event release skips it anyway.
       let lastDeliveredId = lastEventId ?? 0;
+      // A `state_resync_required` means the ring evicted frames (overflow /
+      // epoch reset), so an anchor event a deferred reply is waiting on may
+      // never be delivered. Track it so `endReplayDeferral` can release ALL
+      // deferred replies (anchor guarantee void) instead of stranding them
+      // behind an unreachable watermark — the cascading-freeze fix.
+      let sawEviction = false;
       for await (const event of iterable) {
         if (signal.aborted) break;
         // Count event delivery as connection activity so a long, quiet prompt
         // (no inbound HTTP) isn't reaped by the idle-TTL sweep.
         conn.touch();
         this.translateEvent(conn, sessionId, event);
+        if (event.type === 'state_resync_required') sawEviction = true;
         if (typeof event.id === 'number') {
           lastDeliveredId = event.id;
           conn.releaseDeferredSessionReplies(sessionId, event.id);
         }
         if (event.type === 'replay_complete') {
-          conn.endReplayDeferral(sessionId, lastDeliveredId);
+          conn.endReplayDeferral(sessionId, lastDeliveredId, sawEviction);
         }
       }
       // Safety: a live-only subscription (no cursor → no replay boundary) or a

@@ -591,12 +591,29 @@ export class AcpConnection {
    * content arrives, so a result produced during a slow replay still lands after
    * its tail content (§1.8 W1), not at the boundary.
    */
-  endReplayDeferral(sessionId: string, lastReplayedId: number): void {
+  endReplayDeferral(
+    sessionId: string,
+    lastReplayedId: number,
+    evictionOccurred = false,
+  ): void {
     const binding = this.sessions.get(sessionId);
     if (!binding) return;
     // Replay boundary passed → new replies are no longer gated by the replay
     // window itself (they may still defer behind a non-empty buffer).
     binding.replayPending = false;
+    if (evictionOccurred) {
+      // The replay emitted a `state_resync_required` (ring eviction / epoch
+      // reset): anchor events may have been dropped from the ring and will
+      // NEVER be delivered. A watermark-gated release would then leave any
+      // reply anchored above the surviving range deferred forever — and because
+      // `sendSessionReply` gates inline delivery on an EMPTY buffer, every later
+      // reply piles up behind it too (a cascading freeze: agent runs, heartbeats
+      // flow, but no result ever reaches the client). With the ordering
+      // guarantee already void after an eviction, release everything now — an
+      // ordering imperfection beats a permanently frozen session.
+      this.flushBufferedSessionFrames(sessionId);
+      return;
+    }
     this.releaseDeferredSessionReplies(sessionId, lastReplayedId);
   }
 

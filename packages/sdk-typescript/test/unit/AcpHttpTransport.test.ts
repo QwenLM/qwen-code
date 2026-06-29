@@ -1158,6 +1158,110 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     t.dispose();
   });
 
+  it('two concurrent session-scoped requests SHARE one reply pump (ref-counted): one GET /acp, both resolve, pump tears down only after both settle', async () => {
+    // doudouOUC: the ref-counting contract (entry.refs++ per request, abort only
+    // on the LAST release) is the core correctness property — a double-release
+    // would abort the pump while a second request is still in-flight. Fire two
+    // session/prompt POSTs concurrently and assert they share ONE GET /acp.
+    const promptIds: number[] = [];
+    let sessionGetCalls = 0;
+    const enc = new TextEncoder();
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const headers: Record<string, string> = {};
+        if (init?.headers && typeof init.headers === 'object') {
+          for (const [k, v] of Object.entries(
+            init.headers as Record<string, string>,
+          )) {
+            headers[k.toLowerCase()] = v;
+          }
+        }
+        const body = typeof init?.body === 'string' ? init.body : null;
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          if (parsed.method === 'initialize') {
+            return jsonResponse(
+              200,
+              { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+              { 'acp-connection-id': 'conn-1' },
+            );
+          }
+          if (parsed.method === 'session/prompt') {
+            promptIds.push(parsed.id as number);
+            return new Response(null, { status: 202 });
+          }
+          return jsonResponse(200, {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { ok: true },
+          });
+        }
+        // The shared session reply pump: ONE GET /acp with Acp-Session-Id serves
+        // BOTH prompt replies. Enqueue on a macrotask so both POSTs have
+        // registered their ids first.
+        if (
+          url.endsWith('/acp') &&
+          method === 'GET' &&
+          headers['acp-session-id']
+        ) {
+          sessionGetCalls++;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                setTimeout(() => {
+                  for (const id of promptIds) {
+                    controller.enqueue(
+                      enc.encode(
+                        `data: ${JSON.stringify({
+                          jsonrpc: '2.0',
+                          id,
+                          result: { stopReason: 'end_turn' },
+                        })}\n\n`,
+                      ),
+                    );
+                  }
+                  controller.close();
+                }, 0);
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'text/event-stream' } },
+          );
+        }
+        if (url.endsWith('/acp') && method === 'GET') return sseResponse([]);
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    const mkPrompt = () =>
+      t
+        .fetch('http://d/session/sess-1/prompt', {
+          method: 'POST',
+          body: JSON.stringify({ prompt: [{ type: 'text', text: 'hi' }] }),
+        })
+        .then((r) => r.json());
+    const [a, b] = await Promise.all([mkPrompt(), mkPrompt()]);
+
+    expect(a).toEqual({ stopReason: 'end_turn' });
+    expect(b).toEqual({ stopReason: 'end_turn' });
+    // Both shared a single reply pump (one session-scoped GET), not one each.
+    expect(sessionGetCalls).toBe(1);
+    // The pump tore down after the last release.
+    expect(
+      (
+        t as unknown as { sessionReplyPumps: Map<string, unknown> }
+      ).sessionReplyPumps.has('sess-1'),
+    ).toBe(false);
+    t.dispose();
+  });
+
   it('rejects (does not parse garbage / hang) a no-subscriber session/prompt when the reply pump GET returns a non-SSE content-type (M3pAM)', async () => {
     const fetchImpl = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1392,6 +1496,52 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     await new Promise((r) => setTimeout(r, 0));
     expect(getCalls).toBe(2);
 
+    t.dispose();
+  });
+
+  it('the conn-stream pump never resolves a SESSION-scoped pending (cross-stream scope guard, mirrors the session readers)', async () => {
+    // doudouOUC: the connection stream carries only conn-scoped replies. A reply
+    // frame whose id collides with a session-scoped pending (a daemon routing
+    // regression) must NOT be cross-delivered here — the same guard the session
+    // readers and the openConnStream error sweep already enforce.
+    const replyFrame = `data: ${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 5,
+      result: { leaked: true },
+    })}\n\n`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (url.endsWith('/acp')) return sseResponse([replyFrame]);
+      return jsonResponse(200, { ok: true });
+    }) as unknown as typeof globalThis.fetch;
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const resolve = vi.fn();
+    pending.set(5, { resolve, reject: () => {}, sessionId: 'sess-1' });
+
+    (t as unknown as { openConnStream: () => void }).openConnStream();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Session-scoped pending left untouched for its OWN session stream.
+    expect(resolve).not.toHaveBeenCalled();
+    expect(pending.has(5)).toBe(true);
     t.dispose();
   });
 });

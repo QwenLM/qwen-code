@@ -681,6 +681,48 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('releases ALL deferred replies at replay_complete when the replay evicted frames (state_resync_required) — no cascading freeze on an unreachable anchor', () => {
+    // doudouOUC's cascading-freeze: a reply anchored ABOVE the surviving range
+    // (its anchor event was evicted from the ring on overflow) would otherwise
+    // wait for an id the pump never delivers — and because `sendSessionReply`
+    // gates inline delivery on an EMPTY buffer, every later reply piles up
+    // behind it forever. When the replay carried a `state_resync_required`, the
+    // ordering guarantee is void, so endReplayDeferral must release everything.
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const s = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s, new AbortController(), 5); // resume
+
+      // Two replies anchored at id 9 — but the ring evicted everything, so no
+      // event with id ≥ 9 will ever be delivered.
+      conn.sendSessionReply('sess-1', { promptResult: true }, 9);
+      conn.sendSessionReply('sess-1', { second: true }, 9);
+      expect(s.sent).toEqual([]); // both deferred
+
+      // replay_complete WITH eviction (lastReplayed 4 < anchor 9): release all.
+      conn.endReplayDeferral('sess-1', 4, true);
+      expect(s.sent).toEqual([
+        { message: { promptResult: true }, id: undefined },
+        { message: { second: true }, id: undefined },
+      ]);
+
+      // Cascade broken: buffer empty + replayPending cleared → a later reply
+      // reaches the wire immediately instead of stranding.
+      conn.sendSessionReply('sess-1', { third: true });
+      expect(s.sent).toContainEqual({
+        message: { third: true },
+        id: undefined,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('holds an UNANCHORED deferred reply during replay (Branch A) and releases it once the boundary clears replayPending (Branch B) (M3w6e)', () => {
     const registry = new ConnectionRegistry();
     try {

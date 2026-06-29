@@ -210,6 +210,18 @@ class FakeBridge {
     return Promise.resolve({ stopReason: 'end_turn' });
   }
 
+  /**
+   * Bus head id the daemon stamps as a deferred reply's WATERMARK (`anchorId`)
+   * in `replySession`. Configurable per test so the watermark-ordering path can
+   * be exercised end-to-end with a REAL anchor (without this method the daemon's
+   * try/catch fell back to `anchorId = undefined`, so every integration test
+   * only ever hit the unanchored path).
+   */
+  sessionLastEventId: number | undefined = undefined;
+  getSessionLastEventId(_sessionId: string): number | undefined {
+    return this.sessionLastEventId;
+  }
+
   respondToSessionPermission() {
     return true;
   }

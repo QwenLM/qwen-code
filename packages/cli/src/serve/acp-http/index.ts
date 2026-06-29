@@ -576,6 +576,17 @@ export function mountAcpHttp(
     //  • the pump ended while the stream is still open (subprocess done /
     //    iterator error) → the stream is a zombie; full close now.
     // Both are identity-guarded so a stale stream can't act on a newer one.
+    // INVARIANT (cross-file, mirrors the CONTRACT comment in
+    // `connection-registry.ts` `attachSessionStream`): the identity checks below
+    // (`conn.sessions.get(sessionId)?.stream === stream`) are load-bearing and
+    // depend on `attachSessionStream` installing the NEW stream BEFORE the old
+    // one's pump settles here. If a refactor closed the old stream first, this
+    // settling pump would see `stream !== current` and fall into the "superseded"
+    // no-op while the reclaim is mid-flight — skipping detach-with-grace and
+    // aborting the prompt instead of keeping it alive for reconnect. The
+    // identity guard, not a flag, is what keeps a stale close from tearing down a
+    // fresh reclaim. Covered by connection-registry.test.ts "detachSessionStream
+    // is a no-op for a stale stream after reclaim (identity guard)".
     const onPumpSettled = () => {
       if (stream.isClosed) {
         // Transport-closed → detach-with-grace. detachSessionStream logs the
