@@ -2207,6 +2207,7 @@ export async function runQwenServe(
         runtimeStartAfterHealthTimer = setTimeout(() => {
           runtimeStartAfterHealthTimer = undefined;
           if (shuttingDown) return;
+          daemonLog.info('deferred runtime: health timer fired, starting');
           startRuntime();
         }, FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS);
         runtimeStartAfterHealthTimer.unref();

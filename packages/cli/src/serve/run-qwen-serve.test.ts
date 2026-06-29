@@ -761,6 +761,7 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-first-')),
     );
+    const logBaseDir = path.join(tmpDir, 'debug');
     const resolveTelemetrySettings = vi
       .spyOn(qwenCore, 'resolveTelemetrySettings')
       .mockResolvedValue({
@@ -787,9 +788,11 @@ describe('runQwenServe runtime startup failures', () => {
         resolveOnListen: true,
         deferRuntimeUntilFirstHealth: true,
         runtimeStartupTimeoutMs: 0,
+        daemonLogBaseDir: logBaseDir,
       },
     );
 
+    let closed = false;
     try {
       await new Promise((resolve) => setTimeout(resolve, 250));
       expect(resolveTelemetrySettings).not.toHaveBeenCalled();
@@ -803,8 +806,25 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
-    } finally {
       await handle.close();
+      closed = true;
+
+      const daemonDir = path.join(logBaseDir, 'daemon');
+      const [logFile] = fs
+        .readdirSync(daemonDir)
+        .filter((fileName) => fileName.endsWith('.log'));
+      expect(logFile).toBeDefined();
+      const logContent = fs.readFileSync(
+        path.join(daemonDir, logFile!),
+        'utf8',
+      );
+      expect(logContent).toContain(
+        'deferred runtime: health timer fired, starting',
+      );
+    } finally {
+      if (!closed) {
+        await handle.close();
+      }
     }
   });
 
