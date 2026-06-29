@@ -164,6 +164,27 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
+  it('disables chat recording for hidden remember agents', async () => {
+    const touched = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [touched],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember without creating a visible session.',
+      contextMode: 'workspace',
+    });
+
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+    };
+    expect(params.config.getChatRecordingService()).toBeUndefined();
+    expect(params.config.getTranscriptPath()).toBe('');
+  });
+
   it('rebuilds touched project indexes and best-effort user indexes', async () => {
     const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
     const userFile = path.join(getUserAutoMemoryRoot(), 'user.md');

@@ -95,6 +95,13 @@ function buildRememberSystemPrompt(memoryPrompt: string): string {
   ].join('\n');
 }
 
+function createHiddenRememberConfig(config: Config): Config {
+  const hiddenConfig = Object.create(config) as Config;
+  hiddenConfig.getChatRecordingService = () => undefined;
+  hiddenConfig.getTranscriptPath = () => '';
+  return hiddenConfig;
+}
+
 function uniqueSortedScopes(scopes: Iterable<WorkspaceRememberScope>) {
   return [...new Set(scopes)].sort();
 }
@@ -144,8 +151,9 @@ export async function runManagedRememberByAgent(params: {
           return cleanConfig;
         })()
       : params.config;
+  const hiddenConfig = createHiddenRememberConfig(baseConfig);
   const scopedConfig = createMemoryScopedAgentConfig(
-    baseConfig,
+    hiddenConfig,
     params.projectRoot,
     {
       restrictReadsToMemoryPaths: true,
