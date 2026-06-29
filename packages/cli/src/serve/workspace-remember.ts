@@ -282,7 +282,8 @@ export function mountWorkspaceMemoryRememberRoutes(
           });
           return;
         }
-      } catch {
+      } catch (err) {
+        debugLogger.error('Availability check failed:', err);
         res.status(500).json({
           error: 'Workspace memory remember failed.',
           code: 'remember_failed',

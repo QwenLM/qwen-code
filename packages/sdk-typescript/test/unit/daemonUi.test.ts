@@ -1753,6 +1753,17 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).not.toContain('\x00');
   });
 
+  it('renders managed memory events without a source fallback leak', () => {
+    const output = daemonUiEventToTerminalText({
+      type: 'workspace.memory.changed',
+      scope: 'managed',
+      touchedScopes: ['project'],
+    });
+
+    expect(output).toContain('managed_memory');
+    expect(output).not.toContain('undefined');
+  });
+
   it('renders extension failures without assuming install failed', () => {
     const output = daemonUiEventToTerminalText({
       type: 'workspace.extensions.changed',

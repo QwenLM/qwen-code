@@ -104,7 +104,7 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return terminalLine(
         'memory',
         event.scope === 'managed'
-          ? event.source!
+          ? (event.source ?? 'managed_memory')
           : `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
         '36',
       );
