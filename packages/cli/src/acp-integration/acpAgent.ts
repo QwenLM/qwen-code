@@ -131,7 +131,6 @@ import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
 import {
@@ -7636,7 +7635,6 @@ class QwenAgent implements Agent {
           config.storage.getProjectTempDir(),
           path.join(config.storage.getProjectDir(), 'subagents'),
           Storage.getGlobalTempDir(),
-          os.tmpdir(),
           getAutoMemoryRoot(config.getTargetDir()),
           getUserAutoMemoryRoot(),
           ...config.storage.getUserSkillsDirs(),

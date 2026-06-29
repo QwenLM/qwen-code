@@ -16,7 +16,7 @@ import type {
   FileSystemService,
   ReadTextFileResponse,
 } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, isSubpath } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
@@ -103,7 +103,7 @@ async function resolveRealPath(value: string): Promise<string | undefined> {
   }
 }
 
-async function isPathWithinRoot(
+async function isRealPathWithinRoot(
   filePath: string,
   root: string,
 ): Promise<boolean> {
@@ -113,13 +113,7 @@ async function isPathWithinRoot(
   ]);
   if (!realFilePath || !realRoot) return false;
 
-  const relative = path.relative(realRoot, realFilePath);
-  return (
-    relative === '' ||
-    (!relative.startsWith(`..${path.sep}`) &&
-      relative !== '..' &&
-      !path.isAbsolute(relative))
-  );
+  return isSubpath(realRoot, realFilePath);
 }
 
 export class AcpFileSystemService implements FileSystemService {
@@ -214,7 +208,7 @@ export class AcpFileSystemService implements FileSystemService {
 
   private async isLocalReadFallbackPath(filePath: string): Promise<boolean> {
     for (const root of this.options.localReadRoots ?? []) {
-      if (await isPathWithinRoot(filePath, root)) return true;
+      if (await isRealPathWithinRoot(filePath, root)) return true;
     }
     return false;
   }

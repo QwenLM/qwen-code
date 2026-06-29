@@ -1278,7 +1278,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           '/project/.qwen/tmp',
           '/project/subagents',
           '/tmp/qwen-global-temp',
-          os.tmpdir(),
           '/project/.qwen/memory',
           '/tmp/user-memory',
           '/home/test/.qwen/skills',
