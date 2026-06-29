@@ -6,7 +6,9 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
+import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,7 +18,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
+import * as ts from 'typescript';
 import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 
 import {
@@ -66,6 +69,195 @@ const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
 const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
 const originalCwd = process.cwd();
+const cliPackageRoot = process.cwd();
+const repoRoot = resolve(cliPackageRoot, '../..');
+
+interface StaticSourceGraph {
+  localFiles: Set<string>;
+  externalValueImports: Set<string>;
+  unresolvedLocalImports: string[];
+}
+
+interface EsbuildMetafileOutput {
+  inputs?: Record<string, unknown>;
+  imports?: Array<{
+    path: string;
+    kind?: string;
+  }>;
+}
+
+interface EsbuildMetafile {
+  outputs: Record<string, EsbuildMetafileOutput>;
+}
+
+function normalizePathForTest(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
+
+function moduleSpecifierText(
+  specifier: ts.Expression | undefined,
+): string | undefined {
+  if (!specifier || !ts.isStringLiteral(specifier)) return undefined;
+  return specifier.text;
+}
+
+function importDeclarationHasRuntimeValue(node: ts.ImportDeclaration): boolean {
+  const clause = node.importClause;
+  if (!clause) return true;
+  if (clause.isTypeOnly) return false;
+  if (clause.name) return true;
+  const bindings = clause.namedBindings;
+  if (!bindings) return false;
+  if (ts.isNamespaceImport(bindings)) return true;
+  if (bindings.elements.length === 0) return true;
+  return bindings.elements.some((element) => !element.isTypeOnly);
+}
+
+function exportDeclarationHasRuntimeValue(node: ts.ExportDeclaration): boolean {
+  if (node.isTypeOnly) return false;
+  const clause = node.exportClause;
+  if (!clause) return true;
+  if (ts.isNamespaceExport(clause)) return true;
+  if (clause.elements.length === 0) return true;
+  return clause.elements.some((element) => !element.isTypeOnly);
+}
+
+function resolveLocalSourceImport(
+  importer: string,
+  specifier: string,
+): string | undefined {
+  const basePath = resolve(dirname(importer), specifier);
+  const candidates = specifier.endsWith('.js')
+    ? [`${basePath.slice(0, -3)}.ts`, `${basePath.slice(0, -3)}.tsx`]
+    : [
+        `${basePath}.ts`,
+        `${basePath}.tsx`,
+        join(basePath, 'index.ts'),
+        join(basePath, 'index.tsx'),
+      ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function collectStaticSourceGraph(entryFile: string): StaticSourceGraph {
+  const visited = new Set<string>();
+  const localFiles = new Set<string>();
+  const externalValueImports = new Set<string>();
+  const unresolvedLocalImports: string[] = [];
+
+  function visit(filePath: string): void {
+    const normalizedFilePath = resolve(filePath);
+    if (visited.has(normalizedFilePath)) return;
+    visited.add(normalizedFilePath);
+    localFiles.add(
+      normalizePathForTest(relative(cliPackageRoot, normalizedFilePath)),
+    );
+
+    const sourceText = readFileSync(normalizedFilePath, 'utf8');
+    const sourceFile = ts.createSourceFile(
+      normalizedFilePath,
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      normalizedFilePath.endsWith('.tsx')
+        ? ts.ScriptKind.TSX
+        : ts.ScriptKind.TS,
+    );
+
+    for (const statement of sourceFile.statements) {
+      let specifier: string | undefined;
+      let hasRuntimeValue = false;
+      if (ts.isImportDeclaration(statement)) {
+        specifier = moduleSpecifierText(statement.moduleSpecifier);
+        hasRuntimeValue = importDeclarationHasRuntimeValue(statement);
+      } else if (ts.isExportDeclaration(statement)) {
+        specifier = moduleSpecifierText(statement.moduleSpecifier);
+        hasRuntimeValue = exportDeclarationHasRuntimeValue(statement);
+      }
+      if (!specifier || !hasRuntimeValue) continue;
+      if (!specifier.startsWith('.')) {
+        externalValueImports.add(specifier);
+        continue;
+      }
+      const resolvedImport = resolveLocalSourceImport(
+        normalizedFilePath,
+        specifier,
+      );
+      if (!resolvedImport) {
+        unresolvedLocalImports.push(
+          `${normalizePathForTest(relative(cliPackageRoot, normalizedFilePath))} -> ${specifier}`,
+        );
+        continue;
+      }
+      visit(resolvedImport);
+    }
+  }
+
+  visit(entryFile);
+  return { localFiles, externalValueImports, unresolvedLocalImports };
+}
+
+function collectBundledRunServeStaticRuntimeOffenders(): string[] {
+  const metafilePath = resolve(repoRoot, 'dist/esbuild.json');
+  rmSync(metafilePath, { force: true });
+  execFileSync(process.execPath, [resolve(repoRoot, 'esbuild.config.js')], {
+    cwd: repoRoot,
+    env: { ...process.env, DEV: 'true' },
+    stdio: 'pipe',
+    timeout: 30_000,
+  });
+
+  expect(existsSync(metafilePath)).toBe(true);
+  const metafile = JSON.parse(
+    readFileSync(metafilePath, 'utf8'),
+  ) as EsbuildMetafile;
+  const outputs = new Map(
+    Object.entries(metafile.outputs).map(([outputPath, output]) => [
+      normalizePathForTest(outputPath),
+      output,
+    ]),
+  );
+  const runServeOutput = [...outputs.entries()].find(([, output]) =>
+    Object.keys(output.inputs ?? {}).some(
+      (input) =>
+        normalizePathForTest(input) ===
+        'packages/cli/src/serve/run-qwen-serve.ts',
+    ),
+  );
+  expect(runServeOutput).toBeDefined();
+  const queue = [runServeOutput![0]];
+  const staticClosure = new Set(queue);
+
+  for (let i = 0; i < queue.length; i++) {
+    const output = outputs.get(queue[i]);
+    for (const bundledImport of output?.imports ?? []) {
+      if (bundledImport.kind !== 'import-statement') continue;
+      const importedOutput = normalizePathForTest(bundledImport.path);
+      if (!outputs.has(importedOutput) || staticClosure.has(importedOutput)) {
+        continue;
+      }
+      staticClosure.add(importedOutput);
+      queue.push(importedOutput);
+    }
+  }
+
+  const forbiddenInputs = new Set([
+    'packages/cli/src/serve/acp-session-bridge.ts',
+    'packages/acp-bridge/src/bridge.ts',
+    'packages/acp-bridge/src/bridgeClient.ts',
+    'packages/acp-bridge/src/spawnChannel.ts',
+  ]);
+  const offenders: string[] = [];
+  for (const outputPath of staticClosure) {
+    const output = outputs.get(outputPath);
+    for (const input of Object.keys(output?.inputs ?? {})) {
+      const normalizedInput = normalizePathForTest(input);
+      if (forbiddenInputs.has(normalizedInput)) {
+        offenders.push(`${outputPath} -> ${normalizedInput}`);
+      }
+    }
+  }
+  return offenders;
+}
 
 function useTempQwenHome(): string {
   tempQwenHome = realpathSync(
@@ -297,6 +489,45 @@ describe('CLI entry import boundary', () => {
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
   });
+
+  it('keeps the runQwenServe static source graph free of ACP runtime modules', () => {
+    const graph = collectStaticSourceGraph(
+      resolve(cliPackageRoot, 'src/serve/run-qwen-serve.ts'),
+    );
+
+    expect(graph.unresolvedLocalImports).toEqual([]);
+    const forbiddenLocalFiles = [...graph.localFiles].filter(
+      (filePath) => filePath === 'src/serve/acp-session-bridge.ts',
+    );
+    expect(
+      forbiddenLocalFiles,
+      `Unexpected static source graph files:\n${forbiddenLocalFiles.join('\n')}`,
+    ).toEqual([]);
+
+    const forbiddenExternalImports = [
+      '@qwen-code/acp-bridge',
+      '@qwen-code/acp-bridge/bridge',
+      '@qwen-code/acp-bridge/spawnChannel',
+      '@qwen-code/acp-bridge/bridgeClient',
+      '@qwen-code/acp-bridge/bridgeErrors',
+    ];
+    const forbiddenImports = [...graph.externalValueImports].filter(
+      (specifier) => forbiddenExternalImports.includes(specifier),
+    );
+    expect(
+      forbiddenImports,
+      `Unexpected ACP runtime imports:\n${forbiddenImports.join('\n')}`,
+    ).toEqual([]);
+  });
+
+  it('keeps bundled runQwenServe static imports free of ACP runtime modules', () => {
+    const offenders = collectBundledRunServeStaticRuntimeOffenders();
+
+    expect(
+      offenders,
+      `Unexpected ACP runtime inputs in static bundle closure:\n${offenders.join('\n')}`,
+    ).toEqual([]);
+  }, 30_000);
 });
 
 describe('serve fast path argument parsing', () => {
