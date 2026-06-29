@@ -26,6 +26,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
@@ -737,6 +738,47 @@ describe('useGeminiStream', () => {
         expect.any(Number),
       );
     });
+  });
+
+  it('expands autonomous loop wakeup sentinels before queuing them', async () => {
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            prompt: string;
+            cronExpr?: string;
+            missed?: boolean;
+          }) => void,
+        ) => {
+          callback({
+            prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+            cronExpr: '@wakeup',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: 'Loop: Autonomous loop tick' },
+        expect.any(Number),
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalled();
+    });
+    const sent = String(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('# Autonomous loop check');
+    expect(sent).toContain('# Autonomous loop tick (dynamic pacing)');
+    expect(sent).not.toContain(AUTONOMOUS_SENTINEL_DYNAMIC);
   });
 
   it('renders teammate reports as a compact notification, not a raw envelope bubble', async () => {

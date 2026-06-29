@@ -48,6 +48,7 @@ import {
   ToolConfirmationOutcome,
   logApiCancel,
   ApiCancelEvent,
+  detectAutonomousSentinel,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   runVisionBridge,
@@ -62,6 +63,7 @@ import {
   createDuplicateProviderToolCallResponse,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  LoopTickResolver,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -3128,7 +3130,17 @@ export const useGeminiStream = (
       sendMessageType: SendMessageType;
     }>
   >([]);
+  const autonomousLoopTickResolverRef = useRef<LoopTickResolver | null>(null);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+
+  const getAutonomousLoopTickResolver = useCallback(() => {
+    autonomousLoopTickResolverRef.current ??= new LoopTickResolver({
+      projectRoot: '',
+      homeDir: '',
+      allowProjectFile: () => false,
+    });
+    return autonomousLoopTickResolverRef.current;
+  }, []);
   const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
 
   useEffect(() => {
@@ -3189,11 +3201,20 @@ export const useGeminiStream = (
       if (stopped) return;
       scheduler.start(
         (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
-          const label = job.prompt.slice(0, 40);
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+          const autonomousMode = detectAutonomousSentinel(job.prompt);
+          let label = job.prompt.slice(0, 40);
+          let modelText = job.prompt;
+          if (autonomousMode) {
+            const resolver = getAutonomousLoopTickResolver();
+            const tick = resolver.resolveAutonomous(autonomousMode);
+            resolver.markDelivered();
+            label = 'Autonomous loop tick';
+            modelText = tick.modelText;
+          }
           notificationQueueRef.current.push({
             displayText: `${job.missed ? 'Missed' : source}: ${label}`,
-            modelText: job.prompt,
+            modelText,
             sendMessageType: SendMessageType.Cron,
           });
           setNotificationTrigger((n) => n + 1);
@@ -3209,7 +3230,7 @@ export const useGeminiStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config, isConfigInitialized]);
+  }, [config, getAutonomousLoopTickResolver, isConfigInitialized]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
