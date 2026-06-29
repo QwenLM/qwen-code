@@ -756,6 +756,70 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     t.dispose();
   });
 
+  it('rejects (not strands) a session-scoped pending when the subscription fails fast before its read loop (M4DWq fast-fail)', async () => {
+    // The session GET returns 401, so subscribeEventsInner throws at the res.ok
+    // check — BEFORE its read-loop finally. The pending sweep lives in the
+    // wrapper finally (which always runs), so the pending must still be rejected.
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const headers: Record<string, string> = {};
+        if (init?.headers && typeof init.headers === 'object') {
+          for (const [k, v] of Object.entries(
+            init.headers as Record<string, string>,
+          )) {
+            headers[k.toLowerCase()] = v;
+          }
+        }
+        const body = typeof init?.body === 'string' ? init.body : null;
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          return jsonResponse(
+            200,
+            { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+            { 'acp-connection-id': 'conn-1' },
+          );
+        }
+        // Session GET → 401, throws before the read loop.
+        if (
+          url.endsWith('/acp') &&
+          method === 'GET' &&
+          headers['acp-session-id']
+        ) {
+          return new Response('unauthorized', { status: 401 });
+        }
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const reject = vi.fn();
+    pending.set(7, { resolve: () => {}, reject, sessionId: 'sess-1' });
+
+    await expect(collect(t, 'sess-1')).rejects.toThrow();
+    expect(reject).toHaveBeenCalledTimes(1); // swept by the wrapper finally
+    expect(pending.has(7)).toBe(false);
+    t.dispose();
+  });
+
   it('rejects in-flight session-scoped pendings when the subscription stream closes (M2iHz) — a session/prompt caller does not hang', async () => {
     const { fetch } = sessionStreamFetch([]); // stream closes with no frames
     const t = new AcpHttpTransport('http://d', undefined, fetch);

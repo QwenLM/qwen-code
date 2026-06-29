@@ -322,6 +322,22 @@ export class AcpHttpTransport implements DaemonTransport {
       const n = (this.activeSessionSubscriptions.get(sessionId) ?? 1) - 1;
       if (n <= 0) this.activeSessionSubscriptions.delete(sessionId);
       else this.activeSessionSubscriptions.set(sessionId, n);
+      // This consumer owned reply routing for the session (no reply pump runs
+      // while a subscription is active). On exit — whether the stream closed
+      // cleanly OR `subscribeEventsInner` failed fast before its read loop (a
+      // fetch reject / non-OK / wrong content-type) — if it was the LAST route
+      // (no other active subscription left, no reply pump), reject its still-live
+      // session-scoped pendings so a `session/prompt` caller can't hang on a
+      // reply that will never arrive. This finally ALWAYS runs, so it covers the
+      // fast-fail path the inner read-loop finally cannot. Mirrors the
+      // reply-pump and connection-stream sweeps.
+      if (!this._disposed && n <= 0 && !this.sessionReplyPumps.has(sessionId)) {
+        for (const [id, entry] of this.pending) {
+          if (entry.sessionId !== sessionId) continue;
+          entry.reject(new Error('Session SSE stream closed unexpectedly'));
+          this.pending.delete(id);
+        }
+      }
     }
   }
 
@@ -594,27 +610,11 @@ export class AcpHttpTransport implements DaemonTransport {
       } catch {
         /* already closed */
       }
-      // When a consumer subscription delivers session replies (no reply pump is
-      // started while one is active), it owns the route for this session's
-      // pendings. If the session stream closes with this as the LAST route (no
-      // other active subscription — the ref-count still includes self here,
-      // decremented by the outer wrapper right after — and no reply pump), reject
-      // its still-live session-scoped pendings so a `session/prompt` caller can't
-      // hang on a reply the closed stream will never deliver (the mirror of the
-      // reply-pump sweep, and of the connection-stream sweep for conn scope).
-      const otherSubs =
-        (this.activeSessionSubscriptions.get(sessionId) ?? 0) - 1;
-      if (
-        !this._disposed &&
-        otherSubs <= 0 &&
-        !this.sessionReplyPumps.has(sessionId)
-      ) {
-        for (const [id, entry] of this.pending) {
-          if (entry.sessionId !== sessionId) continue;
-          entry.reject(new Error('Session SSE stream closed unexpectedly'));
-          this.pending.delete(id);
-        }
-      }
+      // NOTE: the session-scoped pending sweep lives in the `subscribeEvents`
+      // WRAPPER's finally, not here. This read-loop finally only runs if the
+      // pump reached the read loop — a fast failure (fetch reject / non-OK /
+      // wrong content-type, all BEFORE this try) would skip it and strand the
+      // pending. The wrapper finally always runs, so the sweep belongs there.
     }
   }
 
@@ -1029,8 +1029,14 @@ export class AcpHttpTransport implements DaemonTransport {
       const created = { abort, refs: 0 };
       entry = created;
       this.sessionReplyPumps.set(sessionId, created);
+      // Capture the pump's error (e.g. `HTTP 401`, wrong content-type) so the
+      // sweep can reject pendings WITH that reason instead of a generic message
+      // — the caller can then tell an auth failure from a network drop.
+      let pumpError: Error | undefined;
       void this.pumpSessionReplies(sessionId, abort.signal)
-        .catch(() => {})
+        .catch((err) => {
+          pumpError = err instanceof Error ? err : new Error(String(err));
+        })
         .finally(() => {
           if (this.sessionReplyPumps.get(sessionId) === created) {
             this.sessionReplyPumps.delete(sessionId);
@@ -1041,11 +1047,12 @@ export class AcpHttpTransport implements DaemonTransport {
           // so they don't hang. Scoped to THIS sessionId — the mirror of the
           // connection-stream sweep (§W2 race).
           if (!this._disposed && !abort.signal.aborted) {
+            const reason =
+              pumpError ??
+              new Error('Session SSE reply stream closed unexpectedly');
             for (const [id, entry] of this.pending) {
               if (entry.sessionId !== sessionId) continue;
-              entry.reject(
-                new Error('Session SSE reply stream closed unexpectedly'),
-              );
+              entry.reject(reason);
               this.pending.delete(id);
             }
           }
