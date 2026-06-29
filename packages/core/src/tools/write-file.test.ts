@@ -847,6 +847,30 @@ describe('WriteFileTool', () => {
       );
     });
 
+    it('should include cause details for non-Node write errors', async () => {
+      const filePath = path.join(rootDir, 'write_error_with_cause.txt');
+      const content = 'test content';
+
+      vi.restoreAllMocks();
+
+      const cause = Object.assign(new Error(''), { code: 'ECONNREFUSED' });
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce(
+        new TypeError('fetch failed', { cause }),
+      );
+
+      const params = { file_path: filePath, content };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      expect(result.llmContent).toContain(
+        'Error writing to file: fetch failed (cause: ECONNREFUSED)',
+      );
+      expect(result.returnDisplay).toContain(
+        'Error writing to file: fetch failed (cause: ECONNREFUSED)',
+      );
+    });
+
     it('should surface plain object write error messages without object stringification', async () => {
       const filePath = path.join(rootDir, 'plain_object_error_file.txt');
       const content = 'test content';

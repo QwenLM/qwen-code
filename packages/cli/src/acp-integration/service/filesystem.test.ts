@@ -161,12 +161,20 @@ describe('AcpFileSystemService', () => {
       expect(String(err)).not.toContain('[object Object]');
     });
 
-    it('preserves stack traces from plain object ACP errors', async () => {
-      const otherError = {
-        code: INTERNAL_ERROR_CODE,
+    it('does not copy unsafe properties from plain object ACP errors', async () => {
+      const otherError: Record<string, unknown> = {
+        code: 'ABORT_ERR',
         message: 'Internal error',
-        stack: 'Original ACP stack',
+        stack: 'Remote ACP stack',
+        name: 'AbortError',
+        constructor: 'RemoteConstructor',
+        toString: 'not callable',
+        valueOf: 'not callable',
       };
+      Object.defineProperty(otherError, '__proto__', {
+        value: { remotePrototype: true },
+        enumerable: true,
+      });
       const client = {
         readTextFile: vi.fn().mockRejectedValue(otherError),
       } as unknown as AgentSideConnection;
@@ -183,7 +191,21 @@ describe('AcpFileSystemService', () => {
         .catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(Error);
-      expect((err as Error).stack).toBe('Original ACP stack');
+      expect((err as Error).name).toBe('Error');
+      expect((err as Error).stack).toContain('Internal error');
+      expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(err, 'constructor')).toBe(
+        false,
+      );
+      expect(Object.prototype.hasOwnProperty.call(err, 'toString')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(err, 'valueOf')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(err, '__proto__')).toBe(
+        false,
+      );
+      expect(
+        (err as Record<string, unknown>)['remotePrototype'],
+      ).toBeUndefined();
+      expect(String(err)).toContain('Internal error');
     });
 
     it('does not copy array entries onto normalized ACP errors', async () => {

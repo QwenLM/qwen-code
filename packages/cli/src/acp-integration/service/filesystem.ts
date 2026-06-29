@@ -66,21 +66,9 @@ function getErrorKind(error: unknown): string | undefined {
 function normalizeError(error: unknown): Error {
   if (error instanceof Error) return error;
 
-  const normalized = new Error(getErrorMessage(error), {
+  return new Error(getErrorMessage(error), {
     cause: error,
-  }) as Error & Record<string, unknown>;
-  if (isRecord(error)) {
-    for (const [key, value] of Object.entries(error)) {
-      if (
-        key !== 'message' &&
-        key !== 'cause' &&
-        (key !== 'code' || typeof value === 'string')
-      ) {
-        normalized[key] = value;
-      }
-    }
-  }
-  return normalized;
+  });
 }
 
 function createEnoentError(filePath: string): NodeJS.ErrnoException {
