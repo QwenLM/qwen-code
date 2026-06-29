@@ -2504,7 +2504,10 @@ function isMemoryChangedData(value: unknown): value is DaemonMemoryChangedData {
     return (
       isNonEmptyString(value['source']) &&
       isNonEmptyString(value['taskId']) &&
-      Array.isArray(value['touchedScopes'])
+      Array.isArray(value['touchedScopes']) &&
+      value['touchedScopes'].every(
+        (touchedScope) => touchedScope === 'user' || touchedScope === 'project',
+      )
     );
   }
   const mode = value['mode'];

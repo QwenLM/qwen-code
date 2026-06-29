@@ -1249,6 +1249,19 @@ describe('daemon event schema', () => {
       },
     };
     expect(asKnownDaemonEvent(missingTask)).toBeUndefined();
+
+    const badTouchedScope: DaemonEvent = {
+      id: 12,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['bad'],
+      },
+    };
+    expect(asKnownDaemonEvent(badTouchedScope)).toBeUndefined();
   });
 
   it('narrows agent_changed events and rejects malformed payloads', () => {
