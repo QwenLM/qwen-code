@@ -227,7 +227,16 @@ operator logging can't drift.
   `Acp-Connection-Id` than the one that streamed the prompt) — a separate,
   security-sensitive concern tracked as its own follow-up. This PR does make
   `permission_request` translation idempotent under replay (above), but does
-  not add the session-global requestId resolve.
+  not add the session-global requestId resolve. It also does not add
+  **response-replay idempotency for an ALREADY-RESOLVED permission**: once the
+  client has voted, the pending entry is consumed, so a later reconnect that
+  replays the (still-ringed) `permission_request` re-sends the prompt with the
+  same `_meta.requestId`. A conformant client dedupes on that id (the contract
+  the replay path already relies on) and the residual orphan pending entry is
+  reaped at teardown — the agent never stalls — but recording resolved outcomes
+  in a bounded per-session LRU to re-send the recorded vote (full idempotency
+  for non-deduping clients) belongs with this same permission-coordination
+  follow-up, since it adds resolved-permission state to the vote path.
 - The lost in-flight _prompt response_ on the session stream — recovered
   content frames all flow through the `eventBus` ring; a JSON-RPC response is
   not a ring event.
@@ -238,7 +247,7 @@ operator logging can't drift.
   `permission_request` event, but the SDK's vote APIs
   (`respondToPermission` / `respondToSessionPermission`) map to a
   `session/permission` request the ACP daemon has no handler for — it only
-  accepts a permission vote as the JSON-RPC *response* echoing the outbound
+  accepts a permission vote as the JSON-RPC _response_ echoing the outbound
   `_qwen_perm_N` id. Wiring the vote round-trip is part of the §1.7
   permission-coordination follow-up.
 - **Session RPCs issued from inside the `subscribeEvents` loop on the exported
@@ -253,3 +262,13 @@ operator logging can't drift.
   `DaemonEvent`s for the iterator; deferred as a focused follow-up since it is a
   structural change to an opt-in, newly-exported transport and does not affect
   the default REST transport.
+- **Automated guard for the `SESSION_STREAM_REPLY_METHODS` ⇄ `replySession`
+  drift.** The SDK's `SESSION_STREAM_REPLY_METHODS` set must mirror the daemon's
+  `replySession(...)` call sites in `dispatch.ts` (a different package); a method
+  added there without adding it here opens no reply pump and a no-subscriber
+  `sendRequest` for it hangs until abort. Neither package's type system enforces
+  this. A CI guard (a lightweight script or vitest that extracts the daemon's
+  session-reply method names and diffs them against the SDK set) is the right
+  fix, but cross-package static-analysis tooling is its own focused task; the set
+  is small and stable in the meantime, and the JSDoc on the constant documents
+  the invariant.

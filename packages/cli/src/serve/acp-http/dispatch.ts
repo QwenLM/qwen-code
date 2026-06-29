@@ -2798,9 +2798,10 @@ export class AcpDispatcher {
       // could drain the deferred reply onto a RECLAIMING stream ahead of its own
       // replay (reintroducing the very out-of-order delivery the deferral
       // prevents). The reclaiming pump owns the buffer then and will release
-      // after its replay boundary. On an iterator error mid-replay (the catch
-      // below) the deferred frames likewise stay buffered for the next attach —
-      // never lost, just delivered next round.
+      // after its replay boundary. On an iterator error mid-replay the catch
+      // below performs the SAME flush (a re-throw with the stream still open
+      // closes it outright rather than detaching with grace, so the buffered
+      // replies must be released there too — otherwise they are lost).
       if (!signal.aborted) conn.flushBufferedSessionFrames(sessionId);
     } catch (err) {
       // Symmetric for the SYNC `subscribeEvents` throw and a MID-STREAM
@@ -2808,6 +2809,16 @@ export class AcpDispatcher {
       // so the caller's `.catch()` closes the stream. Returning would leave a
       // zombie SSE stream (heartbeats, no events, no reconnect signal).
       if (!signal.aborted) {
+        // The iterator has terminated (errored), so no more content frames will
+        // arrive through this pump and the ordering constraint the deferral
+        // protected against no longer applies. Flush any still-deferred session
+        // replies onto the (still-open) stream BEFORE signalling stream_error:
+        // the re-throw drives `onPumpSettled`, and while the stream is still
+        // open that takes the `closeSessionStream` branch (full teardown, NOT a
+        // detach-with-grace), which would otherwise DROP the buffered replies
+        // instead of preserving them for a reconnect. Same safety flush as the
+        // happy-path completion above.
+        conn.flushBufferedSessionFrames(sessionId);
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
@@ -2899,6 +2910,20 @@ export class AcpDispatcher {
         // for catch-up) instead of minting a second id + entry — which would
         // orphan one until teardown and double-prompt a client that doesn't
         // dedupe on `_meta.requestId`.
+        //
+        // KNOWN LIMITATION (already-resolved replay): if the client ALREADY
+        // voted, the vote handler consumed the pending entry, so the scan below
+        // finds no match and mints a fresh entry + re-sends the prompt. The
+        // re-sent prompt carries the SAME `_meta.requestId`, so a conformant
+        // client (the dedupe contract this whole replay path already relies on)
+        // recognises and drops it; the only residual is a transient orphan
+        // pending entry, reaped by `abandonPendingForSession` at teardown — the
+        // agent does NOT stall, since its permission was resolved by the prior
+        // vote. Full response-replay idempotency for non-deduping clients (an
+        // LRU of resolved requestIds re-sending the recorded outcome) belongs
+        // with the permission-coordination follow-up (§1.7), not this
+        // content-stream PR, as it would add resolved-permission state to the
+        // vote path.
         let id: string | undefined;
         for (const [existingId, p] of conn.pending) {
           if (

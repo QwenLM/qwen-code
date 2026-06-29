@@ -1153,6 +1153,112 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(order.indexOf('resync')).toBeLessThan(order.indexOf('content'));
   });
 
+  it('on resume, an ANCHORED deferred reply releases mid-replay at its watermark — after the anchor content, BEFORE replay_complete (end-to-end through getSessionLastEventId)', async () => {
+    // Exercises the anchored watermark path end-to-end: `replySession` stamps
+    // the reply with `anchorId = getSessionLastEventId(sessionId)` (a real
+    // number here, not the undefined fallback), so the reply is held until the
+    // pump has DELIVERED content through that id — then released MID-replay,
+    // before `replay_complete`. This distinguishes the watermark release from
+    // the unanchored "release at replay_complete" path (covered above): the
+    // reply must land between the anchor content and the replay boundary, and
+    // NOT before the content that precedes its watermark.
+    bridge.sessionLastEventId = 2; // reply's watermark anchors at bus id 2.
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    bridge.promptBehavior = async (_s, _q) => {
+      await gate; // result produced during the detach gap → buffered.
+      return { stopReason: 'end_turn' };
+    };
+
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    expect(ack.status).toBe(202);
+
+    // Close s1 → detach-with-grace; release the prompt while detached so its
+    // reply buffers as a deferred reply WITH anchorId=2.
+    await s1.body?.cancel().catch(() => {});
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+    openGate();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Reconnect carrying a cursor → replay in flight, the reply is DEFERRED.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '0',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+
+    // Clean replay (no eviction): two id-bearing content frames straddling the
+    // watermark, then replay_complete. The reply must release on id=2, NOT id=1.
+    const q2 = bridge.queues.get('sess-1')!;
+    q2.push({
+      type: 'session_update',
+      id: 1,
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'C1' },
+      },
+    });
+    q2.push({
+      type: 'session_update',
+      id: 2,
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'C2' },
+      },
+    });
+    q2.push({ type: 'replay_complete', data: { replayedCount: 2 } });
+
+    const r2 = frameReader(s2);
+    const order: string[] = [];
+    try {
+      // Read past the reply through to the replay boundary so the ordering of
+      // reply vs replay_complete is observable (the distinguishing assertion).
+      for (let i = 0; i < 12 && !order.includes('replay_complete'); i++) {
+        const f = (await r2.next()) as {
+          method?: string;
+          result?: unknown;
+          params?: { kind?: string; update?: { text?: string } };
+        };
+        if (f.method === undefined && 'result' in f) order.push('reply');
+        else if (f.params?.update?.text === 'C1') order.push('c1');
+        else if (f.params?.update?.text === 'C2') order.push('c2');
+        else if (f.params?.kind === 'replay_complete')
+          order.push('replay_complete');
+      }
+    } finally {
+      r2.close();
+    }
+
+    // Held through the pre-watermark content (c1), released ON the watermark
+    // (c2) MID-replay, and BEFORE the replay boundary — the anchor, not the
+    // replay_complete boundary, gated the release.
+    expect(order).toContain('reply');
+    expect(order).toContain('c1');
+    expect(order).toContain('c2');
+    expect(order).toContain('replay_complete');
+    expect(order.indexOf('c1')).toBeLessThan(order.indexOf('c2'));
+    expect(order.indexOf('c2')).toBeLessThan(order.indexOf('reply'));
+    expect(order.indexOf('reply')).toBeLessThan(
+      order.indexOf('replay_complete'),
+    );
+  });
+
   it('GET Last-Event-ID past MAX_SAFE_INTEGER → live-only (undefined)', async () => {
     const connId = await initialize();
     await newSession(connId);
