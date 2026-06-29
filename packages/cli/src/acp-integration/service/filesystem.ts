@@ -91,22 +91,15 @@ async function resolveRealPath(value: string): Promise<string | undefined> {
 
   try {
     return await realpath(path.resolve(value));
-  } catch {
+  } catch (error) {
+    if (getErrorCode(error) !== 'ENOENT') {
+      debugLogger.warn('realpath failed during ACP local read fallback check', {
+        path: value,
+        error: getErrorMessage(error),
+      });
+    }
     return undefined;
   }
-}
-
-async function isRealPathWithinRoot(
-  filePath: string,
-  root: string,
-): Promise<boolean> {
-  const [realFilePath, realRoot] = await Promise.all([
-    resolveRealPath(filePath),
-    resolveRealPath(root),
-  ]);
-  if (!realFilePath || !realRoot) return false;
-
-  return isSubpath(realRoot, realFilePath);
 }
 
 export class AcpFileSystemService implements FileSystemService {
@@ -139,27 +132,34 @@ export class AcpFileSystemService implements FileSystemService {
       }
 
       const errorKind = getErrorKind(error);
-      if (
-        isLocalReadFallbackErrorKind(errorKind) &&
-        (await this.isLocalReadFallbackPath(params.path))
-      ) {
+      const shouldTryLocalReadFallback =
+        isLocalReadFallbackErrorKind(errorKind);
+      const fallbackPath = shouldTryLocalReadFallback
+        ? await this.getLocalReadFallbackPath(params.path)
+        : undefined;
+      if (shouldTryLocalReadFallback && fallbackPath) {
         debugLogger.debug('Falling back to local read after ACP error', {
           path: params.path,
+          resolvedPath: fallbackPath,
           errorKind,
           error: getErrorMessage(error),
         });
         try {
-          return await this.fallback.readTextFile(params);
+          return await this.fallback.readTextFile({
+            ...params,
+            path: fallbackPath,
+          });
         } catch (fallbackError) {
           debugLogger.warn('Local read fallback failed after ACP error', {
             path: params.path,
+            resolvedPath: fallbackPath,
             errorKind,
             originalError: getErrorMessage(error),
             fallbackError: getErrorMessage(fallbackError),
           });
           throw new Error(
             `Local fallback read failed for ${params.path}: ${getErrorMessage(fallbackError)} (original ACP error: ${getErrorMessage(error)})`,
-            { cause: fallbackError },
+            { cause: { fallbackError, acpError: error } },
           );
         }
       }
@@ -199,10 +199,16 @@ export class AcpFileSystemService implements FileSystemService {
     return this.fallback.findFiles(fileName, searchPaths);
   }
 
-  private async isLocalReadFallbackPath(filePath: string): Promise<boolean> {
+  private async getLocalReadFallbackPath(
+    filePath: string,
+  ): Promise<string | undefined> {
+    const realFilePath = await resolveRealPath(filePath);
+    if (!realFilePath) return undefined;
+
     for (const root of this.options.localReadRoots ?? []) {
-      if (await isRealPathWithinRoot(filePath, root)) return true;
+      const realRoot = await resolveRealPath(root);
+      if (realRoot && isSubpath(realRoot, realFilePath)) return realFilePath;
     }
-    return false;
+    return undefined;
   }
 }

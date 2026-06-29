@@ -63,6 +63,10 @@ describe('getErrorMessage cause unwrapping', () => {
     expect(message.length).toBeLessThanOrEqual(1000);
     expect(message).toContain('"detail"');
   });
+
+  it('uses String formatting for arrays', () => {
+    expect(getErrorMessage([1, 2, 3])).toBe('1,2,3');
+  });
 });
 
 describe('isAbortError', () => {

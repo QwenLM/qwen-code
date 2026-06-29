@@ -263,9 +263,56 @@ describe('AcpFileSystemService', () => {
           content: 'skill instructions',
           _meta: { bom: false, encoding: 'utf-8' },
         });
-        expect(fallback.readTextFile).toHaveBeenCalledWith({ path: filePath });
+        expect(fallback.readTextFile).toHaveBeenCalledWith({
+          path: await fs.realpath(filePath),
+        });
       });
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'uses the resolved real path for local read fallback',
+      async () => {
+        await withTempRoot(async (tempRoot) => {
+          const localRoot = path.join(tempRoot, 'skills');
+          const realFilePath = path.join(localRoot, 'instructions.md');
+          const symlinkPath = path.join(localRoot, 'instructions-link.md');
+          await fs.mkdir(localRoot, { recursive: true });
+          await fs.writeFile(realFilePath, 'instructions', 'utf8');
+          await fs.symlink(realFilePath, symlinkPath);
+
+          const pathOutsideWorkspaceError =
+            createLocalReadFallbackError(symlinkPath);
+          const client = {
+            readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+          } as unknown as AgentSideConnection;
+          const fallback = createFallback();
+          (fallback.readTextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+            {
+              content: 'instructions',
+              _meta: { bom: false, encoding: 'utf-8' },
+            },
+          );
+
+          const svc = new AcpFileSystemService(
+            client,
+            'session-2c-real-fallback-path',
+            { readTextFile: true, writeTextFile: true },
+            fallback,
+            { localReadRoots: [localRoot] },
+          );
+
+          await expect(
+            svc.readTextFile({ path: symlinkPath }),
+          ).resolves.toEqual({
+            content: 'instructions',
+            _meta: { bom: false, encoding: 'utf-8' },
+          });
+          expect(fallback.readTextFile).toHaveBeenCalledWith({
+            path: await fs.realpath(realFilePath),
+          });
+        });
+      },
+    );
 
     it('does not use top-level errorKind fields for local read fallback', async () => {
       await withTempRoot(async (tempRoot) => {
@@ -387,7 +434,7 @@ describe('AcpFileSystemService', () => {
             _meta: { bom: false, encoding: 'utf-8' },
           });
           expect(fallback.readTextFile).toHaveBeenCalledWith({
-            path: filePath,
+            path: await fs.realpath(filePath),
           });
         });
       },
@@ -425,7 +472,9 @@ describe('AcpFileSystemService', () => {
           content: 'instructions',
           _meta: { bom: false, encoding: 'utf-8' },
         });
-        expect(fallback.readTextFile).toHaveBeenCalledWith({ path: filePath });
+        expect(fallback.readTextFile).toHaveBeenCalledWith({
+          path: await fs.realpath(filePath),
+        });
       });
     });
 
@@ -442,8 +491,9 @@ describe('AcpFileSystemService', () => {
           readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
         } as unknown as AgentSideConnection;
         const fallback = createFallback();
+        const fallbackError = new Error('local read failed');
         (fallback.readTextFile as ReturnType<typeof vi.fn>).mockRejectedValue(
-          new Error('local read failed'),
+          fallbackError,
         );
 
         const svc = new AcpFileSystemService(
@@ -454,9 +504,18 @@ describe('AcpFileSystemService', () => {
           { localReadRoots: [localRoot] },
         );
 
-        await expect(svc.readTextFile({ path: filePath })).rejects.toThrow(
-          `Local fallback read failed for ${filePath}: local read failed (original ACP error: path escapes workspace: ${filePath})`,
-        );
+        const err = await svc
+          .readTextFile({ path: filePath })
+          .catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(Error);
+        expect(err).toMatchObject({
+          message: `Local fallback read failed for ${filePath}: local read failed (original ACP error: path escapes workspace: ${filePath})`,
+          cause: {
+            fallbackError,
+            acpError: pathOutsideWorkspaceError,
+          },
+        });
       });
     });
 
