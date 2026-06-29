@@ -322,6 +322,21 @@ describe('<InlineParallelAgentsDisplay />', () => {
       expect(frame).toContain('10/10 done');
     });
 
+    it('at a budget of 3, shows exactly one (most-recent) row + indicator', () => {
+      // The transition point: budget 2 shows zero data rows, budget 3 shows the
+      // first one (rowsFit = budget - 2 = 1). Pins the off-by-one in
+      // `rowsFit = availableTerminalHeight - 2` and in `rows.slice(...)`.
+      const budget = 3;
+      const { lastFrame } = renderCapped(manyAgents(10), budget);
+      const frame = lastFrame() ?? '';
+      expect(frame.split('\n').length).toBe(budget);
+      expect(frame).toContain('+9 more agents');
+      // The single visible row is the most recent agent, not an older one.
+      expect(frame).toContain('CapAgent 9');
+      expect(frame).not.toContain('CapAgent 0');
+      expect(frame).toContain('10/10 done');
+    });
+
     it('at a budget of 2, keeps the header + indicator only (drops every row)', () => {
       const budget = 2;
       const { lastFrame } = renderCapped(manyAgents(10), budget);

@@ -1247,5 +1247,46 @@ describe('<ToolGroupMessage />', () => {
       expect(frame).toContain('COMMITB');
       expect(frame).toContain('2/2 done');
     });
+
+    it('forwards the height cap only in the live phase (committed phase = no cap)', () => {
+      // The InlineParallelAgentsDisplay height backstop guards ONLY the live,
+      // non-`<Static>` frame. ToolGroupMessage forwards
+      // `isPending ? availableTerminalHeight : undefined`, so a tight budget
+      // windows the live phase but never the committed scrollback record (where
+      // MainContent passes staticAreaMaxItemHeight >= 100). Without the
+      // conditional, completed agents would be permanently hidden behind a
+      // static "+N more" in scrollback. The contrast pins that load-bearing
+      // conditional — a regression that always forwards (or always drops) the
+      // budget breaks exactly one of these two assertions.
+      const manyCompleted = Array.from({ length: 8 }, (_, i) =>
+        parallelAgent(`cap-${i}`, `CAPAGENT${i}`, 'completed'),
+      );
+
+      // Live phase + tight budget → windowing kicks in, overflow indicator shows.
+      const live = renderParallel(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={true}
+          availableTerminalHeight={5}
+          toolCalls={manyCompleted}
+        />,
+      );
+      expect(live.lastFrame() ?? '').toContain('more agent');
+
+      // Committed phase, SAME tight budget → cap suppressed, every agent renders.
+      const committed = renderParallel(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={false}
+          availableTerminalHeight={5}
+          toolCalls={manyCompleted}
+        />,
+      );
+      const committedFrame = committed.lastFrame() ?? '';
+      expect(committedFrame).not.toContain('more agent');
+      expect(committedFrame).toContain('CAPAGENT0');
+      expect(committedFrame).toContain('CAPAGENT7');
+      expect(committedFrame).toContain('8/8 done');
+    });
   });
 });
