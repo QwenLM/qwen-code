@@ -18,6 +18,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
+import { SUMMARY_MARKER } from './post-suggestions.js';
 
 interface PrMetadata {
   title: string;
@@ -103,6 +104,7 @@ function buildMarkdown(
   inline: RawComment[],
   issue: RawComment[],
   reviews: RawReview[],
+  suggestionSummaries: RawComment[],
 ): string {
   // Build a map id → comment, and group replies by root id, so each
   // already-discussed thread can be rendered with the reviewer's original
@@ -226,6 +228,21 @@ function buildMarkdown(
     }
   }
 
+  if (suggestionSummaries.length > 0) {
+    parts.push(
+      '## Previous suggestion summary (evaluate afresh — do NOT treat as already discussed)',
+    );
+    parts.push('');
+    parts.push(
+      'The following issue comment is the most recent `/review` suggestion summary. Each row is a Suggestion-level finding that should be re-evaluated against the current code — do not skip them just because they appear here.',
+    );
+    parts.push('');
+    for (const c of suggestionSummaries) {
+      parts.push(`- by @${c.user?.login ?? '?'}: ${snippet(c.body, 500)}`);
+    }
+    parts.push('');
+  }
+
   if (openRoots.length > 0) {
     parts.push(
       '## Open inline comments (no replies yet — may still need attention)',
@@ -270,14 +287,28 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   const inline = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
   ) as RawComment[];
-  const issue = ghApiAll(
+  const allIssue = ghApiAll(
     `repos/${owner}/${repo}/issues/${prNumber}/comments`,
   ) as RawComment[];
+  const suggestionSummaries = allIssue.filter((c) =>
+    (c.body ?? '').includes(SUMMARY_MARKER),
+  );
+  const issue = allIssue.filter(
+    (c) => !(c.body ?? '').includes(SUMMARY_MARKER),
+  );
   const reviews = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
   ) as RawReview[];
 
-  const md = buildMarkdown(prNumber, ownerRepo, meta, inline, issue, reviews);
+  const md = buildMarkdown(
+    prNumber,
+    ownerRepo,
+    meta,
+    inline,
+    issue,
+    reviews,
+    suggestionSummaries,
+  );
 
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, md, 'utf8');
@@ -285,7 +316,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     isReviewWorthShowing(r.body),
   ).length;
   writeStdoutLine(
-    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${meaningfulReviewCount}/${reviews.length} review summaries)`,
+    `Wrote PR context to ${out} (${inline.length} inline, ${issue.length} issue comments, ${suggestionSummaries.length} suggestion summaries, ${meaningfulReviewCount}/${reviews.length} review summaries)`,
   );
 }
 
