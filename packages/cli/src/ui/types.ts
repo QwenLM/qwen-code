@@ -67,6 +67,15 @@ export interface IndividualToolCallDisplay {
   name: string;
   description: string;
   resultDisplay: ToolResultDisplay | string | undefined;
+  /**
+   * Full tool-result text for the Ctrl+O full-detail transcript (§4.9).
+   * Derived (NOT persisted) — extracted via `getToolResponseDisplayText` from
+   * the already-persisted `functionResponse` parts at live/resume/replay time.
+   * Used only when `fullDetail && isCollapsibleTool(name)` to replace the
+   * summary `resultDisplay` for read/search/list tools whose `returnDisplay`
+   * is only a count. Undefined → fall back to the summary.
+   */
+  detailedDisplay?: string;
   status: ToolCallStatus;
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;

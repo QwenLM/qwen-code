@@ -15,6 +15,7 @@ import type {
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
 } from '@qwen-code/qwen-code-core';
+import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
   HistoryItemInfo,
@@ -166,6 +167,7 @@ function convertToHistoryItems(
     name: string;
     description: string;
     resultDisplay: ToolResultDisplay | undefined;
+    detailedDisplay?: string;
     status: ToolCallStatus;
     confirmationDetails: undefined;
   }> = [];
@@ -417,6 +419,14 @@ function convertToHistoryItems(
             // Preserve the resultDisplay as-is - it can be a string or structured object
             const rawDisplay = record.toolCallResult.resultDisplay;
             toolCall.resultDisplay = rawDisplay;
+            // Full detail for the Ctrl+O transcript (§4.9): the complete
+            // functionResponse parts are persisted on the tool_result record
+            // (only resultDisplay is sanitized), so resume yields full detail
+            // too. Fall back to message.parts for older records.
+            toolCall.detailedDisplay = getToolResponseDisplayText(
+              (record.toolCallResult.responseParts as Part[] | undefined) ??
+                (record.message?.parts as Part[] | undefined),
+            );
             // Check if status exists and use it
             const rawStatus = (
               record.toolCallResult as Record<string, unknown>

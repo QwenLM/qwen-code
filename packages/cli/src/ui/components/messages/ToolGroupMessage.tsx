@@ -466,6 +466,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
+                fullDetail={fullDetail}
                 forceShowResult={
                   fullDetail ||
                   isUserInitiated ||

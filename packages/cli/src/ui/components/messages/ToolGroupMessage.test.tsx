@@ -669,6 +669,55 @@ describe('<ToolGroupMessage />', () => {
         .mock.calls.find((c) => c[0].callId === 'shell-2');
       expect(call?.[0].availableTerminalHeight).toBeTypeOf('number');
     });
+
+    it('forwards fullDetail and detailedDisplay to each ToolMessage (§4.9)', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'read-1',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'Read 1 file',
+        }),
+      ];
+      // detailedDisplay is set on the display item by the scheduler/resume path.
+      (
+        toolCalls[0] as { detailedDisplay?: string }
+      ).detailedDisplay = 'full a.ts contents';
+      renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} fullDetail />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'read-1');
+      expect(call?.[0].fullDetail).toBe(true);
+      expect(
+        (call?.[0] as { detailedDisplay?: string }).detailedDisplay,
+      ).toBe('full a.ts contents');
+    });
+
+    it('passes fullDetail=false to ToolMessage in the normal (non-transcript) path', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'edit-1',
+          name: 'Edit',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'edited',
+        }),
+      ];
+      renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'edit-1');
+      expect(call?.[0].fullDetail).toBe(false);
+    });
   });
 
   describe('isUserInitiated', () => {

@@ -16,7 +16,7 @@
 > | 基于 #5661 type-based partition 的 rebase（已合入 main）                                                                 | ✅ 已实现                                                                                                         |
 > | `AlternateScreen` 的 `process.stdout.isTTY` guard（§4.2）                                                                | ✅ 已实现 + 测试                                                                                                  |
 > | i18n 旧 compact 文案清理（9 语言）+ KeyboardShortcuts `ctrl+o → view transcript` 文案（§5）                              | ✅ 已实现                                                                                                         |
-> | **read/search/list 完整明细透传到 transcript（§4.9：`detailedDisplay` 提取 helper + 渲染拆分 + live/resume/replay）**    | 🚧 **未实现——本 PR merge blocker**（Ctrl+O 真正"全详情"的前提；方案 Y，截图 §3.4 待重录）                         |
+> | **read/search/list 完整明细透传到 transcript（§4.9：`detailedDisplay` 提取 helper + 渲染拆分 + live/resume/replay）**    | ✅ **已实现 + 测试**（方案 Y：core `getToolResponseDisplayText` + live/resume 派生 + `ToolMessage` 数据源切换；ACP 经 `transformPartsToToolCallContent` 已带全文，无需新增协议字段；截图 §3.4 待重录）                         |
 > | **鼠标点击工具 block 就地展开（§4.8，follow-up）**                                                                       | ⏭️ **follow-up（独立 PR，不在本 PR）**——理由见 §4.8：type-based 下无 per-tool 点击目标、~250–400 行、SGR 选区风险 |
 
 ---
@@ -360,7 +360,7 @@ claude code 的机制是"**存储层保留完整、显示层按 `verbose` 截断
 **测试点（并入 §8）**：
 
 - core helper：`functionResponse.response.output` 提取、media 占位、空/缺失降级；
-- **live + resume + ACP replay 三路都产出 `detailedDisplay`**，尤其 **resume/回放后 transcript 仍全详情**；
+- **live + resume 两路都产出 `detailedDisplay`**，尤其 **resume/回放后 transcript 仍全详情**；ACP 路经 `transformPartsToToolCallContent` 已带全文（非 TUI transcript，无需 `detailedDisplay`）；
 - `ToolMessage`：`fullDetail && collapsible && detailedDisplay` 用完整；**`forceShowResult 但非 fullDetail`（主视图 user-initiated/error）仍用摘要**（回归主视图不变）；
 - 覆盖 `glob`（或 legacy search displayName），不只 read/grep/list；
 - 旧 saved history：`detailedDisplay` 提取自 parts，旧记录的 parts 同样在 → 自然全详情；极旧无 parts 记录降级摘要。
@@ -410,7 +410,8 @@ claude code 的机制是"**存储层保留完整、显示层按 `verbose` 截断
 >
 > - **新增** core helper `packages/core/src/utils/generateContentResponseUtilities.ts` 的 `getToolResponseDisplayText(parts)`（读 `functionResponse.response.output` + 遍历 nested `functionResponse.parts` 媒体占位、空/缺失返回 `undefined`；**不二次截断**；规则见 §4.9 改动点 1）；
 > - **改** `packages/cli/src/ui/types.ts`：`IndividualToolCallDisplay` 加 `detailedDisplay?: string`（派生、不持久化）；
-> - **改** `packages/cli/src/ui/hooks/useReactToolScheduler.ts`（live 提取）、`packages/cli/src/ui/utils/resumeHistoryUtils.ts`（resume 提取，:411-431）、`packages/cli/src/acp-integration/session/HistoryReplayer.ts` + `emitters/ToolCallEmitter.ts`（ACP replay 提取，复用已传的 `message: record.message.parts`）；
+> - **改** `packages/cli/src/ui/hooks/useReactToolScheduler.ts`（live 提取，`success` 分支派生 `detailedDisplay`）、`packages/cli/src/ui/utils/resumeHistoryUtils.ts`（resume 提取，`tool_result` 分支从 `responseParts ?? message.parts` 派生）、`packages/cli/src/ui/components/messages/ToolMessage.tsx` + `ToolGroupMessage.tsx`（渲染拆分：`ToolGroupMessage` 下传 `fullDetail`，`ToolMessage` 仅 `fullDetail && isCollapsibleTool && detailedDisplay` 切数据源）；
+> - **不改** `packages/cli/src/acp-integration/session/HistoryReplayer.ts` / `emitters/ToolCallEmitter.ts`——ACP `content[]` 已含完整 `output`（见上表），TUI transcript 不经此路，无需改动；
 > - **不改** 持久化 schema（`serializeToolResponse` / `chatRecordingService` / ACP 协议字段）——完整明细已天然存于 `responseParts`，新字段为派生值。
 
 ### C. 新增
@@ -460,7 +461,7 @@ claude code 的机制是"**存储层保留完整、显示层按 `verbose` 截断
   - 消息队列：transcript 打开期间排队消息**不被自动提交**，退出后恢复排空（§4.6 #3）。
   - 渲染模型 + `refreshStatic` 守卫：打开 transcript 期间后台完成一轮工具调用 / 触发 resize，**transcript 期间 `refreshStatic` 被 `isTranscriptOpenRef` 守卫跳过**、退出后重绘一次——该轮内容**恰好出现一次**（无重复回放/无缺失/scrollback 不破坏，§4.4）。
   - core 截断边界：core 层已截断的工具输出在 transcript 中仍显示 truncation marker、不臆造"全文"（§4.4 两层截断）。
-  - **§4.9 完整明细透传（merge blocker）**：core helper 从 `functionResponse.response.output` 提取 + media 占位 + 空/缺失降级；`detailedDisplay` 在 **live + resume + ACP replay 三路**都产出，尤其 **resume / 回放后 Ctrl+O transcript 仍是全详情**（不回退摘要）；`ToolMessage` 仅 `fullDetail && isCollapsibleTool && detailedDisplay` 用完整明细，而 **`forceShowResult 但非 fullDetail`（主视图 user-initiated/error 等）仍用摘要 `resultDisplay`**（回归"主视图不变"）；覆盖 `glob`（或 legacy search displayName），不只 read/grep/list；**不二次截断**（`read_file` 超 32k 的完整 `output` 在 Ctrl+O 仍完整、不被 UI 再裁，仅受 core 已施加的 `truncateToolOutput`/分页边界）；极旧无-`parts` 记录降级摘要。
+  - **§4.9 完整明细透传（已实现 + 测试）**：core helper 从 `functionResponse.response.output` 提取 + media 占位 + 空/缺失降级；`detailedDisplay`（TUI 专属、`IndividualToolCallDisplay` 派生字段）在 **live（`useReactToolScheduler`）+ resume（`resumeHistoryUtils`）两路**都产出，尤其 **resume / 回放后 Ctrl+O transcript 仍是全详情**（不回退摘要）；**ACP 路无需 `detailedDisplay`**——`ToolCallEmitter.transformPartsToToolCallContent` 早已把同一 `functionResponse.response.output` 完整文本写进 ACP `content[]`（其 SSE 客户端自行渲染，非 TUI transcript），故复用 `message: record.message.parts`、不新增协议字段即满足 §4.9；`ToolMessage` 仅 `fullDetail && isCollapsibleTool && detailedDisplay` 用完整明细，而 **`forceShowResult 但非 fullDetail`（主视图 user-initiated/error 等）仍用摘要 `resultDisplay`**（回归"主视图不变"）；覆盖 `glob`（或 legacy search displayName），不只 read/grep/list；**不二次截断**（`read_file` 超 32k 的完整 `output` 在 Ctrl+O 仍完整、不被 UI 再裁，仅受 core 已施加的 `truncateToolOutput`/分页边界）；极旧无-`parts` 记录降级摘要。
   - **方案 Y 前提保护（持久化/回放不丢完整明细）**：构造 `functionResponse.response.output` 长度 > `MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS` 的 tool_result + 旁置 `toolCallResult.resultDisplay` 摘要 + 后续 `chat_compression` record；断言 `record.message.parts[0].functionResponse.response.output` 在 **recording / loadSession / `resumeHistoryUtils` / `HistoryReplayer` 四段都保留完整 string**，且 `detailedDisplay` 从 `message.parts` 派生（**非** `resultDisplay`、**非** API `compressedHistory`）。**此用例失败即触发回退方案 X**（新增持久化 display 字段）。源码上前提成立：`serializeToolResponse`/`summarizeBatchResponsePart` 仅用于 post-tool-batch hook payload（`coreToolScheduler.ts:819-870`）、不碰 chat recording；`ChatRecordingService.recordToolResult` 以 `createUserContent(message)` 原样写 `record.message`、只 sanitize `resultDisplay`（`chatRecordingService.ts:1077-1109`）；TUI resume / ACP replay 走 `conversation.messages`、非 API `compressedHistory`（`AppContainer.tsx:642-652`、`acpAgent.ts:6355-6357`）。
 - **回归**：确认删除全局 compactMode 后无 CLI 残留引用（`grep -rE 'TOGGLE_COMPACT_MODE|useCompactMode|CompactModeContext|compactInline|compactToggleHasVisualEffect'` 在 `packages/cli/src` 非测试源应为空；`compactMode` 仅保留 web-shell 透传 `WEB_SHELL_SETTINGS` 与 `ToolConfirmationMessage` 的本地 layout prop）；**注意 `CompactToolGroupDisplay` 与 partition 符号（`getToolCategory`/`CATEGORY_ORDER`/`isCollapsibleTool` 等）应仍存在**（属 #5661 基线，不在删除范围）；`mergeCompactToolGroups.ts` 应已删除；typecheck/lint/test 全绿。
 - **TUI 快照（基线随 #5661 已变，本 PR 进一步微调，需重录）**：type-based partition 基线由 #5661 引入；本 PR 删全局 compactMode 后，工具组折叠不再受 `compactMode` 影响（始终走 type-based partition）。需重录 `qwen-code-mac-autotest`：默认 partition 基线（collapsible→摘要、non-collapsible→逐个、混合组并存）、含出错工具（force 逐个展示）、含长 shell 输出（non-collapsible 结果可见）、点击工具块就地展开、打开 transcript、transcript 内滚动到顶/底、transcript 内 resize、退出后主屏恢复。

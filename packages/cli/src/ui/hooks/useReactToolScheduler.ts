@@ -24,6 +24,7 @@ import {
   CoreToolScheduler,
   compactToolResultDisplayForHistory,
   createDebugLogger,
+  getToolResponseDisplayText,
   isAnyAutoMemPath,
 } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
@@ -329,6 +330,14 @@ export function mapToDisplay(
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: compactToolResultDisplayForHistory(
               trackedCall.response.resultDisplay,
+            ),
+            // Full detail for the Ctrl+O transcript (§4.9): derived from the
+            // already-persisted functionResponse parts; NOT char-capped (the
+            // bound is whatever core already applied). Used only by the
+            // transcript's fullDetail render for collapsible (read/search/list)
+            // tools whose summary resultDisplay is just a count.
+            detailedDisplay: getToolResponseDisplayText(
+              trackedCall.response.responseParts,
             ),
             confirmationDetails: undefined,
           };

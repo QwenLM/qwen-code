@@ -278,6 +278,75 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
+  describe('fullDetail (§4.9 transcript) data-source switch', () => {
+    it('swaps summary for detailedDisplay on a collapsible tool in fullDetail mode', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="config.yaml"
+          resultDisplay="Read 1 file"
+          detailedDisplay="full file contents here"
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame();
+      expect(output).toContain('MockMarkdown:full file contents here');
+      expect(output).not.toContain('MockMarkdown:Read 1 file');
+    });
+
+    it('keeps the summary when forced but NOT in fullDetail mode (main-view force)', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="config.yaml"
+          resultDisplay="Read 1 file"
+          detailedDisplay="full file contents here"
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame();
+      expect(output).toContain('MockMarkdown:Read 1 file');
+      expect(output).not.toContain('full file contents here');
+    });
+
+    it('keeps the summary for a non-collapsible tool even in fullDetail mode', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="test-tool"
+          resultDisplay="Test result"
+          detailedDisplay="should not appear"
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame();
+      expect(output).toContain('MockMarkdown:Test result');
+      expect(output).not.toContain('should not appear');
+    });
+
+    it('falls back to the summary when fullDetail is set but no detailedDisplay exists', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="config.yaml"
+          resultDisplay="Read 1 file"
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      expect(lastFrame()).toContain('MockMarkdown:Read 1 file');
+    });
+  });
+
   describe('ToolStatusIndicator rendering', () => {
     it('shows ✓ for Success status', () => {
       const { lastFrame } = renderWithContext(
