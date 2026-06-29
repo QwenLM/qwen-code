@@ -71,6 +71,7 @@ describe('directoryCommand', () => {
       }),
       getWorkingDir: () => '/test/dir',
       shouldLoadMemoryFromIncludeDirectories: () => false,
+      isSafeMode: () => false,
       getDebugMode: () => false,
       getFileService: () => ({}),
       getExtensionContextFilePaths: () => [],
