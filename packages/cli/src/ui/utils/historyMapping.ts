@@ -107,7 +107,6 @@ export function computeApiTruncationIndex(
     const apiTailUserIndices = getApiUserTextIndices(
       apiHistory,
       getCompressionTailStartIndex(apiHistory, startIndex),
-      true,
     );
     const compressedTurnCount = Math.max(
       0,
@@ -129,11 +128,7 @@ export function computeApiTruncationIndex(
     return startIndex;
   }
 
-  const apiUserTextIndices = getApiUserTextIndices(
-    apiHistory,
-    startIndex,
-    false,
-  );
+  const apiUserTextIndices = getApiUserTextIndices(apiHistory, startIndex);
   const targetApiIndex = apiUserTextIndices[targetOrdinal - 1];
   if (targetApiIndex !== undefined) return targetApiIndex;
 

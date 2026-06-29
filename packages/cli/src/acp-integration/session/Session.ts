@@ -188,12 +188,10 @@ type AutoCompressionSendResult =
   | {
       responseStream: AsyncGenerator<StreamEvent>;
       stopReason?: never;
-      historyCompressed?: boolean;
     }
   | {
       responseStream: null;
       stopReason: PromptResponse['stopReason'];
-      historyCompressed?: boolean;
     };
 
 export interface HistorySnapshot {
@@ -227,10 +225,9 @@ function computeVisibleModelFacingUserTurnCount(apiHistory: Content[]): number {
     return getApiUserTextIndices(
       apiHistory,
       getCompressionTailStartIndex(apiHistory, startIndex),
-      true,
     ).length;
   }
-  return getApiUserTextIndices(apiHistory, startIndex, true).length;
+  return getApiUserTextIndices(apiHistory, startIndex).length;
 }
 
 function validateModelFacingUserTurnCount(count: unknown): number {
@@ -267,7 +264,6 @@ function validateModelFacingUserTurnCountForHistory(
     const visibleTailTurnCount = getApiUserTextIndices(
       history,
       getCompressionTailStartIndex(history, startIndex),
-      true,
     ).length;
     if (validatedCount < visibleTailTurnCount) {
       throw RequestError.invalidParams(
@@ -1152,16 +1148,7 @@ export class Session implements SessionContext {
 
   getRewindableUserTurnCount(): number {
     const { history: apiHistory } = this.captureHistorySnapshot();
-    const startIndex = getStartupContextLength(apiHistory);
-    let count = 0;
-
-    for (let i = startIndex; i < apiHistory.length; i++) {
-      if (this.#isUserTextContent(apiHistory[i]!)) {
-        count += 1;
-      }
-    }
-
-    return count;
+    return computeVisibleModelFacingUserTurnCount(apiHistory);
   }
 
   restoreHistory(snapshot: Content[] | HistorySnapshot): void {
@@ -1217,7 +1204,6 @@ export class Session implements SessionContext {
       const apiTailUserIndices = getApiUserTextIndices(
         apiHistory,
         getCompressionTailStartIndex(apiHistory, startIndex),
-        true,
       );
       if (this.modelFacingUserTurnCount < targetTurnIndex + 1) {
         debugLogger.warn(
@@ -1266,10 +1252,7 @@ export class Session implements SessionContext {
       return apiTailUserIndices[tailOffset]!;
     }
 
-    return (
-      getApiUserTextIndices(apiHistory, startIndex, false)[targetTurnIndex] ??
-      -1
-    );
+    return getApiUserTextIndices(apiHistory, startIndex)[targetTurnIndex] ?? -1;
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -2223,7 +2206,6 @@ export class Session implements SessionContext {
     const geminiClient = this.config.getGeminiClient()!;
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
-    let historyCompressed = false;
     if (!options.skipCompression) {
       try {
         const compressed = await geminiClient.tryCompressChat(
@@ -2234,7 +2216,6 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
-          historyCompressed = true;
           const reasonClause =
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
@@ -2251,7 +2232,6 @@ export class Session implements SessionContext {
           return {
             responseStream: null,
             stopReason: 'cancelled',
-            historyCompressed,
           };
         }
         debugLogger.warn(
@@ -2266,7 +2246,6 @@ export class Session implements SessionContext {
       return {
         responseStream: null,
         stopReason: 'cancelled',
-        historyCompressed,
       };
     }
 
@@ -2291,7 +2270,6 @@ export class Session implements SessionContext {
         return {
           responseStream: null,
           stopReason: 'max_tokens',
-          historyCompressed,
         };
       }
     }
@@ -2310,7 +2288,6 @@ export class Session implements SessionContext {
       return {
         responseStream: null,
         stopReason: 'cancelled',
-        historyCompressed,
       };
     }
 
@@ -2324,7 +2301,7 @@ export class Session implements SessionContext {
       },
       promptId,
     );
-    return { responseStream, historyCompressed };
+    return { responseStream };
   }
 
   #preserveUnsentMessageHistory(

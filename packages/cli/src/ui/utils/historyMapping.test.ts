@@ -9,7 +9,6 @@ import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
-  COMPRESSION_CONTINUATION_BRIDGE,
   COMPRESSION_SUMMARY_MODEL_ACK,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
@@ -398,7 +397,7 @@ describe('computeApiTruncationIndex', () => {
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
     });
 
-    it('ignores the compression continuation bridge when mapping tail turns', () => {
+    it('maps the first middle tail turn after compression', () => {
       const ui: HistoryItem[] = [
         userItem(1),
         geminiItem(2),
@@ -406,42 +405,19 @@ describe('computeApiTruncationIndex', () => {
         geminiItem(4),
         userItem(5),
         geminiItem(6),
-      ];
-      const api: Content[] = [
-        userContent('compressed summary of prompt 1 and prompt 3'),
-        modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
-        userContent(COMPRESSION_CONTINUATION_BRIDGE),
-        modelContent('continued response'),
-        userContent('prompt 5'),
-        modelContent('response 5'),
-      ];
-
-      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
-    });
-
-    it('skips the legacy visible bridge text without the sentinel', () => {
-      const visibleBridgeText =
-        'Continue with the prior task using the context above.';
-      const ui: HistoryItem[] = [
-        userItem(1),
-        geminiItem(2),
-        userItem(3),
-        geminiItem(4),
-        userItem(5, visibleBridgeText),
-        geminiItem(6),
         userItem(7),
         geminiItem(8),
       ];
       const api: Content[] = [
         userContent('compressed summary of prompt 1 and prompt 3'),
         modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
-        userContent(visibleBridgeText),
-        modelContent('continued response'),
+        userContent('prompt 5'),
+        modelContent('response 5'),
         userContent('prompt 7'),
         modelContent('response 7'),
       ];
 
-      expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(2);
       expect(computeApiTruncationIndex(ui, 7, api)).toBe(4);
     });
 
@@ -457,7 +433,6 @@ describe('computeApiTruncationIndex', () => {
       const api: Content[] = [
         userContent('compressed summary of prompt 1 and prompt 3'),
         modelContent(COMPRESSION_SUMMARY_MODEL_ACK),
-        userContent(COMPRESSION_CONTINUATION_BRIDGE),
         functionCallContent(),
         functionResponseContent(),
         modelContent('tool result response'),
@@ -465,7 +440,7 @@ describe('computeApiTruncationIndex', () => {
         modelContent('response 5'),
       ];
 
-      expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(5);
     });
 
     it('returns -1 when not enough user prompts found', () => {

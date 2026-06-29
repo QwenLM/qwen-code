@@ -7,8 +7,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Content, Part } from '@google/genai';
 import {
-  COMPRESSION_CONTINUATION_BRIDGE,
-  COMPRESSION_CONTINUATION_BRIDGE_MARKER,
   COMPRESSION_SUMMARY_MODEL_ACK,
   POST_COMPACT_ATTACHMENT_TEXT_PREFIXES,
   SYSTEM_REMINDER_CLOSE,
@@ -21,8 +19,6 @@ import {
   hasCompressionSummaryPair,
   getCompressionTailStartIndex,
   getApiUserTextIndices,
-  hasStartupContext,
-  isCompressionContinuationBridge,
   isPostCompactAttachmentContent,
 } from './api-history-utils.js';
 
@@ -276,7 +272,7 @@ describe('getApiUserTextIndices', () => {
       modelTextContent('resp'),
       userTextContent('third'),
     ];
-    expect(getApiUserTextIndices(history, 0, false)).toEqual([0, 2, 4]);
+    expect(getApiUserTextIndices(history, 0)).toEqual([0, 2, 4]);
   });
 
   it('respects startIndex', () => {
@@ -286,7 +282,7 @@ describe('getApiUserTextIndices', () => {
       userTextContent('second'),
       modelTextContent('resp'),
     ];
-    expect(getApiUserTextIndices(history, 2, false)).toEqual([2]);
+    expect(getApiUserTextIndices(history, 2)).toEqual([2]);
   });
 
   it('skips functionResponse entries', () => {
@@ -297,132 +293,6 @@ describe('getApiUserTextIndices', () => {
       modelTextContent('resp2'),
       userTextContent('second'),
     ];
-    expect(getApiUserTextIndices(history, 0, false)).toEqual([0, 4]);
-  });
-
-  describe('skipContinuationBridge', () => {
-    it('skips the compression continuation bridge', () => {
-      const history: Content[] = [
-        userTextContent('summary'),
-        modelTextContent(COMPRESSION_SUMMARY_MODEL_ACK),
-        userTextContent(COMPRESSION_CONTINUATION_BRIDGE),
-        modelTextContent('continued'),
-        userTextContent('tail turn'),
-      ];
-      const indices = getApiUserTextIndices(history, 0, true);
-      expect(indices).toEqual([0, 4]);
-    });
-
-    it('includes the bridge when skipContinuationBridge is false', () => {
-      const history: Content[] = [
-        userTextContent('summary'),
-        modelTextContent(COMPRESSION_SUMMARY_MODEL_ACK),
-        userTextContent(COMPRESSION_CONTINUATION_BRIDGE),
-        modelTextContent('continued'),
-        userTextContent('tail turn'),
-      ];
-      const indices = getApiUserTextIndices(history, 0, false);
-      expect(indices).toEqual([0, 2, 4]);
-    });
-
-    it('skips the legacy visible bridge text without the sentinel', () => {
-      const visibleText =
-        'Continue with the prior task using the context above.';
-      const history: Content[] = [
-        userTextContent('summary'),
-        modelTextContent(COMPRESSION_SUMMARY_MODEL_ACK),
-        userTextContent(visibleText), // no invisible prefix
-        userTextContent('tail turn'),
-      ];
-      const indices = getApiUserTextIndices(history, 0, true);
-      expect(indices).toEqual([0, 3]);
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// hasStartupContext
-// ---------------------------------------------------------------------------
-
-describe('hasStartupContext', () => {
-  it('detects the startup context pair', () => {
-    const history: Content[] = [
-      userTextContent('Environment context...'),
-      modelTextContent(STARTUP_CONTEXT_MODEL_ACK),
-    ];
-    expect(hasStartupContext(history)).toBe(true);
-  });
-
-  it('returns false for too-short history', () => {
-    expect(hasStartupContext([userTextContent('only one')])).toBe(false);
-    expect(hasStartupContext([])).toBe(false);
-  });
-
-  it('returns false when roles are wrong', () => {
-    const history: Content[] = [
-      modelTextContent('not user'),
-      modelTextContent(STARTUP_CONTEXT_MODEL_ACK),
-    ];
-    expect(hasStartupContext(history)).toBe(false);
-  });
-
-  it('returns false when ack text does not match', () => {
-    const history: Content[] = [
-      userTextContent('Environment context...'),
-      modelTextContent('different ack'),
-    ];
-    expect(hasStartupContext(history)).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// isCompressionContinuationBridge
-// ---------------------------------------------------------------------------
-
-describe('isCompressionContinuationBridge', () => {
-  it('detects the synthetic bridge by sentinel marker prefix', () => {
-    const bridge: Content = {
-      role: 'user',
-      parts: [{ text: COMPRESSION_CONTINUATION_BRIDGE } as Part],
-    };
-    expect(isCompressionContinuationBridge(bridge)).toBe(true);
-  });
-
-  it('detects legacy bridge content by exact visible text', () => {
-    const visibleText = 'Continue with the prior task using the context above.';
-    const legacyBridge: Content = {
-      role: 'user',
-      parts: [{ text: visibleText } as Part],
-    };
-    expect(isCompressionContinuationBridge(legacyBridge)).toBe(true);
-  });
-
-  it('returns false for model role content', () => {
-    const modelContent: Content = {
-      role: 'model',
-      parts: [{ text: COMPRESSION_CONTINUATION_BRIDGE } as Part],
-    };
-    expect(isCompressionContinuationBridge(modelContent)).toBe(false);
-  });
-
-  it('returns false for undefined content', () => {
-    expect(isCompressionContinuationBridge(undefined)).toBe(false);
-  });
-
-  it('returns false when parts do not start with the sentinel', () => {
-    const content: Content = {
-      role: 'user',
-      parts: [{ text: 'some other text' } as Part],
-    };
-    expect(isCompressionContinuationBridge(content)).toBe(false);
-  });
-
-  it('detects bridge even with additional content after the marker', () => {
-    const bridgeWithExtra = `${COMPRESSION_CONTINUATION_BRIDGE_MARKER}Continue with the prior task using the context above.`;
-    const content: Content = {
-      role: 'user',
-      parts: [{ text: bridgeWithExtra } as Part],
-    };
-    expect(isCompressionContinuationBridge(content)).toBe(true);
+    expect(getApiUserTextIndices(history, 0)).toEqual([0, 4]);
   });
 });

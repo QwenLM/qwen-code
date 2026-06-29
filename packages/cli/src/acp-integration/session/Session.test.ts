@@ -733,7 +733,7 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
-        { truncatedCount: 2 },
+        { truncatedCount: 2, maxModelFacingUserTurnCount: 0 },
         undefined,
       );
     });
@@ -781,6 +781,36 @@ describe('Session', () => {
           ],
         },
         { role: 'user', parts: [{ text: 'second' }] },
+      ];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+    });
+
+    it('counts only visible tail prompts as rewindable after compression', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'summary of first two turns' }] },
+        {
+          role: 'model',
+          parts: [{ text: core.COMPRESSION_SUMMARY_MODEL_ACK }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              text:
+                'Recently accessed file (full current content embedded):\n\n' +
+                '## a.ts\n\n```ts\nexport const a = 1;\n```',
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'read_file', args: {} } }],
+        } as unknown as Content,
+        { role: 'user', parts: [{ text: 'third' }] },
+        { role: 'model', parts: [{ text: 'third reply' }] },
+        { role: 'user', parts: [{ text: 'fourth' }] },
       ];
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
@@ -1056,32 +1086,6 @@ describe('Session', () => {
         apiTruncateIndex: 0,
       });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
-    });
-
-    it('does not treat the compression bridge as an ACP rewind target', () => {
-      setSessionTurnCounters(session, {
-        turn: 3,
-        modelFacingUserTurnCount: 3,
-      });
-      vi.mocked(mockChat.getHistory).mockReturnValue([
-        { role: 'user', parts: [{ text: 'summary of first two turns' }] },
-        {
-          role: 'model',
-          parts: [{ text: core.COMPRESSION_SUMMARY_MODEL_ACK }],
-        },
-        {
-          role: 'user',
-          parts: [{ text: core.COMPRESSION_CONTINUATION_BRIDGE }],
-        },
-        { role: 'model', parts: [{ text: 'continued response' }] },
-        { role: 'user', parts: [{ text: 'third' }] },
-        { role: 'model', parts: [{ text: 'third reply' }] },
-      ]);
-
-      expect(() => session.rewindToTurn(1)).toThrow(
-        'Cannot rewind to the requested turn',
-      );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('does not treat post-compact attachment restoration as an ACP rewind target', () => {
@@ -1494,11 +1498,6 @@ describe('Session', () => {
           role: 'model',
           parts: [{ text: core.COMPRESSION_SUMMARY_MODEL_ACK }],
         },
-        {
-          role: 'user',
-          parts: [{ text: core.COMPRESSION_CONTINUATION_BRIDGE }],
-        },
-        { role: 'model', parts: [{ text: 'continued response' }] },
         { role: 'user', parts: [{ text: 'third' }] },
         { role: 'model', parts: [{ text: 'third reply' }] },
         { role: 'user', parts: [{ text: 'fourth' }] },

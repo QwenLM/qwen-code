@@ -6,39 +6,12 @@
 
 import type { Content, Part } from '@google/genai';
 import {
-  COMPRESSION_CONTINUATION_BRIDGE_MARKER,
   COMPRESSION_SUMMARY_MODEL_ACK,
   POST_COMPACT_ATTACHMENT_TEXT_PREFIXES,
-  createDebugLogger,
-  getStartupContextLength,
   isSystemReminderContent,
 } from '@qwen-code/qwen-code-core';
 
-const debugLogger = createDebugLogger('API_HISTORY_UTILS');
-const LEGACY_COMPRESSION_CONTINUATION_BRIDGE_PROMPT =
-  'Continue with the prior task using the context above.';
 const BACKGROUND_NOTIFICATION_PREFIX = '<task-notification';
-
-/**
- * Checks whether a Content entry is the synthetic continuation bridge
- * inserted after compression. New histories use an invisible sentinel marker;
- * the exact visible prompt is kept as a legacy fallback for sessions
- * compressed before the marker was added.
- */
-export function isCompressionContinuationBridge(
-  content: Content | undefined,
-): boolean {
-  if (!content || content.role !== 'user') return false;
-  return (
-    content.parts?.some(
-      (part) =>
-        'text' in part &&
-        typeof part.text === 'string' &&
-        (part.text.startsWith(COMPRESSION_CONTINUATION_BRIDGE_MARKER) ||
-          part.text === LEGACY_COMPRESSION_CONTINUATION_BRIDGE_PROMPT),
-    ) ?? false
-  );
-}
 
 export function hasTextPart(
   content: Content | undefined,
@@ -153,27 +126,14 @@ export function getCompressionTailStartIndex(
 export function getApiUserTextIndices(
   apiHistory: Content[],
   startIndex: number,
-  skipContinuationBridge: boolean,
 ): number[] {
   const indices: number[] = [];
 
   for (let i = startIndex; i < apiHistory.length; i++) {
     const content = apiHistory[i]!;
     if (!isApiUserTextContent(content)) continue;
-    if (skipContinuationBridge && isCompressionContinuationBridge(content)) {
-      debugLogger.debug('Skipping compression continuation bridge at index', i);
-      continue;
-    }
     indices.push(i);
   }
 
   return indices;
-}
-
-/**
- * Detects whether the API history starts with the startup context pair
- * (user env context + model acknowledgment).
- */
-export function hasStartupContext(apiHistory: Content[]): boolean {
-  return getStartupContextLength(apiHistory) > 0;
 }

@@ -1422,6 +1422,65 @@ describe('SessionService', () => {
       ]);
     });
 
+    it('keeps slash-like user records that are not resume slash commands', () => {
+      const doubleSlashText: ChatRecord = {
+        ...recordA1,
+        uuid: 'double-slash-text',
+        message: { role: 'user', parts: [{ text: '// not a command' }] },
+      };
+      const blockCommentText: ChatRecord = {
+        ...recordA1,
+        uuid: 'block-comment-text',
+        message: { role: 'user', parts: [{ text: '/* not a command */' }] },
+      };
+      const pathText: ChatRecord = {
+        ...recordA1,
+        uuid: 'path-text',
+        message: { role: 'user', parts: [{ text: '/tmp/example.txt' }] },
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [doubleSlashText, blockCommentText, pathText],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toEqual([
+        doubleSlashText.message,
+        blockCommentText.message,
+        pathText.message,
+      ]);
+    });
+
+    it('keeps cron user records in resume API history', () => {
+      const cronPrompt: ChatRecord = {
+        ...recordA1,
+        uuid: 'cron-prompt',
+        subtype: 'cron',
+        message: { role: 'user', parts: [{ text: '/scheduled prompt' }] },
+      };
+      const assistantReply: ChatRecord = {
+        ...recordB2,
+        sessionId: sessionIdA,
+        parentUuid: cronPrompt.uuid,
+        message: { role: 'model', parts: [{ text: 'cron reply' }] },
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [cronPrompt, assistantReply],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toEqual([cronPrompt.message, assistantReply.message]);
+    });
+
     it('keeps notification records in resume API history', () => {
       const notification: ChatRecord = {
         ...recordA1,
