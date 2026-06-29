@@ -33,6 +33,23 @@ import {
  */
 const MAX_SSE_BUF_CHARS = 16 * 1024 * 1024;
 
+/**
+ * ACP methods whose JSON-RPC reply the daemon routes onto the SESSION stream
+ * (`replySession`) rather than the connection stream — every other request
+ * replies on the connection stream the transport already pumps. For these, a
+ * `sendRequest` made without an active `subscribeEvents` consumer must open a
+ * background session-reply pump or it would hang. All require an already-owned
+ * session, so the pump's `GET /acp` is always authorized. Kept in sync with the
+ * `replySession` call sites in the daemon dispatcher.
+ */
+const SESSION_STREAM_REPLY_METHODS = new Set<string>([
+  'session/prompt',
+  'session/cancel',
+  'session/set_config_option',
+  'session/set_mode',
+  'session/set_model',
+]);
+
 // ---------------------------------------------------------------------------
 // JSON-RPC types
 // ---------------------------------------------------------------------------
@@ -141,6 +158,26 @@ export class AcpHttpTransport implements DaemonTransport {
   private readonly pending = new Map<number, PendingRequest>();
   /** Abort controller for the connection-scoped SSE stream. */
   private connStreamAbort: AbortController | undefined;
+  /**
+   * Per-session count of in-progress `subscribeEvents` iterations. When > 0 a
+   * consumer is already reading that session's `/acp` stream and routing its
+   * JSON-RPC replies to `pending` — so `sendRequest` must NOT open a competing
+   * background reply pump (the daemon's session stream is single-reader; a
+   * second `GET /acp` would detach the consumer's).
+   */
+  private readonly activeSessionSubscriptions = new Map<string, number>();
+  /**
+   * Background reply pumps started by `sendRequest` for a session-scoped
+   * request when no consumer subscription is active, keyed by sessionId and
+   * reference-counted so concurrent session requests share one pump. The
+   * daemon routes replies to `session/prompt` & friends onto the SESSION
+   * stream (not the connection stream), so without this a `DaemonClient.prompt`
+   * that never iterates `subscribeEvents` would hang forever.
+   */
+  private readonly sessionReplyPumps = new Map<
+    string,
+    { abort: AbortController; refs: number }
+  >();
 
   readonly type = 'acp-http' as const;
   readonly supportsReplay = true;
@@ -244,7 +281,26 @@ export class AcpHttpTransport implements DaemonTransport {
     opts: DaemonTransportSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     if (this._disposed) throw new DaemonTransportClosedError();
+    // Mark this session as having an active consumer reader for the duration of
+    // the iteration, so `sendRequest` knows replies are already being routed
+    // and won't open a competing background pump (single-reader session stream).
+    this.activeSessionSubscriptions.set(
+      sessionId,
+      (this.activeSessionSubscriptions.get(sessionId) ?? 0) + 1,
+    );
+    try {
+      yield* this.subscribeEventsInner(sessionId, opts);
+    } finally {
+      const n = (this.activeSessionSubscriptions.get(sessionId) ?? 1) - 1;
+      if (n <= 0) this.activeSessionSubscriptions.delete(sessionId);
+      else this.activeSessionSubscriptions.set(sessionId, n);
+    }
+  }
 
+  private async *subscribeEventsInner(
+    sessionId: string,
+    opts: DaemonTransportSubscribeOptions = {},
+  ): AsyncGenerator<DaemonEvent> {
     await this.ensureInitialized();
 
     // Open the SESSION-scoped `/acp` stream (GET /acp + Acp-Session-Id), NOT
@@ -504,6 +560,12 @@ export class AcpHttpTransport implements DaemonTransport {
     // Tear down the connection-scoped SSE stream.
     this.connStreamAbort?.abort();
     this.connStreamAbort = undefined;
+
+    // Tear down any background session-reply pumps.
+    for (const [sid, entry] of this.sessionReplyPumps) {
+      entry.abort.abort();
+      this.sessionReplyPumps.delete(sid);
+    }
 
     // Reject all pending requests.
     for (const [id, entry] of this.pending) {
@@ -812,9 +874,25 @@ export class AcpHttpTransport implements DaemonTransport {
       return (await res.json()) as JsonRpcResponse;
     }
 
-    // 202 (ack) — the real response rides the connection-scoped SSE
-    // stream. Ensure it's open and register the pending request.
+    // 202 (ack) — the real response rides an SSE stream. Ensure the
+    // connection-scoped stream is open and register the pending request.
     this.ensureConnStream();
+
+    // The daemon routes a handful of session methods' replies onto the SESSION
+    // stream, not the connection stream. If this is one of them and the caller
+    // isn't already iterating `subscribeEvents` for that session (which would
+    // route the reply itself), open a background reply pump so the request can
+    // resolve — otherwise `DaemonClient.prompt()` and friends hang forever.
+    const sessionId =
+      typeof params['sessionId'] === 'string'
+        ? (params['sessionId'] as string)
+        : undefined;
+    const releaseSessionPump =
+      sessionId &&
+      SESSION_STREAM_REPLY_METHODS.has(method) &&
+      !this.activeSessionSubscriptions.has(sessionId)
+        ? this.ensureSessionReplyPump(sessionId)
+        : undefined;
 
     const responsePromise = new Promise<JsonRpcResponse>((resolve, reject) => {
       this.pending.set(req.id, { resolve, reject });
@@ -835,7 +913,138 @@ export class AcpHttpTransport implements DaemonTransport {
       signal.addEventListener('abort', abortHandler, { once: true });
     }
 
-    return responsePromise;
+    // Release the background reply pump once the request settles (resolved by
+    // the pump, rejected by abort/stream-close) — the pump closes when its last
+    // in-flight request drains.
+    return releaseSessionPump
+      ? responsePromise.finally(releaseSessionPump)
+      : responsePromise;
+  }
+
+  /**
+   * Ensure a background session-reply pump is running for `sessionId`, returning
+   * a release callback. Reference-counted: concurrent session requests share one
+   * pump and it tears down when the last releases. The pump reads the session
+   * `/acp` stream and routes JSON-RPC *responses* to `pending` (mirroring
+   * `pumpConnStream`); it ignores events (no consumer) — a consumer that wants
+   * events uses `subscribeEvents`, which suppresses this pump entirely.
+   */
+  private ensureSessionReplyPump(sessionId: string): () => void {
+    let entry = this.sessionReplyPumps.get(sessionId);
+    if (!entry) {
+      const abort = new AbortController();
+      const created = { abort, refs: 0 };
+      entry = created;
+      this.sessionReplyPumps.set(sessionId, created);
+      void this.pumpSessionReplies(sessionId, abort.signal)
+        .catch(() => {})
+        .finally(() => {
+          if (this.sessionReplyPumps.get(sessionId) === created) {
+            this.sessionReplyPumps.delete(sessionId);
+          }
+        });
+    }
+    entry.refs += 1;
+    let released = false;
+    const active = entry;
+    return () => {
+      if (released) return;
+      released = true;
+      active.refs -= 1;
+      if (active.refs <= 0) {
+        active.abort.abort();
+        if (this.sessionReplyPumps.get(sessionId) === active) {
+          this.sessionReplyPumps.delete(sessionId);
+        }
+      }
+    };
+  }
+
+  /**
+   * Read a session-scoped `/acp` stream purely to route JSON-RPC *responses*
+   * (`id`, no `method`) to `pending`. Notifications and agent→client requests
+   * (`session/request_permission`, which also carry an `id`) are skipped — the
+   * `method` guard prevents a permission request id from being mis-routed onto
+   * a pending response slot.
+   */
+  private async pumpSessionReplies(
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
+    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+    if (this.connectionId) headers['Acp-Connection-Id'] = this.connectionId;
+    headers['Acp-Session-Id'] = sessionId;
+
+    const res = await this._fetch(`${this.baseUrl}/acp`, { headers, signal });
+    if (!res.ok || !res.body) return;
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      signal.addEventListener(
+        'abort',
+        () =>
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError')),
+        { once: true },
+      );
+    });
+
+    try {
+      while (!signal.aborted) {
+        const { value, done } = await Promise.race([
+          reader.read(),
+          abortPromise,
+        ]);
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        if (buf.length > MAX_SSE_BUF_CHARS) {
+          throw new Error('session reply pump: SSE buffer exceeded cap');
+        }
+        const { frames, tail } = consumeFrames(buf);
+        buf = tail;
+        for (const rawFrame of frames) {
+          const dataParts: string[] = [];
+          for (const rawLine of rawFrame.split('\n')) {
+            const line = rawLine.endsWith('\r')
+              ? rawLine.slice(0, -1)
+              : rawLine;
+            if (line.startsWith('data:')) {
+              dataParts.push(line.slice('data:'.length).replace(/^ /, ''));
+            }
+          }
+          if (dataParts.length === 0) continue;
+          let msg: unknown;
+          try {
+            msg = JSON.parse(dataParts.join('\n'));
+          } catch {
+            continue;
+          }
+          if (!isRecord(msg)) continue;
+          // Only JSON-RPC responses (id present, NO method) route to pending —
+          // skip notifications and permission requests (which carry a method).
+          if (!('id' in msg) || typeof msg['method'] === 'string') continue;
+          const rid = msg['id'];
+          if (typeof rid !== 'number') continue;
+          const pending = this.pending.get(rid);
+          if (pending) {
+            this.pending.delete(rid);
+            pending.resolve(msg as unknown as JsonRpcResponse);
+          }
+        }
+      }
+    } finally {
+      try {
+        reader.cancel().catch(() => {});
+      } catch {
+        /* already closed */
+      }
+    }
   }
 }
 

@@ -758,3 +758,83 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     await new Promise((r) => setTimeout(r, 0));
   });
 });
+
+describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', () => {
+  it('resolves a session/prompt whose reply rides the session stream WITHOUT the caller iterating subscribeEvents', async () => {
+    // wenshao MsOpi: the daemon answers POST /session/:id/prompt with 202 and
+    // routes the final JSON-RPC result onto the SESSION stream. A DaemonClient
+    // that never opens subscribeEvents would hang. The transport now opens a
+    // background reply pump for session-reply methods, so fetch() resolves.
+    let promptId: number | undefined;
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const headers: Record<string, string> = {};
+        if (init?.headers && typeof init.headers === 'object') {
+          for (const [k, v] of Object.entries(
+            init.headers as Record<string, string>,
+          )) {
+            headers[k.toLowerCase()] = v;
+          }
+        }
+        const body = typeof init?.body === 'string' ? init.body : null;
+
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          if (parsed.method === 'initialize') {
+            return jsonResponse(
+              200,
+              { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+              { 'acp-connection-id': 'conn-1' },
+            );
+          }
+          if (parsed.method === 'session/prompt') {
+            promptId = parsed.id as number;
+            return new Response(null, { status: 202 });
+          }
+          return jsonResponse(200, {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { ok: true },
+          });
+        }
+
+        // Background session-reply pump: GET /acp + Acp-Session-Id → serve the
+        // prompt's JSON-RPC result (id captured from the POST above).
+        if (
+          url.endsWith('/acp') &&
+          method === 'GET' &&
+          headers['acp-session-id']
+        ) {
+          return sseResponse([
+            `data: ${JSON.stringify({
+              jsonrpc: '2.0',
+              id: promptId,
+              result: { stopReason: 'end_turn' },
+            })}\n\n`,
+          ]);
+        }
+        // Connection-scoped stream (no Acp-Session-Id) → nothing to deliver.
+        if (url.endsWith('/acp') && method === 'GET') {
+          return sseResponse([]);
+        }
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    const res = await t.fetch('http://d/session/sess-1/prompt', {
+      method: 'POST',
+      body: JSON.stringify({ prompt: [{ type: 'text', text: 'hi' }] }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ stopReason: 'end_turn' });
+    t.dispose();
+  });
+});
