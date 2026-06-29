@@ -288,12 +288,13 @@ export class QQChannel extends ChannelBase {
     const msgId =
       entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
 
+    let nextSeq = 0;
     try {
       const body: Record<string, unknown> = {
         msg_type: 2,
         markdown: { content: text },
       };
-      const nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
+      nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
       if (msgId) this.msgSeqMap.set(msgId, nextSeq);
       if (msgId) {
         body['msg_id'] = msgId;
@@ -351,6 +352,7 @@ export class QQChannel extends ChannelBase {
       }
       if (msgId) this.saveQQState();
     } catch (e) {
+      if (msgId) this.msgSeqMap.set(msgId, nextSeq - 1);
       process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
     }
   }
@@ -506,7 +508,16 @@ export class QQChannel extends ChannelBase {
       clearTimeout(state.timer);
       state.timer = null;
     }
-    const remaining = state?.buffer ?? _fullText;
+    // ?? not ||: empty-string buffer means already-flushed by idleFlush/onToolCall;
+    // || would re-send _fullText (duplicate message).
+    const remaining =
+      state?.buffer ??
+      (() => {
+        process.stderr.write(
+          `[QQ:${this.name}] onResponseComplete: no streamState for ${sessionId}, sending fullText\n`,
+        );
+        return _fullText;
+      })();
     this.streamState.delete(sessionId);
     if (remaining) {
       await super.onResponseComplete(chatId, remaining, sessionId);
@@ -640,7 +651,6 @@ export class QQChannel extends ChannelBase {
             )
             // Validate new-format entries: must have string msgId and numeric timestamp.
             .filter(([, v]) => {
-              if (typeof v === 'string') return true; // old format, normalized above
               if (typeof v !== 'object' || v === null) return false;
               const entry = v as { msgId?: unknown; timestamp?: unknown };
               return (
@@ -942,6 +952,7 @@ export class QQChannel extends ChannelBase {
             () => this.reconnectWithRetry(),
             delay,
           );
+          this.reconnectTimer.unref();
         } else {
           process.stderr.write(
             `[QQ:${this.name}] Close-handler reconnect skipped (already reconnecting)\n`,
@@ -1543,7 +1554,11 @@ export class QQChannel extends ChannelBase {
       channelName: this.name,
       chatId,
       text,
-      senderId: event.author.member_openid || event.author.id || 'unknown',
+      senderId:
+        event.author.member_openid ||
+        event.author.user_openid ||
+        event.author.id ||
+        'unknown',
       senderName,
       messageId: event.id,
       isGroup: true,
