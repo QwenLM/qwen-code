@@ -10,6 +10,8 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_METAFILE_PATH = resolve('dist/esbuild.json');
+const METAFILE_BUILD_COMMAND =
+  'npm run build -- --cli-only && npx cross-env DEV=true npm run bundle';
 const SERVE_PRE_LISTEN_ROOTS = [
   {
     label: 'serve fast path entry',
@@ -151,7 +153,7 @@ function findServePreListenRootOutputs(outputs) {
     throw new Error(
       'Could not find bundled outputs for serve pre-listen roots:\n' +
         missingRoots.map((root) => `- ${root}`).join('\n') +
-        '\nRun DEV=true npm run bundle before this check.',
+        `\nRun \`${METAFILE_BUILD_COMMAND}\` to produce the metafile.`,
     );
   }
 
@@ -235,7 +237,7 @@ export function findServeFastPathBundleOffenders(metafile) {
   return offenders;
 
   function addOffender(label, matchedInput, outputPath) {
-    const key = `${label}\0${outputPath}`;
+    const key = `${label}\0${matchedInput}\0${outputPath}`;
     if (seen.has(key)) return;
     seen.add(key);
     offenders.push({
@@ -268,11 +270,20 @@ export function checkServeFastPathBundle({
   if (!existsSync(metafilePath)) {
     throw new Error(
       `Missing esbuild metafile at ${metafilePath}. ` +
-        'Run `npm run check:serve-fast-path-bundle` to build one.',
+        `Run \`${METAFILE_BUILD_COMMAND}\` to produce it.`,
     );
   }
 
-  const metafile = JSON.parse(readFileSync(metafilePath, 'utf8'));
+  let metafile;
+  try {
+    metafile = JSON.parse(readFileSync(metafilePath, 'utf8'));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Invalid esbuild metafile at ${metafilePath}: ${reason}. ` +
+        `Run \`${METAFILE_BUILD_COMMAND}\` to regenerate it.`,
+    );
+  }
   const offenders = findServeFastPathBundleOffenders(metafile);
   return { ok: offenders.length === 0, offenders };
 }

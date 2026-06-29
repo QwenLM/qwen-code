@@ -237,6 +237,37 @@ describe('serve fast-path bundle check', () => {
     expect(() => findServeFastPathBundleOffenders(metafile)).toThrow(
       /Could not find bundled outputs for serve pre-listen roots/,
     );
+    expect(() => findServeFastPathBundleOffenders(metafile)).toThrow(
+      /npm run build -- --cli-only && npx cross-env DEV=true npm run bundle/,
+    );
+  });
+
+  it('reports each matched input for the same forbidden label and output', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/acp-runtime.js')],
+      }),
+      'dist/chunks/acp-runtime.js': output({
+        inputs: [
+          'packages/acp-bridge/src/bridge.ts',
+          'packages/acp-bridge/dist/bridge.js',
+        ],
+      }),
+    });
+
+    const offenders = findServeFastPathBundleOffenders(metafile);
+
+    expect(offenders).toEqual([
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: 'packages/acp-bridge/src/bridge.ts',
+      }),
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: 'packages/acp-bridge/dist/bridge.js',
+      }),
+    ]);
   });
 
   it('reads a metafile path and returns bundle offenders', () => {
@@ -277,6 +308,31 @@ describe('serve fast-path bundle check', () => {
           metafilePath: join(tempDir, 'dist', 'esbuild.json'),
         }),
       ).toThrow(/Missing esbuild metafile/);
+      expect(() =>
+        checkServeFastPathBundle({
+          metafilePath: join(tempDir, 'dist', 'esbuild.json'),
+        }),
+      ).toThrow(
+        /npm run build -- --cli-only && npx cross-env DEV=true npm run bundle/,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws with context when the metafile is invalid JSON', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      mkdirSync(join(tempDir, 'dist'));
+      const metafilePath = join(tempDir, 'dist', 'esbuild.json');
+      writeFileSync(metafilePath, '{');
+
+      expect(() => checkServeFastPathBundle({ metafilePath })).toThrow(
+        /Invalid esbuild metafile at .*dist[/\\]esbuild\.json/,
+      );
+      expect(() => checkServeFastPathBundle({ metafilePath })).toThrow(
+        /Run `npm run build -- --cli-only && npx cross-env DEV=true npm run bundle` to regenerate it/,
+      );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
