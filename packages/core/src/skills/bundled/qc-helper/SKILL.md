@@ -75,6 +75,13 @@ Use this index to locate the right document for the user's question. Load only t
 | Contextual tips                             | `docs/features/tips.md`                 |
 | Channels (Telegram/WeChat/DingTalk/etc.)    | `docs/features/channels/overview.md`    |
 
+### Daemon Mode
+
+| Topic                             | Doc Path                          |
+| --------------------------------- | --------------------------------- |
+| qwen serve (daemon mode overview) | `docs/qwen-serve.md`              |
+| Local launch templates            | `docs/qwen-serve-deploy-local.md` |
+
 ### IDE Integration
 
 | Topic                   | Doc Path                                     |
@@ -115,7 +122,7 @@ When the user asks about configuration, the primary reference is `docs/configura
 | ------- | ------------------------------------------------------------ | -------------------------------------- |
 | User    | `~/.qwen/settings.json`                                      | Personal global config                 |
 | Project | `<project>/.qwen/settings.json`                              | Project-specific, overrides user level |
-| System  | macOS: `/Library/Application Support/QwenCode/settings.json` | Admin-level config                     |
+| System  | Linux: `/etc/qwen-code/settings.json`<br>Windows: `C:\ProgramData\qwen-code\settings.json`<br>macOS: `/Library/Application Support/QwenCode/settings.json` | Admin-level config                     |
 
 **Priority** (highest to lowest): CLI args > env vars > system settings > project settings > user settings > defaults
 
