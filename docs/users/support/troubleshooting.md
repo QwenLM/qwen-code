@@ -56,7 +56,7 @@ This guide provides solutions to common issues and debugging tips, including top
   - A: Cached token information is only displayed when cached tokens are being used. This feature is available for API key users (e.g., Alibaba Cloud Model Studio API key or Google Cloud Vertex AI). You can still view your total token usage using the `/stats` command.
 
 - **Q: A customization (extension, hook, skill, or MCP server) seems to be breaking Qwen Code. How do I isolate it?**
-  - A: Start Qwen Code with the `--safe-mode` flag to disable all customizations — context files, hooks, extensions, skills, and MCP servers — for the session. If the problem disappears in safe mode, re-enable your customizations one at a time to find the culprit.
+  - A: Start Qwen Code with the `--safe-mode` flag to disable all customizations — context files, hooks, extensions, skills, MCP servers, permission rules, approval mode overrides, memory features, and sandbox settings — for the session. If the problem disappears in safe mode, re-enable your customizations one at a time to find the culprit.
     - Example: `qwen --safe-mode`
 
 ## Common error messages and solutions
