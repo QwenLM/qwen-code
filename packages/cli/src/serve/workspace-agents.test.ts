@@ -21,7 +21,7 @@ import {
 import { Storage, QWEN_DIR } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
-import type { BridgeEvent } from './event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;

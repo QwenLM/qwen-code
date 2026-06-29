@@ -69,6 +69,17 @@ describe('AssistantMessage markdown tables', () => {
   it('enhances completed assistant tables', () => {
     const container = render(<AssistantMessage content={tableMarkdown} />);
 
+    expect(container.querySelector('table')).not.toBeNull();
+    expect(container.textContent).not.toContain('Quick copy');
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Switch to advanced table"]',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => {
+      toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
     expect(container.textContent).toContain('Quick copy');
     expect(container.textContent).toContain('Details');
   });

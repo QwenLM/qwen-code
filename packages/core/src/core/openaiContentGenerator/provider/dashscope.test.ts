@@ -1251,7 +1251,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result.max_tokens).toBe(1000); // Should remain unchanged
     });
 
-    it('should set conservative max_tokens default when not present in request', () => {
+    it('should set model max_tokens default when not present in request', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
@@ -1260,12 +1260,10 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      // Should set capped default (min of model limit and CAPPED_DEFAULT_MAX_TOKENS)
-      // qwen3-max has 32K output limit, so min(32K, 8K) = 8K
-      expect(result.max_tokens).toBe(8000);
+      expect(result.max_tokens).toBe(32768);
     });
 
-    it('should set conservative max_tokens when null is provided', () => {
+    it('should set model max_tokens when null is provided', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
@@ -1274,8 +1272,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      // null is treated as not configured, so set capped default: min(32K, 8K) = 8K
-      expect(result.max_tokens).toBe(8000);
+      expect(result.max_tokens).toBe(32768);
     });
 
     it('should respect user max_tokens for unknown models', () => {

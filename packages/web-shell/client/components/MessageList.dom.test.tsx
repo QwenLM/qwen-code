@@ -88,7 +88,6 @@ function mount(
           ref={ref}
           messages={messages}
           pendingApproval={null}
-          onConfirm={() => {}}
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
         />

@@ -3,7 +3,7 @@
   flex-direction: column;
   border: 1px solid var(--warning-color);
   border-radius: 8px;
-  color: var(--text-primary);
+  color: var(--foreground);
   max-height: 50vh;
   padding: 10px 12px;
 }
@@ -35,7 +35,7 @@
 
 .shortcuts {
   margin-top: 10px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.35;
 }

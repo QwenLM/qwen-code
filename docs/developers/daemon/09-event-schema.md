@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`; the current set has 43 known event types. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `server.ts`; see [Envelope-level metadata](#envelope-level-metadata).
+Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`; the current set has 47 known event types. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `packages/cli/src/serve/routes/sse-events.ts`; see [Envelope-level metadata](#envelope-level-metadata).
 
 The SDK exposes `asKnownDaemonEvent(evt)`. It returns a discriminated `KnownDaemonEvent` for known event types and `undefined` for other types. SDK consumers can therefore handle forward compatibility without requiring a lockstep SDK upgrade when a newer daemon adds an event type; the session reducer records those as `unrecognizedKnownEventCount`.
 
@@ -15,7 +15,7 @@ The wire format lives in [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md
 - Provide pure reducers (`reduceDaemonSessionEvent`, `reduceDaemonAuthEvent`) that project an event stream into SDK view state.
 - Broadcast the `typed_event_schema` capability tag as an informational signal. If the tag is absent, `asKnownDaemonEvent` still falls back to `unknown`.
 
-## Event vocabulary (43 known types)
+## Event vocabulary (47 known types)
 
 Grouped by domain.
 
@@ -67,15 +67,17 @@ Grouped by domain.
 
 ### Mutation control (Wave 4 PR 16+17)
 
-| Type                    | Direction | Payload                                                                                              |
-| ----------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
-| `memory_changed`        | S->C      | `scope: 'workspace' \| 'global', filePath, mode: 'append' \| 'replace', bytesWritten`                |
-| `agent_changed`         | S->C      | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`                      |
-| `approval_mode_changed` | S->C      | `sessionId, previous, next, persisted: boolean`                                                      |
-| `tool_toggled`          | S->C      | `toolName, enabled`; affects the next ACP child spawn and does not mutate already-running sessions.  |
-| `settings_changed`      | S->C      | Workspace settings write completed. Payload is open; consumers should refresh with read-after-write. |
-| `settings_reloaded`     | S->C      | Daemon workspace service reread settings. Payload is open.                                           |
-| `workspace_initialized` | S->C      | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`                              |
+| Type                     | Direction | Payload                                                                                                                          |
+| ------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `memory_changed`         | S->C      | `scope: 'workspace' \| 'global', filePath, mode: 'append' \| 'replace', bytesWritten`                                            |
+| `agent_changed`          | S->C      | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`                                                  |
+| `approval_mode_changed`  | S->C      | `sessionId, previous, next, persisted: boolean`                                                                                  |
+| `tool_toggled`           | S->C      | `toolName, enabled`; affects the next ACP child spawn and does not mutate already-running sessions.                              |
+| `settings_changed`       | S->C      | Workspace settings write completed. Payload is open; consumers should refresh with read-after-write.                             |
+| `settings_reloaded`      | S->C      | Daemon workspace service reread settings. Payload is open.                                                                       |
+| `trust_change_requested` | S->C      | `workspaceCwd, desiredState: 'trusted' \| 'untrusted', reason?`                                                                  |
+| `workspace_initialized`  | S->C      | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`                                                          |
+| `github_setup_completed` | S->C      | `releaseTag, readmeUrl, secretsUrl?, workflows: [{path, status, sizeBytes?, error?}], gitignore: {path, status, added?, error?}` |
 
 ### Auth device flow (PR 21)
 
@@ -96,6 +98,18 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 | `mcp_server_added`   | S->C      | Server added at runtime through `POST /workspace/mcp/servers` | `name, transport, replaced, shadowedSettings, toolCount, originatorClientId` |
 | `mcp_server_removed` | S->C      | Server removed at runtime                                     | `name, wasShadowingSettings, originatorClientId`                             |
 
+### Extensions lifecycle
+
+| Type                 | Direction | Trigger                                                              | Key payload fields                                                                                                                               |
+| -------------------- | --------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `extensions_changed` | S->C      | Background extension install/refresh work completed or status change | `refreshed, failed, status?: 'installed' \| 'enabled' \| 'disabled' \| 'updated' \| 'uninstalled' \| 'failed', source?, name?, version?, error?` |
+
+### Mid-turn message injection
+
+| Type                        | Direction | Trigger                                                                                         | Key payload fields                                                                                                                 |
+| --------------------------- | --------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `mid_turn_message_injected` | S->C      | Web-shell or remote client injected messages into a running turn via `POST /session/:id/inject` | `sessionId, messages: string[], originatorClientId?`; consumers MUST compare `originatorClientId` to their own id before deduping. |
+
 ### Turn lifecycle / assistant pushes
 
 | Type                  | Direction | Trigger                                                                                                             | Key payload fields                                                                                                                                                                               |
@@ -114,7 +128,7 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 | Concern                                | Source                                         | Notes                                                                                                              |
 | -------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `EVENT_SCHEMA_VERSION = 1`             | `packages/acp-bridge/src/eventBus.ts`          | Sent on every frame.                                                                                               |
-| `DAEMON_KNOWN_EVENT_TYPE_VALUES`       | `packages/sdk-typescript/src/daemon/events.ts` | Closed list with 43 types.                                                                                         |
+| `DAEMON_KNOWN_EVENT_TYPE_VALUES`       | `packages/sdk-typescript/src/daemon/events.ts` | Closed list with 47 types.                                                                                         |
 | `DaemonEventEnvelope<TType, TData>`    | `events.ts`                                    | Generic envelope.                                                                                                  |
 | `DaemonKnownEventType`                 | `events.ts`                                    | `typeof DAEMON_KNOWN_EVENT_TYPE_VALUES[number]`.                                                                   |
 | Per-event payload types                | `events.ts`                                    | Most event types have a `DaemonXxxData` interface; `user_shell_*` is currently parsed ad hoc by the UI normalizer. |
@@ -192,7 +206,7 @@ Beyond each event's `data` payload, the daemon stamps two envelope-level fields.
 
 ### `_meta.serverTimestamp` - daemon clock
 
-`formatSseFrame()` in `packages/cli/src/serve/server.ts` stamps this at the SSE write boundary, **not** inside `EventBus.publish`. The in-memory `BridgeEvent` type stays unchanged; internal daemon consumers do not see `_meta`, while wire SSE frames do.
+`EventBus.publish()` in `packages/acp-bridge/src/eventBus.ts` stamps `_meta.serverTimestamp` when the event enters the bus. The `BridgeEvent` type includes `_meta?: Record<string, unknown>`, so internal daemon consumers **do** see `_meta` on every bus-published event. `formatSseFrame()` in `packages/cli/src/serve/routes/sse-events.ts` provides a fallback timestamp only for synthetic frames (e.g. `stream_error`) that bypass `EventBus.publish`.
 
 ```jsonc
 {
@@ -204,10 +218,10 @@ Beyond each event's `data` payload, the daemon stamps two envelope-level fields.
 }
 ```
 
-The merge preserves any existing `_meta` keys
-(`{...existingMeta, serverTimestamp: Date.now()}`). **No current daemon producer
-writes envelope-level `_meta`**. The top-level merge is a forward-compatibility
-escape hatch.
+The merge preserves any existing `_meta` keys from the input event
+(`{...input._meta, serverTimestamp: Date.now()}`). Producers may attach
+additional envelope-level `_meta` keys; `EventBus.publish` merges them with the
+timestamp rather than overwriting.
 
 Why it matters: multi-client UIs that render relative time or sort transcript blocks should use server time instead of each browser/tab/phone local clock. Server stamping keeps ordering consistent across clients.
 

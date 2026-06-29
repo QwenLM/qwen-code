@@ -495,6 +495,25 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('GETs /workspace/mcp/:server/resources with URL encoding', async () => {
+      const resourcesStatus = {
+        v: 1,
+        serverName: 'my server',
+        resources: [{ uri: 'file:///intro.md', name: 'Intro' }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, resourcesStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcpResources('my server')).resolves.toEqual(
+        resourcesStatus,
+      );
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp/my%20server/resources'],
+      ]);
+    });
+
     it('GETs /workspace/tools and returns the tools envelope', async () => {
       const toolsStatus = {
         v: 1,
@@ -1798,8 +1817,30 @@ describe('DaemonClient', () => {
       // The cwd must be URL-encoded so the slashes don't collide with the
       // route segments.
       expect(calls[0]?.url).toBe(
-        'http://daemon/workspace/%2Fwork%2Fa/sessions',
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20',
       );
+    });
+
+    it('uses the requested page size without following pagination', async () => {
+      const { fetch, calls } = recordingFetch((request) => {
+        if (request.url.includes('cursor=next-page')) {
+          return jsonResponse(200, {
+            sessions: [{ sessionId: 's-2', workspaceCwd: '/work/a' }],
+          });
+        }
+        return jsonResponse(200, {
+          sessions: [{ sessionId: 's-1', workspaceCwd: '/work/a' }],
+          nextCursor: 'next-page',
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const sessions = await client.listWorkspaceSessions('/work/a', {
+        pageSize: 50,
+      });
+      expect(sessions.map((session) => session.sessionId)).toEqual(['s-1']);
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=50',
+      ]);
     });
 
     it('throws on non-2xx (e.g. 400 from a relative path)', async () => {

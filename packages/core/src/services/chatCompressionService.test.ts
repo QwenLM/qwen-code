@@ -48,6 +48,7 @@ describe('ChatCompressionService', () => {
     mockGetHookSystem = vi.fn().mockReturnValue({});
     mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getHookSystem: mockGetHookSystem,
@@ -1869,6 +1870,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     } as unknown as GeminiChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -1934,6 +1936,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     const warn = vi.fn();
     const mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -1992,6 +1995,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
   function makeFakeConfig(opts: { contextWindowSize: number }): Config {
     return {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -2133,6 +2137,87 @@ describe('computeThresholds', () => {
       expect(t.auto).toBeLessThan(t.hard);
     }
   });
+
+  describe('custom pct parameter', () => {
+    it('uses DEFAULT_PCT when pct is not provided', () => {
+      const defaultResult = computeThresholds(32_000);
+      const explicitDefault = computeThresholds(32_000, 0.7);
+      expect(explicitDefault).toEqual(defaultResult);
+    });
+
+    it('custom pct=0.5 lowers proportional auto threshold for small windows', () => {
+      const t = computeThresholds(32_000, 0.5);
+      expect(t.auto).toBe(16_000); // 0.5 * 32K
+      expect(t.warn).toBe(12_800); // (0.5 - 0.1) * 32K
+    });
+
+    it('custom pct=0.9 raises proportional auto threshold for small windows', () => {
+      const t = computeThresholds(32_000, 0.9);
+      expect(t.auto).toBe(28_800); // 0.9 * 32K
+      expect(t.warn).toBe(25_600); // (0.9 - 0.1) * 32K
+    });
+
+    it('custom pct does not affect absolute-branch-dominated large windows', () => {
+      const defaultResult = computeThresholds(1_000_000);
+      const customPct = computeThresholds(1_000_000, 0.5);
+      // For 1M window, absolute branch dominates regardless of pct
+      expect(customPct.auto).toBe(defaultResult.auto);
+      expect(customPct.hard).toBe(defaultResult.hard);
+    });
+
+    it('custom pct preserves warn <= auto < hard invariant', () => {
+      for (const pct of [0.3, 0.5, 0.6, 0.8, 0.9]) {
+        for (const w of [10_000, 32_000, 128_000, 200_000]) {
+          const t = computeThresholds(w, pct);
+          expect(t.warn).toBeLessThanOrEqual(t.auto);
+          expect(t.auto).toBeLessThan(t.hard);
+        }
+      }
+    });
+
+    it('pct=0 produces auto=0 for small windows (proportional branch is 0)', () => {
+      const t = computeThresholds(32_000, 0);
+      // 0 * 32000 = 0, absolute branch is negative → auto = 0
+      expect(t.auto).toBe(0);
+      // warn = max((0 - 0.1) * 32000, absWarn) = -3200
+      expect(t.warn).toBeLessThanOrEqual(t.auto);
+      // hard is clamped to max(rawHard, auto + HARD_BUFFER)
+      expect(t.hard).toBeGreaterThan(t.auto);
+    });
+
+    it('pct=1 sets proportional auto to full window; hard may equal auto for small windows', () => {
+      const t = computeThresholds(32_000, 1);
+      expect(t.auto).toBe(32_000);
+      expect(t.warn).toBeLessThanOrEqual(t.auto);
+      // For 32K window: hard = min(32000, max(effectiveWindow - HARD_BUFFER, 32000 + HARD_BUFFER)) = 32000
+      expect(t.hard).toBeLessThanOrEqual(t.auto);
+    });
+
+    it('pct=1 with large window: auto and hard both equal window', () => {
+      const t = computeThresholds(200_000, 1);
+      expect(t.auto).toBe(200_000);
+      expect(t.hard).toBe(200_000);
+      expect(t.warn).toBeLessThanOrEqual(t.auto);
+    });
+
+    it('clamps negative pct to 0', () => {
+      expect(computeThresholds(32_000, -0.5)).toEqual(
+        computeThresholds(32_000, 0),
+      );
+    });
+
+    it('clamps pct > 1 to 1', () => {
+      expect(computeThresholds(32_000, 1.5)).toEqual(
+        computeThresholds(32_000, 1),
+      );
+    });
+
+    it('NaN pct falls back to DEFAULT_PCT (via Number.isFinite check)', () => {
+      expect(computeThresholds(32_000, NaN)).toEqual(
+        computeThresholds(32_000), // no pct arg = DEFAULT_PCT
+      );
+    });
+  });
 });
 
 describe('ChatCompressionService.compress — claude-code-style full-history compression', () => {
@@ -2151,6 +2236,7 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
   function makeFakeConfig(): Config {
     return {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -2261,6 +2347,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
   function makeFakeConfig(opts: { contextWindowSize: number }): Config {
     return {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -2318,6 +2405,51 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     expect(spy).toHaveBeenCalled();
     expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
   });
+
+  it('with custom threshold 0.5, triggers compression at lower token count (32K window)', async () => {
+    const spy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({ text: 's', usage: {} } as never);
+
+    const config = makeFakeConfig({ contextWindowSize: 32_000 });
+    vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
+
+    // computeThresholds(32000, 0.5).auto = max(0.5*32000, 12000-13000) = 16000
+    // 20K > 16K → falls through cheap-gate
+    const result = await new ChatCompressionService().compress(makeFakeChat(), {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 20_000,
+    });
+
+    expect(spy).toHaveBeenCalled();
+    expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
+  });
+
+  it('with default threshold, NOOPs at same token count (32K window, 20K tokens)', async () => {
+    const spy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({ text: 's', usage: {} } as never);
+
+    const config = makeFakeConfig({ contextWindowSize: 32_000 });
+    // getAutoCompactThreshold returns undefined → default 0.7
+    // computeThresholds(32000).auto = max(0.7*32000, 12000-13000) = 22400
+    // 20K < 22.4K → NOOP
+    const result = await new ChatCompressionService().compress(makeFakeChat(), {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 20_000,
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+  });
 });
 
 describe('ChatCompressionService.compress — single-turn computer-use regression', () => {
@@ -2336,6 +2468,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
   function makeFakeConfig(): Config {
     return {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -2496,6 +2629,7 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     };
     const mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -2553,6 +2687,7 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     } as unknown as GeminiChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -2781,6 +2916,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     } as unknown as GeminiChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()
@@ -2976,6 +3112,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     } as unknown as GeminiChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi
         .fn()

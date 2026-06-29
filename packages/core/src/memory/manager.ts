@@ -47,7 +47,7 @@ import {
   MemoryDreamEvent,
   MemoryExtractEvent,
 } from '../telemetry/index.js';
-import { isAnyAutoMemPath } from './paths.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryMetadataPath,
@@ -72,6 +72,7 @@ import { getManagedAutoMemoryStatus } from './status.js';
 import {
   appendManagedAutoMemoryToUserMemory,
   type UserAutoMemorySection,
+  type TeamAutoMemorySection,
 } from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
@@ -275,7 +276,8 @@ function partWritesToMemory(part: Part, projectRoot: string): boolean {
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
     if (
       typeof filePath === 'string' &&
-      isAnyAutoMemPath(filePath, projectRoot)
+      (isAnyAutoMemPath(filePath, projectRoot) ||
+        isTeamAutoMemPath(filePath, projectRoot))
     ) {
       return true;
     }
@@ -1438,12 +1440,14 @@ export class MemoryManager {
     memoryDir: string,
     indexContent?: string | null,
     userSection?: UserAutoMemorySection,
+    teamSection?: TeamAutoMemorySection,
   ): string {
     return appendManagedAutoMemoryToUserMemory(
       userMemory,
       memoryDir,
       indexContent,
       userSection,
+      teamSection,
     );
   }
 

@@ -109,11 +109,6 @@ const debugLogger = createDebugLogger('GEMINI_STREAM');
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
-const VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT = 2048;
-// Untrusted vision-model output is shown in the terminal; strip ANSI/C0+C1
-// control escapes (keep \t, \n) so a crafted image can't inject sequences.
-// eslint-disable-next-line no-control-regex
-const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
@@ -121,26 +116,17 @@ interface PendingDuplicateToolResponses {
   responseParts: Part[];
 }
 
-function truncateVisionBridgeTranscript(transcript: string): string {
-  const safe = transcript.replace(TERMINAL_CONTROL_CHARS, '');
-  if (safe.length <= VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT) {
-    return safe;
-  }
-  return `${safe
-    .slice(0, VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT)
-    .trimEnd()}\n[Transcript truncated]`;
-}
-
 /**
  * Build the user-facing notice shown when the vision bridge runs. On success it
  * states which model was used, how many images were converted (and omitted),
- * discloses the data egress (and endpoint, since auto-select can route to a
- * different host than the primary model), and includes the generated
- * transcription so the user can catch misreads. On failure it surfaces the
- * reason.
+ * and discloses the data egress (and endpoint, since auto-select can route to a
+ * different host than the primary model). On failure it surfaces the reason.
+ *
+ * The transcription itself is not shown: it is fed to the primary model and
+ * surfaced in its answer, so repeating it here only duplicated the description.
  *
  * @param result The structured result returned by the vision bridge.
- * @returns A multi-line notice string for the message history.
+ * @returns A notice string for the message history.
  */
 function formatVisionBridgeNotice(result: VisionBridgeResult): string {
   const modelName = result.modelId ?? 'vision model';
@@ -150,22 +136,23 @@ function formatVisionBridgeNotice(result: VisionBridgeResult): string {
   const egressNote = result.egressOccurred
     ? ` Your image and prompt/context were sent to ${target}.`
     : '';
+  // No leading glyph here: the renderer supplies the gutter prefix (🔎 for the
+  // dim notice, ✕ for the error variant). Baking one in too produced a doubled
+  // marker (e.g. `● 🔎 …`).
   if (result.status === 'failed') {
     const reason = result.egressOccurred
       ? 'the vision model request failed'
       : 'the vision bridge could not run';
-    return `⚠ Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+    return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
   }
   if (result.status === 'skipped') {
-    return `🔎 Vision bridge cancelled.${egressNote}`;
+    return `Vision bridge cancelled.${egressNote}`;
   }
   // On success the image was always sent, so disclose egress unconditionally.
   const omitted =
     result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
-  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
-  return result.transcript
-    ? `${header}\n${truncateVisionBridgeTranscript(result.transcript)}`
-    : header;
+  const header = `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
+  return header;
 }
 
 /**
@@ -898,7 +885,7 @@ export const useGeminiStream = (
             type:
               bridgeResult.status === 'failed'
                 ? MessageType.ERROR
-                : MessageType.INFO,
+                : MessageType.VISION_NOTICE,
             text: formatVisionBridgeNotice(bridgeResult),
           },
           timestamp,

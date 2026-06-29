@@ -508,9 +508,7 @@ describe('handleSlashCommand', () => {
   });
 
   it('records SKILL submit_prompt commands as failures when hooks throw', async () => {
-    mockFireUserPromptExpansionEvent.mockRejectedValue(
-      new Error('hook crash'),
-    );
+    mockFireUserPromptExpansionEvent.mockRejectedValue(new Error('hook crash'));
     const mockSkillCommand = {
       name: 'review',
       description: 'Review code',
