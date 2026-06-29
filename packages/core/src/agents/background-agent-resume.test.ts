@@ -433,6 +433,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -524,6 +525,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -662,6 +664,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -739,6 +742,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -829,6 +833,7 @@ describe('BackgroundAgentResumeService', () => {
         getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
         getExecutionSummary: () => ({
           totalTokens: 0,
+          outputTokens: 0,
           totalDurationMs: 0,
         }),
         getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -911,6 +916,7 @@ describe('BackgroundAgentResumeService', () => {
         getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
         getExecutionSummary: () => ({
           totalTokens: 0,
+          outputTokens: 0,
           totalDurationMs: 0,
         }),
         getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -995,6 +1001,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -1021,8 +1028,7 @@ describe('BackgroundAgentResumeService', () => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
     const provider = subagent.setExternalMessageProvider.mock.calls[0]?.[0] as
-      | (() => string[])
-      | undefined;
+      (() => string[]) | undefined;
     expect(provider).toBeDefined();
     expect(provider?.()).toEqual(['second message']);
   });
@@ -1081,7 +1087,11 @@ describe('BackgroundAgentResumeService', () => {
       setExternalMessageWaiter: vi.fn(),
       setExternalMessageWaitPredicate: vi.fn(),
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'done',
     };
@@ -1193,7 +1203,11 @@ describe('BackgroundAgentResumeService', () => {
       getCore: vi.fn(() => {
         throw new Error('setup failed');
       }),
-      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'done',
     };
@@ -1324,6 +1338,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -1363,8 +1378,7 @@ describe('BackgroundAgentResumeService', () => {
     const executeCall = execute.mock.calls[0];
     expect(executeCall).toBeDefined();
     const contextArg = executeCall?.[0] as
-      | { get(key: string): unknown }
-      | undefined;
+      { get(key: string): unknown } | undefined;
     expect(contextArg).toBeDefined();
     if (!contextArg) {
       throw new Error('Expected resume execute context');
@@ -1601,6 +1615,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.CANCELLED,
@@ -1679,6 +1694,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.CANCELLED,
@@ -1765,8 +1781,7 @@ describe('BackgroundAgentResumeService', () => {
     const execute = vi.fn(
       async (context: { get: (key: string) => unknown }) => {
         const override = context.get('initial_messages_override') as
-          | Array<{ parts?: Array<{ text?: string }> }>
-          | undefined;
+          Array<{ parts?: Array<{ text?: string }> }> | undefined;
         expect(override).toBeUndefined();
         expect(context.get('task_prompt')).toBe('continue work');
       },
@@ -1777,6 +1792,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -1872,7 +1888,11 @@ describe('BackgroundAgentResumeService', () => {
       execute,
       setExternalMessageProvider: vi.fn(),
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'iterated',
     };
@@ -2196,7 +2216,11 @@ describe('BackgroundAgentResumeService', () => {
       execute: vi.fn(async () => undefined),
       setExternalMessageProvider: vi.fn(),
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'iterated',
     };

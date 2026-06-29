@@ -246,8 +246,8 @@ export const InlineParallelAgentsDisplay: React.FC<
           : undefined,
         tokenCount:
           result.tokenCount ??
-          live?.stats?.totalTokens ??
-          result.executionSummary?.totalTokens,
+          live?.stats?.outputTokens ??
+          result.executionSummary?.outputTokens,
       };
     });
   }, [agentEntries, config, now]);

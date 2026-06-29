@@ -598,6 +598,13 @@ export async function buildAvailableCommandsSnapshot(
         supportedModes: getEffectiveSupportedModes(cmd),
         subcommands: getCommandSubcommandNames(cmd),
         modelInvocable: cmd.modelInvocable === true,
+        // Carry aliases so a channel consumer (which only sees the wire snapshot,
+        // not the command registry) can recognize an aliased command and avoid
+        // tagging it. _meta is ACP's extension point; omitted when there are none
+        // so command entries without aliases stay byte-identical on the wire.
+        ...(cmd.altNames && cmd.altNames.length > 0
+          ? { altNames: cmd.altNames }
+          : {}),
       },
     };
   });

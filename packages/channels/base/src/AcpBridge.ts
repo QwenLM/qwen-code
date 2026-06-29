@@ -24,6 +24,39 @@ export interface AvailableCommand {
   name: string;
   description: string;
   input?: { hint: string } | null;
+  /**
+   * Aliases the agent's parser also accepts for this command (e.g. `summarize`
+   * for `compress`). Carried over the wire in `_meta.altNames`; lifted here by
+   * readAvailableCommandAltNames so attribution can recognize an aliased command
+   * and not prefix it (which would stop it from parsing).
+   */
+  altNames?: string[];
+}
+
+/**
+ * Read a command's aliases off a raw wire `available_commands_update` entry. ACP
+ * carries them in `_meta` (its only extension point); a top-level `altNames` is
+ * also accepted for forward-compat. Returns undefined when absent so the field
+ * stays optional and entries without aliases are left byte-identical.
+ */
+export function readAvailableCommandAltNames(
+  raw: unknown,
+): string[] | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const record = raw as Record<string, unknown>;
+  const meta = record['_meta'];
+  const fromMeta =
+    typeof meta === 'object' && meta !== null
+      ? (meta as Record<string, unknown>)['altNames']
+      : undefined;
+  const source = Array.isArray(record['altNames'])
+    ? record['altNames']
+    : Array.isArray(fromMeta)
+      ? fromMeta
+      : undefined;
+  if (!source) return undefined;
+  const names = source.filter((n): n is string => typeof n === 'string');
+  return names.length > 0 ? names : undefined;
 }
 
 export interface ToolCallEvent {
@@ -231,9 +264,12 @@ export class AcpBridge extends EventEmitter {
       }
       case 'available_commands_update': {
         if (Array.isArray(update['availableCommands'])) {
-          this._availableCommands = update[
-            'availableCommands'
-          ] as AvailableCommand[];
+          this._availableCommands = (
+            update['availableCommands'] as AvailableCommand[]
+          ).map((cmd) => {
+            const altNames = readAvailableCommandAltNames(cmd);
+            return altNames ? { ...cmd, altNames } : cmd;
+          });
         }
         break;
       }
