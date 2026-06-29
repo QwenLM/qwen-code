@@ -773,9 +773,11 @@ describe('runQwenServe runtime startup failures', () => {
       telemetryPromise,
     );
     const bridge = makeRuntimeBridge();
-    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
-      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-    );
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
 
     const handle = await runQwenServe(
       {
@@ -789,15 +791,25 @@ describe('runQwenServe runtime startup failures', () => {
       {
         resolveOnListen: true,
         deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 1,
+        runtimeStartupTimeoutMs: 0,
       },
     );
 
     try {
       await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(createBridge).not.toHaveBeenCalled();
       const healthRes = await fetch(`${handle.url}/health`);
       expect(healthRes.status).toBe(200);
       expect(await healthRes.json()).toEqual({ status: 'ok' });
+
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
+        timeout: 1500,
+      });
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
       resolveTelemetry?.({
         enabled: false,
