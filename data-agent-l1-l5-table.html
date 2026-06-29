@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data Agent 数据飞轮 L1-L5 映射</title>
+  <style>
+    :root {
+      --bg-a: #f8fbff;
+      --bg-b: #eef6f0;
+      --ink: #132019;
+      --muted: #5c6b61;
+      --line: rgba(30, 58, 44, 0.13);
+      --green: #2f7d52;
+      --green-dark: #195237;
+      --blue: #2f67b1;
+      --amber: #b8732a;
+      --red: #a84b46;
+      --violet: #7560b8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 8% 8%, rgba(77, 141, 108, 0.18), transparent 34%),
+        radial-gradient(circle at 88% 0%, rgba(47, 103, 177, 0.14), transparent 38%),
+        linear-gradient(135deg, var(--bg-a), var(--bg-b));
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      padding: 64px;
+    }
+
+    .canvas {
+      width: 2160px;
+      min-height: 1320px;
+      margin: 0 auto;
+      padding: 56px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.9);
+      border-radius: 44px;
+      box-shadow: 0 36px 110px rgba(24, 54, 39, 0.16);
+      backdrop-filter: blur(18px);
+    }
+
+    .header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 40px;
+      margin-bottom: 36px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(47, 125, 82, 0.10);
+      color: var(--green-dark);
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 7px rgba(47, 125, 82, 0.12);
+    }
+
+    h1 {
+      margin: 20px 0 12px;
+      font-size: 58px;
+      line-height: 1.08;
+      letter-spacing: -0.04em;
+    }
+
+    .subtitle {
+      margin: 0;
+      max-width: 1180px;
+      color: var(--muted);
+      font-size: 25px;
+      line-height: 1.55;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(5, auto);
+      gap: 10px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 19px;
+      white-space: nowrap;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 30px;
+      background: rgba(255, 255, 255, 0.86);
+      box-shadow: 0 18px 46px rgba(30, 58, 44, 0.08);
+    }
+
+    col.level { width: 15%; }
+    col.stage { width: 17%; }
+    col.feature { width: 24%; }
+    col.human { width: 13%; }
+    col.flywheel { width: 31%; }
+
+    thead th {
+      padding: 24px 24px;
+      background: linear-gradient(135deg, #20392d, #315d45);
+      color: white;
+      font-size: 22px;
+      line-height: 1.25;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    tbody td {
+      position: relative;
+      padding: 28px 24px;
+      border-top: 1px solid var(--line);
+      color: #1e2a22;
+      font-size: 23px;
+      line-height: 1.48;
+      vertical-align: top;
+    }
+
+    tbody tr:first-child td { border-top: 0; }
+    tbody tr:nth-child(odd) td { background: rgba(249, 252, 250, 0.9); }
+    tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.92); }
+
+    tbody td + td,
+    thead th + th {
+      border-left: 1px solid var(--line);
+    }
+
+    .level-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 68px;
+      padding: 8px 14px;
+      border-radius: 18px;
+      color: white;
+      font-size: 28px;
+      font-weight: 900;
+      letter-spacing: -0.03em;
+      box-shadow: 0 10px 22px rgba(20, 52, 34, 0.14);
+    }
+
+    .level-title {
+      display: block;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 21px;
+      font-weight: 700;
+    }
+
+    .stage-title {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 26px;
+      font-weight: 850;
+      letter-spacing: -0.02em;
+    }
+
+    .human-role {
+      display: inline-flex;
+      padding: 9px 14px;
+      border-radius: 14px;
+      background: rgba(31, 33, 29, 0.05);
+      color: #20392d;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .flywheel strong {
+      color: #193b2a;
+      font-weight: 850;
+    }
+
+    .l1 .level-badge { background: linear-gradient(135deg, var(--green), #58a371); }
+    .l2 .level-badge { background: linear-gradient(135deg, var(--blue), #6b96d2); }
+    .l3 .level-badge { background: linear-gradient(135deg, var(--amber), #d49a52); }
+    .l4 .level-badge { background: linear-gradient(135deg, var(--red), #cc736f); }
+    .l5 .level-badge { background: linear-gradient(135deg, var(--violet), #a08fe0); }
+
+    .l1 .stage-title { color: var(--green-dark); }
+    .l2 .stage-title { color: #244f8d; }
+    .l3 .stage-title { color: #8d571d; }
+    .l4 .stage-title { color: #8d3b37; }
+    .l5 .stage-title { color: #56469a; }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 40px;
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 20px;
+      line-height: 1.45;
+    }
+
+    .footer strong { color: var(--green-dark); }
+  </style>
+</head>
+<body>
+  <main class="canvas">
+    <section class="header">
+      <div>
+        <div class="eyebrow">DATA AGENT MATURITY MODEL</div>
+        <h1>数据飞轮 × 自动驾驶 L1-L5 映射</h1>
+        <p class="subtitle">用自动驾驶分级表达 Data Agent 从“知识辅助”到“目标自治”的演进路径，并明确每一级的数据飞轮建设要求。</p>
+      </div>
+      <div class="legend" aria-label="阶段图例">
+        <span><i class="dot" style="background:#2f7d52"></i>L1 辅助</span>
+        <span><i class="dot" style="background:#2f67b1"></i>L2 诊断</span>
+        <span><i class="dot" style="background:#b8732a"></i>L3 闭环</span>
+        <span><i class="dot" style="background:#a84b46"></i>L4 执行</span>
+        <span><i class="dot" style="background:#7560b8"></i>L5 自治</span>
+      </div>
+    </section>
+
+    <table>
+      <colgroup>
+        <col class="level" />
+        <col class="stage" />
+        <col class="feature" />
+        <col class="human" />
+        <col class="flywheel" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>自动驾驶类比</th>
+          <th>Data Agent 阶段</th>
+          <th>核心特征</th>
+          <th>人的角色</th>
+          <th>数据飞轮要求</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="l1">
+          <td><span class="level-badge">L1</span><span class="level-title">辅助驾驶</span></td>
+          <td><span class="stage-title">查询解释型 Agent</span></td>
+          <td>Agent 提供解释、检索、建议，不主动完成任务。</td>
+          <td><span class="human-role">人主导</span></td>
+          <td class="flywheel">记录用户意图、问题类型、答案采纳 / 未采纳；沉淀<strong>知识缺失</strong>和<strong>高频问法</strong>。</td>
+        </tr>
+        <tr class="l2">
+          <td><span class="level-badge">L2</span><span class="level-title">部分自动驾驶</span></td>
+          <td><span class="stage-title">诊断辅助型 Agent</span></td>
+          <td>Agent 可调用只读工具、给出诊断和证据链。</td>
+          <td><span class="human-role">人确认</span></td>
+          <td class="flywheel">记录工具调用链、上下文来源、诊断结果、采纳 / 修改 / 拒绝；归因<strong>工具失败</strong>、<strong>上下文缺失</strong>、<strong>意图识别错误</strong>。</td>
+        </tr>
+        <tr class="l3">
+          <td><span class="level-badge">L3</span><span class="level-title">条件自动驾驶</span></td>
+          <td><span class="stage-title">场景闭环型 Agent</span></td>
+          <td>在特定任务类型内可完成完整诊断 / 方案生成。</td>
+          <td><span class="human-role">人兜底接管</span></td>
+          <td class="flywheel">建立标准 <strong>Telemetry</strong>、失败归因、<strong>Eval 回流</strong>；每类任务沉淀 <strong>Task Card</strong> / <strong>Tool Card</strong> / <strong>Rule Card</strong>。</td>
+        </tr>
+        <tr class="l4">
+          <td><span class="level-badge">L4</span><span class="level-title">高度自动驾驶</span></td>
+          <td><span class="stage-title">受控自动执行型 Agent</span></td>
+          <td>在白名单场景中可自动执行低风险动作，并有回滚 / 审批 / 监控。</td>
+          <td><span class="human-role">人处理例外</span></td>
+          <td class="flywheel">自动采集执行结果、验证结果、回滚 / 审批记录、线上工具成功率与超时率；持续优化<strong>权限策略</strong>和<strong>自动化边界</strong>。</td>
+        </tr>
+        <tr class="l5">
+          <td><span class="level-badge">L5</span><span class="level-title">完全自动驾驶</span></td>
+          <td><span class="stage-title">泛化自治型 Data Agent</span></td>
+          <td>跨场景自主理解、执行、验证、优化，持续自我进化。</td>
+          <td><span class="human-role">人只设目标和边界</span></td>
+          <td class="flywheel">实现跨场景自动归因、自动 Eval 生成、知识健康度扫描、策略自优化；从<strong>业务结果</strong>和<strong>线上运行数据</strong>中持续学习。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <section class="footer">
+      <div><strong>核心判断：</strong>Phase 1-4 是数据来源成熟度，L1-L5 是任务自治成熟度；两者相关但不是一一对应。</div>
+      <div>Data Flywheel · Dogfooding · Telemetry · Eval · Task / Tool / Rule Card</div>
+    </section>
+  </main>
+</body>
+</html>
