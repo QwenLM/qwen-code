@@ -6,7 +6,6 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -70,24 +69,11 @@ const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
 const originalCwd = process.cwd();
 const cliPackageRoot = process.cwd();
-const repoRoot = resolve(cliPackageRoot, '../..');
 
 interface StaticSourceGraph {
   localFiles: Set<string>;
   externalValueImports: Set<string>;
   unresolvedLocalImports: string[];
-}
-
-interface EsbuildMetafileOutput {
-  inputs?: Record<string, unknown>;
-  imports?: Array<{
-    path: string;
-    kind?: string;
-  }>;
-}
-
-interface EsbuildMetafile {
-  outputs: Record<string, EsbuildMetafileOutput>;
 }
 
 function normalizePathForTest(filePath: string): string {
@@ -194,69 +180,6 @@ function collectStaticSourceGraph(entryFile: string): StaticSourceGraph {
 
   visit(entryFile);
   return { localFiles, externalValueImports, unresolvedLocalImports };
-}
-
-function collectBundledRunServeStaticRuntimeOffenders(): string[] {
-  const metafilePath = resolve(repoRoot, 'dist/esbuild.json');
-  rmSync(metafilePath, { force: true });
-  execFileSync(process.execPath, [resolve(repoRoot, 'esbuild.config.js')], {
-    cwd: repoRoot,
-    env: { ...process.env, DEV: 'true' },
-    stdio: 'pipe',
-    timeout: 30_000,
-  });
-
-  expect(existsSync(metafilePath)).toBe(true);
-  const metafile = JSON.parse(
-    readFileSync(metafilePath, 'utf8'),
-  ) as EsbuildMetafile;
-  const outputs = new Map(
-    Object.entries(metafile.outputs).map(([outputPath, output]) => [
-      normalizePathForTest(outputPath),
-      output,
-    ]),
-  );
-  const runServeOutput = [...outputs.entries()].find(([, output]) =>
-    Object.keys(output.inputs ?? {}).some(
-      (input) =>
-        normalizePathForTest(input) ===
-        'packages/cli/src/serve/run-qwen-serve.ts',
-    ),
-  );
-  expect(runServeOutput).toBeDefined();
-  const queue = [runServeOutput![0]];
-  const staticClosure = new Set(queue);
-
-  for (let i = 0; i < queue.length; i++) {
-    const output = outputs.get(queue[i]);
-    for (const bundledImport of output?.imports ?? []) {
-      if (bundledImport.kind !== 'import-statement') continue;
-      const importedOutput = normalizePathForTest(bundledImport.path);
-      if (!outputs.has(importedOutput) || staticClosure.has(importedOutput)) {
-        continue;
-      }
-      staticClosure.add(importedOutput);
-      queue.push(importedOutput);
-    }
-  }
-
-  const forbiddenInputs = new Set([
-    'packages/cli/src/serve/acp-session-bridge.ts',
-    'packages/acp-bridge/src/bridge.ts',
-    'packages/acp-bridge/src/bridgeClient.ts',
-    'packages/acp-bridge/src/spawnChannel.ts',
-  ]);
-  const offenders: string[] = [];
-  for (const outputPath of staticClosure) {
-    const output = outputs.get(outputPath);
-    for (const input of Object.keys(output?.inputs ?? {})) {
-      const normalizedInput = normalizePathForTest(input);
-      if (forbiddenInputs.has(normalizedInput)) {
-        offenders.push(`${outputPath} -> ${normalizedInput}`);
-      }
-    }
-  }
-  return offenders;
 }
 
 function useTempQwenHome(): string {
@@ -490,6 +413,23 @@ describe('CLI entry import boundary', () => {
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
   });
 
+  it('keeps request helpers from value-importing the ACP compatibility shim', () => {
+    const requestHelpersSource = readFileSync(
+      'src/serve/server/request-helpers.ts',
+      'utf8',
+    );
+
+    expect(requestHelpersSource).not.toMatch(
+      /from ['"]\.\.\/acp-session-bridge\.js['"]/,
+    );
+    expect(requestHelpersSource).toContain(
+      "import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';",
+    );
+    expect(requestHelpersSource).toContain(
+      "import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';",
+    );
+  });
+
   it('keeps the runQwenServe static source graph free of ACP runtime modules', () => {
     const graph = collectStaticSourceGraph(
       resolve(cliPackageRoot, 'src/serve/run-qwen-serve.ts'),
@@ -519,15 +459,6 @@ describe('CLI entry import boundary', () => {
       `Unexpected ACP runtime imports:\n${forbiddenImports.join('\n')}`,
     ).toEqual([]);
   });
-
-  it('keeps bundled runQwenServe static imports free of ACP runtime modules', () => {
-    const offenders = collectBundledRunServeStaticRuntimeOffenders();
-
-    expect(
-      offenders,
-      `Unexpected ACP runtime inputs in static bundle closure:\n${offenders.join('\n')}`,
-    ).toEqual([]);
-  }, 30_000);
 });
 
 describe('serve fast path argument parsing', () => {

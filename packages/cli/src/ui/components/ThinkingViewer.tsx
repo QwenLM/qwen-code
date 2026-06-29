@@ -5,9 +5,10 @@
  */
 
 import type { FC } from 'react';
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useFrameCoalescedFlush } from '../hooks/use-frame-coalesced-flush.js';
 import { useKeypress, type Key } from '../hooks/useKeypress.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
@@ -17,6 +18,7 @@ import { t } from '../../i18n/index.js';
 import { AlternateScreen } from './AlternateScreen.js';
 import type { ThinkingViewerData } from '../contexts/ThinkingViewerContext.js';
 import { THINKING_ICON } from './messages/ConversationMessages.js';
+import { wrapToVisualLines } from '../utils/textUtils.js';
 import { formatDuration } from '../utils/displayUtils.js';
 
 interface ThinkingViewerProps {
@@ -33,14 +35,25 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({
   onClose,
   useAlternateScreen = true,
 }) => {
-  const { rows } = useTerminalSize();
+  const { rows, columns } = useTerminalSize();
   const [scrollOffset, setScrollOffset] = useState(0);
 
   const headerHeight = 2;
   const footerHeight = 2;
   const contentHeight = Math.max(rows - headerHeight - footerHeight, 1);
 
-  const lines = useMemo(() => data.text.split('\n'), [data.text]);
+  // The thought text is frequently a single long paragraph with no explicit
+  // newlines. Splitting on '\n' alone yields one logical line that, rendered
+  // with `wrap="truncate-end"`, collapsed to a single ellipsised row above an
+  // empty box (and `maxScroll` stayed 0, so it could not scroll). Pre-wrap to
+  // visual rows at the inner content width — border (1 each side) + paddingX
+  // (1 each side) = 4 columns — so scrolling and rendering operate on the same
+  // rows the user actually sees.
+  const contentWidth = Math.max(1, columns - 4);
+  const lines = useMemo(
+    () => wrapToVisualLines(data.text, contentWidth),
+    [data.text, contentWidth],
+  );
   const maxScroll = Math.max(0, lines.length - contentHeight);
 
   useEffect(() => {
@@ -52,6 +65,17 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({
       setScrollOffset((prev) => Math.max(0, Math.min(maxScroll, prev + delta)));
     },
     [maxScroll],
+  );
+
+  // Coalesce wheel bursts to one update per frame, mirroring ScrollableList —
+  // each wheel event re-renders the modal, so an un-batched brisk spin stutters.
+  const pendingWheelDelta = useRef(0);
+  const { schedule: scheduleWheelFlush } = useFrameCoalescedFlush(
+    useCallback(() => {
+      const delta = pendingWheelDelta.current;
+      pendingWheelDelta.current = 0;
+      if (delta !== 0) scrollBy(delta);
+    }, [scrollBy]),
   );
 
   useKeypress(
@@ -85,12 +109,14 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({
     useCallback(
       (event: MouseEvent) => {
         if (event.name === 'scroll-up') {
-          scrollBy(-WHEEL_LINES);
+          pendingWheelDelta.current -= WHEEL_LINES;
+          scheduleWheelFlush();
         } else if (event.name === 'scroll-down') {
-          scrollBy(WHEEL_LINES);
+          pendingWheelDelta.current += WHEEL_LINES;
+          scheduleWheelFlush();
         }
       },
-      [scrollBy],
+      [scheduleWheelFlush],
     ),
     { isActive: true },
   );
