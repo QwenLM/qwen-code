@@ -18,7 +18,7 @@ import {
 import { theme } from '../semantic-colors.js';
 
 const TMUX_SPINNER_INTERVAL_MS = 750;
-const TMUX_SPINNER_FRAMES = ['.  ', '.. ', '...'];
+const TMUX_SPINNER_FRAMES = ['· ', '··'];
 
 interface GeminiRespondingSpinnerProps {
   /**
@@ -83,7 +83,7 @@ export const GeminiSpinner: React.FC<GeminiSpinnerProps> = ({
   if (isTmux) {
     // Note: must NOT wrap in <Box> here — GeminiSpinner is rendered inside a
     // <Text> in Footer.tsx (`<Text>...<GeminiSpinner /> {msg}</Text>`), and
-    // Ink forbids <Box> nested inside <Text>. The 3-char fixed-width frames
+    // Ink forbids <Box> nested inside <Text>. The 2-char fixed-width frames
     // already give us stable layout without an explicit width container.
     return (
       <Text color={theme.text.primary}>
