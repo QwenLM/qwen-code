@@ -280,6 +280,11 @@ describe('workspace memory remember routes', () => {
       .get('/workspace/memory/remember/remember-missing')
       .expect(404)
       .expect((res) => expect(res.body.code).toBe('remember_task_not_found'));
+    await request(app)
+      .get('/workspace/memory/remember/remember-missing')
+      .set('X-Qwen-Client-Id', 'missing')
+      .expect(400)
+      .expect((res) => expect(res.body.code).toBe('invalid_client_id'));
   });
 
   it('does not expose client-owned task status to other clients', async () => {
@@ -304,7 +309,7 @@ describe('workspace memory remember routes', () => {
       .expect(200);
   });
 
-  it('allows the original owner to poll after the client detaches', async () => {
+  it('rejects task polling after the client detaches', async () => {
     const knownIds = new Set(['client-1']);
     const bridge = buildBridgeStub({ knownIds });
     const app = buildApp(bridge);
@@ -320,7 +325,8 @@ describe('workspace memory remember routes', () => {
     await request(app)
       .get(`/workspace/memory/remember/${post.body.taskId}`)
       .set('X-Qwen-Client-Id', 'client-1')
-      .expect(200);
+      .expect(400)
+      .expect((res) => expect(res.body.code).toBe('invalid_client_id'));
   });
 
   it('rejects new tasks when the hidden remember queue is full', async () => {

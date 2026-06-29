@@ -190,6 +190,12 @@ describe('remember memory helper', () => {
       filesTouched: [projectFile],
       touchedScopes: ['project'],
     });
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      extraHistory?: unknown[];
+      preserveEmptyExtraHistory?: boolean;
+    };
+    expect(params.extraHistory).toBeUndefined();
+    expect(params.preserveEmptyExtraHistory).toBe(false);
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 

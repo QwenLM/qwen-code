@@ -6,6 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
 import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { buildManagedAutoMemoryPrompt } from './prompt.js';
@@ -23,6 +24,8 @@ import {
   createMemoryScopedAgentConfig,
   isAllowedMemoryPath,
 } from './memory-scoped-agent-config.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_REMEMBER');
 
 export type WorkspaceRememberContextMode = 'workspace' | 'clean';
 export type WorkspaceRememberScope = 'user' | 'project';
@@ -194,10 +197,11 @@ export async function runManagedRememberByAgent(params: {
       ? rebuildManagedAutoMemoryIndex(params.projectRoot)
       : Promise.resolve(),
     touchedScopes.includes('user')
-      ? rebuildUserAutoMemoryIndex().catch(() => {
+      ? rebuildUserAutoMemoryIndex().catch((err: unknown) => {
           // Mirrors existing managed-memory behavior: user memory is useful
           // when available, but project memory writes should not fail because
           // ~/.qwen/memories cannot be indexed.
+          debugLogger.error('User memory index rebuild failed:', err);
         })
       : Promise.resolve(),
   ]);
