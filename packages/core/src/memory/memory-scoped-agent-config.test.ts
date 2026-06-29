@@ -139,6 +139,23 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('allow');
   });
 
+  it('allows memory paths with dot-prefixed names inside memory roots', async () => {
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(
+          getAutoMemoryRoot(projectRoot),
+          '..topic',
+          'fact.md',
+        ),
+      }),
+    ).resolves.toBe('allow');
+  });
+
   it('denies memory-root symlinks that resolve outside memory', async () => {
     const outsideDir = path.join(tempDir, 'outside');
     await fs.mkdir(outsideDir, { recursive: true });
@@ -173,6 +190,7 @@ describe('createMemoryScopedAgentConfig', () => {
     const disabled = permissionManager(
       createMemoryScopedAgentConfig({} as Config, projectRoot),
     );
+    await expect(disabled.isToolEnabled(ToolNames.SHELL)).resolves.toBe(false);
     await expect(
       disabled.evaluate({
         toolName: ToolNames.SHELL,
@@ -185,6 +203,7 @@ describe('createMemoryScopedAgentConfig', () => {
         allowShell: true,
       }),
     );
+    await expect(enabled.isToolEnabled(ToolNames.SHELL)).resolves.toBe(true);
     await expect(
       enabled.evaluate({
         toolName: ToolNames.SHELL,

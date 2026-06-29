@@ -43,7 +43,7 @@ function isScopedTool(
         toolName === ToolNames.LS)) ||
     toolName === ToolNames.EDIT ||
     toolName === ToolNames.WRITE_FILE ||
-    (opts.allowShell && toolName === ToolNames.SHELL)
+    toolName === ToolNames.SHELL
   );
 }
 
@@ -113,7 +113,10 @@ function realpathOrResolved(filePath: string): string {
 
 function isWithinRoot(filePath: string, root: string): boolean {
   const rel = path.relative(root, filePath);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  return (
+    rel === '' ||
+    (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
+  );
 }
 
 async function evaluateScopedDecision(
@@ -227,6 +230,9 @@ export function createMemoryScopedAgentConfig(
       return mergePermissionDecision(scopedDecision, baseDecision);
     },
     async isToolEnabled(toolName: string): Promise<boolean> {
+      if (toolName === ToolNames.SHELL) {
+        return opts.allowShell;
+      }
       if (isScopedTool(toolName, opts)) {
         return true;
       }
