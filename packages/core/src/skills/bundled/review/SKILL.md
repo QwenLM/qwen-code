@@ -560,10 +560,21 @@ Rationale: Suggestion-level findings are recommended improvements, not merge blo
 }
 ````
 
+For Suggestion-only reviews (no Critical findings), use `event=COMMENT` with an empty `comments` array and a pointer to the suggestion summary:
+
+```json
+{
+  "commit_id": "{commit_sha}",
+  "event": "COMMENT",
+  "body": "Reviewed — no blockers. Suggestion-level recommendations are in the **Suggestion summary** comment below.",
+  "comments": []
+}
+```
+
 Rules:
 
 - `event`: `APPROVE` (no Critical), `REQUEST_CHANGES` (has Critical). When the review has Suggestion-level findings but **no** Critical, use `event=COMMENT`. Do NOT use `COMMENT` when there are Critical findings. **Apply downgrade decisions from the presubmit JSON above**: if `downgradeApprove=true`, submit `COMMENT` instead of `APPROVE`; if `downgradeRequestChanges=true`, submit `COMMENT` instead of `REQUEST_CHANGES`. The Critical content still appears in inline `comments` regardless, so substantive feedback is preserved.
-- `body`: **empty `""`** when there are inline Critical comments. When the review is submitted as `COMMENT` with an empty `comments` array (Suggestion-only case), put a one-line pointer: `Reviewed — no blockers. Suggestion-level recommendations are in the **Suggestion summary** comment below.` Never put section headers, "Review Summary", or analysis in body.
+- `body`: **empty `""`** when there are inline Critical comments, unless a Critical finding genuinely cannot be mapped to a diff line (whole-PR observation — put it in body as a last resort). When the review is submitted as `COMMENT` with an empty `comments` array (Suggestion-only case), put a one-line pointer: `Reviewed — no blockers. Suggestion-level recommendations are in the **Suggestion summary** comment below.` Never put section headers, "Review Summary", or analysis in body.
 - `comments`: **ONLY** high-confidence Critical findings. Skip Suggestion (routed to the suggestion summary below), Nice to have, and low-confidence. Each must reference a line in the diff.
 - Comment body format: `**[Critical]** description\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_`
 - The model name is declared at the top of this prompt. You MUST include it in every footer. Do NOT omit the model name.
@@ -592,7 +603,7 @@ After submitting the review, publish the Suggestion-level findings as a single u
 
    - If no prior summary exists and there are no suggestions, SKIP this step entirely.
 
-2. Write the summary body to `.qwen/tmp/qwen-review-{target}-suggestions.md`. It MUST begin with the marker exactly as shown — `post-suggestions` uses it to locate and PATCH the existing comment rather than create a duplicate:
+2. Write the summary body to `.qwen/tmp/qwen-review-{target}-suggestions.md`. It MUST contain the marker (typically as the first line) — `post-suggestions` uses it to locate and PATCH the existing comment rather than create a duplicate:
 
    ```markdown
    <!-- qwen-review-suggestion-summary -->

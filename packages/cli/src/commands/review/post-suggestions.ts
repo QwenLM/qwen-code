@@ -171,7 +171,7 @@ export const postSuggestionsCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe:
-          'Path to the Markdown body for the suggestion summary (must begin with the summary marker)',
+          'Path to the Markdown body for the suggestion summary (must contain the summary marker)',
       })
       .option('out', {
         type: 'string',
