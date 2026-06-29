@@ -220,7 +220,7 @@ export const Footer: React.FC = () => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (
             <Text color={theme.text.accent} wrap="truncate">
-              {`⚙ ${t('workflow active')}`}
+              {`▷ ${t('workflow active')}`}
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>

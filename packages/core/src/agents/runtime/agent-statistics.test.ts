@@ -124,7 +124,7 @@ describe('AgentStatistics', () => {
 
       expect(result).toContain('▸ Task Completed: Test task');
       expect(result).toContain('● Tool Usage: 1 calls, 100.0% success');
-      expect(result).toContain(' ● Duration: 5.0s | ● Rounds: 2');
+      expect(result).toContain('● Duration: 5.0s | ● Rounds: 2');
       expect(result).toContain('● Tokens: 1,520 (in 1000, out 500)');
     });
 

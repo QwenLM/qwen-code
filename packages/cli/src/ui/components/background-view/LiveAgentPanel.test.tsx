@@ -319,11 +319,11 @@ describe('<LiveAgentPanel />', () => {
     });
     const frame = lastFrame() ?? '';
     expect(frame).toContain('main');
-    expect(frame).toContain('‖');
+    expect(frame).toContain('⏸');
   });
 
   it.each([
-    ['paused', '‖'],
+    ['paused', '⏸'],
     ['failed', '✖'],
     ['cancelled', '✖'],
   ] as const)('renders the %s status with the %s glyph', (status, glyph) => {

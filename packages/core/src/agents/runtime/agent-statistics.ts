@@ -129,7 +129,7 @@ export class AgentStatistics {
     const lines = [
       `▸ Task Completed: ${taskDesc}`,
       `● Tool Usage: ${stats.totalToolCalls} calls${stats.totalToolCalls ? `, ${sr.toFixed(1)}% success` : ''}`,
-      ` ● Duration: ${this.fmtDuration(stats.totalDurationMs)} | ● Rounds: ${stats.rounds}`,
+      `● Duration: ${this.fmtDuration(stats.totalDurationMs)} | ● Rounds: ${stats.rounds}`,
     ];
     if (typeof stats.totalTokens === 'number') {
       const parts = [
@@ -153,7 +153,7 @@ export class AgentStatistics {
     const lines: string[] = [];
     lines.push(`▸ Task Completed: ${taskDesc}`);
     lines.push(
-      ` ● Duration: ${this.fmtDuration(stats.totalDurationMs)} | ● Rounds: ${stats.rounds}`,
+      `● Duration: ${this.fmtDuration(stats.totalDurationMs)} | ● Rounds: ${stats.rounds}`,
     );
     // Quality indicator
     let quality = 'Poor execution';

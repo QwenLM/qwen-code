@@ -110,7 +110,7 @@ function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
     case 'running':
       return { glyph: '○', color: theme.status.warning };
     case 'paused':
-      return { glyph: '‖', color: theme.status.warning };
+      return { glyph: '⏸', color: theme.status.warning };
     case 'completed':
       return { glyph: '✔', color: theme.status.success };
     case 'failed':
@@ -484,7 +484,7 @@ const AgentRow: React.FC<{
   //         ^ flex-shrink:1              ^ flex-shrink:0
   //         truncate-end                 always intact
   //
-  // - Status glyph at the left (`○` for live slots, ✔/✖/‖ for
+  // - Status glyph at the left (`○` for live slots, ✔/✖/⏸ for
   //   terminal — see `statusIcon`).
   // - `type:` prefix when not the default `general-purpose`.
   // - Activity wrapped in parentheses so it reads as an annotation

@@ -41,7 +41,8 @@ A test server
 exports[`McpStatus > renders correctly with a connecting server 1`] = `
 "Configured MCP servers:
 
-● server-1 - Ready (1 tool)
+◐ server-1 - Starting... (first startup may take longer)
+ (tools and prompts will appear when ready)
 A test server
   Tools:
   - tool-1
