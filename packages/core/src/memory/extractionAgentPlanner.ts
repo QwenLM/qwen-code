@@ -17,7 +17,6 @@ import {
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
-  getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
 import type { AutoMemoryType } from './types.js';

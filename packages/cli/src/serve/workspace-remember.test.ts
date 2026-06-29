@@ -13,7 +13,7 @@ import type {
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
-import type { BridgeEvent } from './event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { mountWorkspaceMemoryRememberRoutes } from './workspace-remember.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
