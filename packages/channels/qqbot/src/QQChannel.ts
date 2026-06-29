@@ -1099,6 +1099,10 @@ export class QQChannel extends ChannelBase {
         // readyTimeout was cleared by the first READY handler; without this,
         // an INVALID_SESSION re-IDENTIFY that never gets a response will
         // hang forever with no timeout to trigger a reconnect.
+        if (this.readyTimeout) {
+          clearTimeout(this.readyTimeout);
+          this.readyTimeout = null;
+        }
         this.readyTimeout = setTimeout(() => {
           if (
             this.ws &&
