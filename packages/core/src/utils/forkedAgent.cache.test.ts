@@ -88,26 +88,33 @@ describe('CacheSafeParams', () => {
       expect(savedTools[0].functionDeclarations).toHaveLength(1);
     });
 
-    it('shallow copies history arrays without cloning entries', () => {
+    it('copies history containers without cloning part payloads', () => {
+      const historyPart = { text: 'large history entry' };
       const historyEntry: Content = {
         role: 'user',
-        parts: [{ text: 'large history entry' }],
+        parts: [historyPart],
       };
       const history: Content[] = [historyEntry];
 
       saveCacheSafeParams({}, history, 'model');
       history.push({ role: 'model', parts: [{ text: 'late mutation' }] });
+      historyEntry.parts!.push({ text: 'late part mutation' });
 
       const params = getCacheSafeParams();
       expect(params!.history).toHaveLength(1);
       expect(params!.history).not.toBe(history);
-      expect(params!.history[0]).toBe(historyEntry);
+      expect(params!.history[0]).not.toBe(historyEntry);
+      expect(params!.history[0]!.parts).toHaveLength(1);
+      expect(params!.history[0]!.parts).not.toBe(historyEntry.parts);
+      expect(params!.history[0]!.parts![0]).toBe(historyPart);
 
       params!.history.push({
         role: 'model',
         parts: [{ text: 'returned mutation' }],
       });
+      params!.history[0]!.parts!.push({ text: 'returned part mutation' });
       expect(getCacheSafeParams()!.history).toHaveLength(1);
+      expect(getCacheSafeParams()!.history[0]!.parts).toHaveLength(1);
     });
   });
 

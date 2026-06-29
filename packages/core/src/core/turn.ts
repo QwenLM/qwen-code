@@ -39,6 +39,7 @@ import type { ActiveGoal } from '../goals/activeGoalStore.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
+const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -134,10 +135,20 @@ function countRequestParts(req: PartListUnion): number {
 function summarizeHistoryEntry(content: Content): {
   role: string | undefined;
   partCount: number;
+  functionNames: string[];
+  textPreview: string;
 } {
+  const parts = content.parts ?? [];
   return {
     role: content.role,
-    partCount: content.parts?.length ?? 0,
+    partCount: parts.length,
+    functionNames: parts
+      .map((part) => part.functionCall?.name ?? part.functionResponse?.name)
+      .filter((name): name is string => typeof name === 'string'),
+    textPreview: parts
+      .map((part) => (typeof part.text === 'string' ? part.text : ''))
+      .join('')
+      .slice(0, ERROR_REPORT_TEXT_PREVIEW_CHARS),
   };
 }
 

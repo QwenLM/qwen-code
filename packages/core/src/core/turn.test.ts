@@ -399,7 +399,14 @@ describe('Turn', () => {
         {
           history: {
             length: 1,
-            tail: [{ role: 'model', partCount: 1 }],
+            tail: [
+              {
+                role: 'model',
+                partCount: 1,
+                functionNames: [],
+                textPreview: 'Previous history',
+              },
+            ],
           },
           request: { partCount: 1 },
         },
@@ -449,8 +456,18 @@ describe('Turn', () => {
           history: {
             length: 100,
             tail: [
-              { role: 'user', partCount: 1 },
-              { role: 'model', partCount: 1 },
+              {
+                role: 'user',
+                partCount: 1,
+                functionNames: ['tool'],
+                textPreview: '',
+              },
+              {
+                role: 'model',
+                partCount: 1,
+                functionNames: [],
+                textPreview: largeText.slice(0, 200),
+              },
             ],
           },
           request: { partCount: 1 },
