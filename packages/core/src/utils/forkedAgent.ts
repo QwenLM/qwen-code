@@ -129,10 +129,9 @@ export function clearCacheSafeParams(): void {
 // ---------------------------------------------------------------------------
 
 /** Per-request config that strips tools so the model never produces function calls. */
-const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
-  GenerateContentConfig,
-  'tools'
->;
+const NO_TOOLS = Object.freeze({
+  tools: [] as const,
+}) satisfies Pick<GenerateContentConfig, 'tools'>;
 
 /**
  * Create an isolated GeminiChat that shares the main conversation's

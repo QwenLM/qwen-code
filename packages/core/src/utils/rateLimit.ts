@@ -175,43 +175,38 @@ interface ProviderErrorPayload {
   requestId?: string;
 }
 
+function isProviderErrorPayload(obj: unknown): obj is ProviderErrorPayload {
+  return typeof obj === 'object' && obj !== null;
+}
+
 function getProviderErrorPayload(error: unknown): ProviderErrorPayload | null {
   for (const payload of getJsonPayloads(error)) {
     if (typeof payload !== 'object' || payload === null) continue;
 
-    const direct = payload as {
-      code?: unknown;
-      message?: unknown;
-      request_id?: unknown;
-      requestId?: unknown;
-    };
+    const direct = isProviderErrorPayload(payload) ? payload : undefined;
     const nestedError = (payload as { error?: unknown }).error;
     const nested =
       typeof nestedError === 'object' && nestedError !== null
-        ? (nestedError as {
-            code?: unknown;
-            message?: unknown;
-            request_id?: unknown;
-            requestId?: unknown;
-          })
+        ? isProviderErrorPayload(nestedError)
+          ? nestedError
+          : undefined
         : undefined;
     const source = nested ?? direct;
     const code =
-      typeof source.code === 'string' || typeof source.code === 'number'
+      source !== undefined &&
+      (typeof source.code === 'string' || typeof source.code === 'number')
         ? source.code
         : undefined;
     const message =
-      typeof source.message === 'string' ? source.message : undefined;
+      source !== undefined && typeof source.message === 'string'
+        ? source.message
+        : undefined;
     const requestId =
-      typeof source.request_id === 'string'
-        ? source.request_id
-        : typeof source.requestId === 'string'
-          ? source.requestId
-          : typeof direct.request_id === 'string'
-            ? direct.request_id
-            : typeof direct.requestId === 'string'
-              ? direct.requestId
-              : undefined;
+      source !== undefined && typeof source.requestId === 'string'
+        ? source.requestId
+        : direct !== undefined && typeof direct.requestId === 'string'
+          ? direct.requestId
+          : undefined;
 
     if (
       code !== undefined ||
