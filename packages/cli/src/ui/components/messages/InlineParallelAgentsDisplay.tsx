@@ -321,6 +321,11 @@ export const InlineParallelAgentsDisplay: React.FC<
           </Text>
         </Box>
       )}
+      {/* INVARIANT: each AgentRow must render exactly 1 terminal line. The
+          height backstop above (rowsFit = budget - 2) counts one line per row;
+          if AgentRow ever grows to multiple lines the frame would exceed the
+          budget and re-trigger the shouldClearTerminalForFrame snap-back this
+          guards against. Enforced by the wrap="truncate-end" Texts in AgentRow. */}
       {visibleRows.map((row) => (
         <AgentRow key={row.agentId} row={row} now={now} />
       ))}
@@ -328,6 +333,10 @@ export const InlineParallelAgentsDisplay: React.FC<
   );
 };
 
+// INVARIANT: must render exactly ONE terminal line. The parent's height
+// backstop (rowsFit = availableTerminalHeight - 2) assumes one line per row;
+// all Text elements below use wrap="truncate-end" to hold that. Do not add
+// wrapping/multi-line content here without revisiting that windowing math.
 const AgentRow: React.FC<{ row: RowData; now: number }> = ({ row, now }) => {
   const { glyph, color } = statusGlyph(row.status);
   const safeName = escapeAnsiCtrlCodes(row.name);
