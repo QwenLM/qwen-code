@@ -5,9 +5,10 @@
  */
 
 import type { FC } from 'react';
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useFrameCoalescedFlush } from '../hooks/use-frame-coalesced-flush.js';
 import { useKeypress, type Key } from '../hooks/useKeypress.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
@@ -66,6 +67,17 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({
     [maxScroll],
   );
 
+  // Coalesce wheel bursts to one update per frame, mirroring ScrollableList —
+  // each wheel event re-renders the modal, so an un-batched brisk spin stutters.
+  const pendingWheelDelta = useRef(0);
+  const { schedule: scheduleWheelFlush } = useFrameCoalescedFlush(
+    useCallback(() => {
+      const delta = pendingWheelDelta.current;
+      pendingWheelDelta.current = 0;
+      if (delta !== 0) scrollBy(delta);
+    }, [scrollBy]),
+  );
+
   useKeypress(
     useCallback(
       (key: Key) => {
@@ -97,12 +109,14 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({
     useCallback(
       (event: MouseEvent) => {
         if (event.name === 'scroll-up') {
-          scrollBy(-WHEEL_LINES);
+          pendingWheelDelta.current -= WHEEL_LINES;
+          scheduleWheelFlush();
         } else if (event.name === 'scroll-down') {
-          scrollBy(WHEEL_LINES);
+          pendingWheelDelta.current += WHEEL_LINES;
+          scheduleWheelFlush();
         }
       },
-      [scrollBy],
+      [scheduleWheelFlush],
     ),
     { isActive: true },
   );

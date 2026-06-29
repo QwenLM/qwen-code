@@ -4,19 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  useRef,
-  forwardRef,
-  useImperativeHandle,
-  useCallback,
-  useEffect,
-} from 'react';
+import { useRef, forwardRef, useImperativeHandle, useCallback } from 'react';
 import type React from 'react';
 import {
   VirtualizedList,
   type VirtualizedListRef,
   type VirtualizedListProps,
 } from './VirtualizedList.js';
+import { useFrameCoalescedFlush } from '../../hooks/use-frame-coalesced-flush.js';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
@@ -114,19 +109,14 @@ function ScrollableList<T>(
   // Terminal mouse reporting emits one event per row the pointer crosses, so a
   // brisk wheel spin or scrollbar drag fires a rapid burst. Applying each event
   // synchronously forced one Ink reflow + terminal flush per event — the source
-  // of the "一顿一顿" stutter. Coalesce a burst into a single viewport update per
-  // frame: accumulate the intent in refs and flush on a short timer. A drag is
+  // of the "一顿一顿" stutter. Accumulate the intent in refs and let
+  // useFrameCoalescedFlush apply the latest at most once per frame. A drag is
   // absolute (snap to the newest row); a wheel burst is relative (sum the
-  // ticks); a drag in the same window wins. Tests drive real timers and only
-  // await microtasks, so apply synchronously under NODE_ENV==='test' (the same
-  // escape hatch VirtualizedList uses for its readiness gate).
-  const SCROLL_FRAME_MS = 16;
+  // ticks); a drag in the same window wins.
   const pendingWheelDelta = useRef(0);
   const pendingDragRow = useRef<number | null>(null);
-  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const applyPendingScroll = useCallback(() => {
-    flushTimer.current = null;
     const list = virtualizedListRef.current;
     const dragRow = pendingDragRow.current;
     const wheelDelta = pendingWheelDelta.current;
@@ -142,34 +132,18 @@ function ScrollableList<T>(
     }
   }, []);
 
-  const scheduleScrollFlush = useCallback(() => {
-    if (process.env['NODE_ENV'] === 'test') {
-      applyPendingScroll();
-      return;
-    }
-    if (flushTimer.current !== null) return;
-    flushTimer.current = setTimeout(applyPendingScroll, SCROLL_FRAME_MS);
-  }, [applyPendingScroll]);
+  const { schedule: scheduleScrollFlush, cancel: cancelScrollFlush } =
+    useFrameCoalescedFlush(applyPendingScroll);
 
   // Discard any queued wheel/drag intent and cancel an in-flight flush. Used
   // when a scrollbar press takes over: without it, a wheel burst scheduled
-  // moments earlier would still fire its timer and `scrollBy` the view away
-  // from the row the user just clicked.
+  // moments earlier would still fire and `scrollBy` the view away from the row
+  // the user just clicked.
   const cancelPendingScroll = useCallback(() => {
     pendingWheelDelta.current = 0;
     pendingDragRow.current = null;
-    if (flushTimer.current !== null) {
-      clearTimeout(flushTimer.current);
-      flushTimer.current = null;
-    }
-  }, []);
-
-  useEffect(
-    () => () => {
-      if (flushTimer.current !== null) clearTimeout(flushTimer.current);
-    },
-    [],
-  );
+    cancelScrollFlush();
+  }, [cancelScrollFlush]);
 
   const handleMouseEvent = useCallback(
     (event: MouseEvent) => {
