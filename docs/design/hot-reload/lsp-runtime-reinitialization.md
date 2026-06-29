@@ -204,7 +204,8 @@ Flow:
    servers; preserve document state for unchanged servers.
 
 `.lsp.json` parse failures need special handling: do not treat parse failure as
-empty config. The watcher or loader should return a parse-failed state;
+empty config. The watcher should report an invalid-config event so the CLI can
+show a user-visible error, but it must not call `reinitialize()` for that event.
 `reinitialize()` should preserve the old runtime state, skip reconcile, and
 write the error to status/logs. Only deleting the file, or parsing a valid empty
 JSON config, means the desired config is empty.
@@ -216,7 +217,7 @@ interface LspServiceReinitializeResult {
   reconcile: LspReconcileResult;
   skipped: Array<{
     name: string;
-    reason: 'not_allowed' | 'workspace_untrusted' | 'server_trust_required';
+    reason: 'workspace_untrusted' | 'server_trust_required';
   }>;
 }
 ```
@@ -291,13 +292,16 @@ filterLspServerConfigs(configs, {
   admitted: LspServerConfig[];
   skipped: Array<{
     name: string;
-    reason: 'not_allowed' | 'workspace_untrusted' | 'server_trust_required';
+    reason: 'workspace_untrusted' | 'server_trust_required';
   }>;
 }
 ```
 
-Even though there is no LSP approval store today, this helper makes the security
-boundary explicit and leaves room for future hash-based approval gates.
+Even though there is no LSP approval store or CLI allow-list today, this helper
+makes the security boundary explicit and leaves room for future hash-based
+approval gates. If a future `--allowed-lsp-server-names` flag is added, it
+should add a `not_allowed` skipped reason at that time instead of carrying an
+unwired allow-list path in v1.
 
 Trust semantics must match the current startup path:
 
@@ -324,9 +328,10 @@ with a smaller responsibility:
 - debounce for 300 ms;
 - compare `.lsp.json` before/after using parse + canonicalize so formatting-only
   changes do not trigger reload;
-- on parse failure, do not notify the reload listener; preserve the old runtime
-  state and log the parse error. File deletion is a separate event and should
-  notify the reload listener, producing empty workspace config;
+- on parse failure, notify the listener with an invalid-config event for
+  user-visible feedback, but do not trigger LSP reinitialization. Preserve the
+  old runtime state and log the parse error. File deletion is a separate event
+  and should notify the reload listener, producing empty workspace config;
 - run callbacks serially;
 - use listener timeout and failure isolation matching `SettingsWatcher`.
 
@@ -436,7 +441,8 @@ real language servers.
 - detects create/modify/delete;
 - ignores unrelated files;
 - ignores formatting-only changes after canonical parse;
-- parse failure does not trigger the reload listener and records an error;
+- parse failure emits an invalid-config notification for user-visible feedback
+  and does not trigger LSP reinitialization;
 - deleting `.lsp.json` triggers the reload listener;
 - duplicate file events are debounced;
 - slow listeners run serially;

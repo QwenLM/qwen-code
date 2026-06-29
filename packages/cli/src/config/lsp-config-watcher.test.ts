@@ -10,9 +10,31 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { LspConfigWatcher } from './lsp-config-watcher.js';
 
+// Keep chokidar fully in-process so watcher lifecycle tests can trigger file
+// events deterministically without arming real filesystem watchers.
+const chokidarMock = vi.hoisted(() => {
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const watcher = {
+    on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      handlers.set(event, handler);
+      return watcher;
+    }),
+    close: vi.fn(async () => {}),
+  };
+  return {
+    handlers,
+    watch: vi.fn(() => watcher),
+    watcher,
+  };
+});
+
 const debugLoggerMock = vi.hoisted(() => ({
   info: vi.fn(),
   warn: vi.fn(),
+}));
+
+vi.mock('chokidar', () => ({
+  watch: chokidarMock.watch,
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
@@ -20,9 +42,13 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   createDebugLogger: vi.fn(() => debugLoggerMock),
 }));
 
+// The watcher intentionally keeps its refresh pipeline private. These tests
+// exercise it directly to cover semantic diffing and timeout behavior without
+// waiting on real chokidar scheduling.
 type TestableWatcher = {
   listener?: (event: unknown) => void | Promise<void>;
   handleChange(): Promise<void>;
+  notifyListener(event: unknown): Promise<void>;
 };
 
 const tempDirs: string[] = [];
@@ -35,7 +61,9 @@ function makeTempDir(): string {
 
 describe('LspConfigWatcher', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
+    chokidarMock.handlers.clear();
     for (const dir of tempDirs.splice(0)) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -75,7 +103,9 @@ describe('LspConfigWatcher', () => {
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
-  it('does not notify on parse failure and notifies on later deletion', async () => {
+  // Invalid JSON should be visible to the user, but it must not replace the
+  // current runtime state. A later delete still needs to reconcile to empty.
+  it('notifies invalid config and notifies on later deletion', async () => {
     const dir = makeTempDir();
     const configPath = path.join(dir, '.lsp.json');
     fs.writeFileSync(configPath, '{"typescript":{"command":"tsserver"}}');
@@ -85,7 +115,12 @@ describe('LspConfigWatcher', () => {
 
     fs.writeFileSync(configPath, '{');
     await watcher.handleChange();
-    expect(listener).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledWith({
+      path: configPath,
+      changeType: 'invalid',
+      error:
+        'Invalid JSON in .lsp.json; existing LSP runtime state is unchanged.',
+    });
 
     fs.unlinkSync(configPath);
     await watcher.handleChange();
@@ -93,5 +128,45 @@ describe('LspConfigWatcher', () => {
       path: configPath,
       changeType: 'deleted',
     });
+  });
+
+  it('debounces duplicate filesystem events', async () => {
+    vi.useFakeTimers();
+    const dir = makeTempDir();
+    const configPath = path.join(dir, '.lsp.json');
+    const watcher = new LspConfigWatcher(dir);
+    const listener = vi.fn();
+    watcher.startWatching(listener);
+    const onAll = chokidarMock.handlers.get('all');
+    expect(onAll).toBeDefined();
+
+    fs.writeFileSync(configPath, '{"typescript":{"command":"tsserver"}}');
+    onAll?.('add', configPath);
+    onAll?.('change', configPath);
+    await vi.advanceTimersByTimeAsync(LspConfigWatcher.DEBOUNCE_MS);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    watcher.stopWatching();
+  });
+
+  // Listener timeout is the isolation boundary between file watching and the
+  // running CLI session: a hung reload callback should be logged and swallowed.
+  it('times out a hanging listener without throwing', async () => {
+    vi.useFakeTimers();
+    const dir = makeTempDir();
+    const watcher = new LspConfigWatcher(dir) as unknown as TestableWatcher;
+    watcher.listener = vi.fn(() => new Promise<void>(() => {}));
+
+    const notifyPromise = watcher.notifyListener({
+      path: path.join(dir, '.lsp.json'),
+      changeType: 'modified',
+    });
+    await vi.advanceTimersByTimeAsync(LspConfigWatcher.LISTENER_TIMEOUT_MS);
+    await expect(notifyPromise).resolves.toBeUndefined();
+
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'LSP config change listener error:',
+      expect.any(Error),
+    );
   });
 });

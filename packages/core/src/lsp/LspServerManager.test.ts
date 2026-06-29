@@ -186,6 +186,52 @@ describe('LspServerManager', () => {
         'clangd-next',
       );
     });
+
+    it('waits for a server startup before removing it', async () => {
+      const { manager, privateView } = createReconcileManager();
+      manager.setServerConfigs([serverConfig]);
+      const handle = manager.getHandles().get('clangd');
+      expect(handle).toBeDefined();
+      let resolveStartup!: () => void;
+      handle!.startingPromise = new Promise<void>((resolve) => {
+        resolveStartup = resolve;
+      });
+
+      const reconcile = manager.reconcileServerConfigs([]);
+      await Promise.resolve();
+      expect(privateView.stopServer).not.toHaveBeenCalled();
+
+      resolveStartup();
+      await reconcile;
+
+      expect(privateView.stopServer).toHaveBeenCalledOnce();
+      expect(manager.getHandles().has('clangd')).toBe(false);
+    });
+
+    it('stopAll waits for an active reconcile before clearing handles', async () => {
+      const { manager, privateView } = createReconcileManager();
+      let resolveStart!: () => void;
+      vi.mocked(privateView.startServer).mockImplementation(
+        async (_name, handle) => {
+          await new Promise<void>((resolve) => {
+            resolveStart = resolve;
+          });
+          (handle as { status: string }).status = 'READY';
+        },
+      );
+
+      const reconcile = manager.reconcileServerConfigs([serverConfig]);
+      await Promise.resolve();
+      const stopAll = manager.stopAll();
+      await Promise.resolve();
+
+      expect(manager.getHandles().has('clangd')).toBe(true);
+      resolveStart();
+      await Promise.all([reconcile, stopAll]);
+
+      expect(privateView.stopServer).toHaveBeenCalledOnce();
+      expect(manager.getHandles().size).toBe(0);
+    });
   });
 
   describe('isPathSafe', () => {
@@ -315,6 +361,9 @@ describe('LspServerManager', () => {
     expect(process.kill).toHaveBeenCalledOnce();
     expect(manager.getHandles().get('clangd')?.connection).toBeUndefined();
     expect(manager.getHandles().get('clangd')?.process).toBeUndefined();
+    expect(
+      manager.getHandles().get('clangd')?.processDiagnostics,
+    ).toBeUndefined();
     expect(debugLoggerMock.error).toHaveBeenCalledWith(
       'LSP server clangd process diagnostics:',
       processDiagnostics,
@@ -322,6 +371,24 @@ describe('LspServerManager', () => {
     expect(debugLoggerMock.error).toHaveBeenCalledWith(
       'LSP server clangd failed to start:',
       expect.any(Error),
+    );
+  });
+
+  it('logs when workspace trust check blocks startup', async () => {
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(false);
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+
+    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'Workspace trust check failed, not starting LSP server clangd',
     );
   });
 
@@ -361,6 +428,26 @@ describe('LspServerManager', () => {
     await manager.stopAll();
 
     expect(connection.shutdown).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('ends the connection when shutdown timeout fires', async () => {
+    vi.useFakeTimers();
+    const manager = createTrustedManager();
+    const connection = createMockConnection({
+      shutdown: vi.fn(() => new Promise<void>(() => {})),
+    });
+    manager.setServerConfigs([{ ...serverConfig, shutdownTimeout: 30_000 }]);
+    const handle = manager.getHandles().get('clangd');
+    expect(handle).toBeDefined();
+    handle!.connection = connection;
+    handle!.status = 'READY';
+
+    const stopAll = manager.stopAll();
+    await vi.advanceTimersByTimeAsync(30_000);
+    await stopAll;
+
+    expect(connection.end).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
 });

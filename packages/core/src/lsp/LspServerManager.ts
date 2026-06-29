@@ -39,9 +39,18 @@ export interface LspServerManagerOptions {
   workspaceRoot: string;
 }
 
+/**
+ * Owns the per-session lifecycle of configured LSP servers.
+ *
+ * The manager is deliberately session-local: it stores one handle per server
+ * name, starts/stops subprocess or socket-backed connections, and reconciles
+ * config changes without replacing unchanged handles. Callers must pass only
+ * configs that have already passed service-level admission checks.
+ */
 export class LspServerManager {
   private serverHandles: Map<string, LspServerHandle> = new Map();
   private serverConfigHashes: Map<string, string> = new Map();
+  /** Serializes hot-reload reconcile calls so stop/start operations do not race. */
   private reconcileQueue: Promise<unknown> = Promise.resolve();
   private requireTrustedWorkspace: boolean;
   private workspaceRoot: string;
@@ -73,6 +82,7 @@ export class LspServerManager {
     );
   }
 
+  /** Drops all prepared handles without attempting process shutdown. */
   clearServerHandles(): void {
     if (this.serverHandles.size > 0) {
       debugLogger.info(
@@ -103,7 +113,14 @@ export class LspServerManager {
     }
   }
 
+  /**
+   * Stops every server after any in-flight reconcile has drained.
+   *
+   * This prevents shutdown from clearing handles while a queued reconcile is
+   * still able to start a new process.
+   */
   async stopAll(): Promise<void> {
+    await this.reconcileQueue;
     for (const [name, handle] of Array.from(this.serverHandles)) {
       await this.stopServer(name, handle);
     }
@@ -114,12 +131,22 @@ export class LspServerManager {
   async reconcileServerConfigs(
     configs: LspServerConfig[],
   ): Promise<LspReconcileResult> {
+    // Keep the returned promise as the caller-visible result, but store a
+    // swallowed version in the queue so one failed reconcile does not poison
+    // every future hot reload.
     const run = async () => this.doReconcileServerConfigs(configs);
     const next = this.reconcileQueue.then(run, run);
     this.reconcileQueue = next.catch(() => undefined);
     return next;
   }
 
+  /**
+   * Applies a desired config set incrementally.
+   *
+   * Hashes identify semantic config changes. Unchanged servers keep their
+   * existing connection and warm state; removed or changed servers are stopped
+   * before their handles are deleted or replaced.
+   */
   private async doReconcileServerConfigs(
     configs: LspServerConfig[],
   ): Promise<LspReconcileResult> {
@@ -287,7 +314,8 @@ export class LspServerManager {
     name: string,
     handle: LspServerHandle,
   ): Promise<void> {
-    // If already starting, wait for the existing promise
+    // A handle can be reached by startAll(), reconcile, or crash restart. Share
+    // one startup promise so concurrent callers cannot spawn duplicate servers.
     if (handle.startingPromise) {
       return handle.startingPromise;
     }
@@ -297,7 +325,6 @@ export class LspServerManager {
     }
     handle.stopRequested = false;
 
-    // Create a promise to lock concurrent calls
     handle.startingPromise = this.doStartServer(name, handle).finally(() => {
       handle.startingPromise = undefined;
     });
@@ -306,7 +333,11 @@ export class LspServerManager {
   }
 
   /**
-   * Internal method that performs the actual server startup.
+   * Performs startup after the per-handle startup lock is installed.
+   *
+   * All admission and command safety checks happen before process creation.
+   * If creation or initialize fails after resources exist, the catch path tears
+   * them down and leaves a FAILED handle for status reporting.
    *
    * @param name - The name of the LSP server
    * @param handle - The LSP server handle
@@ -334,6 +365,9 @@ export class LspServerManager {
       workspaceTrusted,
     );
     if (!trusted) {
+      debugLogger.warn(
+        `Workspace trust check failed, not starting LSP server ${name}`,
+      );
       handle.status = 'FAILED';
       return;
     }
@@ -395,20 +429,21 @@ export class LspServerManager {
       handle.status = 'FAILED';
       handle.error = error as Error;
       await this.releaseServerResources(name, handle, false);
-      handle.connection = undefined;
-      handle.process = undefined;
       if (handle.processDiagnostics) {
         debugLogger.error(
           `LSP server ${name} process diagnostics:`,
           handle.processDiagnostics,
         );
       }
+      handle.connection = undefined;
+      handle.process = undefined;
+      handle.processDiagnostics = undefined;
       debugLogger.error(`LSP server ${name} failed to start:`, error);
     }
   }
 
   /**
-   * Stop individual LSP server
+   * Stops a server and resets runtime-only handle state.
    */
   private async stopServer(
     name: string,
@@ -432,6 +467,8 @@ export class LspServerManager {
     handle: LspServerHandle,
     graceful: boolean,
   ): Promise<void> {
+    // Connection teardown and process kill are separate on purpose: a broken
+    // pipe during end()/shutdown() must not prevent killing an owned process.
     if (handle.connection) {
       try {
         if (graceful) {
@@ -473,6 +510,8 @@ export class LspServerManager {
         await shutdownPromise;
       }
     } finally {
+      // Always end the JSON-RPC connection, even if shutdown rejects or times
+      // out, so streams and socket handles are not retained.
       handle.connection.end();
     }
   }
@@ -485,6 +524,8 @@ export class LspServerManager {
       if (handle.stopRequested) {
         return;
       }
+      // Only unexpected process exits can trigger restart. Explicit stops set
+      // stopRequested before terminating the process.
       if (!handle.config.restartOnCrash) {
         handle.status = 'FAILED';
         return;
@@ -512,6 +553,8 @@ export class LspServerManager {
   }
 
   private resetHandle(handle: LspServerHandle): void {
+    // Crash restart reuses the same logical handle, so clear runtime resources
+    // while preserving config and restartAttempts.
     if (handle.connection) {
       handle.connection.end();
     }
@@ -542,6 +585,8 @@ export class LspServerManager {
   ): Promise<
     Awaited<ReturnType<typeof LspConnectionFactory.createSocketConnection>>
   > {
+    // Socket-based servers may need a short boot window after the command is
+    // spawned. Retry until the startup deadline instead of failing immediately.
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
     while (true) {
@@ -569,7 +614,11 @@ export class LspServerManager {
   }
 
   /**
-   * Create LSP connection
+   * Creates a transport-specific LSP connection.
+   *
+   * For stdio, the spawned process is always owned by this manager. For
+   * tcp/socket, the process is owned only when a command was provided; otherwise
+   * the connection is to an externally managed daemon.
    */
   private async createLspConnection(
     config: LspServerConfig,

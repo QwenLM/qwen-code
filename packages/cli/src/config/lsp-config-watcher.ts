@@ -11,9 +11,20 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('LSP_CONFIG_WATCHER');
 
-export interface LspConfigChangeEvent {
+export type LspConfigChangeEvent =
+  | LspConfigRuntimeChangeEvent
+  | LspConfigInvalidEvent;
+
+export interface LspConfigRuntimeChangeEvent {
   path: string;
   changeType: 'modified' | 'created' | 'deleted';
+}
+
+export interface LspConfigInvalidEvent {
+  path: string;
+  changeType: 'invalid';
+  /** User-facing message; invalid configs preserve the current LSP runtime. */
+  error: string;
 }
 
 export type LspConfigChangeListener = (
@@ -22,9 +33,17 @@ export type LspConfigChangeListener = (
 
 interface LspConfigSnapshot {
   exists: boolean;
+  /** Canonical JSON string. Undefined means the file exists but is invalid. */
   canonical?: string;
 }
 
+/**
+ * Watches the workspace `.lsp.json` and reports semantic config changes.
+ *
+ * This watcher is intentionally narrow: it never creates files, only considers
+ * the workspace-root `.lsp.json`, debounces noisy filesystem events, and
+ * serializes listener calls so LSP reloads cannot overlap.
+ */
 export class LspConfigWatcher {
   private watcher?: FSWatcher;
   private listener?: LspConfigChangeListener;
@@ -98,6 +117,7 @@ export class LspConfigWatcher {
     }, LspConfigWatcher.DEBOUNCE_MS);
   }
 
+  /** Drains debounced changes one at a time while preserving a trailing update. */
   private async drainPendingChange(): Promise<void> {
     if (this.processing) return;
     this.processing = true;
@@ -111,6 +131,12 @@ export class LspConfigWatcher {
     }
   }
 
+  /**
+   * Compares the previous and current semantic snapshots.
+   *
+   * Invalid JSON emits an `invalid` event for user feedback but does not report
+   * a runtime config change; the caller must keep the existing LSP state.
+   */
   private async handleChange(): Promise<void> {
     const before = this.lastSnapshot;
     const after = this.readSnapshot();
@@ -119,6 +145,12 @@ export class LspConfigWatcher {
         `Invalid .lsp.json; keeping existing LSP runtime state.`,
       );
       this.lastSnapshot = after;
+      await this.notifyListener({
+        path: this.configPath,
+        changeType: 'invalid',
+        error:
+          'Invalid JSON in .lsp.json; existing LSP runtime state is unchanged.',
+      });
       return;
     }
 
@@ -143,20 +175,25 @@ export class LspConfigWatcher {
     await this.notifyListener(event);
   }
 
+  /**
+   * Reads `.lsp.json` as a single operation. ENOENT is treated as deletion so a
+   * file removed during a filesystem race still reconciles servers to empty.
+   */
   private readSnapshot(): LspConfigSnapshot {
-    if (!fs.existsSync(this.configPath)) {
-      return { exists: false };
-    }
     try {
       const raw = fs.readFileSync(this.configPath, 'utf-8');
       const parsed = JSON.parse(raw) as unknown;
       return { exists: true, canonical: canonicalize(parsed) };
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { exists: false };
+      }
       debugLogger.warn('Failed to parse .lsp.json:', error);
       return { exists: true };
     }
   }
 
+  /** Runs the listener with timeout isolation so a hung reload cannot stall CLI. */
   private async notifyListener(event: LspConfigChangeEvent): Promise<void> {
     if (!this.listener) return;
     const TIMEOUT_MS = LspConfigWatcher.LISTENER_TIMEOUT_MS;

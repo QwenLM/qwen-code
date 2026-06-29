@@ -83,7 +83,6 @@ export class NativeLspService {
   private workspaceContext: WorkspaceContext;
   private fileDiscoveryService: FileDiscoveryService;
   private requireTrustedWorkspace: boolean;
-  private allowedServerNames?: Set<string>;
   private workspaceRoot: string;
   private configLoader: LspConfigLoader;
   private serverManager: LspServerManager;
@@ -103,9 +102,6 @@ export class NativeLspService {
     this.workspaceContext = workspaceContext;
     this.fileDiscoveryService = fileDiscoveryService;
     this.requireTrustedWorkspace = options.requireTrustedWorkspace ?? true;
-    this.allowedServerNames = options.allowedServerNames
-      ? new Set(options.allowedServerNames)
-      : undefined;
     this.workspaceRoot =
       options.workspaceRoot ??
       (config as { getProjectRoot: () => string }).getProjectRoot();
@@ -225,16 +221,6 @@ export class NativeLspService {
     const admitted: LspServerConfig[] = [];
     const skipped: LspSkippedServer[] = [];
     for (const config of configs) {
-      if (
-        this.allowedServerNames &&
-        !this.allowedServerNames.has(config.name)
-      ) {
-        debugLogger.warn(
-          `LSP server ${config.name} is not allowed by the configured whitelist`,
-        );
-        skipped.push({ name: config.name, reason: 'not_allowed' });
-        continue;
-      }
       if (!workspaceTrusted && config.trustRequired) {
         debugLogger.warn(
           `LSP server ${config.name} requires trusted workspace, skipping`,

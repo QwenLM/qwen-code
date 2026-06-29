@@ -1064,11 +1064,14 @@ export function createNonInteractivePromptId(sessionId: string): string {
  * Emits {@link AppEvent.LspStatusChanged} after every successful reload
  * so the UI can reflect the new server state.
  */
-function registerLspHotReload(
+export function registerLspHotReload(
   config: Config,
   registerCleanup: (fn: () => void) => void,
 ): void {
-  if (!config.isLspEnabled() || !config.getLspClient()?.reinitialize) {
+  if (
+    config.isLspEnabled?.() !== true ||
+    !config.getLspClient?.()?.reinitialize
+  ) {
     return;
   }
   const lspConfigWatcher = new LspConfigWatcher(config.getProjectRoot());
@@ -1076,6 +1079,11 @@ function registerLspHotReload(
     `Registering LSP config hot reload watcher for ${config.getProjectRoot()}`,
   );
   lspConfigWatcher.startWatching(async (event) => {
+    if (event.changeType === 'invalid') {
+      debugLogger.warn(`Invalid LSP config file ${event.path}: ${event.error}`);
+      appEvents.emit(AppEvent.LogError, event.error);
+      return;
+    }
     debugLogger.info(
       `Reloading LSP server settings: changeType=${event.changeType}, path=${event.path}`,
     );

@@ -255,7 +255,6 @@ export interface LspServerStatusInfo {
 }
 
 export type LspServerSkipReason =
-  | 'not_allowed'
   | 'workspace_untrusted'
   | 'server_trust_required';
 
@@ -623,8 +622,6 @@ export interface NativeLspServiceOptions {
   requireTrustedWorkspace?: boolean;
   /** Override workspace root path */
   workspaceRoot?: string;
-  /** Optional startup upper bound for allowed LSP server names */
-  allowedServerNames?: readonly string[];
 }
 
 /**

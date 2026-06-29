@@ -240,6 +240,64 @@ describe('NativeLspService', () => {
     expect(result.reconcile.removed).toEqual(['tsserver']);
   });
 
+  test('reinitialize skips trust-required servers in untrusted workspaces', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-untrusted-'));
+    try {
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          trusted: {
+            command: 'trusted-language-server',
+            languages: ['typescript'],
+            trustRequired: true,
+          },
+          untrusted: {
+            command: 'untrusted-language-server',
+            languages: ['javascript'],
+            trustRequired: false,
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { requireTrustedWorkspace: false, workspaceRoot: tempDir },
+      );
+      const reconcileServerConfigs = vi.fn(async () => ({
+        added: ['untrusted-language-server'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+      }));
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+      };
+
+      const result = await service.reinitialize();
+
+      expect(reconcileServerConfigs).toHaveBeenCalledWith([
+        expect.objectContaining({
+          name: 'untrusted-language-server',
+          trustRequired: false,
+        }),
+      ]);
+      expect(result.skipped).toEqual([
+        {
+          name: 'trusted-language-server',
+          reason: 'server_trust_required',
+        },
+      ]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('stop clears document tracking caches', async () => {
     const stopAll = vi.fn(async () => {});
     const internals = lspService as unknown as {
