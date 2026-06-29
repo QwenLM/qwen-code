@@ -47,12 +47,17 @@ export interface RowMouseControllerProps {
  * `left-press` selects it. Disabled rows and interactions outside the list's
  * columns are ignored.
  *
- * Coordinates assume alternate-screen mode: there `measureElementPosition`
- * returns rows in the same 0-based space as the (1-based) mouse event rows, so
- * the click's layout row is just `event.row - 1` — no frame anchor needed
- * (mirrors VirtualizedList.hitTestScrollbar). The owning component only mounts
- * this layer in that mode; inline mode, where the live region floats, is
- * intentionally unsupported here.
+ * Coordinates assume alternate-screen mode. When the frame fits within the
+ * terminal (`frameHeight <= terminalHeight`) the anchor is 0 and the layout row
+ * is just `event.row - 1`. When the frame overflows, Ink bottom-pins it and the
+ * top rows scroll off-screen; the frame anchor (`terminalHeight - frameHeight`,
+ * negative) corrects terminal rows back into layout space. This is why the code
+ * below routes through `frameAnchor`/`terminalRowToLayoutRow` rather than a bare
+ * `event.row - 1`. VirtualizedList.hitTestScrollbar does not apply this
+ * correction (it operates only on the scrollbar track, which is always in the
+ * visible region); list-item hit-testing needs it. The owning component only
+ * mounts this layer in alternate-screen mode; inline mode, where the live region
+ * floats, is intentionally unsupported here.
  */
 export function RowMouseController({
   containerRef,
