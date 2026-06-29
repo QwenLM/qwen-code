@@ -109,6 +109,28 @@ describe('DiscoveredMCPTool', () => {
       expect(tool.schema.parametersJsonSchema).toEqual(inputSchema);
       expect(tool.serverToolName).toBe(serverToolName);
     });
+
+    it('supports deferred tools that are still always visible from the first turn', () => {
+      const eagerTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+
+      expect(eagerTool.shouldDefer).toBe(true);
+      expect(eagerTool.alwaysLoad).toBe(true);
+      expect(eagerTool.asFullyQualifiedTool().alwaysLoad).toBe(true);
+      expect(eagerTool.withTrust(true).alwaysLoad).toBe(true);
+    });
   });
 
   describe('execute', () => {

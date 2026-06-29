@@ -511,6 +511,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
     readonly annotations?: McpToolAnnotations,
+    alwaysLoad = false,
   ) {
     super(
       nameOverride ??
@@ -523,7 +524,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       true, // canUpdateOutput — enables streaming progress for MCP tools
       true, // shouldDefer — MCP tools are discovered via ToolSearch to keep the
       //   initial tool-declaration list small when many MCP servers are attached.
-      false, // alwaysLoad
+      alwaysLoad,
       // searchHint: server name boosts fuzzy matching when the user references
       // the server in their query ("send a slack message").
       `mcp ${serverName}`,
@@ -543,6 +544,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpClient,
       this.mcpTimeout,
       this.annotations,
+      this.alwaysLoad,
     );
   }
 
@@ -578,6 +580,25 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpClient,
       this.mcpTimeout,
       this.annotations,
+      this.alwaysLoad,
+    );
+  }
+
+  withAlwaysLoad(alwaysLoad: boolean): DiscoveredMCPTool {
+    if (alwaysLoad === this.alwaysLoad) return this;
+    return new DiscoveredMCPTool(
+      this.mcpTool,
+      this.serverName,
+      this.serverToolName,
+      this.description,
+      this.parameterSchema,
+      this.trust,
+      this.name,
+      this.cliConfig,
+      this.mcpClient,
+      this.mcpTimeout,
+      this.annotations,
+      alwaysLoad,
     );
   }
 

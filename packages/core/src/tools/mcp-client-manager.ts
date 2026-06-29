@@ -2478,7 +2478,8 @@ export class McpClientManager {
    * intentionally transport-only (it excludes the per-session discovery filters
    * so the shared pool can reuse a transport across sessions with different
    * filters). But the single-session reconcile must ALSO reconnect when only a
-   * discovery filter changes — `trust`, `includeTools`, `excludeTools` are
+   * discovery filter changes — `trust`, `includeTools`, `excludeTools`, and
+   * `alwaysLoadTools` are
    * applied during `discover()` and baked into the registered tools, so a
    * config edit to them otherwise never takes effect mid-session. Append a
    * stable hash of those fields (arrays sorted so order alone doesn't churn).
@@ -2491,6 +2492,7 @@ export class McpClientManager {
       trust: config.trust ?? null,
       includeTools: [...(config.includeTools ?? [])].sort(),
       excludeTools: [...(config.excludeTools ?? [])].sort(),
+      alwaysLoadTools: config.alwaysLoadTools === true,
     });
     return `${connectionIdOf(serverName, config)}|${discovery}`;
   }

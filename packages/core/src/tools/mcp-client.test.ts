@@ -1131,6 +1131,46 @@ describe('mcp-client', () => {
       expect(snapshot.tools[0].trust).toBe(true);
     });
 
+    it('marks discovered tools alwaysLoad when the MCP server config requests eager loading', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'list_pages' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'chrome-devtools',
+        {
+          command: 'test-command',
+          alwaysLoadTools: true,
+        } as MCPServerConfig,
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
+
+      expect(snapshot.tools[0].shouldDefer).toBe(true);
+      expect(snapshot.tools[0].alwaysLoad).toBe(true);
+    });
+
     it('discoverAndReturn throws "No prompts or tools found" when both empty', async () => {
       // Preserves the discover() pre-F2 invariant — the wrapping
       // McpClientManager / pool entry uses this signal to mark the

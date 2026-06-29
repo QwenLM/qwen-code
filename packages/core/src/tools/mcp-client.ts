@@ -1032,6 +1032,7 @@ export async function discoverTools(
             mcpClient, // raw MCP Client for direct callTool with progress
             mcpTimeout,
             annotationsMap.get(funcDecl.name!),
+            mcpServerConfig.alwaysLoadTools === true,
           ),
         );
       } catch (error) {

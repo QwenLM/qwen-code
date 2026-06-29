@@ -196,7 +196,9 @@ export class SessionMcpView {
       // Per-session trust copy. `withTrust` returns the same
       // instance when value unchanged, so the common case (same trust)
       // pays zero allocation.
-      const sessionTool = tool.withTrust(this.cfg.trust);
+      const sessionTool = tool
+        .withTrust(this.cfg.trust)
+        .withAlwaysLoad(this.cfg.alwaysLoadTools === true);
       try {
         this.sessionToolRegistry.registerTool(sessionTool);
         registered += 1;

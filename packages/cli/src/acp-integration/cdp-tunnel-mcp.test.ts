@@ -38,6 +38,7 @@ describe('buildCdpTunnelMcpServer — CDP tunnel auto-wiring (#5626)', () => {
     expect(server?.args?.[0]).toMatch(/chrome-devtools-mcp/);
     expect(server?.args).toContain('--wsEndpoint');
     expect(server?.args).toContain('ws://127.0.0.1:4170/cdp');
+    expect(server?.alwaysLoadTools).toBe(true);
     // trust unset → tools default to 'ask' (no silent auto-approval of
     // browser-driving tools), same as any project MCP server.
     expect(server?.trust).toBeUndefined();

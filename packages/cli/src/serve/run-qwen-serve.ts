@@ -82,12 +82,9 @@ import {
 } from '../utils/startupProfiler.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
-// Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
-// `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
-// the daemon WS. Off by default while the contract settles.
+// Default-on browser MCP channel; `=0` / `false` disables it for rollback.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
-// CDP tunnel opt-in (Plan C, issue #5626). `=1` advertises `cdp_tunnel_over_ws`
-// and exposes the `/cdp` WebSocket. Off by default while the contract settles.
+// Default-on CDP tunnel; `=0` / `false` disables it for rollback.
 const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
@@ -157,6 +154,12 @@ function parseDeadlineEnv(
     );
   }
   return parsed;
+}
+
+function envFlagDisabled(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  const normalized = raw.trim().toLowerCase();
+  return normalized === '0' || normalized === 'false';
 }
 
 function createDaemonTelemetryRuntimeConfig(
@@ -1094,19 +1097,12 @@ export async function runQwenServe(
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
-    // Reverse tool channel (issue #5626, Phase 2). Opt-in via env until the
-    // public contract settles — the WS `mcp_register` / `mcp_message` frames
-    // and the child↔parent `client_mcp/message` round-trip stay dormant
-    // otherwise. An explicit `clientMcpOverWs` in `optsIn` (embedded callers)
-    // still wins.
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
-      process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV] === '1',
-    // CDP tunnel (Plan C, issue #5626). Opt-in via env until the contract
-    // settles; an explicit `cdpTunnelOverWs` in `optsIn` still wins.
+      !envFlagDisabled(process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV]),
     cdpTunnelOverWs:
       optsIn.cdpTunnelOverWs ??
-      process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
+      !envFlagDisabled(process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV]),
   };
   validateRateLimitOptions(opts);
 

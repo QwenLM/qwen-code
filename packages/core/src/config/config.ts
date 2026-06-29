@@ -681,6 +681,8 @@ export class MCPServerConfig {
      * `new MCPServerConfig(...)` call sites. See issue #4615.
      */
     readonly scope?: McpServerScope,
+    /** Keep this server's deferred MCP tools visible from the first turn. */
+    readonly alwaysLoadTools?: boolean,
   ) {}
 }
 

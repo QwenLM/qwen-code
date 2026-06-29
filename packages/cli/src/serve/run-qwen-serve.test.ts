@@ -926,6 +926,12 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
     );
+    const originalClientMcpOverWs =
+      process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    const originalCdpTunnelOverWs =
+      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
     const boundWorkspace = canonicalizeWorkspace(tmpDir);
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
       throw new Error('runtime boom');
@@ -971,6 +977,8 @@ describe('runQwenServe runtime startup failures', () => {
           'daemon_status',
           'workspace_settings',
           'workspace_reload',
+          'client_mcp_over_ws',
+          'cdp_tunnel_over_ws',
         ]),
         modelServices: [],
         workspaceCwd: boundWorkspace,
@@ -1067,6 +1075,16 @@ describe('runQwenServe runtime startup failures', () => {
         },
       });
     } finally {
+      if (originalClientMcpOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = originalClientMcpOverWs;
+      }
+      if (originalCdpTunnelOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
       await handle.close();
     }
   });
