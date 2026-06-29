@@ -277,11 +277,11 @@ export class SessionRouter {
       reservations.set(key, reservation);
     }
 
-    for (const [key, entry] of Object.entries(entries)) {
-      const reservation = reservations.get(key);
-      if (!reservation) continue;
-      try {
-        this.beginSessionLoad();
+    this.beginSessionLoad();
+    try {
+      for (const [key, entry] of Object.entries(entries)) {
+        const reservation = reservations.get(key);
+        if (!reservation) continue;
         try {
           const sessionId = await this.bridge.loadSession(
             entry.sessionId,
@@ -301,19 +301,19 @@ export class SessionRouter {
             changed = true;
           }
           restored++;
+        } catch {
+          reservation.reject(new Error('Session restore failed'));
+          // Session can't be loaded — will create fresh on next message
+          failed++;
+          changed = true;
         } finally {
-          this.endSessionLoad();
-        }
-      } catch {
-        reservation.reject(new Error('Session restore failed'));
-        // Session can't be loaded — will create fresh on next message
-        failed++;
-        changed = true;
-      } finally {
-        if (this.creatingSessions.get(key) === reservation.promise) {
-          this.creatingSessions.delete(key);
+          if (this.creatingSessions.get(key) === reservation.promise) {
+            this.creatingSessions.delete(key);
+          }
         }
       }
+    } finally {
+      this.endSessionLoad();
     }
 
     // Update persist file to only include successfully restored sessions

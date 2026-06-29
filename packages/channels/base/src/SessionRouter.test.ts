@@ -613,6 +613,62 @@ describe('SessionRouter', () => {
       expect(router.getSession('ch', 'bob', 'chat2')).toBe('restored-bob');
       expect(router.getTarget('session-2')).toBeUndefined();
     });
+
+    it('keeps pending dead session ids across the whole restore batch', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const state: { router?: SessionRouter } = {};
+      bridge = {
+        ...mockBridge(),
+        loadSession: vi.fn(async (sessionId: string) => {
+          if (sessionId === 'old-alice') {
+            state.router?.removeSessionId('restored-bob');
+            return 'restored-alice';
+          }
+          return 'restored-bob';
+        }),
+      };
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      state.router = router;
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 1,
+      });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('restored-alice');
+      expect(router.getSession('ch', 'bob', 'chat2')).toBeUndefined();
+      expect(router.getTarget('restored-bob')).toBeUndefined();
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({
+          sessionId: 'restored-alice',
+        }),
+      });
+    });
   });
 
   describe('getAll', () => {

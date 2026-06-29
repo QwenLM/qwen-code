@@ -945,6 +945,24 @@ describe('ChannelBase', () => {
         imageMimeType: undefined,
       });
     });
+
+    it('reports shell command failures without falling through to the agent', async () => {
+      const shellCommand = vi.fn().mockRejectedValue(new Error('boom'));
+      bridge = Object.assign(new EventEmitter(), {
+        ...bridge,
+        shellCommand,
+      }) as unknown as ChannelAgentBridge;
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ text: '!echo hello' }));
+
+      expect(shellCommand).toHaveBeenCalledWith('s-1', 'echo hello');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)).toEqual({
+        chatId: 'chat1',
+        text: 'Shell command failed: boom',
+      });
+    });
   });
 
   describe('dispatch modes', () => {
