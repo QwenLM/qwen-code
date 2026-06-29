@@ -184,7 +184,10 @@ async function connect(): Promise<void> {
   socket = ws;
 
   ws.onopen = () => {
-    if (socket !== ws) return;
+    if (socket !== ws) {
+      ws.close();
+      return;
+    }
     reconnectDelay = RECONNECT_MIN_MS;
     console.log(LOG_PREFIX, 'Connected; sending ACP initialize');
     sendRaw(ws, {
