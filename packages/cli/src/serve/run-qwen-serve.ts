@@ -94,7 +94,9 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
+// Let the first /health response flush before evaluating the runtime graph.
 const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
+// Keep manual/non-probed starts moving; health probes cancel this fallback.
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
@@ -2173,9 +2175,13 @@ export async function runQwenServe(
       const scheduleRuntimeStartFallback = (): void => {
         if (shuttingDown || runtimeStarting || runtimeStartFallbackTimer)
           return;
+        daemonLog.info(
+          `deferred runtime: scheduling fallback start in ${FAST_PATH_RUNTIME_START_FALLBACK_MS}ms`,
+        );
         runtimeStartFallbackTimer = setTimeout(() => {
           runtimeStartFallbackTimer = undefined;
           if (shuttingDown) return;
+          daemonLog.info('deferred runtime: fallback timer fired, starting');
           startRuntime();
         }, FAST_PATH_RUNTIME_START_FALLBACK_MS);
         runtimeStartFallbackTimer.unref();
@@ -2185,6 +2191,9 @@ export async function runQwenServe(
           return;
         }
         clearRuntimeStartFallbackTimer();
+        daemonLog.info(
+          `deferred runtime: health served, scheduling start in ${FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS}ms`,
+        );
         runtimeStartAfterHealthTimer = setTimeout(() => {
           runtimeStartAfterHealthTimer = undefined;
           if (shuttingDown) return;

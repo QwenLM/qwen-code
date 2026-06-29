@@ -761,17 +761,12 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-first-')),
     );
-    let resolveTelemetry:
-      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
-      | undefined;
-    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
-      (resolve) => {
-        resolveTelemetry = resolve;
-      },
-    );
-    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
-      telemetryPromise,
-    );
+    const resolveTelemetrySettings = vi
+      .spyOn(qwenCore, 'resolveTelemetrySettings')
+      .mockResolvedValue({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
     const bridge = makeRuntimeBridge();
     const createBridge = vi
       .spyOn(acpBridge, 'createAcpSessionBridge')
@@ -796,25 +791,19 @@ describe('runQwenServe runtime startup failures', () => {
     );
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(resolveTelemetrySettings).not.toHaveBeenCalled();
       expect(createBridge).not.toHaveBeenCalled();
       const healthRes = await fetch(`${handle.url}/health`);
       expect(healthRes.status).toBe(200);
       expect(await healthRes.json()).toEqual({ status: 'ok' });
 
-      resolveTelemetry?.({
-        enabled: false,
-        sensitiveSpanAttributeMaxLength: 1024 * 1024,
-      });
       await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
-        timeout: 1500,
+        timeout: 750,
       });
+      expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
-      resolveTelemetry?.({
-        enabled: false,
-        sensitiveSpanAttributeMaxLength: 1024 * 1024,
-      });
       await handle.close();
     }
   });
