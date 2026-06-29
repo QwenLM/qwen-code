@@ -19,10 +19,10 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 | Stage 2 | Code review + test results (with screenshots) |
 | Stage 3 | Reflection + verdict                          |
 
-**Terminal gate exception:** if any terminal exit triggers (Stage 0b hard
-block, Stage 1a template failure, Stage 1b problem-does-not-exist, or
-direction escalation), submit exactly one `CHANGES_REQUESTED` review and
-stop. Do not also post or update a Stage 1 issue comment, and do not
+**Terminal gate exception:** if any terminal exit triggers (Stage 0 core
+module hard block, Stage 1a template failure, Stage 1b problem-does-not-exist,
+or Stage 1c direction escalation), submit exactly one `CHANGES_REQUESTED`
+review and stop. Do not also post or update a Stage 1 issue comment, and do not
 continue to Stage 2, Stage 3, or approval.
 
 **Re-runs:** if the triage runs again on the same PR, update each comment in place:
@@ -45,7 +45,7 @@ Never create duplicates.
 
 Default posture: **skepticism**. Burden of proof is on the author. Distinguish **observed failures** (linked issue, reproduction, before/after) from **theoretical hardening** ("could theoretically send X" with no evidence it ever has). Volume ≠ value — an AI bot can produce 20 plausible PRs in a day. If being "too strict" feels uncomfortable, that is the gate working correctly.
 
-### Stage 0b: Core Module Protection (two-tier check)
+### Stage 0: Core Module Protection (two-tier check)
 
 Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`, or cross-package changes spanning multiple `packages/*/`.
 
@@ -86,7 +86,7 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-g
 Before "is the direction right?", ask **"does this problem actually exist?"**
 
 - **Observed bug** (linked issue, reproduction, before/after) → proceed.
-- **Theoretical hardening** ("could theoretically send X" with no evidence) → **request changes.** Ask for a reproduction. If the author cannot provide one, close.
+- **Theoretical hardening** ("could theoretically send X" with no evidence) → **request changes.** Ask for a reproduction. If the author cannot provide one on re-run, leave for maintainer to decide.
 - **No reproduction = no fix.** A `fix:` PR without reproduction is a hypothesis — belongs in issues, not PRs.
 
 **"direction is correct" ≠ "problem exists."** If the runtime already handles the case correctly, there is no bug — only code hygiene. Code hygiene does not warrant a PR.
@@ -164,10 +164,10 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 
 Save this comment's ID. Terminal exits — stop here if any applies:
 
-- Core module hard block (Stage 0b) → rejected, do not proceed.
-- Template failure → stopped in 1a.
-- Problem does not exist → request changes in 1b, do not proceed to Stage 2.
-- Direction escalated → stop here.
+- Core module hard block (Stage 0) → rejected, do not proceed.
+- Template failure (Stage 1a) → stopped.
+- Problem does not exist (Stage 1b) → request changes, do not proceed to Stage 2.
+- Direction escalated (Stage 1c) → stop here.
 
 ### Stage 2: Review + Test
 
