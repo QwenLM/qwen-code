@@ -378,6 +378,7 @@ describe('CLI entry import boundary', () => {
     expect(fastPathSource).not.toContain('@qwen-code/qwen-code-core');
     expect(fastPathSource).toContain('bootSettings: settings');
     expect(fastPathSource).toContain('resolveOnListen: true');
+    expect(fastPathSource).toContain('deferRuntimeUntilFirstHealth: true');
   });
 
   it('keeps settings free of UI imports used before serve can listen', () => {

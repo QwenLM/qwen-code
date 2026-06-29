@@ -8,6 +8,7 @@ import type { RunHandle } from './run-qwen-serve.js';
 import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import type { ServeOptions } from './types.js';
+import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
 
 type McpBudgetMode = NonNullable<ServeOptions['mcpBudgetMode']>;
 
@@ -395,25 +396,18 @@ async function maybeOpenWebShellBrowser(
   await openBrowser(handle, true);
 }
 
-async function emitHeadlessYoloWarning(
+function emitHeadlessYoloWarning(
   settings: ServeFastPathSettings | undefined,
-) {
+): void {
   if (!settings) return;
-  try {
-    const { HEADLESS_YOLO_NO_SANDBOX_WARNING } = await import(
-      '../utils/headlessSafetyWarnings.js'
-    );
-    const suppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
-    if (
-      settings.tools?.approvalMode === 'yolo' &&
-      !settings.tools?.sandbox &&
-      !process.env['SANDBOX'] &&
-      !isTruthyEnv(suppress)
-    ) {
-      writeStderrLine(HEADLESS_YOLO_NO_SANDBOX_WARNING);
-    }
-  } catch {
-    // Keep the warning best-effort, matching the yargs serve handler.
+  const suppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+  if (
+    settings.tools?.approvalMode === 'yolo' &&
+    !settings.tools?.sandbox &&
+    !process.env['SANDBOX'] &&
+    !isTruthyEnv(suppress)
+  ) {
+    writeStderrLine(HEADLESS_YOLO_NO_SANDBOX_WARNING);
   }
 }
 
@@ -491,8 +485,9 @@ export async function tryRunServeFastPath(
     handle = await runQwenServe(parsed.options, {
       ...(settings ? { bootSettings: settings } : {}),
       resolveOnListen: true,
+      deferRuntimeUntilFirstHealth: true,
     });
-    void emitHeadlessYoloWarning(settings);
+    emitHeadlessYoloWarning(settings);
     await maybeOpenWebShellBrowser(handle, parsed.open);
   } catch (err) {
     writeStderrLine(

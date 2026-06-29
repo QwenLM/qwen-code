@@ -44,6 +44,22 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   sessions: [],
 };
 
+function makeRuntimeBridge(): HttpAcpBridge {
+  return {
+    spawnOrAttach: vi.fn(),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+    killAllSync: vi.fn(),
+    getSession: vi.fn(),
+    getAllSessions: vi.fn().mockReturnValue([]),
+    publishWorkspaceEvent: vi.fn(),
+    getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+    resume: vi.fn(),
+    preheat: vi.fn().mockResolvedValue(undefined),
+    getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+    isChannelLive: vi.fn().mockReturnValue(true),
+  } as unknown as HttpAcpBridge;
+}
+
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
   () => [] as Array<Record<string, unknown>>,
 );
@@ -708,19 +724,7 @@ describe('runQwenServe runtime startup failures', () => {
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
       telemetryPromise,
     );
-    const bridge = {
-      spawnOrAttach: vi.fn(),
-      shutdown: vi.fn().mockResolvedValue(undefined),
-      killAllSync: vi.fn(),
-      getSession: vi.fn(),
-      getAllSessions: vi.fn().mockReturnValue([]),
-      publishWorkspaceEvent: vi.fn(),
-      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
-      resume: vi.fn(),
-      preheat: vi.fn().mockResolvedValue(undefined),
-      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
-      isChannelLive: vi.fn().mockReturnValue(true),
-    } as unknown as HttpAcpBridge;
+    const bridge = makeRuntimeBridge();
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
       bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
     );
@@ -751,6 +755,127 @@ describe('runQwenServe runtime startup failures', () => {
       });
       await handle.close();
     }
+  });
+
+  it('keeps health responsive before starting deferred runtime work', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-first-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 1,
+      },
+    );
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const healthRes = await fetch(`${handle.url}/health`);
+      expect(healthRes.status).toBe(200);
+      expect(await healthRes.json()).toEqual({ status: 'ok' });
+    } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.close();
+    }
+  });
+
+  it('starts deferred runtime on fallback when no health probe arrives', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-fallback-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      expect(createBridge).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
+        timeout: 1500,
+      });
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not start deferred runtime after close before first health', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    await handle.close();
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    expect(createBridge).not.toHaveBeenCalled();
   });
 
   it('flushes runtime startup failures to the daemon log when closing', async () => {

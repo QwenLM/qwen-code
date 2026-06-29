@@ -94,6 +94,8 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
+const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
+const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 20;
@@ -495,6 +497,12 @@ export interface RunQwenServeDeps {
    */
   resolveOnListen?: boolean;
   /**
+   * Internal serve fast-path mode: keep bootstrap /health responsive before
+   * starting the heavier runtime graph. A fallback timer still starts runtime
+   * when no health probe arrives. Only applies with resolveOnListen.
+   */
+  deferRuntimeUntilFirstHealth?: boolean;
+  /**
    * Bounds background runtime mounting after the listener is ready. Defaults to
    * QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS, then 120s. Use 0 to disable.
    */
@@ -811,6 +819,7 @@ function createBootstrapServeApp(input: {
   sessionShellCommandEnabled: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   getRuntimeError: () => string | undefined;
+  onHealthServed?: () => void;
 }): Application {
   const {
     opts,
@@ -822,6 +831,7 @@ function createBootstrapServeApp(input: {
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError,
+    onHealthServed,
   } = input;
   const app = express();
 
@@ -843,6 +853,9 @@ function createBootstrapServeApp(input: {
       return;
     }
 
+    if (onHealthServed) {
+      res.once('finish', onHealthServed);
+    }
     res.status(200).json({ status: 'ok' });
   };
   const loopback = isLoopbackBind(opts.hostname);
@@ -1503,6 +1516,9 @@ export async function runQwenServe(
   let markRuntimeReady!: () => void;
   let markRuntimeFailed!: (err: Error) => void;
   let runtimeStartupSettled = false;
+  let startRuntimeAfterHealth: (() => void) | undefined;
+  const deferRuntimeUntilFirstHealth =
+    deps.resolveOnListen === true && deps.deferRuntimeUntilFirstHealth === true;
   const runtimeReady = new Promise<void>((resolve, reject) => {
     markRuntimeReady = resolve;
     markRuntimeFailed = reject;
@@ -1890,6 +1906,9 @@ export async function runQwenServe(
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError: () => runtimeStartupError,
+    onHealthServed: deferRuntimeUntilFirstHealth
+      ? () => startRuntimeAfterHealth?.()
+      : undefined,
   });
   const app =
     runtimeApp ?? createDelegatingServeApp(bootstrapApp, () => runtimeApp);
@@ -2023,6 +2042,8 @@ export async function runQwenServe(
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
+      let runtimeStartAfterHealthTimer: NodeJS.Timeout | undefined;
+      let runtimeStartFallbackTimer: NodeJS.Timeout | undefined;
       const runtimeStartupTimeoutMs = resolveRuntimeStartupTimeoutMs(
         deps.runtimeStartupTimeoutMs,
       );
@@ -2030,6 +2051,16 @@ export async function runQwenServe(
         if (!runtimeStartupTimer) return;
         clearTimeout(runtimeStartupTimer);
         runtimeStartupTimer = undefined;
+      };
+      const clearRuntimeStartFallbackTimer = (): void => {
+        if (!runtimeStartFallbackTimer) return;
+        clearTimeout(runtimeStartFallbackTimer);
+        runtimeStartFallbackTimer = undefined;
+      };
+      const clearRuntimeStartAfterHealthTimer = (): void => {
+        if (!runtimeStartAfterHealthTimer) return;
+        clearTimeout(runtimeStartAfterHealthTimer);
+        runtimeStartAfterHealthTimer = undefined;
       };
       const shutdownBridgeAfterFailedStartup = async (
         bridge: AcpSessionBridge | undefined,
@@ -2098,6 +2129,8 @@ export async function runQwenServe(
       };
       const startRuntime = (): void => {
         if (runtimeStarting) return;
+        clearRuntimeStartAfterHealthTimer();
+        clearRuntimeStartFallbackTimer();
         runtimeStarting = buildRuntime()
           .then(async (runtime) => {
             if (runtimeStartupSettled) {
@@ -2136,6 +2169,28 @@ export async function runQwenServe(
           }, runtimeStartupTimeoutMs);
           runtimeStartupTimer.unref();
         }
+      };
+      const scheduleRuntimeStartFallback = (): void => {
+        if (shuttingDown || runtimeStarting || runtimeStartFallbackTimer)
+          return;
+        runtimeStartFallbackTimer = setTimeout(() => {
+          runtimeStartFallbackTimer = undefined;
+          if (shuttingDown) return;
+          startRuntime();
+        }, FAST_PATH_RUNTIME_START_FALLBACK_MS);
+        runtimeStartFallbackTimer.unref();
+      };
+      startRuntimeAfterHealth = (): void => {
+        if (shuttingDown || runtimeStarting || runtimeStartAfterHealthTimer) {
+          return;
+        }
+        clearRuntimeStartFallbackTimer();
+        runtimeStartAfterHealthTimer = setTimeout(() => {
+          runtimeStartAfterHealthTimer = undefined;
+          if (shuttingDown) return;
+          startRuntime();
+        }, FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS);
+        runtimeStartAfterHealthTimer.unref();
       };
 
       // Forward declaration so handle.close can detach the listener after
@@ -2194,6 +2249,8 @@ export async function runQwenServe(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
+            clearRuntimeStartAfterHealthTimer();
+            clearRuntimeStartFallbackTimer();
             // NOTE: the SIGINT/SIGTERM handlers stay attached during the
             // drain. Their `if (shuttingDown) return` guard makes a second
             // signal a no-op. Detaching them up front would leave Node's
@@ -2402,6 +2459,8 @@ export async function runQwenServe(
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef);
         }
+      } else if (deferRuntimeUntilFirstHealth) {
+        scheduleRuntimeStartFallback();
       } else {
         startRuntime();
       }
