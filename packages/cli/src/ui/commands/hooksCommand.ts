@@ -12,7 +12,13 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import type { HookRegistryEntry } from '@qwen-code/qwen-code-core';
+import type {
+  HookRegistryEntry,
+  SessionHookEntry,
+  HookEventName,
+} from '@qwen-code/qwen-code-core';
+import { supportsMatchers } from '../components/hooks/constants.js';
+import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
 
 /**
  * Format hook source for display
@@ -27,16 +33,11 @@ function formatHookSource(source: string): string {
       return t('System');
     case 'extensions':
       return t('Extension');
+    case 'session':
+      return t('Session (temporary)');
     default:
       return source;
   }
-}
-
-/**
- * Format hook status for display
- */
-function formatHookStatus(enabled: boolean): string {
-  return enabled ? t('✓ Enabled') : t('✗ Disabled');
 }
 
 const listCommand: SlashCommand = {
@@ -45,6 +46,7 @@ const listCommand: SlashCommand = {
     return t('List all configured hooks');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     _args: string,
@@ -70,40 +72,114 @@ const listCommand: SlashCommand = {
     }
 
     const registry = hookSystem.getRegistry();
-    const allHooks = registry.getAllHooks();
+    const configHooks = registry.getAllHooks();
 
-    if (allHooks.length === 0) {
+    const sessionId = config.getSessionId();
+    const sessionHooksManager = hookSystem.getSessionHooksManager();
+    const sessionHooks = sessionId
+      ? sessionHooksManager.getAllSessionHooks(sessionId)
+      : [];
+
+    const totalHooks = configHooks.length + sessionHooks.length;
+
+    if (totalHooks === 0) {
       return {
         type: 'message',
         messageType: 'info',
         content: t(
-          'No hooks configured. Add hooks in your settings.json file.',
+          'No hooks configured. Add hooks in your settings.json file or invoke a skill with hooks.',
         ),
       };
     }
 
-    // Group hooks by event
-    const hooksByEvent = new Map<string, HookRegistryEntry[]>();
-    for (const hook of allHooks) {
-      const eventName = hook.eventName;
-      if (!hooksByEvent.has(eventName)) {
-        hooksByEvent.set(eventName, []);
-      }
-      hooksByEvent.get(eventName)!.push(hook);
+    interface FlattenedHook {
+      name: string;
+      source: string;
     }
 
-    let output = `**Configured Hooks (${allHooks.length} total)**\n\n`;
+    const hooksByEvent = new Map<string, Map<string, FlattenedHook[]>>();
 
-    for (const [eventName, hooks] of hooksByEvent) {
-      output += `### ${eventName}\n`;
-      for (const hook of hooks) {
-        const name = hook.config.name || hook.config.command || 'unnamed';
-        const source = formatHookSource(hook.source);
-        const status = formatHookStatus(hook.enabled);
-        const matcher = hook.matcher ? ` (matcher: ${hook.matcher})` : '';
-        output += `- **${name}** [${source}] ${status}${matcher}\n`;
+    const addHook = (
+      eventName: string,
+      matcher: string,
+      hook: FlattenedHook,
+    ): void => {
+      const matcherKey = supportsMatchers(eventName as HookEventName)
+        ? matcher
+        : '*';
+      let matcherMap = hooksByEvent.get(eventName);
+      if (!matcherMap) {
+        matcherMap = new Map<string, FlattenedHook[]>();
+        hooksByEvent.set(eventName, matcherMap);
       }
-      output += '\n';
+      let bucket = matcherMap.get(matcherKey);
+      if (!bucket) {
+        bucket = [];
+        matcherMap.set(matcherKey, bucket);
+      }
+      bucket.push(hook);
+    };
+
+    const extractName = (config: {
+      type: string;
+      command?: string;
+      url?: string;
+      name?: string;
+    }): string =>
+      config.name ||
+      (config.type === 'command' ? config.command : undefined) ||
+      (config.type === 'http' ? config.url : undefined) ||
+      'unnamed';
+
+    for (const hook of configHooks) {
+      const configHook = hook as HookRegistryEntry;
+      const config = configHook.config as {
+        type: string;
+        command?: string;
+        url?: string;
+        name?: string;
+      };
+      addHook(configHook.eventName, normalizeMatcher(configHook.matcher), {
+        name: extractName(config),
+        source: formatHookSource(configHook.source),
+      });
+    }
+
+    for (const hook of sessionHooks) {
+      const sessionHook = hook as SessionHookEntry;
+      const config = sessionHook.config as {
+        type: string;
+        command?: string;
+        url?: string;
+        name?: string;
+      };
+      addHook(sessionHook.eventName, normalizeMatcher(sessionHook.matcher), {
+        name: extractName(config),
+        source: formatHookSource('session'),
+      });
+    }
+
+    let output = `**Configured Hooks (${totalHooks} total)**\n\n`;
+
+    for (const [eventName, matcherMap] of hooksByEvent) {
+      output += `### ${eventName}\n\n`;
+      const useMatchers = supportsMatchers(eventName as HookEventName);
+      if (useMatchers) {
+        for (const [matcher, hookList] of matcherMap) {
+          output += `#### ${t('Matcher:')} ${matcher}\n`;
+          for (const hook of hookList) {
+            output += `- **${hook.name}** [${hook.source}]\n`;
+          }
+          output += '\n';
+        }
+      } else {
+        for (const hookList of matcherMap.values()) {
+          for (const hook of hookList) {
+            output += `- **${hook.name}** [${hook.source}]\n`;
+          }
+        }
+        output += '\n';
+      }
     }
 
     return {
@@ -120,11 +196,11 @@ export const hooksCommand: SlashCommand = {
     return t('Manage Qwen Code hooks');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<SlashCommandActionReturn> => {
-    // In interactive mode, open the hooks dialog
     const executionMode = context.executionMode ?? 'interactive';
     if (executionMode === 'interactive') {
       return {
@@ -133,7 +209,6 @@ export const hooksCommand: SlashCommand = {
       };
     }
 
-    // In non-interactive mode, list hooks
     const result = await listCommand.action?.(context, args);
     return result ?? { type: 'message', messageType: 'info', content: '' };
   },

@@ -4,15 +4,15 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 ## Overview
 
-Use `modelProviders` to declare curated model lists per auth type that the `/model` picker can switch between. Keys must be valid auth types (`openai`, `anthropic`, `gemini`, etc.). Each entry requires an `id` and **must include `envKey`**, with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+Use `modelProviders` to declare models per auth type that the `/model` picker can switch between. Keys must be valid auth types (`openai`, `anthropic`, `gemini`, etc.). Each auth type maps to a `ProviderConfig` object with a `protocol` field and a `models` field (the array of model definitions). Each entry in `models` requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
 
 > [!note]
 >
-> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, etc., must be defined via `modelProviders`. The `/auth` command lists Qwen OAuth, Alibaba Cloud Coding Plan, and API Key as the built-in authentication options.
+> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, etc., must be defined via `modelProviders`. The `/auth` command lists three top-level options: **Alibaba ModelStudio** (with Coding Plan, Token Plan, and Standard API Key in its sub-menu), **Third-party Providers**, and **Custom Provider**. (Qwen OAuth is no longer a selectable dialog entry; its free tier was discontinued on 2026-04-15.)
 
-> [!warning]
+> [!note]
 >
-> **Duplicate model IDs within the same authType:** Defining multiple models with the same `id` under a single `authType` (e.g., two entries with `"id": "gpt-4o"` in `openai`) is currently not supported. If duplicates exist, **the first occurrence wins** and subsequent duplicates are skipped with a warning. Note that the `id` field is used both as the configuration identifier and as the actual model name sent to the API, so using unique IDs (e.g., `gpt-4o-creative`, `gpt-4o-balanced`) is not a viable workaround. This is a known limitation that we plan to address in a future release.
+> **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
 
 ## Configuration Examples by Auth Type
 
@@ -22,15 +22,16 @@ Below are comprehensive configuration examples for different authentication type
 
 The `modelProviders` object keys must be valid `authType` values. Currently supported auth types are:
 
-| Auth Type    | Description                                                                             |
-| ------------ | --------------------------------------------------------------------------------------- |
-| `openai`     | OpenAI-compatible APIs (OpenAI, Azure OpenAI, local inference servers like vLLM/Ollama) |
-| `anthropic`  | Anthropic Claude API                                                                    |
-| `gemini`     | Google Gemini API                                                                       |
-| `qwen-oauth` | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                       |
+| Auth Type    | Description                                                                                                                                     |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openai`     | OpenAI-compatible APIs (OpenAI, Azure OpenAI, local inference servers like vLLM/Ollama)                                                         |
+| `anthropic`  | Anthropic Claude API                                                                                                                            |
+| `gemini`     | Google Gemini API                                                                                                                               |
+| `qwen-oauth` | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                               |
+| `vertex-ai`  | Google Vertex AI (uses the `gemini` protocol and the `@google/genai` SDK in Vertex AI mode; selecting it sets `GOOGLE_GENAI_USE_VERTEXAI=true`) |
 
 > [!warning]
-> If an invalid auth type key is used (e.g., a typo like `"openai-custom"`), the configuration will be **silently skipped** and the models will not appear in the `/model` picker. Always use one of the supported auth type values listed above.
+> If an unknown auth type key is used (e.g., a typo like `"openai-custom"`), a non-empty key is accepted as-is as its own auth-type group, but it will not map to a known protocol — so its models won't work as intended and won't behave correctly in the `/model` picker. Only blank (empty or whitespace-only) keys are skipped. Always use one of the supported auth type values listed above.
 
 ### SDKs Used for API Requests
 
@@ -47,72 +48,89 @@ This means the `baseUrl` you configure should be compatible with the correspondi
 
 ### OpenAI-compatible providers (`openai`)
 
-This auth type supports not only OpenAI's official API but also any OpenAI-compatible endpoint, including aggregated model providers like OpenRouter.
+This auth type supports not only OpenAI's official API but also any OpenAI-compatible endpoint, including aggregated model providers like OpenRouter and Requesty.
 
 ```json
 {
   "env": {
     "OPENAI_API_KEY": "sk-your-actual-openai-key-here",
-    "OPENROUTER_API_KEY": "sk-or-your-actual-openrouter-key-here"
+    "OPENROUTER_API_KEY": "sk-or-your-actual-openrouter-key-here",
+    "REQUESTY_API_KEY": "sk-your-actual-requesty-key-here"
   },
   "modelProviders": {
-    "openai": [
-      {
-        "id": "gpt-4o",
-        "name": "GPT-4o",
-        "envKey": "OPENAI_API_KEY",
-        "baseUrl": "https://api.openai.com/v1",
-        "generationConfig": {
-          "timeout": 60000,
-          "maxRetries": 3,
-          "enableCacheControl": true,
-          "contextWindowSize": 128000,
-          "modalities": {
-            "image": true
-          },
-          "customHeaders": {
-            "X-Client-Request-ID": "req-123"
-          },
-          "extra_body": {
-            "enable_thinking": true,
-            "service_tier": "priority"
-          },
-          "samplingParams": {
-            "temperature": 0.2,
-            "top_p": 0.8,
-            "max_tokens": 4096,
-            "presence_penalty": 0.1,
-            "frequency_penalty": 0.1
+    "openai": {
+      "protocol": "openai",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "envKey": "OPENAI_API_KEY",
+          "baseUrl": "https://api.openai.com/v1",
+          "generationConfig": {
+            "timeout": 60000,
+            "maxRetries": 3,
+            "enableCacheControl": true,
+            "contextWindowSize": 128000,
+            "modalities": {
+              "image": true
+            },
+            "customHeaders": {
+              "X-Client-Request-ID": "req-123"
+            },
+            "extra_body": {
+              "enable_thinking": true,
+              "service_tier": "priority"
+            },
+            "samplingParams": {
+              "temperature": 0.2,
+              "top_p": 0.8,
+              "max_tokens": 4096,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1
+            }
+          }
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "envKey": "OPENAI_API_KEY",
+          "baseUrl": "https://api.openai.com/v1",
+          "generationConfig": {
+            "timeout": 30000,
+            "samplingParams": {
+              "temperature": 0.5,
+              "max_tokens": 2048
+            }
+          }
+        },
+        {
+          "id": "openai/gpt-4o",
+          "name": "GPT-4o (via OpenRouter)",
+          "envKey": "OPENROUTER_API_KEY",
+          "baseUrl": "https://openrouter.ai/api/v1",
+          "generationConfig": {
+            "timeout": 120000,
+            "maxRetries": 3,
+            "samplingParams": {
+              "temperature": 0.7
+            }
+          }
+        },
+        {
+          "id": "openai/gpt-4o-mini",
+          "name": "GPT-4o Mini (via Requesty)",
+          "envKey": "REQUESTY_API_KEY",
+          "baseUrl": "https://router.requesty.ai/v1",
+          "generationConfig": {
+            "timeout": 120000,
+            "maxRetries": 3,
+            "samplingParams": {
+              "temperature": 0.7
+            }
           }
         }
-      },
-      {
-        "id": "gpt-4o-mini",
-        "name": "GPT-4o Mini",
-        "envKey": "OPENAI_API_KEY",
-        "baseUrl": "https://api.openai.com/v1",
-        "generationConfig": {
-          "timeout": 30000,
-          "samplingParams": {
-            "temperature": 0.5,
-            "max_tokens": 2048
-          }
-        }
-      },
-      {
-        "id": "openai/gpt-4o",
-        "name": "GPT-4o (via OpenRouter)",
-        "envKey": "OPENROUTER_API_KEY",
-        "baseUrl": "https://openrouter.ai/api/v1",
-        "generationConfig": {
-          "timeout": 120000,
-          "maxRetries": 3,
-          "samplingParams": {
-            "temperature": 0.7
-          }
-        }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
@@ -125,37 +143,40 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
     "ANTHROPIC_API_KEY": "sk-ant-your-actual-anthropic-key-here"
   },
   "modelProviders": {
-    "anthropic": [
-      {
-        "id": "claude-3-5-sonnet",
-        "name": "Claude 3.5 Sonnet",
-        "envKey": "ANTHROPIC_API_KEY",
-        "baseUrl": "https://api.anthropic.com/v1",
-        "generationConfig": {
-          "timeout": 120000,
-          "maxRetries": 3,
-          "contextWindowSize": 200000,
-          "samplingParams": {
-            "temperature": 0.7,
-            "max_tokens": 8192,
-            "top_p": 0.9
+    "anthropic": {
+      "protocol": "anthropic",
+      "models": [
+        {
+          "id": "claude-3-5-sonnet",
+          "name": "Claude 3.5 Sonnet",
+          "envKey": "ANTHROPIC_API_KEY",
+          "baseUrl": "https://api.anthropic.com/v1",
+          "generationConfig": {
+            "timeout": 120000,
+            "maxRetries": 3,
+            "contextWindowSize": 200000,
+            "samplingParams": {
+              "temperature": 0.7,
+              "max_tokens": 8192,
+              "top_p": 0.9
+            }
+          }
+        },
+        {
+          "id": "claude-3-opus",
+          "name": "Claude 3 Opus",
+          "envKey": "ANTHROPIC_API_KEY",
+          "baseUrl": "https://api.anthropic.com/v1",
+          "generationConfig": {
+            "timeout": 180000,
+            "samplingParams": {
+              "temperature": 0.3,
+              "max_tokens": 4096
+            }
           }
         }
-      },
-      {
-        "id": "claude-3-opus",
-        "name": "Claude 3 Opus",
-        "envKey": "ANTHROPIC_API_KEY",
-        "baseUrl": "https://api.anthropic.com/v1",
-        "generationConfig": {
-          "timeout": 180000,
-          "samplingParams": {
-            "temperature": 0.3,
-            "max_tokens": 4096
-          }
-        }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
@@ -168,29 +189,32 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
     "GEMINI_API_KEY": "AIza-your-actual-gemini-key-here"
   },
   "modelProviders": {
-    "gemini": [
-      {
-        "id": "gemini-2.0-flash",
-        "name": "Gemini 2.0 Flash",
-        "envKey": "GEMINI_API_KEY",
-        "baseUrl": "https://generativelanguage.googleapis.com",
-        "capabilities": {
-          "vision": true
-        },
-        "generationConfig": {
-          "timeout": 60000,
-          "maxRetries": 2,
-          "contextWindowSize": 1000000,
-          "schemaCompliance": "auto",
-          "samplingParams": {
-            "temperature": 0.4,
-            "top_p": 0.95,
-            "max_tokens": 8192,
-            "top_k": 40
+    "gemini": {
+      "protocol": "gemini",
+      "models": [
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "envKey": "GEMINI_API_KEY",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "capabilities": {
+            "vision": true
+          },
+          "generationConfig": {
+            "timeout": 60000,
+            "maxRetries": 2,
+            "contextWindowSize": 1000000,
+            "schemaCompliance": "auto",
+            "samplingParams": {
+              "temperature": 0.4,
+              "top_p": 0.95,
+              "max_tokens": 8192,
+              "top_k": 40
+            }
           }
         }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
@@ -207,51 +231,54 @@ Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-c
     "LMSTUDIO_API_KEY": "lm-studio"
   },
   "modelProviders": {
-    "openai": [
-      {
-        "id": "qwen2.5-7b",
-        "name": "Qwen2.5 7B (Ollama)",
-        "envKey": "OLLAMA_API_KEY",
-        "baseUrl": "http://localhost:11434/v1",
-        "generationConfig": {
-          "timeout": 300000,
-          "maxRetries": 1,
-          "contextWindowSize": 32768,
-          "samplingParams": {
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "max_tokens": 4096
+    "openai": {
+      "protocol": "openai",
+      "models": [
+        {
+          "id": "qwen2.5-7b",
+          "name": "Qwen2.5 7B (Ollama)",
+          "envKey": "OLLAMA_API_KEY",
+          "baseUrl": "http://localhost:11434/v1",
+          "generationConfig": {
+            "timeout": 300000,
+            "maxRetries": 1,
+            "contextWindowSize": 32768,
+            "samplingParams": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "max_tokens": 4096
+            }
+          }
+        },
+        {
+          "id": "llama-3.1-8b",
+          "name": "Llama 3.1 8B (vLLM)",
+          "envKey": "VLLM_API_KEY",
+          "baseUrl": "http://localhost:8000/v1",
+          "generationConfig": {
+            "timeout": 120000,
+            "maxRetries": 2,
+            "contextWindowSize": 128000,
+            "samplingParams": {
+              "temperature": 0.6,
+              "max_tokens": 8192
+            }
+          }
+        },
+        {
+          "id": "local-model",
+          "name": "Local Model (LM Studio)",
+          "envKey": "LMSTUDIO_API_KEY",
+          "baseUrl": "http://localhost:1234/v1",
+          "generationConfig": {
+            "timeout": 60000,
+            "samplingParams": {
+              "temperature": 0.5
+            }
           }
         }
-      },
-      {
-        "id": "llama-3.1-8b",
-        "name": "Llama 3.1 8B (vLLM)",
-        "envKey": "VLLM_API_KEY",
-        "baseUrl": "http://localhost:8000/v1",
-        "generationConfig": {
-          "timeout": 120000,
-          "maxRetries": 2,
-          "contextWindowSize": 128000,
-          "samplingParams": {
-            "temperature": 0.6,
-            "max_tokens": 8192
-          }
-        }
-      },
-      {
-        "id": "local-model",
-        "name": "Local Model (LM Studio)",
-        "envKey": "LMSTUDIO_API_KEY",
-        "baseUrl": "http://localhost:1234/v1",
-        "generationConfig": {
-          "timeout": 60000,
-          "samplingParams": {
-            "temperature": 0.5
-          }
-        }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
@@ -299,11 +326,18 @@ Alibaba Cloud Coding Plan provides a pre-configured set of Qwen models optimized
 
 When you authenticate with an Alibaba Cloud Coding Plan API key using the `/auth` command, Qwen Code automatically configures the following models:
 
-| Model ID               | Name                 | Description                            |
-| ---------------------- | -------------------- | -------------------------------------- |
-| `qwen3.5-plus`         | qwen3.5-plus         | Advanced model with thinking enabled   |
-| `qwen3-coder-plus`     | qwen3-coder-plus     | Optimized for coding tasks             |
-| `qwen3-max-2026-01-23` | qwen3-max-2026-01-23 | Latest max model with thinking enabled |
+| Model ID               | Name                 | Description                                               |
+| ---------------------- | -------------------- | --------------------------------------------------------- |
+| `qwen3.5-plus`         | qwen3.5-plus         | Advanced model with thinking enabled                      |
+| `qwen3.6-plus`         | qwen3.6-plus         | Latest model with thinking enabled (Pro subscribers only) |
+| `qwen3.7-plus`         | qwen3.7-plus         | Advanced model with thinking enabled                      |
+| `qwen3-coder-plus`     | qwen3-coder-plus     | Optimized for coding tasks                                |
+| `qwen3-coder-next`     | qwen3-coder-next     | Experimental coding model                                 |
+| `qwen3-max-2026-01-23` | qwen3-max-2026-01-23 | Latest max model with thinking enabled                    |
+| `glm-5`                | glm-5                | GLM model with thinking enabled                           |
+| `glm-4.7`              | glm-4.7              | GLM model with thinking enabled                           |
+| `kimi-k2.5`            | kimi-k2.5            | Kimi model with thinking and vision/video support         |
+| `MiniMax-M2.5`         | MiniMax-M2.5         | MiniMax model with thinking enabled                       |
 
 ### Setup
 
@@ -311,7 +345,7 @@ When you authenticate with an Alibaba Cloud Coding Plan API key using the `/auth
    - **China**: <https://bailian.console.aliyun.com/?tab=model#/efm/coding_plan>
    - **International**: <https://modelstudio.console.alibabacloud.com/?tab=dashboard#/efm/coding_plan>
 2. Run the `/auth` command in Qwen Code
-3. Select **Alibaba Cloud Coding Plan**
+3. Select **Alibaba ModelStudio**, then choose **Coding Plan** from the sub-menu
 4. Select your region
 5. Enter your API key when prompted
 
@@ -326,7 +360,7 @@ Alibaba Cloud Coding Plan supports two regions:
 | China                | `https://coding.dashscope.aliyuncs.com/v1`      | Mainland China endpoint |
 | Global/International | `https://coding-intl.dashscope.aliyuncs.com/v1` | International endpoint  |
 
-The region is selected during authentication and stored in `settings.json` under `codingPlan.region`. To switch regions, re-run the `/auth` command and select a different region.
+The region is selected during authentication and stored in `settings.json` under the `modelProviders` configuration. To switch regions, re-run the `/auth` command and select a different region.
 
 ### API Key Storage
 
@@ -360,15 +394,18 @@ If you prefer to manually configure Coding Plan models, you can add them to your
 ```json
 {
   "modelProviders": {
-    "openai": [
-      {
-        "id": "qwen3-coder-plus",
-        "name": "qwen3-coder-plus",
-        "description": "Qwen3-Coder via Alibaba Cloud Coding Plan",
-        "envKey": "YOUR_CUSTOM_ENV_KEY",
-        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1"
-      }
-    ]
+    "openai": {
+      "protocol": "openai",
+      "models": [
+        {
+          "id": "qwen3-coder-plus",
+          "name": "qwen3-coder-plus",
+          "description": "Qwen3-Coder via Alibaba Cloud Coding Plan",
+          "envKey": "YOUR_CUSTOM_ENV_KEY",
+          "baseUrl": "https://coding.dashscope.aliyuncs.com/v1"
+        }
+      ]
+    }
   }
 }
 ```
@@ -389,14 +426,14 @@ If you prefer to manually configure Coding Plan models, you can add them to your
 
 The effective auth/model/credential values are chosen per field using the following precedence (first present wins). You can combine `--auth-type` with `--model` to point directly at a provider entry; these CLI flags run before other layers.
 
-| Layer (highest → lowest)   | authType                            | model                                           | apiKey                                              | baseUrl                                              | apiKeyEnvKey           | proxy                             |
-| -------------------------- | ----------------------------------- | ----------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------- | ---------------------- | --------------------------------- |
-| Programmatic overrides     | `/auth`                             | `/auth` input                                   | `/auth` input                                       | `/auth` input                                        | —                      | —                                 |
-| Model provider selection   | —                                   | `modelProvider.id`                              | `env[modelProvider.envKey]`                         | `modelProvider.baseUrl`                              | `modelProvider.envKey` | —                                 |
-| CLI arguments              | `--auth-type`                       | `--model`                                       | `--openaiApiKey` (or provider-specific equivalents) | `--openaiBaseUrl` (or provider-specific equivalents) | —                      | —                                 |
-| Environment variables      | —                                   | Provider-specific mapping (e.g. `OPENAI_MODEL`) | Provider-specific mapping (e.g. `OPENAI_API_KEY`)   | Provider-specific mapping (e.g. `OPENAI_BASE_URL`)   | —                      | —                                 |
-| Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                              | `security.auth.baseUrl`                              | —                      | —                                 |
-| Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3-coder-plus`)  | —                                                   | —                                                    | —                      | `Config.getProxy()` if configured |
+| Layer (highest → lowest)   | authType                            | model                                           | apiKey                                                | baseUrl                                                | apiKeyEnvKey           | proxy                             |
+| -------------------------- | ----------------------------------- | ----------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------ | ---------------------- | --------------------------------- |
+| Programmatic overrides     | `/auth`                             | `/auth` input                                   | `/auth` input                                         | `/auth` input                                          | —                      | —                                 |
+| Model provider selection   | —                                   | `modelProvider.id`                              | `env[modelProvider.envKey]`                           | `modelProvider.baseUrl`                                | `modelProvider.envKey` | —                                 |
+| CLI arguments              | `--auth-type`                       | `--model`                                       | `--openai-api-key` (or provider-specific equivalents) | `--openai-base-url` (or provider-specific equivalents) | —                      | —                                 |
+| Environment variables      | —                                   | Provider-specific mapping (e.g. `OPENAI_MODEL`) | Provider-specific mapping (e.g. `OPENAI_API_KEY`)     | Provider-specific mapping (e.g. `OPENAI_BASE_URL`)     | —                      | —                                 |
+| Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                                | `security.auth.baseUrl`                                | —                      | —                                 |
+| Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3.5-plus`)      | —                                                     | —                                                      | —                      | `Config.getProxy()` if configured |
 
 \*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. Qwen OAuth and OpenAI are the only auth types surfaced without extra configuration.
 
@@ -416,6 +453,13 @@ The configuration resolution follows a strict layering model with one crucial ru
    - All fields defined in `modelProviders[].generationConfig` use the provider's values
    - All fields **not defined** by the provider are set to `undefined` (not inherited from settings)
    - This ensures provider configurations act as a complete, self-contained "sealed package"
+
+   If a model is listed in `modelProviders`, put all model-specific
+   generation settings for that model in the matching provider entry. Top-level
+   `model.generationConfig` values, including `contextWindowSize`,
+   `modalities`, `customHeaders`, and `extra_body`, are ignored for provider
+   models. Configure those fields under
+   `modelProviders[authType][].generationConfig` for them to apply.
 
 2. **When NO modelProvider model is selected** (e.g., using `--model` with a raw model ID, or using CLI/env/settings directly):
    - The resolution falls through to lower layers
@@ -441,7 +485,7 @@ The following fields are treated as atomic objects - provider values completely 
 
 ### Example
 
-```json
+```jsonc
 // User settings (~/.qwen/settings.json)
 {
   "model": {
@@ -455,14 +499,17 @@ The following fields are treated as atomic objects - provider values completely 
 // modelProviders configuration
 {
   "modelProviders": {
-    "openai": [{
-      "id": "gpt-4o",
-      "envKey": "OPENAI_API_KEY",
-      "generationConfig": {
-        "timeout": 60000,
-        "samplingParams": { "temperature": 0.2 }
-      }
-    }]
+    "openai": {
+      "protocol": "openai",
+      "models": [{
+        "id": "gpt-4o",
+        "envKey": "OPENAI_API_KEY",
+        "generationConfig": {
+          "timeout": 60000,
+          "samplingParams": { "temperature": 0.2 }
+        }
+      }]
+    }
   }
 }
 ```
@@ -480,6 +527,72 @@ When using a raw model via `--model gpt-4` (not from modelProviders, creates a R
 - `samplingParams.max_tokens` = 1000 (from settings)
 
 The merge strategy for `modelProviders` itself is REPLACE: the entire `modelProviders` from project settings will override the corresponding section in user settings, rather than merging the two.
+
+## Reasoning / thinking configuration
+
+The optional `reasoning` field under `generationConfig` controls how aggressively the model reasons before responding. The Anthropic and Gemini converters always honor it. The OpenAI-compatible pipeline honors it **unless** `generationConfig.samplingParams` is set — see the "Interaction with `samplingParams`" caveat below.
+
+```jsonc
+{
+  "modelProviders": {
+    "openai": {
+      "protocol": "openai",
+      "models": [
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "baseUrl": "https://api.deepseek.com/v1",
+          "envKey": "DEEPSEEK_API_KEY",
+          "generationConfig": {
+            // The four-tier scale:
+            //   'low'    | 'medium' — server-mapped to 'high' on DeepSeek
+            //   'high'   — default reasoning intensity
+            //   'max'    — DeepSeek-specific extra-strong tier
+            // Or set `false` to disable reasoning entirely.
+            "reasoning": { "effort": "max" },
+          },
+        },
+      ],
+    },
+  },
+}
+```
+
+### Per-provider behavior
+
+| Protocol / provider                          | Wire shape                                                           | Notes                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **OpenAI / DeepSeek** (`api.deepseek.com`)   | Flat `reasoning_effort: <effort>` body parameter                     | When `reasoning.effort` is set in the nested config shape, it's rewritten to flat `reasoning_effort` and `'low'`/`'medium'` are normalized to `'high'`, `'xhigh'` to `'max'` — mirroring DeepSeek's [server-side back-compat](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion). Top-level `samplingParams.reasoning_effort` or `extra_body.reasoning_effort` overrides skip this normalization and ship verbatim. |
+| **OpenAI** (other compatible servers)        | `reasoning: { effort, ... }` passed through verbatim                 | Set via `samplingParams` (e.g. `samplingParams.reasoning_effort` for GPT-5/o-series) when the provider expects a different shape.                                                                                                                                                                                                                                                                                                |
+| **Anthropic** (real `api.anthropic.com`)     | `output_config: { effort }` plus the `effort-2025-11-24` beta header | Real Anthropic accepts `'low'`/`'medium'`/`'high'` only. `'max'` is **clamped to `'high'`** with a `debugLogger.warn` line (once per generator); if you want max effort, switch the baseURL to a DeepSeek-compatible endpoint that supports it.                                                                                                                                                                                  |
+| **Anthropic** (`api.deepseek.com/anthropic`) | Same `output_config: { effort }` + beta header                       | `'max'` is passed through unchanged.                                                                                                                                                                                                                                                                                                                                                                                             |
+| **Gemini** (`@google/genai`)                 | `thinkingConfig: { includeThoughts: true, thinkingLevel }`           | `'low'` → `LOW`, `'high'`/`'max'` → `HIGH`, others → `THINKING_LEVEL_UNSPECIFIED` (Gemini has no `MAX` tier).                                                                                                                                                                                                                                                                                                                    |
+
+### `reasoning: false`
+
+Setting `reasoning: false` (the literal boolean) explicitly disables thinking on every provider — useful for cheap side queries that don't benefit from reasoning. This is honored at the request level too via `request.config.thinkingConfig.includeThoughts: false` for one-off calls (e.g. suggestion generation).
+
+On a `api.deepseek.com` baseURL, the OpenAI pipeline emits the explicit `thinking: { type: 'disabled' }` field that DeepSeek V4+ requires — the server-side default is `'enabled'`, so simply omitting `reasoning_effort` would still pay thinking latency/cost. Self-hosted DeepSeek backends (sglang/vllm) and other OpenAI-compatible servers do **not** receive this field; if you need to disable thinking on those, inject `thinking: { type: 'disabled' }` (or whatever knob your inference framework exposes) via `samplingParams`/`extra_body`.
+
+### Interaction with `samplingParams` (OpenAI-compatible only)
+
+> [!warning]
+>
+> When `generationConfig.samplingParams` is set on an OpenAI-compatible provider, the pipeline ships those keys to the wire **verbatim** and skips the separate `reasoning` injection entirely. So a config like `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` will silently drop the reasoning field on OpenAI/DeepSeek requests.
+>
+> If you set `samplingParams`, include the reasoning knob inside it directly — for DeepSeek that's `samplingParams.reasoning_effort`, for GPT-5/o-series it's `samplingParams.reasoning_effort` (their flat field) or `samplingParams.reasoning` (the nested object). For OpenRouter and other providers the field name varies; consult the provider docs.
+>
+> The Anthropic and Gemini converters are unaffected — they always read `reasoning.effort` directly regardless of `samplingParams`.
+
+### `budget_tokens`
+
+You can pin an exact thinking-token budget by including `budget_tokens` alongside `effort`:
+
+```jsonc
+"reasoning": { "effort": "high", "budget_tokens": 50000 }
+```
+
+For Anthropic this becomes `thinking.budget_tokens`. For OpenAI/DeepSeek the field is preserved but currently ignored by the server — `reasoning_effort` is the load-bearing knob.
 
 ## Provider Models vs Runtime Models
 
@@ -507,7 +620,7 @@ When you configure a model without using `modelProviders`, Qwen Code automatical
 
 ```bash
 # This creates a RuntimeModelSnapshot with ID: $runtime|openai|my-custom-model
-qwen --auth-type openai --model my-custom-model --openaiApiKey $KEY --openaiBaseUrl https://api.example.com/v1
+qwen --auth-type openai --model my-custom-model --openai-api-key $KEY --openai-base-url https://api.example.com/v1
 ```
 
 The snapshot:

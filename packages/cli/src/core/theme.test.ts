@@ -12,6 +12,7 @@ vi.mock('../ui/themes/theme-manager.js', () => ({
   themeManager: {
     findThemeByName: (...args: unknown[]) => mockFindThemeByName(...args),
   },
+  AUTO_THEME_NAME: 'auto',
 }));
 
 vi.mock('../i18n/index.js', () => ({
@@ -60,5 +61,12 @@ describe('validateTheme', () => {
     const settings = { merged: {} };
     const result = validateTheme(settings as never);
     expect(result).toBeNull();
+  });
+
+  it('should return null when theme is set to auto', () => {
+    const settings = { merged: { ui: { theme: 'auto' } } };
+    const result = validateTheme(settings as never);
+    expect(result).toBeNull();
+    expect(mockFindThemeByName).not.toHaveBeenCalled();
   });
 });

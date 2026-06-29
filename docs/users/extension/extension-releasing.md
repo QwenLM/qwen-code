@@ -75,7 +75,7 @@ To ensure Qwen Code can automatically find the correct release asset for each pl
 
 Archives must be fully contained extensions and have all the standard requirements - specifically the `qwen-extension.json` file must be at the root of the archive.
 
-The rest of the layout should look exactly the same as a typical extension, see [extensions.md](extension.md).
+The rest of the layout should look exactly the same as a typical extension, see [introduction.md](./introduction.md).
 
 #### Example GitHub Actions workflow
 
@@ -98,7 +98,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install dependencies
         run: npm ci

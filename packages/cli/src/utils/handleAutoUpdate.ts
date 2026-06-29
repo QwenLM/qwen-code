@@ -8,11 +8,18 @@ import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { getInstallationInfo } from './installationInfo.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
-import type { HistoryItem } from '../ui/types.js';
+import type { HistoryItemWithoutId } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
+import { performStandaloneUpdate } from './standalone-update.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
+
+const UPDATE_SUCCESS_MESSAGE =
+  'Update successful! Please restart Qwen Code to use the new version. ' +
+  'Switching model providers before restarting may not work correctly.';
+const UPDATE_FAILED_MESSAGE =
+  'Automatic update failed. Please try updating manually.';
 
 export function handleAutoUpdate(
   info: UpdateObject | null,
@@ -43,6 +50,27 @@ export function handleAutoUpdate(
     message: combinedMessage,
   });
 
+  if (
+    installationInfo.isStandalone &&
+    installationInfo.standaloneDir &&
+    isAutoUpdateEnabled
+  ) {
+    performStandaloneUpdate(installationInfo.standaloneDir, info.update.latest)
+      .then((result) => {
+        const message =
+          result === 'deferred'
+            ? 'Update downloaded. It will be applied after you exit this session.'
+            : 'Update successful! The new version will be used on your next run.';
+        updateEventEmitter.emit('update-success', { message });
+      })
+      .catch((err: Error) => {
+        updateEventEmitter.emit('update-failed', {
+          message: `Automatic update failed: ${err.message}. Re-run the installer to update manually.`,
+        });
+      });
+    return;
+  }
+
   // Don't automatically run the update if auto-update is disabled or no update command
   if (!installationInfo.updateCommand || !isAutoUpdateEnabled) {
     return;
@@ -65,77 +93,75 @@ export function handleAutoUpdate(
   updateProcess.on('close', (code) => {
     if (code === 0) {
       updateEventEmitter.emit('update-success', {
-        message:
-          'Update successful! The new version will be used on your next run.',
+        message: UPDATE_SUCCESS_MESSAGE,
       });
     } else {
       updateEventEmitter.emit('update-failed', {
-        message: `Automatic update failed. Please try updating manually. (command: ${updateCommand}, stderr: ${errorOutput.trim()})`,
+        message: `${UPDATE_FAILED_MESSAGE} (command: ${updateCommand}, stderr: ${errorOutput.trim()})`,
       });
     }
   });
 
   updateProcess.on('error', (err) => {
     updateEventEmitter.emit('update-failed', {
-      message: `Automatic update failed. Please try updating manually. (error: ${err.message})`,
+      message: `${UPDATE_FAILED_MESSAGE} (error: ${err.message})`,
     });
   });
   return updateProcess;
 }
 
 export function setUpdateHandler(
-  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   setUpdateInfo: (info: UpdateObject | null) => void,
+  isIdleRef: { current: boolean } = { current: true },
 ) {
   let successfullyInstalled = false;
+  const pendingNotifications: HistoryItemWithoutId[] = [];
+
+  const addItemOrDefer = (item: HistoryItemWithoutId) => {
+    if (isIdleRef.current) {
+      addItem(item, Date.now());
+    } else {
+      pendingNotifications.push(item);
+    }
+  };
+
   const handleUpdateRecieved = (info: UpdateObject) => {
     setUpdateInfo(info);
     const savedMessage = info.message;
     setTimeout(() => {
       if (!successfullyInstalled) {
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: savedMessage,
-          },
-          Date.now(),
-        );
+        addItemOrDefer({
+          type: MessageType.INFO,
+          text: savedMessage,
+        });
       }
       setUpdateInfo(null);
     }, 60000);
   };
 
-  const handleUpdateFailed = () => {
+  const handleUpdateFailed = (data?: { message?: string }) => {
     setUpdateInfo(null);
-    addItem(
-      {
-        type: MessageType.ERROR,
-        text: `Automatic update failed. Please try updating manually`,
-      },
-      Date.now(),
-    );
+    addItemOrDefer({
+      type: MessageType.ERROR,
+      text: data?.message ?? UPDATE_FAILED_MESSAGE,
+    });
   };
 
-  const handleUpdateSuccess = () => {
+  const handleUpdateSuccess = (data?: { message?: string }) => {
     successfullyInstalled = true;
     setUpdateInfo(null);
-    addItem(
-      {
-        type: MessageType.INFO,
-        text: `Update successful! The new version will be used on your next run.`,
-      },
-      Date.now(),
-    );
+    addItemOrDefer({
+      type: MessageType.INFO,
+      text: data?.message ?? UPDATE_SUCCESS_MESSAGE,
+    });
   };
 
   const handleUpdateInfo = (data: { message: string }) => {
-    addItem(
-      {
-        type: MessageType.INFO,
-        text: data.message,
-      },
-      Date.now(),
-    );
+    addItemOrDefer({
+      type: MessageType.INFO,
+      text: data.message,
+    });
   };
 
   updateEventEmitter.on('update-received', handleUpdateRecieved);
@@ -143,10 +169,20 @@ export function setUpdateHandler(
   updateEventEmitter.on('update-success', handleUpdateSuccess);
   updateEventEmitter.on('update-info', handleUpdateInfo);
 
-  return () => {
+  const cleanup = () => {
     updateEventEmitter.off('update-received', handleUpdateRecieved);
     updateEventEmitter.off('update-failed', handleUpdateFailed);
     updateEventEmitter.off('update-success', handleUpdateSuccess);
     updateEventEmitter.off('update-info', handleUpdateInfo);
+    pendingNotifications.length = 0;
   };
+
+  const flush = () => {
+    while (pendingNotifications.length > 0) {
+      const item = pendingNotifications.shift()!;
+      addItem(item, Date.now());
+    }
+  };
+
+  return { cleanup, flush };
 }

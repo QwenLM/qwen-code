@@ -10,7 +10,8 @@
     "strict": true,
     "skipLibCheck": true,
     "paths": {
-      "@lydell/node-pty": ["../../node_modules/@lydell/node-pty/node-pty.d.ts"]
+      "@lydell/node-pty": ["../../node_modules/@lydell/node-pty/node-pty.d.ts"],
+      "@qwen-code/qwen-code/export": ["../cli/src/export/index.ts"]
     }
     /* Additional Checks */
     // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */

@@ -8,9 +8,16 @@
 
 import { initStartupProfiler } from './src/utils/startupProfiler.js';
 import { startCapturingEarlyInput } from './src/utils/earlyInput.js';
+import { isServeFastPathArgv } from './src/serve/fast-path-argv.js';
 
 // Must run before any other imports to capture the earliest possible T0.
 initStartupProfiler();
+
+import { initCpuProfiler } from './src/utils/cpuProfiler.js';
+// Initialize early to register SIGUSR1 handler and start recording when
+// QWEN_CODE_CPU_PROFILE=1, capturing as much of the startup as possible.
+initCpuProfiler();
+
 
 // --- Global Entry Point ---
 //
@@ -18,6 +25,10 @@ initStartupProfiler();
 // This covers the real startup window where users can type before `gemini.tsx`
 // has finished evaluating and before `main()` starts.
 startCapturingEarlyInput();
+
+function writeStderrLine(line: string): void {
+  process.stderr.write(line.endsWith('\n') ? line : `${line}\n`);
+}
 
 // Suppress known race conditions in @lydell/node-pty.
 //
@@ -52,6 +63,14 @@ const isExpectedPtyRaceError = (error: unknown): boolean => {
     return true;
   }
 
+  // EAGAIN: transient non-blocking read error from PTY fd
+  if (
+    (code === 'EAGAIN' && message.includes('read')) ||
+    message.includes('read EAGAIN')
+  ) {
+    return true;
+  }
+
   // PTY-specific resize/exit race errors - require PTY context in message
   if (
     message.includes('ioctl(2) failed, EBADF') ||
@@ -63,44 +82,77 @@ const isExpectedPtyRaceError = (error: unknown): boolean => {
   return false;
 };
 
+async function runCliEntry(): Promise<void> {
+  if (isServeFastPathArgv(process.argv.slice(2))) {
+    const { tryRunServeFastPath } = await import('./src/serve/fast-path.js');
+    if (await tryRunServeFastPath()) return;
+  }
+
+  const { main } = await import('./src/gemini.js');
+  await main();
+}
+
+async function handleCriticalError(error: unknown): Promise<void> {
+  const [{ FatalError }, { AlreadyReportedError }] = await Promise.all([
+    import('@qwen-code/qwen-code-core'),
+    import('./src/utils/errors.js'),
+  ]);
+
+  if (error instanceof FatalError) {
+    let errorMessage = error.message;
+    if (!process.env['NO_COLOR']) {
+      errorMessage = `\x1b[31m${errorMessage}\x1b[0m`;
+    }
+    console.error(errorMessage);
+    process.exit(error.exitCode);
+  }
+  // AlreadyReportedError means an upstream layer (e.g. the non-interactive
+  // stream-error handler) has already written the user-facing message to
+  // stderr and just wants to surface a non-zero exit code. Don't print
+  // "An unexpected critical error occurred:" with a stack trace — that
+  // framing is for genuinely unexpected, programmer-level bugs, and a
+  // routine 4xx from an upstream API does not qualify.
+  if (error instanceof AlreadyReportedError) {
+    process.exit(error.exitCode);
+  }
+  console.error('An unexpected critical error occurred:');
+  if (error instanceof Error) {
+    console.error(error.stack);
+  } else {
+    console.error(String(error));
+  }
+  process.exit(1);
+}
+
 process.on('uncaughtException', (error) => {
   if (isExpectedPtyRaceError(error)) {
     return;
   }
 
   if (error instanceof Error) {
-    console.error(error.stack ?? error.message);
+    writeStderrLine(error.stack ?? error.message);
   } else {
-    console.error(String(error));
+    writeStderrLine(String(error));
   }
   process.exit(1);
 });
 
-const run = async () => {
-  const { main } = await import('./src/gemini.js');
-
-  try {
-    await main();
-  } catch (error) {
-    const { FatalError } = await import('@qwen-code/qwen-code-core');
-
-    if (error instanceof FatalError) {
-      let errorMessage = error.message;
-      if (!process.env['NO_COLOR']) {
-        errorMessage = `\x1b[31m${errorMessage}\x1b[0m`;
-      }
-      console.error(errorMessage);
-      process.exit(error.exitCode);
-    }
-
+runCliEntry().catch((error: unknown) => {
+  void handleCriticalError(error).catch((handlerError: unknown) => {
     console.error('An unexpected critical error occurred:');
+    console.error('Original error:');
     if (error instanceof Error) {
       console.error(error.stack);
     } else {
       console.error(String(error));
     }
+    console.error('Error handler failed:');
+    if (handlerError instanceof Error) {
+      console.error(handlerError.stack);
+    } else {
+      console.error(String(handlerError));
+    }
     process.exit(1);
-  }
-};
+  });
+});
 
-void run();

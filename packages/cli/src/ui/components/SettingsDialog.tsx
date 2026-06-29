@@ -26,13 +26,20 @@ import {
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
+  validateSettingValue,
 } from '../../utils/settingsUtils.js';
-import { updateOutputLanguageFile } from '../../utils/languageUtils.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
+import {
+  useVimModeState,
+  useVimModeActions,
+} from '../contexts/VimModeContext.js';
+import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
-import chalk from 'chalk';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import {
   type SettingsValue,
   TOGGLE_TYPES,
@@ -58,7 +65,11 @@ export function SettingsDialog({
   config,
 }: SettingsDialogProps): React.JSX.Element {
   // Get vim mode context to sync vim mode changes
-  const { vimEnabled, toggleVimEnabled } = useVimMode();
+  const { vimEnabled } = useVimModeState();
+  const { toggleVimEnabled } = useVimModeActions();
+  // Get compact mode context to sync compact mode changes
+  const { compactMode, setCompactMode } = useCompactMode();
+  const uiActions = useUIActions();
 
   // Mode state: 'settings' or 'scope' (view switching like ThemeDialog)
   const [mode, setMode] = useState<'settings' | 'scope'>('settings');
@@ -186,6 +197,13 @@ export function SettingsDialog({
               });
             }
 
+            // Special handling for compact mode to sync with CompactModeContext
+            // and refresh static content so already-rendered history updates.
+            if (key === 'ui.compactMode' && newValue !== compactMode) {
+              setCompactMode?.(newValue as boolean);
+              uiActions.refreshStatic();
+            }
+
             // Special handling for approval mode to apply to current session
             if (
               key === 'tools.approvalMode' &&
@@ -308,6 +326,16 @@ export function SettingsDialog({
       }
     }
 
+    if (definition) {
+      const validationError = validateSettingValue(definition, parsed);
+      if (validationError) {
+        setEditingKey(null);
+        setEditBuffer('');
+        setEditCursorPos(0);
+        return;
+      }
+    }
+
     // Update pending
     setPendingSettings((prev) =>
       parsed === undefined
@@ -367,7 +395,7 @@ export function SettingsDialog({
 
       // Update output language rule file immediately (no restart needed for LLM effect)
       if (key === 'general.outputLanguage' && typeof parsed === 'string') {
-        updateOutputLanguageFile(parsed);
+        writeOutputLanguageAndRegisterPath(parsed, config);
       }
 
       // Mark as needing restart and show prompt
@@ -534,8 +562,8 @@ export function SettingsDialog({
           // Block other keys while editing
           return;
         }
-        if (name === 'up' || name === 'k') {
-          // If editing, commit first
+        if (keyMatchers[Command.SELECTION_UP](key)) {
+          // ↑/k/Ctrl+P all move selection up. If editing, commit first.
           if (editingKey) {
             commitEdit(editingKey);
           }
@@ -550,8 +578,8 @@ export function SettingsDialog({
           } else if (newIndex < scrollOffset) {
             setScrollOffset(newIndex);
           }
-        } else if (name === 'down' || name === 'j') {
-          // If editing, commit first
+        } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
+          // ↓/j/Ctrl+N all move selection down. If editing, commit first.
           if (editingKey) {
             commitEdit(editingKey);
           }
@@ -584,6 +612,12 @@ export function SettingsDialog({
             }
             return;
           }
+          if (currentItem?.value === 'visionModel') {
+            if (name === 'return') {
+              onSelect('visionModel', selectedScope);
+            }
+            return;
+          }
           if (
             currentItem?.type === 'number' ||
             currentItem?.type === 'string'
@@ -598,7 +632,8 @@ export function SettingsDialog({
           if (
             currentItem?.value === 'ui.theme' ||
             currentItem?.value === 'general.preferredEditor' ||
-            currentItem?.value === 'fastModel'
+            currentItem?.value === 'fastModel' ||
+            currentItem?.value === 'visionModel'
           ) {
             onSelect(currentItem.value, selectedScope);
           }
@@ -804,10 +839,10 @@ export function SettingsDialog({
                 );
                 const afterCursor = cpSlice(editBuffer, editCursorPos + 1);
                 displayValue =
-                  beforeCursor + chalk.inverse(atCursor) + afterCursor;
+                  beforeCursor + renderSoftwareCursor(atCursor) + afterCursor;
               } else if (cursorVisible && editCursorPos >= cpLen(editBuffer)) {
-                // Cursor is at the end - show inverted space
-                displayValue = editBuffer + chalk.inverse(' ');
+                // Cursor is at the end - show software cursor space
+                displayValue = editBuffer + renderSoftwareCursor(' ');
               } else {
                 // Cursor not visible
                 displayValue = editBuffer;
@@ -817,7 +852,8 @@ export function SettingsDialog({
               const isSubDialogSetting =
                 item.value === 'ui.theme' ||
                 item.value === 'general.preferredEditor' ||
-                item.value === 'fastModel';
+                item.value === 'fastModel' ||
+                item.value === 'visionModel';
 
               // For numbers/strings, get the actual current value from pending settings
               const path = item.value.split('.');

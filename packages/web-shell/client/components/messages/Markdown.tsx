@@ -1,0 +1,698 @@
+import {
+  Component,
+  createContext,
+  memo,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ErrorInfo,
+  type ReactNode,
+} from 'react';
+import { useTheme } from '../../themeContext';
+import ReactMarkdown from 'react-markdown';
+import type { Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import {
+  getCachedHtml,
+  getCodeHighlighter,
+  highlightToHtmlSync,
+  isTooLargeToHighlight,
+} from './codeHighlighter';
+import { useI18n } from '../../i18n';
+import {
+  useWebShellCustomization,
+  type MarkdownContentSource,
+} from '../../customization';
+import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import styles from './Markdown.module.css';
+
+interface MarkdownProps {
+  content: string;
+  source?: MarkdownContentSource;
+  /**
+   * True while the message is still streaming in. Used to defer expensive,
+   * per-chunk rendering (Mermaid diagrams and Shiki syntax highlighting) until
+   * the content settles, avoiding flicker and wasted re-tokenization.
+   */
+  isStreaming?: boolean;
+  enhanceTables?: boolean;
+}
+
+const SUPPORTED_LANGUAGES = new Set([
+  'javascript',
+  'typescript',
+  'python',
+  'rust',
+  'go',
+  'java',
+  'c',
+  'cpp',
+  'csharp',
+  'ruby',
+  'php',
+  'swift',
+  'kotlin',
+  'scala',
+  // `shell` and `zsh` are intentionally absent: LANGUAGE_ALIASES maps them to
+  // `bash`, which resolveFenceLanguage applies before this membership check.
+  'bash',
+  'fish',
+  'powershell',
+  'sql',
+  'html',
+  'css',
+  'scss',
+  'json',
+  'yaml',
+  'toml',
+  'xml',
+  'markdown',
+  'dockerfile',
+  'graphql',
+  'lua',
+  'r',
+  'matlab',
+  'perl',
+  'haskell',
+  'elixir',
+  'erlang',
+  'clojure',
+  'dart',
+  'vue',
+  'svelte',
+  'astro',
+  'tsx',
+  'jsx',
+  'diff',
+]);
+
+// Common fence aliases → Shiki's canonical language id. Without this, blocks
+// tagged ```ts / ```js / ```py fall through to the unhighlighted "text" path
+// even though Shiki supports them under their full names.
+const LANGUAGE_ALIASES: Record<string, string> = {
+  ts: 'typescript',
+  js: 'javascript',
+  py: 'python',
+  rb: 'ruby',
+  rs: 'rust',
+  kt: 'kotlin',
+  cs: 'csharp',
+  sh: 'bash',
+  zsh: 'bash',
+  shell: 'bash',
+  yml: 'yaml',
+  md: 'markdown',
+  golang: 'go',
+  ps1: 'powershell',
+  docker: 'dockerfile',
+};
+
+export interface ResolvedFenceLanguage {
+  /** What the user typed, in its original case, shown in the code-block header. */
+  label: string;
+  /** Canonical language id (aliases resolved); also used to detect mermaid. */
+  lang: string;
+  /** A supported Shiki language id, or 'text' when unsupported (no highlight). */
+  resolvedLang: string;
+}
+
+export function resolveFenceLanguage(
+  rawLang: string | undefined,
+): ResolvedFenceLanguage {
+  const normalized = (rawLang || '').toLowerCase();
+  // `Object.hasOwn` guard: a bracket read like `LANGUAGE_ALIASES['__proto__']`
+  // would otherwise return an inherited prototype value (an object/function),
+  // violating the `lang: string` contract.
+  const lang = Object.hasOwn(LANGUAGE_ALIASES, normalized)
+    ? LANGUAGE_ALIASES[normalized]
+    : normalized;
+  const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
+  // Header label preserves the original case (` ```TypeScript ` shows
+  // "TypeScript", not "typescript"); alias resolution uses the lowercased form.
+  return { label: (rawLang || '').trim() || 'text', lang, resolvedLang };
+}
+
+const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
+const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,/i;
+
+export function isSafeHref(url: string | undefined): boolean {
+  if (!url) return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('#')) return true;
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
+  return SAFE_HREF_SCHEMES.test(trimmed);
+}
+
+export function isSafeImageSrc(url: string | undefined): boolean {
+  if (!url) return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('#')) return true;
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
+  if (SAFE_IMAGE_DATA_URI.test(trimmed)) return true;
+  return SAFE_HREF_SCHEMES.test(trimmed);
+}
+
+// Track last initialized theme to avoid redundant mermaid.initialize() calls.
+// mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
+// transcript this saves N-1 redundant calls per render cycle.
+let lastMermaidTheme: string | undefined;
+let mermaidRenderId = 0;
+
+function MermaidBlock({ code }: { code: string }) {
+  const { t } = useI18n();
+  const appTheme = useTheme();
+  const [svg, setSvg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
+  const [copied, setCopied] = useState(false);
+  const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
+
+  useEffect(() => {
+    let cancelled = false;
+    setSvg(null);
+    setError(null);
+    const timer = setTimeout(() => {
+      import('mermaid').then(async (mod) => {
+        if (cancelled) return;
+        const mermaid = mod.default;
+        if (lastMermaidTheme !== mermaidTheme) {
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: mermaidTheme,
+            securityLevel: 'strict',
+            suppressErrorRendering: true,
+          });
+          lastMermaidTheme = mermaidTheme;
+        }
+        try {
+          const id = `mermaid-${++mermaidRenderId}`;
+          const { svg } = await mermaid.render(id, code.trim());
+          // No additional sanitization needed: securityLevel:'strict' uses
+          // DOMPurify internally to sanitize SVG output.
+          if (!cancelled) {
+            setSvg(svg);
+          }
+        } catch (error: unknown) {
+          if (!cancelled) {
+            setError(
+              error instanceof Error ? error.message : 'Mermaid render failed',
+            );
+          }
+        }
+      });
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [code, mermaidTheme]);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      },
+      () => {},
+    );
+  };
+
+  if (error) {
+    return (
+      <div className={styles.codeBlock}>
+        <div className={styles.codeBlockHeader}>
+          <span className={styles.codeBlockLang}>mermaid (error)</span>
+        </div>
+        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+          <code>{code}</code>
+        </pre>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.codeBlock}>
+      <div className={styles.codeBlockHeader}>
+        <span className={styles.codeBlockLang}>mermaid</span>
+        <span className={styles.mermaidActions}>
+          <button
+            className={styles.codeBlockCopy}
+            onClick={() =>
+              setViewMode(viewMode === 'diagram' ? 'code' : 'diagram')
+            }
+          >
+            {viewMode === 'diagram'
+              ? t('mermaid.viewCode')
+              : t('mermaid.viewDiagram')}
+          </button>
+          <button className={styles.codeBlockCopy} onClick={handleCopy}>
+            {copied ? t('code.copied') : t('code.copy')}
+          </button>
+        </span>
+      </div>
+      {viewMode === 'code' ? (
+        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+          <code>{code}</code>
+        </pre>
+      ) : !svg ? (
+        <div
+          className={`${styles.mermaidBlock} ${styles.mermaidLoading} ${styles.mermaidInline}`}
+        >
+          <span>{t('mermaid.rendering')}</span>
+        </div>
+      ) : (
+        <div
+          className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CodeBlock({
+  className,
+  children,
+  isStreaming,
+}: {
+  className?: string;
+  children: string;
+  isStreaming?: boolean;
+}) {
+  const { t } = useI18n();
+  const appTheme = useTheme();
+  const [html, setHtml] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const match = className?.match(/language-(\w+)/);
+  const { label, lang, resolvedLang } = resolveFenceLanguage(match?.[1]);
+  const code = String(children).replace(/\n$/, '');
+  const shikiTheme =
+    appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
+
+  useEffect(() => {
+    // Don't highlight unsupported languages or blocks too large to tokenize
+    // without freezing the main thread — render them as plain text.
+    if (
+      lang === 'mermaid' ||
+      resolvedLang === 'text' ||
+      isTooLargeToHighlight(code)
+    ) {
+      setHtml(null);
+      return;
+    }
+
+    // Already-highlighted exact code/lang/theme (settled re-render, or a block
+    // that re-mounted): return it synchronously without needing the highlighter.
+    const cached = getCachedHtml(code, resolvedLang, shikiTheme);
+    if (cached !== null) {
+      setHtml(cached);
+      return;
+    }
+
+    // Re-highlight synchronously on every code change. With the Oniguruma
+    // engine a normal-sized block tokenizes in ~1–7ms, so there's no need to
+    // throttle or keep a stale snapshot around: `html` always matches the
+    // current `code`, so no streamed text is ever hidden and there's no flicker.
+    // `isTooLargeToHighlight` above bounds the worst-case per-chunk cost.
+    //
+    // Don't persist streaming intermediates: the growing block produces a new
+    // cache key every chunk and would otherwise evict other blocks from the LRU.
+    const persist = !isStreaming;
+    const warmHtml = highlightToHtmlSync(
+      code,
+      resolvedLang,
+      shikiTheme,
+      persist,
+    );
+    if (warmHtml !== null) {
+      setHtml(warmHtml);
+      return;
+    }
+
+    // Cold path: the grammar isn't loaded yet. Drop any HTML still held from a
+    // previous `code` (e.g. this reused CodeBlock instance just switched to a
+    // not-yet-loaded language on regeneration) so we render the current code as
+    // plain text — not the prior block's stale highlight — until the load
+    // resolves. Then re-check cancellation *before* the synchronous tokenization
+    // so superseded streaming snapshots that queued behind the same load don't
+    // each run codeToHtml.
+    setHtml(null);
+    let cancelled = false;
+    getCodeHighlighter(resolvedLang)
+      .then(() => {
+        if (cancelled) return;
+        const cold = highlightToHtmlSync(
+          code,
+          resolvedLang,
+          shikiTheme,
+          persist,
+        );
+        if (cold !== null) setHtml(cold);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn(
+          '[web-shell] highlight failed for lang=%s',
+          resolvedLang,
+          err,
+        );
+        setHtml(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      },
+      () => {},
+    );
+  };
+
+  if (lang === 'mermaid' && !isStreaming) {
+    return <MermaidBlock code={code} />;
+  }
+
+  // `html` is always the highlight of the *current* `code` (re-highlighted
+  // synchronously per chunk), so it can be rendered directly — no prefix gate
+  // is needed to guard against showing a stale/previous block's HTML.
+  return (
+    <div className={styles.codeBlock}>
+      <div className={styles.codeBlockHeader}>
+        <span className={styles.codeBlockLang}>{label}</span>
+        <button className={styles.codeBlockCopy} onClick={handleCopy}>
+          {copied ? t('code.copied') : t('code.copy')}
+        </button>
+      </div>
+      {html !== null ? (
+        <div
+          className={styles.codeBlockContent}
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      ) : (
+        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+          <code>{code}</code>
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function InlineCode({ children }: { children: ReactNode }) {
+  return <code className={styles.inlineCode}>{children}</code>;
+}
+
+function PlainMarkdownTable({
+  children,
+  toggle,
+}: {
+  children?: ReactNode;
+  toggle?: ReactNode;
+}) {
+  return (
+    <div className={styles.tableWrapper}>
+      {toggle}
+      <table className={styles.table}>{children}</table>
+    </div>
+  );
+}
+
+function TableBasicIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="6" y="6" width="12" height="12" rx="1" />
+      <path d="M6 10h12" />
+      <path d="M6 14h12" />
+      <path d="M12 6v12" />
+    </svg>
+  );
+}
+
+const TableAdvancedIcon = TableBasicIcon;
+
+function ToggleableMarkdownTable({
+  children,
+  tableResetKey,
+}: {
+  children?: ReactNode;
+  tableResetKey: string;
+}) {
+  const [enhanced, setEnhanced] = useState(false);
+  const { t } = useI18n();
+
+  if (enhanced) {
+    const fallbackToggle = (
+      <button
+        className={`${styles.tableToggle} ${styles.tableToggleActive}`}
+        type="button"
+        onClick={() => setEnhanced(false)}
+        title={t('markdownTable.toggleBasic')}
+        aria-label={t('markdownTable.toggleBasic')}
+        aria-pressed={true}
+      >
+        <TableBasicIcon />
+      </button>
+    );
+    const fallback = (
+      <PlainMarkdownTable toggle={fallbackToggle}>
+        {children}
+      </PlainMarkdownTable>
+    );
+    const toolbarToggle = (
+      <button
+        className={`${styles.tableToggle} ${styles.tableToggleInline} ${styles.tableToggleActive}`}
+        type="button"
+        onClick={() => setEnhanced(false)}
+        title={t('markdownTable.toggleBasic')}
+        aria-label={t('markdownTable.toggleBasic')}
+        aria-pressed={true}
+      >
+        <TableBasicIcon />
+      </button>
+    );
+    const plainFallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
+    return (
+      <EnhancedMarkdownTableBoundary
+        fallback={fallback}
+        resetKey={tableResetKey}
+      >
+        <EnhancedMarkdownTable
+          fallback={plainFallback}
+          toolbarExtra={toolbarToggle}
+        >
+          {children}
+        </EnhancedMarkdownTable>
+      </EnhancedMarkdownTableBoundary>
+    );
+  }
+
+  const toggleButton = (
+    <button
+      className={styles.tableToggle}
+      type="button"
+      onClick={() => setEnhanced(true)}
+      title={t('markdownTable.toggleAdvanced')}
+      aria-label={t('markdownTable.toggleAdvanced')}
+      aria-pressed={false}
+    >
+      <TableAdvancedIcon />
+    </button>
+  );
+  return (
+    <PlainMarkdownTable toggle={toggleButton}>{children}</PlainMarkdownTable>
+  );
+}
+
+class EnhancedMarkdownTableBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode; resetKey: string },
+  { hasError: boolean; resetKey: string }
+> {
+  state = { hasError: false, resetKey: this.props.resetKey };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  static getDerivedStateFromProps(
+    props: { resetKey: string },
+    state: { resetKey: string },
+  ) {
+    if (props.resetKey !== state.resetKey) {
+      return { hasError: false, resetKey: props.resetKey };
+    }
+    return null;
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error(
+      '[web-shell] enhanced markdown table failed:',
+      error,
+      errorInfo.componentStack,
+    );
+  }
+
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
+
+// Carries the streaming flag to CodeBlock via context instead of a closure, so
+// the `code` renderer below can be a single stable reference. Toggling
+// isStreaming then no longer changes the `code` element type, so React reuses
+// the same CodeBlock instance across the streaming→settled transition
+// (preserving its highlighted `html` state) instead of remounting it.
+const IsStreamingContext = createContext(false);
+
+function MarkdownCode({
+  className,
+  children,
+}: {
+  className?: string;
+  children?: ReactNode;
+}) {
+  const isStreaming = useContext(IsStreamingContext);
+  const isBlock =
+    className?.startsWith('language-') ||
+    (typeof children === 'string' && children.includes('\n'));
+
+  if (isBlock) {
+    return (
+      <CodeBlock className={className} isStreaming={isStreaming}>
+        {String(children)}
+      </CodeBlock>
+    );
+  }
+  return <InlineCode>{children}</InlineCode>;
+}
+
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  return <>{children}</>;
+}
+
+function MarkdownLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children?: ReactNode;
+}) {
+  const safeHref = isSafeHref(href) ? href : undefined;
+  return (
+    <a
+      href={safeHref}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={styles.link}
+    >
+      {children}
+    </a>
+  );
+}
+
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const safeSrc = isSafeImageSrc(src) ? src : undefined;
+  return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+}
+
+// `code`/`pre`/`a`/`img` are stable references; only `table` is created per
+// call (it closes over enhanceTables/tableResetKey). Recreating the components
+// object for a table reset therefore never changes the `code` element type, so
+// code blocks are not remounted.
+function createComponents(
+  enhanceTables?: boolean,
+  tableResetKey = '',
+): Components {
+  return {
+    code: MarkdownCode,
+    pre: MarkdownPre,
+    a: MarkdownLink,
+    img: MarkdownImage,
+    table({ children }: { children?: ReactNode }) {
+      if (enhanceTables) {
+        return (
+          <ToggleableMarkdownTable tableResetKey={tableResetKey}>
+            {children}
+          </ToggleableMarkdownTable>
+        );
+      }
+      return <PlainMarkdownTable>{children}</PlainMarkdownTable>;
+    },
+  };
+}
+
+const COMPONENTS_DEFAULT = createComponents();
+
+export const Markdown = memo(function Markdown({
+  content,
+  source,
+  isStreaming,
+  enhanceTables,
+}: MarkdownProps) {
+  const { markdown } = useWebShellCustomization();
+  const sourceMarkdown = source ? markdown : undefined;
+  const renderedContent =
+    content && source && sourceMarkdown?.transformMarkdown
+      ? sourceMarkdown.transformMarkdown(content, { source })
+      : content;
+  const components = useMemo(() => {
+    if (enhanceTables) {
+      return createComponents(true, renderedContent);
+    }
+    return COMPONENTS_DEFAULT;
+  }, [enhanceTables, renderedContent]);
+  const sourceComponents = sourceMarkdown?.components;
+  const renderedComponents = useMemo(() => {
+    if (!sourceComponents) return components;
+    return {
+      ...components,
+      ...sourceComponents,
+      ...(enhanceTables ? { table: components.table } : {}),
+    };
+  }, [components, enhanceTables, sourceComponents]);
+
+  if (!content) return null;
+  const remarkPlugins = sourceMarkdown?.remarkPlugins
+    ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
+    : [remarkGfm, remarkMath];
+  const rehypePlugins = sourceMarkdown?.rehypePlugins
+    ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
+    : [rehypeKatex];
+
+  return (
+    <div
+      className={source !== 'thinking' ? styles.content : undefined}
+      data-markdown-source={source}
+    >
+      <IsStreamingContext.Provider value={!!isStreaming}>
+        <ReactMarkdown
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
+          components={renderedComponents}
+        >
+          {renderedContent}
+        </ReactMarkdown>
+      </IsStreamingContext.Provider>
+    </div>
+  );
+});

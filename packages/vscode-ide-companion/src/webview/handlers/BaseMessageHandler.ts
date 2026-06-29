@@ -37,6 +37,7 @@ export abstract class BaseMessageHandler implements IMessageHandler {
     protected conversationStore: ConversationStore,
     protected currentConversationId: string | null,
     protected sendToWebView: (message: unknown) => void,
+    private readonly syncCurrentConversationId?: (id: string | null) => void,
   ) {}
 
   abstract handle(message: { type: string; data?: unknown }): Promise<void>;
@@ -46,6 +47,18 @@ export abstract class BaseMessageHandler implements IMessageHandler {
    * Update current conversation ID
    */
   setCurrentConversationId(id: string | null): void {
+    this.currentConversationId = id;
+  }
+
+  /**
+   * Update current conversation ID through the owning router when available.
+   */
+  protected updateCurrentConversationId(id: string | null): void {
+    if (this.syncCurrentConversationId) {
+      this.syncCurrentConversationId(id);
+      return;
+    }
+
     this.currentConversationId = id;
   }
 

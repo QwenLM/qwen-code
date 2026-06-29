@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
+import type { Conversation } from '../../services/conversationStore.js';
 import type { ImageAttachment } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import {
@@ -15,6 +16,25 @@ import {
 } from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { stripZeroWidthSpaces } from '@qwen-code/webui';
+import {
+  exportSessionToFile,
+  parseExportSlashCommand,
+  type SessionExportFormat,
+} from '../../services/sessionExportService.js';
+import {
+  DISCONTINUED_MESSAGES,
+  isDiscontinuedModel,
+} from '../utils/discontinuedModel.js';
+
+function formatExportSuccessMessage(
+  formatLabel: string,
+  filename: string,
+  filePath: string,
+): string {
+  const markdownLinkPath = vscode.Uri.file(filePath).toString();
+  return `Session exported to ${formatLabel}: [${filename}](${markdownLinkPath})`;
+}
 
 /**
  * Session message handler
@@ -22,16 +42,19 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
  */
 export class SessionMessageHandler extends BaseMessageHandler {
   private currentStreamContent = '';
-  private loginHandler: (() => Promise<void>) | null = null;
+  private authHandler: (() => Promise<void>) | null = null;
   private isTitleSet = false; // Flag to track if title has been set
 
   canHandle(messageType: string): boolean {
     return [
       'sendMessage',
+      'editMessage',
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
       'resumeSession',
+      'deleteQwenSession',
+      'renameQwenSession',
       'cancelStreaming',
       // UI action: open a new chat tab (new WebviewPanel)
       'openNewChatTab',
@@ -42,10 +65,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Set login handler
+   * Set auth handler
    */
-  setLoginHandler(handler: () => Promise<void>): void {
-    this.loginHandler = handler;
+  setAuthHandler(handler: () => Promise<void>): void {
+    this.authHandler = handler;
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
@@ -76,6 +99,33 @@ export class SessionMessageHandler extends BaseMessageHandler {
         );
         break;
 
+      case 'editMessage':
+        await this.handleSendMessage(
+          (data?.text as string) || '',
+          data?.context as
+            | Array<{
+                type: string;
+                name: string;
+                value: string;
+                startLine?: number;
+                endLine?: number;
+              }>
+            | undefined,
+          data?.fileContext as
+            | {
+                fileName: string;
+                filePath: string;
+                startLine?: number;
+                endLine?: number;
+              }
+            | undefined,
+          data?.attachments as ImageAttachment[] | undefined,
+          typeof data?.targetTurnIndex === 'number'
+            ? data.targetTurnIndex
+            : undefined,
+        );
+        break;
+
       case 'newQwenSession':
         await this.handleNewQwenSession();
         break;
@@ -93,6 +143,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       case 'resumeSession':
         await this.handleResumeSession((data?.sessionId as string) || '');
+        break;
+
+      case 'deleteQwenSession':
+        await this.handleDeleteQwenSession((data?.sessionId as string) || '');
+        break;
+
+      case 'renameQwenSession':
+        await this.handleRenameQwenSession(
+          (data?.sessionId as string) || '',
+          (data?.title as string) || '',
+        );
         break;
 
       case 'openNewChatTab':
@@ -171,6 +232,76 @@ export class SessionMessageHandler extends BaseMessageHandler {
     this.currentStreamContent = '';
   }
 
+  private async captureConversationSnapshot(
+    conversationId: string | null,
+  ): Promise<Conversation | null> {
+    if (!conversationId) {
+      return null;
+    }
+
+    const conversation =
+      await this.conversationStore.getConversation(conversationId);
+    if (conversation) {
+      return {
+        ...conversation,
+        messages: conversation.messages.map((message) => ({ ...message })),
+      };
+    }
+
+    const getSessionMessages = (
+      this.agentManager as {
+        getSessionMessages?: (sessionId: string) => Promise<ChatMessage[]>;
+      }
+    ).getSessionMessages;
+    if (!getSessionMessages) {
+      return null;
+    }
+
+    const messages = await getSessionMessages.call(
+      this.agentManager,
+      conversationId,
+    );
+    if (messages.length === 0) {
+      return null;
+    }
+
+    const timestamps = messages.map((message) => message.timestamp);
+    const recoveredConversation: Conversation = {
+      id: conversationId,
+      title: messages.find((message) => message.role === 'user')?.content ?? '',
+      messages: messages.map((message) => ({ ...message })),
+      createdAt: Math.min(...timestamps),
+      updatedAt: Math.max(...timestamps),
+    };
+    await this.conversationStore.upsertConversation(recoveredConversation);
+
+    return recoveredConversation;
+  }
+
+  private async restoreConversationSnapshot(
+    snapshot: Conversation | null,
+  ): Promise<void> {
+    if (!snapshot) {
+      return;
+    }
+
+    const restored = await this.conversationStore.replaceMessages(
+      snapshot.id,
+      snapshot.messages,
+    );
+    if (!restored) {
+      console.warn(
+        '[SessionMessageHandler] Failed to restore conversation snapshot; conversation not found:',
+        snapshot.id,
+      );
+    }
+    this.updateCurrentConversationId(snapshot.id);
+    this.sendToWebView({
+      type: 'conversationLoaded',
+      data: snapshot,
+    });
+  }
+
   /**
    * Monotonically increasing request counter used to tag streamStart/streamEnd
    * so the WebView can detect and discard stale events from previous requests.
@@ -223,16 +354,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Prompt user to login and invoke the registered login handler/command.
-   * Returns true if a login was initiated.
+   * Prompt user to authenticate and invoke the registered auth handler/command.
+   * Returns true if authentication was initiated.
    */
-  private async promptLogin(message: string): Promise<boolean> {
-    const result = await vscode.window.showWarningMessage(message, 'Login Now');
-    if (result === 'Login Now') {
-      if (this.loginHandler) {
-        await this.loginHandler();
+  private async promptAuth(message: string): Promise<boolean> {
+    const result = await vscode.window.showWarningMessage(message, 'Configure');
+    if (result === 'Configure') {
+      if (this.authHandler) {
+        await this.authHandler();
       } else {
-        await vscode.commands.executeCommand('qwen-code.login');
+        await vscode.commands.executeCommand('qwen-code.auth');
       }
       return true;
     }
@@ -240,25 +371,25 @@ export class SessionMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Prompt user to login or view offline. Returns 'login', 'offline', or 'dismiss'.
-   * When login is chosen, it triggers the login handler/command.
+   * Prompt user to authenticate or view offline. Returns 'auth', 'offline', or 'dismiss'.
+   * When configure is chosen, it triggers the auth handler/command.
    */
-  private async promptLoginOrOffline(
+  private async promptAuthOrOffline(
     message: string,
-  ): Promise<'login' | 'offline' | 'dismiss'> {
+  ): Promise<'auth' | 'offline' | 'dismiss'> {
     const selection = await vscode.window.showWarningMessage(
       message,
-      'Login Now',
+      'Configure',
       'View Offline',
     );
 
-    if (selection === 'Login Now') {
-      if (this.loginHandler) {
-        await this.loginHandler();
+    if (selection === 'Configure') {
+      if (this.authHandler) {
+        await this.authHandler();
       } else {
-        await vscode.commands.executeCommand('qwen-code.login');
+        await vscode.commands.executeCommand('qwen-code.auth');
       }
-      return 'login';
+      return 'auth';
     }
     if (selection === 'View Offline') {
       return 'offline';
@@ -270,8 +401,75 @@ export class SessionMessageHandler extends BaseMessageHandler {
     return getErrorMessage(error);
   }
 
-  private shouldPromptLogin(error: unknown): boolean {
+  private shouldPromptAuth(error: unknown): boolean {
     return isAuthenticationRequiredError(error);
+  }
+
+  private async resolveSessionWorkingDir(sessionId: string): Promise<string> {
+    try {
+      const sessions = await this.agentManager.getSessionList();
+      const match = sessions.find(
+        (session) =>
+          session.sessionId === sessionId || session.id === sessionId,
+      );
+      if (typeof match?.cwd === 'string' && match.cwd.length > 0) {
+        return match.cwd;
+      }
+    } catch (error) {
+      console.warn(
+        '[SessionMessageHandler] Failed to resolve export session cwd:',
+        error,
+      );
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    return workspaceFolder?.uri.fsPath || process.cwd();
+  }
+
+  private async handleExportCommand(
+    format: SessionExportFormat,
+  ): Promise<void> {
+    // Prefer the active ACP session id. The local conversation id may still be
+    // a webview-only `conv_*` placeholder after starting a fresh session.
+    const sessionId =
+      this.agentManager.currentSessionId ?? this.currentConversationId;
+    if (!sessionId) {
+      const errorMsg = 'No active session found to export.';
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
+
+    try {
+      const cwd = await this.resolveSessionWorkingDir(sessionId);
+      const result = await exportSessionToFile({ sessionId, cwd, format });
+      if (!result) {
+        // User cancelled the save dialog
+        return;
+      }
+      const formatLabel = format.toUpperCase();
+      this.sendToWebView({
+        type: 'message',
+        data: {
+          role: 'assistant',
+          content: formatExportSuccessMessage(
+            formatLabel,
+            result.filename,
+            result.uri.fsPath,
+          ),
+          timestamp: Date.now(),
+        },
+      });
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      console.error('[SessionMessageHandler] Failed to export session:', error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to export session: ${errorMsg}` },
+      });
+    }
   }
 
   /**
@@ -293,15 +491,31 @@ export class SessionMessageHandler extends BaseMessageHandler {
       endLine?: number;
     },
     attachments?: ImageAttachment[],
+    editTargetTurnIndex?: number,
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
     // Guard: do not process empty or whitespace-only messages.
     // This prevents ghost user-message bubbles when slash-command completions
     // or model-selector interactions clear the input but still trigger a submit.
-    const trimmedText = text.replace(/\u200B/g, '').trim();
+    const trimmedText = stripZeroWidthSpaces(text).trim();
     const hasAttachments = (attachments?.length ?? 0) > 0;
     if (!trimmedText && !hasAttachments) {
       console.warn('[SessionMessageHandler] Ignoring empty message');
+      return;
+    }
+
+    try {
+      const exportFormat = parseExportSlashCommand(trimmedText);
+      if (exportFormat) {
+        await this.handleExportCommand(exportFormat);
+        return;
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
       return;
     }
 
@@ -348,7 +562,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
       try {
         const newConv = await this.conversationStore.createConversation();
-        this.currentConversationId = newConv.id;
+        this.updateCurrentConversationId(newConv.id);
         this.sendToWebView({
           type: 'conversationLoaded',
           data: newConv,
@@ -377,29 +591,153 @@ export class SessionMessageHandler extends BaseMessageHandler {
       return;
     }
 
+    let editRestoreSnapshot: Conversation | null = null;
+    let editStoreMutationApplied = false;
+    let editAcpMutationApplied = false;
+    let editAcpHistorySnapshot: unknown[] | null = null;
+
+    if (editTargetTurnIndex !== undefined) {
+      if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
+        const errorMsg = 'Invalid message edit target.';
+        console.error('[SessionMessageHandler]', errorMsg, editTargetTurnIndex);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+
+      if (!this.agentManager.isConnected) {
+        await this.promptAuth(
+          'You need to configure your provider to use Qwen Code.',
+        );
+        return;
+      }
+
+      if (!this.agentManager.currentSessionId) {
+        try {
+          const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+          const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+          await this.agentManager.createNewSession(workingDir);
+        } catch (createErr) {
+          console.error(
+            '[SessionMessageHandler] Failed to create session before editing message:',
+            createErr,
+          );
+          const errorMsg = this.getErrorMessage(createErr);
+          if (this.shouldPromptAuth(createErr)) {
+            await this.promptAuth(
+              'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
+            );
+            return;
+          }
+          vscode.window.showErrorMessage(
+            `Failed to create session: ${errorMsg}`,
+          );
+          return;
+        }
+      }
+
+      try {
+        editRestoreSnapshot = await this.captureConversationSnapshot(
+          this.currentConversationId,
+        );
+      } catch (error) {
+        console.error(
+          '[SessionMessageHandler] Failed to capture edit restore snapshot:',
+          error,
+        );
+        const errorMsg = this.getErrorMessage(error);
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+
+      if (!editRestoreSnapshot) {
+        console.warn(
+          '[SessionMessageHandler] Local conversation snapshot missing before edit; continuing with ACP rewind only.',
+        );
+      }
+
+      try {
+        if (editRestoreSnapshot) {
+          const truncated = await this.conversationStore.truncateFromUserTurn(
+            this.currentConversationId,
+            editTargetTurnIndex,
+          );
+          if (!truncated) {
+            throw new Error('Conversation not found for edit target.');
+          }
+          editStoreMutationApplied = true;
+        }
+
+        const rewindResult =
+          await this.agentManager.rewindSession(editTargetTurnIndex);
+        editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
+        editAcpMutationApplied = true;
+
+        this.sendToWebView({
+          type: 'conversationRewound',
+          data: { targetTurnIndex: editTargetTurnIndex },
+        });
+      } catch (error) {
+        if (editAcpMutationApplied && editAcpHistorySnapshot) {
+          try {
+            await this.agentManager.restoreSessionHistory(
+              editAcpHistorySnapshot,
+            );
+          } catch (restoreError) {
+            console.warn(
+              '[SessionMessageHandler] Failed to restore ACP history after rewind failure:',
+              restoreError,
+            );
+          }
+        }
+        if (editStoreMutationApplied) {
+          await this.restoreConversationSnapshot(editRestoreSnapshot);
+        }
+        const errorMsg = this.getErrorMessage(error);
+        console.error(
+          '[SessionMessageHandler] Failed to rewind session:',
+          error,
+        );
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+    }
+
     // Check if this is the first message
     let isFirstMessage = false;
-    try {
-      const conversation = await this.conversationStore.getConversation(
-        this.currentConversationId,
-      );
-      isFirstMessage = !conversation || conversation.messages.length === 0;
-    } catch (error) {
-      console.error(
-        '[SessionMessageHandler] Failed to check conversation:',
-        error,
-      );
+    if (editTargetTurnIndex !== undefined) {
+      isFirstMessage = editTargetTurnIndex === 0;
+    } else {
+      try {
+        const conversation = await this.conversationStore.getConversation(
+          this.currentConversationId,
+        );
+        isFirstMessage = !conversation || conversation.messages.length === 0;
+      } catch (error) {
+        console.error(
+          '[SessionMessageHandler] Failed to check conversation:',
+          error,
+        );
+      }
     }
 
     // Generate title for first message, but only if it hasn't been set yet
     if (isFirstMessage && !this.isTitleSet) {
-      const title =
-        displayText.substring(0, 50) + (displayText.length > 50 ? '...' : '');
       this.sendToWebView({
         type: 'sessionTitleUpdated',
         data: {
           sessionId: this.currentConversationId,
-          title,
+          title: displayText,
         },
       });
       this.isTitleSet = true; // Mark title as set
@@ -412,10 +750,40 @@ export class SessionMessageHandler extends BaseMessageHandler {
       timestamp: Date.now(),
     };
 
-    await this.conversationStore.addMessage(
-      this.currentConversationId,
-      userMessage,
-    );
+    try {
+      await this.conversationStore.addMessage(
+        this.currentConversationId,
+        userMessage,
+      );
+    } catch (error) {
+      console.error(
+        '[SessionMessageHandler] Failed to save user message:',
+        error,
+      );
+
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        try {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        } catch (restoreError) {
+          console.warn(
+            '[SessionMessageHandler] Failed to restore ACP history after user message save failure:',
+            restoreError,
+          );
+        }
+      }
+
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
+
+      const errorMsg = this.getErrorMessage(error);
+      vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
 
     this.sendToWebView({
       type: 'message',
@@ -426,8 +794,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
     if (!this.agentManager.isConnected) {
       console.warn('[SessionMessageHandler] Agent not connected');
 
-      // Show non-modal notification with Login button
-      await this.promptLogin('You need to login first to use Qwen Code.');
+      // Show non-modal notification with Configure button
+      await this.promptAuth(
+        'You need to configure your provider to use Qwen Code.',
+      );
       return;
     }
 
@@ -443,9 +813,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
           createErr,
         );
         const errorMsg = this.getErrorMessage(createErr);
-        if (this.shouldPromptLogin(createErr)) {
-          await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to continue using Qwen Code.',
+        if (this.shouldPromptAuth(createErr)) {
+          await this.promptAuth(
+            'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
           );
           return;
         }
@@ -497,8 +867,53 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
 
       this.sendStreamEnd(undefined, myRequestId);
+
+      // After first message, sync ACP session ID to webview for session list highlighting
+      const acpSessionId = this.agentManager.currentSessionId;
+      if (acpSessionId && acpSessionId !== this.currentConversationId) {
+        const previousConversationId = this.currentConversationId;
+        if (previousConversationId) {
+          const renamed = await this.conversationStore.renameConversationId(
+            previousConversationId,
+            acpSessionId,
+          );
+          if (!renamed) {
+            console.warn(
+              '[SessionMessageHandler] Failed to align conversation store with ACP session id:',
+              previousConversationId,
+              acpSessionId,
+            );
+            return;
+          }
+        }
+        this.updateCurrentConversationId(acpSessionId);
+        this.sendToWebView({
+          type: 'sessionTitleUpdated',
+          data: {
+            sessionId: acpSessionId,
+            title:
+              displayText.substring(0, 50) +
+              (displayText.length > 50 ? '...' : ''),
+          },
+        });
+      }
     } catch (error) {
       console.error('[SessionMessageHandler] Error sending message:', error);
+
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        try {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        } catch (restoreError) {
+          console.warn(
+            '[SessionMessageHandler] Failed to restore ACP history after send failure:',
+            restoreError,
+          );
+        }
+      }
+
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
 
       const err = error as unknown as Error;
       // Safely convert error to string
@@ -524,17 +939,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Check for session not found error and handle it appropriately
       if (
         errorMsg.includes('Session not found') ||
-        this.shouldPromptLogin(error)
+        this.shouldPromptAuth(error)
       ) {
         // Show a more user-friendly error message for expired sessions
-        await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to continue using Qwen Code.',
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
         );
 
         // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired. Please authenticate again.' },
         });
         this.sendStreamEnd('session_expired', myRequestId);
       } else {
@@ -580,10 +995,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
     try {
       console.log('[SessionMessageHandler] Creating new Qwen session...');
 
-      // Ensure connection (login) before creating a new session
+      // Ensure connection (auth) before creating a new session
       if (!this.agentManager.isConnected) {
-        const proceeded = await this.promptLogin(
-          'You need to login before creating a new session.',
+        const proceeded = await this.promptAuth(
+          'You need to configure your provider before creating a new session.',
         );
         if (!proceeded) {
           return;
@@ -594,7 +1009,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
-      this.currentConversationId = null;
+      this.updateCurrentConversationId(null);
 
       this.sendToWebView({
         type: 'conversationCleared',
@@ -612,16 +1027,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Safely convert error to string
       const errorMsg = this.getErrorMessage(error);
       // Check for authentication/session expiration errors
-      if (this.shouldPromptLogin(error)) {
+      if (this.shouldPromptAuth(error)) {
         // Show a more user-friendly error message for expired sessions
-        await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to create a new session.',
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to create a new session.',
         );
 
         // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired. Please authenticate again.' },
         });
       } else {
         this.sendToWebView({
@@ -639,27 +1054,35 @@ export class SessionMessageHandler extends BaseMessageHandler {
     try {
       console.log('[SessionMessageHandler] Switching to session:', sessionId);
 
-      // If not connected yet, offer to login or view offline
+      // If not connected yet, offer to authenticate or view offline
       if (!this.agentManager.isConnected) {
-        const choice = await this.promptLoginOrOffline(
-          'You are not logged in. Login now to fully restore this session, or view it offline.',
+        const choice = await this.promptAuthOrOffline(
+          'You are not authenticated. Configure your provider to fully restore this session, or view it offline.',
         );
 
         if (choice === 'offline') {
           // Show messages from local cache only
           const messages =
             await this.agentManager.getSessionMessages(sessionId);
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages },
           });
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
           vscode.window.showInformationMessage(
-            'Showing cached session content. Login to interact with the AI.',
+            'Showing cached session content. Configure your provider to interact with the AI.',
           );
           return;
-        } else if (choice !== 'login') {
-          // User dismissed; do nothing
+        } else if (choice !== 'auth') {
+          // User dismissed; clear loading state
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
           return;
         }
       }
@@ -686,7 +1109,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Try to load session via ACP (now we should be connected)
       try {
         // Set current id and clear UI first so replayed updates append afterwards
-        this.currentConversationId = sessionId;
+        this.updateCurrentConversationId(sessionId);
         this.sendToWebView({
           type: 'qwenSessionSwitched',
           data: { sessionId, messages: [], session: sessionDetails },
@@ -704,6 +1127,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // Reset title flag when switching sessions
         this.isTitleSet = false;
 
+        // Notify webview that session history has finished loading
+        this.sendToWebView({
+          type: 'sessionLoadComplete',
+          data: { sessionId },
+        });
+
         // Successfully loaded session, return early to avoid fallback logic
         return;
       } catch (loadError) {
@@ -713,16 +1142,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
         );
 
         // Check for authentication/session expiration errors
-        if (this.shouldPromptLogin(loadError)) {
+        if (this.shouldPromptAuth(loadError)) {
           // Show a more user-friendly error message for expired sessions
-          await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to switch sessions.',
+          await this.promptAuth(
+            'Your session has expired or is invalid. Please configure your provider to switch sessions.',
           );
 
           // Send a specific error to the webview for better UI handling
           this.sendToWebView({
             type: 'sessionExpired',
-            data: { message: 'Session expired. Please login again.' },
+            data: { message: 'Session expired. Please authenticate again.' },
           });
           return;
         }
@@ -733,18 +1162,27 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // If we are connected, try to create a fresh ACP session so user can interact
         if (this.agentManager.isConnected) {
           try {
-            const newAcpSessionId = await this.agentManager.createNewSession(
-              workingDir,
-              {
-                forceNew: true,
-              },
-            );
+            await this.agentManager.createNewSession(workingDir, {
+              forceNew: true,
+            });
 
-            this.currentConversationId = newAcpSessionId;
+            // Keep the viewed session identity aligned with what the webview sees
+            // (the archived sessionId). The live ACP session lives on
+            // agentManager.currentSessionId; the sync-on-first-message path
+            // (see streamEnd handler) will flip both sides to the ACP id once
+            // the user actually sends a message. Setting currentConversationId
+            // to the new ACP id here would desync the backend from the webview
+            // and cause rename/delete/title-update flows to target the wrong
+            // session during the fallback window.
+            this.updateCurrentConversationId(sessionId);
 
             this.sendToWebView({
               type: 'qwenSessionSwitched',
               data: { sessionId, messages, session: sessionDetails },
+            });
+            this.sendToWebView({
+              type: 'sessionLoadComplete',
+              data: { sessionId },
             });
 
             // Only show the cache warning if we actually fell back to local cache
@@ -767,16 +1205,18 @@ export class SessionMessageHandler extends BaseMessageHandler {
             );
 
             // Check for authentication/session expiration errors in session creation
-            if (this.shouldPromptLogin(createError)) {
+            if (this.shouldPromptAuth(createError)) {
               // Show a more user-friendly error message for expired sessions
-              await this.promptLogin(
-                'Your login session has expired or is invalid. Please login again to switch sessions.',
+              await this.promptAuth(
+                'Your session has expired or is invalid. Please configure your provider to switch sessions.',
               );
 
               // Send a specific error to the webview for better UI handling
               this.sendToWebView({
                 type: 'sessionExpired',
-                data: { message: 'Session expired. Please login again.' },
+                data: {
+                  message: 'Session expired. Please authenticate again.',
+                },
               });
               return;
             }
@@ -785,13 +1225,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
           }
         } else {
           // Offline view only
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages, session: sessionDetails },
           });
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
           vscode.window.showWarningMessage(
-            'Showing cached session content. Login to interact with the AI.',
+            'Showing cached session content. Configure your provider to interact with the AI.',
           );
         }
       }
@@ -801,16 +1245,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Safely convert error to string
       const errorMsg = this.getErrorMessage(error);
       // Check for authentication/session expiration errors
-      if (this.shouldPromptLogin(error)) {
+      if (this.shouldPromptAuth(error)) {
         // Show a more user-friendly error message for expired sessions
-        await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to switch sessions.',
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to switch sessions.',
         );
 
         // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired. Please authenticate again.' },
         });
       } else {
         this.sendToWebView({
@@ -850,16 +1294,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Safely convert error to string
       const errorMsg = this.getErrorMessage(error);
       // Check for authentication/session expiration errors
-      if (this.shouldPromptLogin(error)) {
+      if (this.shouldPromptAuth(error)) {
         // Show a more user-friendly error message for expired sessions
-        await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to view sessions.',
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to view sessions.',
         );
 
         // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired. Please authenticate again.' },
         });
       } else {
         this.sendToWebView({
@@ -897,25 +1341,25 @@ export class SessionMessageHandler extends BaseMessageHandler {
    */
   private async handleResumeSession(sessionId: string): Promise<void> {
     try {
-      // If not connected, offer to login or view offline
+      // If not connected, offer to authenticate or view offline
       if (!this.agentManager.isConnected) {
-        const choice = await this.promptLoginOrOffline(
-          'You are not logged in. Login now to fully restore this session, or view it offline.',
+        const choice = await this.promptAuthOrOffline(
+          'You are not authenticated. Configure your provider to fully restore this session, or view it offline.',
         );
 
         if (choice === 'offline') {
           const messages =
             await this.agentManager.getSessionMessages(sessionId);
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages },
           });
           vscode.window.showInformationMessage(
-            'Showing cached session content. Login to interact with the AI.',
+            'Showing cached session content. Configure your provider to interact with the AI.',
           );
           return;
-        } else if (choice !== 'login') {
+        } else if (choice !== 'auth') {
           return;
         }
       }
@@ -923,7 +1367,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Try ACP load first
       try {
         // Pre-clear UI so replayed updates append afterwards
-        this.currentConversationId = sessionId;
+        this.updateCurrentConversationId(sessionId);
         this.sendToWebView({
           type: 'qwenSessionSwitched',
           data: { sessionId, messages: [] },
@@ -939,16 +1383,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
         return;
       } catch (acpError) {
         // Check for authentication/session expiration errors
-        if (this.shouldPromptLogin(acpError)) {
+        if (this.shouldPromptAuth(acpError)) {
           // Show a more user-friendly error message for expired sessions
-          await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to resume sessions.',
+          await this.promptAuth(
+            'Your session has expired or is invalid. Please configure your provider to resume sessions.',
           );
 
           // Send a specific error to the webview for better UI handling
           this.sendToWebView({
             type: 'sessionExpired',
-            data: { message: 'Session expired. Please login again.' },
+            data: { message: 'Session expired. Please authenticate again.' },
           });
           return;
         }
@@ -961,16 +1405,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Safely convert error to string
       const errorMsg = this.getErrorMessage(error);
       // Check for authentication/session expiration errors
-      if (this.shouldPromptLogin(error)) {
+      if (this.shouldPromptAuth(error)) {
         // Show a more user-friendly error message for expired sessions
-        await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to resume sessions.',
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to resume sessions.',
         );
 
         // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired. Please authenticate again.' },
         });
       } else {
         this.sendToWebView({
@@ -978,6 +1422,98 @@ export class SessionMessageHandler extends BaseMessageHandler {
           data: { message: `Failed to resume session: ${errorMsg}` },
         });
       }
+    }
+  }
+
+  /**
+   * Handle delete session request
+   */
+  private async handleDeleteQwenSession(sessionId: string): Promise<void> {
+    try {
+      if (
+        sessionId === this.currentConversationId ||
+        sessionId === this.agentManager.currentSessionId
+      ) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Cannot delete the current active session.' },
+        });
+        return;
+      }
+
+      const success = await this.agentManager.deleteSession(sessionId);
+      if (success) {
+        this.sendToWebView({
+          type: 'sessionDeleted',
+          data: { sessionId },
+        });
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Failed to delete session.' },
+        });
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to delete session: ${errorMsg}` },
+      });
+    }
+  }
+
+  /**
+   * Handle rename session request
+   */
+  private async handleRenameQwenSession(
+    sessionId: string,
+    title: string,
+  ): Promise<void> {
+    try {
+      const trimmedTitle = title.trim().replace(/[\r\n]+/g, ' ');
+      if (!trimmedTitle) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Please provide a name.' },
+        });
+        return;
+      }
+      // Matches SESSION_TITLE_MAX_LENGTH from @qwen-code/qwen-code-core/sessionService
+      if (trimmedTitle.length > 200) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Name is too long. Maximum 200 characters.' },
+        });
+        return;
+      }
+
+      const success = await this.agentManager.renameSession(
+        sessionId,
+        trimmedTitle,
+      );
+      if (success) {
+        this.sendToWebView({
+          type: 'sessionRenamed',
+          data: { sessionId, title: trimmedTitle },
+        });
+        if (sessionId === this.currentConversationId) {
+          this.sendToWebView({
+            type: 'sessionTitleUpdated',
+            data: { sessionId, title: trimmedTitle },
+          });
+        }
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Failed to rename session.' },
+        });
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to rename session: ${errorMsg}` },
+      });
     }
   }
 
@@ -1010,6 +1546,21 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const modelId = data?.modelId;
       if (!modelId) {
         throw new Error('Model ID is required');
+      }
+      // Defensive guard: refuse non-runtime Qwen OAuth models in case the UI
+      // is bypassed (programmatic call, stale webview, restored session).
+      if (isDiscontinuedModel(modelId)) {
+        console.warn(
+          '[SessionMessageHandler] Rejected discontinued model',
+          modelId,
+        );
+        const message = `Failed to switch model: ${DISCONTINUED_MESSAGES.blockedError}`;
+        vscode.window.showErrorMessage(message);
+        this.sendToWebView({
+          type: 'error',
+          data: { message },
+        });
+        return;
       }
       await this.agentManager.setModelFromUi(modelId);
       void vscode.window.showInformationMessage(

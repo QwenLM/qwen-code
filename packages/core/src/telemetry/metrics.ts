@@ -8,6 +8,7 @@ import type { Attributes, Meter, Counter, Histogram } from '@opentelemetry/api';
 import { diag, metrics, ValueType } from '@opentelemetry/api';
 import { SERVICE_NAME, EVENT_CHAT_COMPRESSION } from './constants.js';
 import type { Config } from '../config/config.js';
+import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import type { ModelSlashCommandEvent } from './types.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
@@ -20,6 +21,9 @@ const FILE_OPERATION_COUNT = `${SERVICE_NAME}.file.operation.count`;
 const INVALID_CHUNK_COUNT = `${SERVICE_NAME}.chat.invalid_chunk.count`;
 const CONTENT_RETRY_COUNT = `${SERVICE_NAME}.chat.content_retry.count`;
 const CONTENT_RETRY_FAILURE_COUNT = `${SERVICE_NAME}.chat.content_retry_failure.count`;
+// Phase 4b — Counts HTTP-status retries emitted by `retryWithBackoff` at LLM
+// call sites. Tagged by `model` so operators can graph per-model retry rate.
+const API_RETRY_COUNT = `${SERVICE_NAME}.api.retry.count`;
 const MODEL_SLASH_COMMAND_CALL_COUNT = `${SERVICE_NAME}.slash_command.model.call_count`;
 export const SUBAGENT_EXECUTION_COUNT = `${SERVICE_NAME}.subagent.execution.count`;
 
@@ -44,10 +48,28 @@ const REGRESSION_DETECTION = `${SERVICE_NAME}.performance.regression`;
 const REGRESSION_PERCENTAGE_CHANGE = `${SERVICE_NAME}.performance.regression.percentage_change`;
 const BASELINE_COMPARISON = `${SERVICE_NAME}.performance.baseline.comparison`;
 
+// Auto-Memory Metrics
+const MEMORY_EXTRACT_COUNT = `${SERVICE_NAME}.memory.extract.count`;
+const MEMORY_EXTRACT_DURATION = `${SERVICE_NAME}.memory.extract.duration`;
+const MEMORY_DREAM_COUNT = `${SERVICE_NAME}.memory.dream.count`;
+const MEMORY_DREAM_DURATION = `${SERVICE_NAME}.memory.dream.duration`;
+const MEMORY_RECALL_COUNT = `${SERVICE_NAME}.memory.recall.count`;
+const MEMORY_RECALL_DURATION = `${SERVICE_NAME}.memory.recall.duration`;
+
 const baseMetricDefinition = {
-  getCommonAttributes: (config: Config): Attributes => ({
-    'session.id': config.getSessionId(),
-  }),
+  // session.id on metrics is opt-in: each session is a new value, so
+  // attaching it by default would create unbounded time-series fan-out on
+  // every metric backend. Operators who need session-level metric slicing
+  // can enable QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID or
+  // telemetry.metrics.includeSessionId. Spans and logs always carry
+  // session.id for trace/log correlation.
+  getCommonAttributes: (config: TelemetryRuntimeConfig): Attributes => {
+    const out: Attributes = {};
+    if (config.getTelemetryMetricsIncludeSessionId()) {
+      out['session.id'] = config.getSessionId();
+    }
+    return out;
+  },
 };
 
 const COUNTER_DEFINITIONS = {
@@ -78,7 +100,7 @@ const COUNTER_DEFINITIONS = {
     assign: (c: Counter) => (tokenUsageCounter = c),
     attributes: {} as {
       model: string;
-      type: 'input' | 'output' | 'thought' | 'cache' | 'tool';
+      type: 'input' | 'output' | 'thought' | 'cache';
     },
   },
   [SESSION_COUNT]: {
@@ -116,6 +138,15 @@ const COUNTER_DEFINITIONS = {
     valueType: ValueType.INT,
     assign: (c: Counter) => (contentRetryFailureCounter = c),
     attributes: {} as Record<string, never>,
+  },
+  [API_RETRY_COUNT]: {
+    description:
+      'Counts HTTP-status retries (429/5xx) at LLM call sites, emitted by retryWithBackoff onRetry callback.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (apiRetryCounter = c),
+    attributes: {} as {
+      model: string;
+    },
   },
   [MODEL_SLASH_COMMAND_CALL_COUNT]: {
     description: 'Counts model slash command calls.',
@@ -338,6 +369,7 @@ let chatCompressionCounter: Counter | undefined;
 let invalidChunkCounter: Counter | undefined;
 let contentRetryCounter: Counter | undefined;
 let contentRetryFailureCounter: Counter | undefined;
+let apiRetryCounter: Counter | undefined;
 let subagentExecutionCounter: Counter | undefined;
 let modelSlashCommandCallCounter: Counter | undefined;
 
@@ -361,6 +393,14 @@ let arenaAgentDurationHistogram: Histogram | undefined;
 let arenaAgentTokensCounter: Counter | undefined;
 let arenaResultSelectedCounter: Counter | undefined;
 
+// Auto-Memory Metrics
+let memoryExtractCounter: Counter | undefined;
+let memoryExtractDurationHistogram: Histogram | undefined;
+let memoryDreamCounter: Counter | undefined;
+let memoryDreamDurationHistogram: Histogram | undefined;
+let memoryRecallCounter: Counter | undefined;
+let memoryRecallDurationHistogram: Histogram | undefined;
+
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
 
@@ -371,7 +411,7 @@ export function getMeter(): Meter | undefined {
   return cliMeter;
 }
 
-export function initializeMetrics(config: Config): void {
+export function initializeMetrics(config: TelemetryRuntimeConfig): void {
   if (isMetricsInitialized) return;
 
   const meter = getMeter();
@@ -429,6 +469,42 @@ export function initializeMetrics(config: Config): void {
   // Increment session counter after all metrics are initialized
   sessionCounter?.add(1, baseMetricDefinition.getCommonAttributes(config));
 
+  // Auto-Memory metrics
+  memoryExtractCounter = meter.createCounter(MEMORY_EXTRACT_COUNT, {
+    description:
+      'Counts auto-memory extraction runs, tagged by trigger and status.',
+    valueType: ValueType.INT,
+  });
+  memoryExtractDurationHistogram = meter.createHistogram(
+    MEMORY_EXTRACT_DURATION,
+    {
+      description: 'Duration of auto-memory extraction in milliseconds.',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryDreamCounter = meter.createCounter(MEMORY_DREAM_COUNT, {
+    description:
+      'Counts auto-memory dream (consolidation) runs, tagged by trigger and status.',
+    valueType: ValueType.INT,
+  });
+  memoryDreamDurationHistogram = meter.createHistogram(MEMORY_DREAM_DURATION, {
+    description: 'Duration of auto-memory dream runs in milliseconds.',
+    unit: 'ms',
+    valueType: ValueType.INT,
+  });
+  memoryRecallCounter = meter.createCounter(MEMORY_RECALL_COUNT, {
+    description: 'Counts auto-memory recall operations, tagged by strategy.',
+    valueType: ValueType.INT,
+  });
+  memoryRecallDurationHistogram = meter.createHistogram(
+    MEMORY_RECALL_DURATION,
+    {
+      description: 'Duration of auto-memory recall operations in milliseconds.',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    },
+  );
   // Initialize performance monitoring metrics if enabled
   initializePerformanceMonitoring(config);
 
@@ -564,6 +640,23 @@ export function recordContentRetryFailure(config: Config): void {
   );
 }
 
+/**
+ * Phase 4b — Records a metric for an HTTP-status retry at an LLM call site.
+ * Tagged by `model` so operators can graph per-model retry rate. Called from
+ * `logApiRetry` in loggers.ts which is wired to `retryWithBackoff`'s `onRetry`
+ * callback at the 4 LLM call sites.
+ */
+export function recordApiRetry(
+  config: Config,
+  attributes: MetricDefinitions[typeof API_RETRY_COUNT]['attributes'],
+): void {
+  if (!apiRetryCounter || !isMetricsInitialized) return;
+  apiRetryCounter.add(1, {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    ...attributes,
+  });
+}
+
 export function recordModelSlashCommand(
   config: Config,
   event: ModelSlashCommandEvent,
@@ -577,7 +670,9 @@ export function recordModelSlashCommand(
 
 // Performance Monitoring Functions
 
-export function initializePerformanceMonitoring(config: Config): void {
+export function initializePerformanceMonitoring(
+  config: TelemetryRuntimeConfig,
+): void {
   const meter = getMeter();
   if (!meter) return;
 
@@ -875,4 +970,66 @@ export function recordArenaSessionEndedMetrics(
       model_id: winnerModelId,
     });
   }
+}
+
+// ─── Auto-Memory Metric Recording Functions ─────────────────────────────────
+
+export function recordMemoryExtractMetrics(
+  config: Config,
+  durationMs: number,
+  attrs: {
+    trigger: 'auto' | 'manual';
+    status: 'completed' | 'skipped' | 'failed';
+    patches_count: number;
+  },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  memoryExtractCounter?.add(1, {
+    ...common,
+    trigger: attrs.trigger,
+    status: attrs.status,
+  });
+  memoryExtractDurationHistogram?.record(durationMs, {
+    ...common,
+    trigger: attrs.trigger,
+    status: attrs.status,
+  });
+}
+
+export function recordMemoryDreamMetrics(
+  config: Config,
+  durationMs: number,
+  attrs: {
+    trigger: 'auto' | 'manual';
+    status: 'updated' | 'noop' | 'failed' | 'cancelled';
+    deduped_entries: number;
+  },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  memoryDreamCounter?.add(1, {
+    ...common,
+    trigger: attrs.trigger,
+    status: attrs.status,
+  });
+  memoryDreamDurationHistogram?.record(durationMs, {
+    ...common,
+    trigger: attrs.trigger,
+    status: attrs.status,
+  });
+}
+
+export function recordMemoryRecallMetrics(
+  config: Config,
+  durationMs: number,
+  attrs: { strategy: 'none' | 'heuristic' | 'model'; docs_selected: number },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  memoryRecallCounter?.add(1, { ...common, strategy: attrs.strategy });
+  memoryRecallDurationHistogram?.record(durationMs, {
+    ...common,
+    strategy: attrs.strategy,
+  });
 }

@@ -39,11 +39,14 @@ import type {
   LspConnectionInterface,
   LspServerHandle,
   LspServerStatus,
+  LspStatusSnapshot,
   NativeLspServiceOptions,
 } from './types.js';
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
 
@@ -169,6 +172,75 @@ export class NativeLspService {
    */
   getStatus(): Map<string, LspServerStatus> {
     return this.serverManager.getStatus();
+  }
+
+  /**
+   * Get all server handles for status reporting.
+   */
+  getServerHandles(): ReadonlyMap<string, LspServerHandle> {
+    return this.serverManager.getHandles();
+  }
+
+  /**
+   * Get detailed LSP server status for UI and debug logging.
+   */
+  getStatusSnapshot(): LspStatusSnapshot {
+    const servers = Array.from(this.serverManager.getHandles().entries()).map(
+      ([name, handle]) => {
+        const error =
+          handle.error instanceof Error
+            ? handle.error.message
+            : handle.error
+              ? String(handle.error)
+              : undefined;
+
+        return {
+          name,
+          status: handle.status,
+          languages: handle.config.languages,
+          transport: handle.config.transport,
+          ...(handle.config.command ? { command: handle.config.command } : {}),
+          ...(handle.config.args ? { args: handle.config.args } : {}),
+          ...(handle.config.rootUri ? { rootUri: handle.config.rootUri } : {}),
+          ...(handle.config.workspaceFolder
+            ? { workspaceFolder: handle.config.workspaceFolder }
+            : {}),
+          ...(handle.process?.pid ? { pid: handle.process.pid } : {}),
+          ...(handle.warmedUp !== undefined
+            ? { warmedUp: handle.warmedUp }
+            : {}),
+          ...(handle.restartAttempts !== undefined
+            ? { restartAttempts: handle.restartAttempts }
+            : {}),
+          ...(handle.processDiagnostics?.stderrTail
+            ? { stderrTail: handle.processDiagnostics.stderrTail }
+            : {}),
+          ...(handle.processDiagnostics?.exitCode !== undefined
+            ? { exitCode: handle.processDiagnostics.exitCode }
+            : {}),
+          ...(handle.processDiagnostics?.exitSignal !== undefined
+            ? { exitSignal: handle.processDiagnostics.exitSignal }
+            : {}),
+          ...(error ? { error } : {}),
+        };
+      },
+    );
+
+    return {
+      enabled: true,
+      configuredServers: servers.length,
+      readyServers: servers.filter((server) => server.status === 'READY')
+        .length,
+      failedServers: servers.filter((server) => server.status === 'FAILED')
+        .length,
+      inProgressServers: servers.filter(
+        (server) => server.status === 'IN_PROGRESS',
+      ).length,
+      notStartedServers: servers.filter(
+        (server) => server.status === 'NOT_STARTED',
+      ).length,
+      servers,
+    };
   }
 
   /**
@@ -1236,12 +1308,26 @@ export class NativeLspService {
       throw new Error(`Refusing to apply edits outside workspace: ${filePath}`);
     }
 
-    // Read the current file content
+    // Concurrency: this is an async read-modify-write (readFile → splice →
+    // access(W_OK) → atomicWriteFile) with await points between read and
+    // write. atomicWriteFile keeps the file from being torn, but does NOT
+    // serialize writers — two overlapping applyTextEdits calls for the SAME
+    // path can both read the same base content and the second rename clobbers
+    // the first (lost update). Latent today: applyWorkspaceEdit has no
+    // production caller and no workspace/applyEdit handler is wired. Before
+    // wiring one, serialize per resolved filePath (see jsonl-utils getFileLock).
+
+    // Read the current file content. Only treat ENOENT as "new file"; any
+    // other read failure (EACCES on a read-protected file, EISDIR, etc.)
+    // must propagate — otherwise the atomic rename below would silently
+    // replace the unreadable target with edits applied to an empty buffer.
     let content: string;
     try {
-      content = fs.readFileSync(filePath, 'utf-8');
-    } catch {
-      // File doesn't exist, treat as empty
+      content = await fsp.readFile(filePath, 'utf-8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
       content = '';
     }
 
@@ -1277,8 +1363,22 @@ export class NativeLspService {
       lines.splice(startLine, endLine - startLine + 1, ...newLines);
     }
 
-    // Write back to file
-    fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+    // Honor file-level write permissions. Atomic rename (tmp + rename)
+    // would otherwise bypass a chmod 0444 lock because rename only needs
+    // parent-directory write access. ENOENT is fine — LSP may be creating
+    // the file via edits.
+    try {
+      await fsp.access(filePath, fs.constants.W_OK);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
+    }
+
+    // Atomic write so a crash mid-edit can't leave the user file half-written.
+    // Async variant avoids blocking the event loop on the LSP edit hot path
+    // (sync renameWithRetry can stall up to 350ms under Atomics.wait backoff).
+    await atomicWriteFile(filePath, lines.join('\n'), { encoding: 'utf-8' });
   }
 
   /**

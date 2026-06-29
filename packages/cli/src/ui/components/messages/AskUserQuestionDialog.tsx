@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../keyMatchers.js';
 import { TextInput } from '../shared/TextInput.js';
 import { t } from '../../../i18n/index.js';
 
@@ -102,6 +103,22 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     await onConfirm(ToolConfirmationOutcome.ProceedOnce, { answers });
   };
 
+  // Select a value for the current question, then submit (single question) or advance to the next tab (multi-question).
+  const selectAndAdvance = (value: string) => {
+    setSelectedOptions((prev) => ({ ...prev, [currentQuestionIndex]: value }));
+
+    if (!hasMultipleQuestions) {
+      void onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: { [currentQuestionIndex]: value },
+      });
+    } else if (currentQuestionIndex < totalTabs - 1) {
+      setTimeout(() => {
+        setCurrentQuestionIndex((prev) => Math.min(prev + 1, totalTabs - 1));
+        setSelectedIndex(0);
+      }, 150);
+    }
+  };
+
   const handleMultiSelectSubmit = () => {
     if (!currentQuestion) return;
     const selections = [...(multiSelectedOptions[currentQuestionIndex] ?? [])];
@@ -111,75 +128,45 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     }
     if (selections.length === 0) return;
 
-    const value = selections.join(', ');
-    const updated = { ...selectedOptions, [currentQuestionIndex]: value };
-    setSelectedOptions(updated);
-
-    if (!hasMultipleQuestions) {
-      void onConfirm(ToolConfirmationOutcome.ProceedOnce, {
-        answers: { [currentQuestionIndex]: value },
-      });
-    } else {
-      if (currentQuestionIndex < totalTabs - 1) {
-        setTimeout(() => {
-          setCurrentQuestionIndex((prev) => Math.min(prev + 1, totalTabs - 1));
-          setSelectedIndex(0);
-        }, 150);
-      }
-    }
+    selectAndAdvance(selections.join(', '));
   };
 
   const handleCustomInputSubmit = () => {
     const trimmedValue = currentCustomInputValue.trim();
 
     if (isMultiSelect) {
-      // Toggle custom input checked state
-      if (!trimmedValue) return;
+      // Toggle custom input checked state, then submit/advance if non-empty
       setCustomInputChecked((prev) => ({
         ...prev,
-        [currentQuestionIndex]: !prev[currentQuestionIndex],
+        [currentQuestionIndex]: trimmedValue.length > 0,
       }));
+      if (trimmedValue) {
+        handleMultiSelectSubmit();
+      }
       return;
     }
 
     if (!trimmedValue) return;
-
-    const updated = {
-      ...selectedOptions,
-      [currentQuestionIndex]: trimmedValue,
-    };
-    setSelectedOptions(updated);
-
-    // If single question, submit immediately
-    if (!hasMultipleQuestions) {
-      void onConfirm(ToolConfirmationOutcome.ProceedOnce, {
-        answers: {
-          [currentQuestionIndex]: trimmedValue,
-        },
-      });
-    } else {
-      // Auto-advance to next tab
-      if (currentQuestionIndex < totalTabs - 1) {
-        setTimeout(() => {
-          setCurrentQuestionIndex((prev) => Math.min(prev + 1, totalTabs - 1));
-          setSelectedIndex(0);
-        }, 150);
-      }
-    }
+    selectAndAdvance(trimmedValue);
   };
 
   // Handle navigation and selection
   useKeypress(
     (key) => {
-      if (!isFocused) return;
-
-      // When custom input is focused, still allow up/down navigation, tab switch and escape
+      // When the custom-input TextInput is focused, we must NOT match bare
+      // letter keys (k/j) for option navigation — those characters are being
+      // typed into the input. Only honor unambiguous shortcuts: arrow keys
+      // and the readline-style Ctrl+P/Ctrl+N. TextInput itself doesn't bind
+      // those, so there's no double-fire.
       if (isCustomInputSelected) {
-        if (key.name === 'up') {
+        const isOptionUp = key.name === 'up' || (key.ctrl && key.name === 'p');
+        const isOptionDown =
+          key.name === 'down' || (key.ctrl && key.name === 'n');
+        if (isOptionUp) {
           setSelectedIndex(Math.max(0, selectedIndex - 1));
           return;
         }
-        if (key.name === 'down') {
+        if (isOptionDown) {
           setSelectedIndex(Math.min(totalOptions - 1, selectedIndex + 1));
           return;
         }
@@ -208,12 +195,12 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         return;
       }
 
-      // Option navigation (up/down arrows)
-      if (key.name === 'up') {
+      // Option navigation (up/down arrows and Ctrl+P/N)
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setSelectedIndex(Math.max(0, selectedIndex - 1));
         return;
       }
-      if (key.name === 'down') {
+      if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex(Math.min(totalOptions - 1, selectedIndex + 1));
         return;
       }
@@ -221,7 +208,21 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
       // Number key selection
       const numKey = parseInt(input || '', 10);
       if (!isNaN(numKey) && numKey >= 1 && numKey <= totalOptions) {
-        setSelectedIndex(numKey - 1);
+        const targetIndex = numKey - 1;
+        setSelectedIndex(targetIndex);
+
+        // For single-select, auto-submit when selecting a predefined option (not "Other")
+        if (
+          !isMultiSelect &&
+          !isSubmitTab &&
+          currentQuestion &&
+          targetIndex < currentQuestion.options.length
+        ) {
+          const option = currentQuestion.options[targetIndex];
+          if (option) {
+            selectAndAdvance(option.label);
+          }
+        }
         return;
       }
 
@@ -272,28 +273,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         if (currentQuestion && selectedIndex < currentQuestion.options.length) {
           const option = currentQuestion.options[selectedIndex];
           if (option) {
-            const updated = {
-              ...selectedOptions,
-              [currentQuestionIndex]: option.label,
-            };
-            setSelectedOptions(updated);
-
-            // If single question, submit immediately
-            if (!hasMultipleQuestions) {
-              void onConfirm(ToolConfirmationOutcome.ProceedOnce, {
-                answers: { [currentQuestionIndex]: option.label },
-              });
-            } else {
-              // Auto-advance to next tab after selection
-              if (currentQuestionIndex < totalTabs - 1) {
-                setTimeout(() => {
-                  setCurrentQuestionIndex((prev) =>
-                    Math.min(prev + 1, totalTabs - 1),
-                  );
-                  setSelectedIndex(0);
-                }, 150);
-              }
-            }
+            selectAndAdvance(option.label);
           }
         }
         return;

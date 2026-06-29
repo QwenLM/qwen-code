@@ -7,6 +7,7 @@
 import type {
   Content,
   GenerateContentConfig,
+  GenerateContentResponseUsageMetadata,
   Part,
   EmbedContentParameters,
   FunctionDeclaration,
@@ -15,12 +16,129 @@ import type {
 } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator } from './contentGenerator.js';
+import { AuthType, createContentGenerator } from './contentGenerator.js';
+import type { ResolvedModelConfig } from '../models/types.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+  type ResolvedModelId,
+} from '../utils/modelId.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
+import { ApiRetryEvent } from '../telemetry/types.js';
+import { logApiRetry } from '../telemetry/loggers.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
+import { getResponseText } from '../utils/partUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
+
+const debugLogger = createDebugLogger('BASE_LLM_CLIENT');
+
+/**
+ * The pair of generator and retry-authType to use for a request targeting
+ * a specific model. When the requested model differs from the main session
+ * model, both fields are resolved against that model's provider so that
+ * per-model `extra_body` / `samplingParams` / reasoning settings — and
+ * provider-specific retry/quota behaviour — do not leak from the main
+ * session.
+ */
+export interface ResolvedGeneratorForModel {
+  contentGenerator: ContentGenerator;
+  retryAuthType: string | undefined;
+  retryErrorCodes?: readonly number[];
+  model: string;
+}
+
+/**
+ * Options for the generateText utility function.
+ */
+export interface GenerateTextOptions {
+  /** The input prompt or history. */
+  contents: Content[];
+  /** The specific model to use for this task. */
+  model: string;
+  /**
+   * Task-specific system instructions. Passed through to the underlying
+   * content generator without the geminiClient main-prompt fallback or
+   * user-memory wrapping that `getCustomSystemPrompt` applies.
+   */
+  systemInstruction?: string | Part | Part[] | Content;
+  /**
+   * Overrides for generation configuration (e.g., temperature, thinkingConfig).
+   */
+  config?: Omit<
+    GenerateContentConfig,
+    'systemInstruction' | 'tools' | 'abortSignal'
+  >;
+  /** Signal for cancellation. */
+  abortSignal: AbortSignal;
+  /**
+   * A unique ID for the prompt, used for logging/telemetry correlation.
+   */
+  promptId?: string;
+  /**
+   * The maximum number of attempts for the request.
+   */
+  maxAttempts?: number;
+  /**
+   * Stream the response instead of awaiting the whole non-streaming body.
+   * Defaults to `false` (unchanged non-streaming behavior). Opt in to keep the
+   * HTTP connection alive against BFF gateways whose `proxy_read_timeout` would
+   * otherwise kill a slow inference before the first byte arrives. The streamed
+   * deltas are collected into the same `{ text, usage }` result.
+   */
+  stream?: boolean;
+  /**
+   * When true, throw instead of silently falling back to the main generator if
+   * a distinct generator for `model` can't be created (model not registered, or
+   * generator creation fails — e.g. a missing cross-provider credential). The
+   * vision bridge sets this so image payloads are never routed at the text-only
+   * primary while a notice names a different vision endpoint; it fails the
+   * conversion closed instead.
+   */
+  failClosed?: boolean;
+}
+
+/**
+ * Result of a generateText call.
+ */
+export interface GenerateTextResult {
+  text: string;
+  usage: GenerateContentResponseUsageMetadata | undefined;
+}
+
+/**
+ * Best-effort JSON-object extraction from a model's text response. Used as a
+ * fallback when the model emits plain-text JSON instead of calling the
+ * registered tool. Strips a leading ```json / ``` fence, then takes the
+ * substring from the first `{` to the matching last `}` and JSON-parses it.
+ * Returns the parsed object on success, or `null` if nothing usable is found.
+ */
+function parseLooseJsonObject(text: string): Record<string, unknown> | null {
+  let s = text.trim();
+  if (s.startsWith('```')) {
+    s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  }
+  const firstStructuredChar = s.search(/[[{]/);
+  if (firstStructuredChar !== -1 && s[firstStructuredChar] === '[') {
+    return null;
+  }
+  const first = s.indexOf('{');
+  const last = s.lastIndexOf('}');
+  if (first === -1 || last === -1 || last <= first) return null;
+  try {
+    const parsed = JSON.parse(s.slice(first, last + 1));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Options for the generateJson utility function.
@@ -64,10 +182,24 @@ export interface GenerateJsonOptions {
  * A client dedicated to stateless, utility-focused LLM calls.
  */
 export class BaseLlmClient {
+  /**
+   * Cache of per-model ContentGenerators keyed by model ID. Avoids rebuilding
+   * the generator (SDK instantiation, config resolution) on every side query.
+   * Cleared via {@link clearPerModelGeneratorCache} when the session resets.
+   */
+  private readonly perModelGeneratorCache = new Map<
+    string,
+    Promise<ContentGenerator>
+  >();
+
   constructor(
     private readonly contentGenerator: ContentGenerator,
     private readonly config: Config,
   ) {}
+
+  private getCurrentContentGenerator(): ContentGenerator {
+    return this.config.getContentGenerator?.() ?? this.contentGenerator;
+  }
 
   async generateJson(
     options: GenerateJsonOptions,
@@ -101,11 +233,18 @@ export class BaseLlmClient {
       },
     ];
 
+    const {
+      contentGenerator,
+      retryAuthType,
+      retryErrorCodes,
+      model: requestModel,
+    } = await this.resolveForModel(model);
+
     try {
       const apiCall = () =>
-        this.contentGenerator.generateContent(
+        contentGenerator.generateContent(
           {
-            model,
+            model: requestModel,
             config: {
               ...requestConfig,
               tools,
@@ -117,6 +256,29 @@ export class BaseLlmClient {
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
+        persistentMode: isUnattendedMode(),
+        signal: abortSignal,
+        heartbeatFn: (info) => {
+          process.stderr.write(
+            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: requestModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
+          );
+        },
       });
 
       const functionCalls = getFunctionCalls(result);
@@ -127,6 +289,12 @@ export class BaseLlmClient {
         if (functionCall && functionCall.args) {
           return functionCall.args as Record<string, unknown>;
         }
+      }
+
+      const text = getResponseText(result);
+      if (text) {
+        const parsed = parseLooseJsonObject(text);
+        if (parsed) return parsed;
       }
       return {};
     } catch (error) {
@@ -149,7 +317,136 @@ export class BaseLlmClient {
         'generateJson-api',
       );
       throw new Error(
-        `Failed to generate JSON content: ${getErrorMessage(error)}`,
+        `Failed to generate JSON content${promptId ? ` (${promptId})` : ''}: ${getErrorMessage(error)}`,
+        { cause: error },
+      );
+    }
+  }
+
+  /**
+   * Free-form text generation primitive used by `runSideQuery` text mode.
+   *
+   * Distinct from `GeminiClient.generateContent`: this calls the underlying
+   * `ContentGenerator` directly, so the caller's `systemInstruction` is sent
+   * through verbatim — no `getCustomSystemPrompt` wrapping (which would append
+   * user memory) and no main-session-prompt fallback when omitted. Side queries
+   * need that contract; the main turn does not.
+   */
+  async generateText(
+    options: GenerateTextOptions,
+  ): Promise<GenerateTextResult> {
+    const {
+      contents,
+      model,
+      abortSignal,
+      systemInstruction,
+      promptId,
+      maxAttempts,
+      stream,
+    } = options;
+
+    const requestConfig: GenerateContentConfig = {
+      abortSignal,
+      ...options.config,
+      ...(systemInstruction && { systemInstruction }),
+    };
+
+    const {
+      contentGenerator,
+      retryAuthType,
+      retryErrorCodes,
+      model: requestModel,
+    } = await this.resolveForModel(model, { failClosed: options.failClosed });
+
+    try {
+      const request = {
+        model: requestModel,
+        config: requestConfig,
+        contents,
+      };
+
+      // Both branches resolve to the same `{ text, usage }` shape so a single
+      // retryWithBackoff governs the whole request (a mid-stream failure retries
+      // the entire call — side queries are idempotent). Streaming keeps the HTTP
+      // connection alive so a slow inference can't be killed by a gateway's
+      // `proxy_read_timeout`; non-streaming is the unchanged default.
+      const apiCall: () => Promise<GenerateTextResult> = stream
+        ? async () => {
+            const responseStream = await contentGenerator.generateContentStream(
+              request,
+              promptId ?? '',
+            );
+            // Chunks are deltas, not cumulative snapshots, so concatenate.
+            // getResponseText already drops thought parts; usageMetadata rides
+            // the final chunk (last one wins), matching the non-streaming read.
+            let text = '';
+            let usage: GenerateContentResponseUsageMetadata | undefined;
+            for await (const chunk of responseStream) {
+              text += getResponseText(chunk) ?? '';
+              if (chunk.usageMetadata) {
+                usage = chunk.usageMetadata;
+              }
+            }
+            return { text, usage };
+          }
+        : async () => {
+            const result = await contentGenerator.generateContent(
+              request,
+              promptId ?? '',
+            );
+            return {
+              text: getResponseText(result) ?? '',
+              usage: result.usageMetadata,
+            };
+          };
+
+      const result = await retryWithBackoff(apiCall, {
+        maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
+        persistentMode: isUnattendedMode(),
+        signal: abortSignal,
+        heartbeatFn: (info) => {
+          process.stderr.write(
+            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: requestModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
+          );
+        },
+      });
+
+      return {
+        text: result.text.trim(),
+        usage: result.usage,
+      };
+    } catch (error) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
+
+      await reportError(
+        error,
+        // Mark streaming failures so an oncall can tell a mid-stream error
+        // apart from the original non-streaming gateway timeout (#5861).
+        `Error generating text content via API${stream ? ' [streaming]' : ''}.`,
+        contents,
+        'generateText-api',
+      );
+      throw new Error(
+        `Failed to generate text content${promptId ? ` (${promptId})` : ''}: ${getErrorMessage(error)}`,
+        { cause: error },
       );
     }
   }
@@ -187,5 +484,185 @@ export class BaseLlmClient {
       }
       return values;
     });
+  }
+
+  /**
+   * Resolve the ContentGenerator and retry authType for a request targeting
+   * a specific model.
+   *
+   * When the requested model matches the main session model, returns the
+   * constructor-injected generator and the main session's authType. When it
+   * differs (e.g. a fast model on a different provider), constructs and caches
+   * a per-model generator with that provider's auth, baseUrl, sampling, and
+   * extra_body settings — and reports the target provider as the retry
+   * authType so quota detection and provider-specific retry logic line up.
+   *
+   * Falls back to the main generator when the target model is not registered
+   * or generator creation fails (e.g. tests without full auth setup).
+   */
+  async resolveForModel(
+    model: string,
+    opts?: { failClosed?: boolean },
+  ): Promise<ResolvedGeneratorForModel> {
+    const selector = this.resolveModelSelector(model);
+    const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
+    const mainModel = this.config.getModel() ?? model;
+    const mainGeneratorConfig = this.config.getContentGeneratorConfig();
+    const mainAuthType = mainGeneratorConfig?.authType;
+    const mainRetryErrorCodes = mainGeneratorConfig?.retryErrorCodes;
+
+    if (
+      requestModel === mainModel &&
+      (!selector?.authType || selector.authType === mainAuthType)
+    ) {
+      return {
+        contentGenerator: this.getCurrentContentGenerator(),
+        retryAuthType: mainAuthType,
+        retryErrorCodes: mainRetryErrorCodes,
+        model: requestModel,
+      };
+    }
+
+    const contentGenerator = await this.createContentGeneratorForModel(
+      model,
+      selector,
+      opts?.failClosed ?? false,
+    );
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+    const retryAuthType =
+      resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
+    const retryErrorCodes =
+      resolvedModel?.generationConfig?.retryErrorCodes ?? mainRetryErrorCodes;
+
+    return {
+      contentGenerator,
+      retryAuthType,
+      retryErrorCodes,
+      model: resolvedModel?.id ?? requestModel,
+    };
+  }
+
+  /**
+   * Drop cached per-model ContentGenerators. Called on session reset so that
+   * the next side query picks up updated provider settings.
+   */
+  clearPerModelGeneratorCache(): void {
+    this.perModelGeneratorCache.clear();
+  }
+
+  /**
+   * Resolve a model across all authTypes. Handles the case where the target
+   * model is registered under a different authType than the main model
+   * (e.g. main=QWEN_OAUTH, fast=USE_ANTHROPIC).
+   */
+  private resolveModelAcrossAuthTypes(
+    model: string,
+    selector: ResolvedModelId | undefined,
+  ): ResolvedModelConfig | undefined {
+    const modelsConfig = this.config.getModelsConfig?.();
+    if (!modelsConfig) return undefined;
+    if (!selector) return undefined;
+    const modelId = selector.modelId;
+
+    if (selector.authType) {
+      return modelsConfig.getResolvedModel(selector.authType, modelId);
+    }
+
+    const allAuthTypes: AuthType[] = [
+      AuthType.QWEN_OAUTH,
+      AuthType.USE_OPENAI,
+      AuthType.USE_VERTEX_AI,
+      AuthType.USE_ANTHROPIC,
+      AuthType.USE_GEMINI,
+    ];
+
+    const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
+    if (mainAuthType) {
+      const resolved = modelsConfig.getResolvedModel(mainAuthType, modelId);
+      if (resolved) return resolved;
+    }
+
+    for (const authType of allAuthTypes) {
+      if (authType === mainAuthType) continue;
+      const resolved = modelsConfig.getResolvedModel(authType, modelId);
+      if (resolved) return resolved;
+    }
+
+    return undefined;
+  }
+
+  private async createContentGeneratorForModel(
+    model: string,
+    selector: ResolvedModelId | undefined,
+    failClosed = false,
+  ): Promise<ContentGenerator> {
+    const cacheKey = selector
+      ? `${selector.authType ?? ''}:${selector.modelId}`
+      : model;
+    const cached = this.perModelGeneratorCache.get(cacheKey);
+    if (cached) return cached;
+
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+
+    if (!resolvedModel) {
+      // failClosed callers (vision bridge) must NOT silently run on the main
+      // generator — that would send image payloads to the text-only primary.
+      if (failClosed) {
+        throw new Error(
+          `Model "${model}" is not registered across any auth type; ` +
+            `refusing to fall back to the main generator.`,
+        );
+      }
+      debugLogger.warn(
+        `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+      );
+      // Do not cache the fallback: getCurrentContentGenerator() reads the
+      // runtime view from AsyncLocalStorage, which can differ between calls
+      // (e.g. inside a subagent vs. on the main session). Caching here would
+      // pin the first-call view's generator under this selector key.
+      return this.getCurrentContentGenerator();
+    }
+
+    const generatorPromise = (async () => {
+      try {
+        const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
+        const targetConfig = buildAgentContentGeneratorConfig(
+          this.config,
+          targetModel,
+          {
+            authType: resolvedModel.authType,
+            apiKey: resolvedModel.envKey
+              ? (process.env[resolvedModel.envKey] ?? undefined)
+              : undefined,
+            baseUrl: resolvedModel.baseUrl,
+          },
+        );
+
+        return await createContentGenerator(targetConfig, this.config);
+      } catch (err: unknown) {
+        this.perModelGeneratorCache.delete(cacheKey);
+        if (failClosed) {
+          // Surface the creation failure rather than routing image payloads at
+          // the main (text-only) generator. The caller fails the conversion.
+          throw err instanceof Error
+            ? err
+            : new Error(
+                `Failed to create content generator for model "${model}": ${String(err)}`,
+              );
+        }
+        debugLogger.warn(
+          `Failed to create content generator for model "${model}", falling back to main generator.`,
+          err instanceof Error ? err.message : String(err),
+        );
+        return this.getCurrentContentGenerator();
+      }
+    })();
+
+    this.perModelGeneratorCache.set(cacheKey, generatorPromise);
+    return generatorPromise;
+  }
+
+  private resolveModelSelector(model: string): ResolvedModelId | undefined {
+    return resolveModelId(model, buildModelIdContext(this.config));
   }
 }

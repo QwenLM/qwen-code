@@ -91,6 +91,127 @@ describe('KeypressContext - Kitty Protocol', () => {
   });
 
   describe('Enter key handling', () => {
+    it('preserves typed µ as printable text', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.pressKey({
+          name: 'µ',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'µ',
+        });
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'µ',
+          meta: false,
+          sequence: 'µ',
+        }),
+      );
+    });
+
+    it('rewrites macOS composed Option+t glyph "†" to Alt+t', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '†',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 't',
+            meta: true,
+            sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('leaves "†" untouched on non-macOS platforms', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '†',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: '',
+            meta: false,
+            sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
     it('should recognize regular enter key (keycode 13) in kitty protocol', async () => {
       const keyHandler = vi.fn();
 
@@ -957,6 +1078,63 @@ describe('KeypressContext - Kitty Protocol', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('should keep a literal tab key as a non-paste keypress', () => {
+      vi.useFakeTimers();
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      try {
+        act(() => {
+          stdin.emit('data', Buffer.from('\t'));
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'tab',
+            sequence: '\t',
+            paste: false,
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should mark single-line tabbed raw chunks as paste', async () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.emit('data', Buffer.from('first\tsecond'));
+      });
+
+      await waitFor(() => {
+        expect(keyHandler).toHaveBeenCalledTimes(1);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: '',
+          sequence: 'first\tsecond',
+          paste: true,
+        }),
+      );
     });
 
     it('should concatenate new data and reset timeout', () => {

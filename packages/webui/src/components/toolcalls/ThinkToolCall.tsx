@@ -68,7 +68,11 @@ export const ThinkToolCall: FC<BaseToolCallProps> = ({
     const status =
       toolCall.status === 'pending' || toolCall.status === 'in_progress'
         ? 'loading'
-        : 'default';
+        : toolCall.status === 'failed'
+          ? 'error'
+          : toolCall.status === 'cancelled'
+            ? 'warning'
+            : 'default';
     return (
       <ToolCallContainer
         label="Think"

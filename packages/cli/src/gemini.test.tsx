@@ -14,16 +14,19 @@ import {
   type MockInstance,
 } from 'vitest';
 import type { ReactElement, ReactNode } from 'react';
+import { readFileSync } from 'node:fs';
 import {
+  createNonInteractivePromptId,
   main,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
-  startInteractiveUI,
 } from './gemini.js';
+import { startInteractiveUI } from './ui/startInteractiveUI.js';
+import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { OutputFormat } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockEarlyInput = vi.hoisted(() => ({
@@ -34,6 +37,33 @@ const mockEarlyInput = vi.hoisted(() => ({
     (chunks: readonly Buffer[]) => string | undefined
   >(() => undefined),
 }));
+
+const mockHandleListExtensions = vi.hoisted(() => vi.fn());
+
+describe('gemini import boundary', () => {
+  it('does not statically import ACP or noninteractive auth branches', () => {
+    const source = readFileSync('src/gemini.tsx', 'utf8');
+
+    expect(source).not.toContain(
+      "import { runAcpAgent } from './acp-integration/acpAgent.js'",
+    );
+    expect(source).not.toContain(
+      "import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js'",
+    );
+    expect(source).not.toContain(
+      "import { initializeApp } from './core/initializer.js'",
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/acp-integration\/acpAgent\.js['"]\s*\)/,
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/validateNonInterActiveAuth\.js['"]\s*\)/,
+    );
+    expect(source).toMatch(
+      /await import\(\s*['"]\.\/core\/initializer\.js['"]\s*\)/,
+    );
+  });
+});
 
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
@@ -49,6 +79,7 @@ vi.mock('./config/settings.js', async (importOriginal) => {
   return {
     ...actual,
     loadSettings: vi.fn(),
+    createMinimalSettings: vi.fn(),
   };
 });
 
@@ -58,9 +89,11 @@ vi.mock('./config/config.js', () => ({
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
     getWarnings: vi.fn(() => []),
+    getModelsConfig: vi.fn(() => ({ getCurrentAuthType: () => null })),
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
 }));
 
 vi.mock('read-package-up', () => ({
@@ -99,9 +132,7 @@ vi.mock('./utils/stdioHelpers.js', () => ({
 
 vi.mock('./utils/relaunch.js', () => ({
   relaunchAppInChildProcess: vi.fn(),
-  relaunchOnExitCode: vi.fn(async (runner: () => Promise<number>) => {
-    await runner();
-  }),
+  relaunchOnExitCode: vi.fn((fn: () => Promise<number>) => fn()),
 }));
 
 vi.mock('./config/sandboxConfig.js', () => ({
@@ -119,6 +150,28 @@ vi.mock('./core/initializer.js', () => ({
 
 vi.mock('./utils/earlyInput.js', () => mockEarlyInput);
 
+vi.mock('./commands/extensions/list.js', () => ({
+  handleList: mockHandleListExtensions,
+}));
+
+vi.mock('./ui/AppContainer.js', () => ({
+  AppContainer: () => null,
+}));
+
+// Stub the settings watcher: main() constructs one and calls startWatching()
+// in non-bare mode. The real implementation reads settings.user/.workspace
+// paths and arms chokidar file watchers, neither of which these main()-flow
+// tests supply or want as a side effect.
+vi.mock('./config/settingsWatcher.js', () => ({
+  SettingsWatcher: class {
+    startWatching() {}
+    stopWatching() {}
+    addChangeListener() {
+      return () => {};
+    }
+  },
+}));
+
 vi.mock('./ui/hooks/useKittyKeyboardProtocol.js', () => ({
   useKittyKeyboardProtocol: vi.fn(() => ({
     supported: false,
@@ -130,6 +183,7 @@ vi.mock('./ui/hooks/useKittyKeyboardProtocol.js', () => ({
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
+  let originalEnvQwenCodeSimple: string | undefined;
   let initialUnhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] =
     [];
 
@@ -137,8 +191,10 @@ describe('gemini.tsx main function', () => {
     // Store and clear sandbox-related env variables to ensure a consistent test environment
     originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
+    originalEnvQwenCodeSimple = process.env['QWEN_CODE_SIMPLE'];
     delete process.env['QWEN_SANDBOX'];
     delete process.env['SANDBOX'];
+    delete process.env['QWEN_CODE_SIMPLE'];
 
     initialUnhandledRejectionListeners =
       process.listeners('unhandledRejection');
@@ -155,6 +211,11 @@ describe('gemini.tsx main function', () => {
       process.env['SANDBOX'] = originalEnvSandbox;
     } else {
       delete process.env['SANDBOX'];
+    }
+    if (originalEnvQwenCodeSimple !== undefined) {
+      process.env['QWEN_CODE_SIMPLE'] = originalEnvQwenCodeSimple;
+    } else {
+      delete process.env['QWEN_CODE_SIMPLE'];
     }
 
     const currentListeners = process.listeners('unhandledRejection');
@@ -190,10 +251,13 @@ describe('gemini.tsx main function', () => {
         isInteractive: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
         getDebugMode: () => false,
         getListExtensions: () => false,
         getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
         initialize: vi.fn(),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
         getIdeMode: () => false,
         getExperimentalZedIntegration: () => false,
         getScreenReader: () => false,
@@ -201,6 +265,7 @@ describe('gemini.tsx main function', () => {
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
         getWarnings: () => [],
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
         getSessionId: () => 'test-session-id',
       } as unknown as Config;
     });
@@ -214,6 +279,8 @@ describe('gemini.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
     try {
       await main();
@@ -231,6 +298,391 @@ describe('gemini.tsx main function', () => {
     // we can authorize outside the sandbox.
     expect(callOrder).toEqual(['relaunch', 'loadCliConfig']);
     processExitSpy.mockRestore();
+  });
+
+  it('handles --list-extensions before sandbox and app config startup', async () => {
+    vi.clearAllMocks();
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      listExtensions: true,
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    mockHandleListExtensions.mockResolvedValue(undefined);
+
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof MockProcessExitError)) throw e;
+    }
+
+    expect(mockHandleListExtensions).toHaveBeenCalledOnce();
+    expect(processExitSpy).toHaveBeenCalledWith(0);
+    expect(loadSandboxConfig).not.toHaveBeenCalled();
+    expect(loadCliConfig).not.toHaveBeenCalled();
+
+    processExitSpy.mockRestore();
+  });
+
+  it('should skip full settings discovery in bare mode', async () => {
+    const originalArgv = process.argv;
+    process.argv = ['node', 'script.js', '--bare'];
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings, createMinimalSettings } = await import(
+      './config/settings.js'
+    );
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const minimalSettings = {
+      errors: [],
+      merged: {},
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    };
+    const configStub = {
+      isInteractive: () => false,
+      getQuestion: () => 'bare prompt',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => 'test-session-id',
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      bare: true,
+    } as unknown as CliArgs);
+    vi.mocked(createMinimalSettings).mockReturnValue(minimalSettings as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      process.argv = originalArgv;
+      processExitSpy.mockRestore();
+    }
+
+    expect(createMinimalSettings).toHaveBeenCalledOnce();
+    expect(loadSettings).not.toHaveBeenCalled();
+    expect(loadCliConfig).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ bare: true }),
+      process.cwd(),
+      undefined,
+      {
+        userHooks: undefined,
+        projectHooks: undefined,
+      },
+      expect.any(Function),
+      undefined,
+      // settingsWatcher: not started in bare mode
+      undefined,
+    );
+  });
+
+  it('writes non-interactive warnings discovered during config initialization', async () => {
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const validatorModule = await import('./validateNonInterActiveAuth.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const initializerModule = await import('./core/initializer.js');
+    const startupWarningsModule = await import('./utils/startupWarnings.js');
+    const userStartupWarningsModule = await import(
+      './utils/userStartupWarnings.js'
+    );
+
+    mockWriteStderrLine.mockClear();
+    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    });
+    vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
+    vi.spyOn(
+      userStartupWarningsModule,
+      'getUserStartupWarnings',
+    ).mockResolvedValue([]);
+    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+
+    let initialized = false;
+    const configStub = {
+      isInteractive: () => false,
+      getQuestion: () => 'hello',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn().mockImplementation(async () => {
+        initialized = true;
+      }),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getFailedMcpServerNames: () => [],
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => (initialized ? ['late memory warning'] : []),
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getContentGeneratorConfig: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      getProxy: () => undefined,
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
+      configStub,
+    );
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      processExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('late memory warning');
+  });
+
+  it('creates non-interactive prompt ids that preserve session correlation', () => {
+    expect(createNonInteractivePromptId('test-session-id')).toBe(
+      'test-session-id########0',
+    );
+  });
+
+  const runSandboxRelaunch = async (
+    argv: string[],
+    sessionId = '123e4567-e89b-12d3-a456-426614174000',
+  ): Promise<string[]> => {
+    const originalArgv = process.argv;
+    process.argv = argv;
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { start_sandbox } = await import('./utils/sandbox.js');
+
+    vi.mocked(start_sandbox).mockClear();
+    vi.mocked(parseArguments).mockResolvedValue({
+      debug: true,
+      prompt: 'hello',
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue({
+      command: 'sandbox-exec',
+      image: '',
+    });
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => sessionId,
+    } as unknown as Config);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      process.argv = originalArgv;
+      processExitSpy.mockRestore();
+    }
+
+    expect(start_sandbox).toHaveBeenCalledOnce();
+    return vi.mocked(start_sandbox).mock.calls[0]![3]!;
+  };
+
+  it('passes the outer session ID into the sandbox child process', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const sandboxArgs = await runSandboxRelaunch(
+      ['node', 'script.js', '--debug', '-p', 'hello'],
+      sessionId,
+    );
+
+    const idx = sandboxArgs.indexOf('--sandbox-session-id');
+    expect(idx).not.toBe(-1);
+    expect(sandboxArgs[idx + 1]).toBe(sessionId);
+    expect(sandboxArgs).not.toContain('--session-id');
+  });
+
+  it('does not pass an empty session ID into the sandbox child process', async () => {
+    const sandboxArgs = await runSandboxRelaunch(
+      ['node', 'script.js', '--debug', '-p', 'hello'],
+      '',
+    );
+
+    expect(sandboxArgs).not.toContain('--sandbox-session-id');
+    expect(sandboxArgs).not.toContain('--session-id');
+  });
+
+  it.each([
+    ['--continue', ['node', 'script.js', '--debug', '--continue']],
+    ['-c', ['node', 'script.js', '--debug', '-c']],
+    ['--resume', ['node', 'script.js', '--debug', '--resume', 'session-id']],
+    ['-r', ['node', 'script.js', '--debug', '-r', 'session-id']],
+    [
+      '--session-id',
+      [
+        'node',
+        'script.js',
+        '--debug',
+        '--session-id',
+        '123e4567-e89b-12d3-a456-426614174999',
+      ],
+    ],
+  ])(
+    'does not inject sandbox session ID when argv contains %s',
+    async (_flag, argv) => {
+      const sandboxArgs = await runSandboxRelaunch(argv);
+
+      expect(sandboxArgs).not.toContain('--sandbox-session-id');
+    },
+  );
+
+  it('inserts the sandbox session ID before the argument separator', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const sandboxArgs = await runSandboxRelaunch(
+      ['node', 'script.js', '--debug', '--', '--not-a-cli-flag'],
+      sessionId,
+    );
+
+    expect(sandboxArgs).toEqual([
+      'node',
+      'script.js',
+      '--debug',
+      '--sandbox-session-id',
+      sessionId,
+      '--',
+      '--not-a-cli-flag',
+    ]);
   });
 
   it('should log unhandled promise rejections and open debug console on first error', async () => {
@@ -347,6 +799,8 @@ describe('gemini.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
 
     vi.mocked(parseArguments).mockResolvedValue({
@@ -357,10 +811,13 @@ describe('gemini.tsx main function', () => {
       isInteractive: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
@@ -369,6 +826,7 @@ describe('gemini.tsx main function', () => {
       getInputFormat: () => 'stream-json',
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
       getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getOutputFormat: () => OutputFormat.TEXT,
@@ -399,9 +857,16 @@ describe('gemini.tsx main function', () => {
     }
 
     expect(runStreamJsonSpy).toHaveBeenCalledTimes(1);
-    const [configArg, inputArg] = runStreamJsonSpy.mock.calls[0];
+    const [configArg, inputArg, settingsArg] = runStreamJsonSpy.mock.calls[0];
     expect(configArg).toBe(validatedConfig);
     expect(inputArg).toBe('hello stream');
+    // Regression guard: PR-A's progressive-MCP refactor previously
+    // dropped the `settings` argument here, which silently fell back to
+    // `createMinimalSettings()` inside `runNonInteractiveStreamJson`.
+    // The parallel `runNonInteractive` path still received settings, so
+    // stream-json sessions lost any user-configured permission /
+    // approval / hook setup.
+    expect(settingsArg).toBeDefined();
 
     expect(validateAuthSpy).toHaveBeenCalledWith(
       undefined,
@@ -491,11 +956,19 @@ describe('gemini.tsx main function kitty protocol', () => {
   let setRawModeSpy: MockInstance<
     (mode: boolean) => NodeJS.ReadStream & { fd: 0 }
   >;
+  let initialSigintListeners: NodeJS.SignalsListener[];
+  let initialSigtermListeners: NodeJS.SignalsListener[];
 
   beforeEach(() => {
     // Set no relaunch in tests since process spawning causing issues in tests
     originalEnvNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
     process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    initialSigintListeners = process.listeners(
+      'SIGINT',
+    ) as NodeJS.SignalsListener[];
+    initialSigtermListeners = process.listeners(
+      'SIGTERM',
+    ) as NodeJS.SignalsListener[];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (!(process.stdin as any).setRawMode) {
@@ -515,12 +988,24 @@ describe('gemini.tsx main function kitty protocol', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.listeners('SIGINT')) {
+      if (!initialSigintListeners.includes(listener)) {
+        process.removeListener('SIGINT', listener as NodeJS.SignalsListener);
+      }
+    }
+    for (const listener of process.listeners('SIGTERM')) {
+      if (!initialSigtermListeners.includes(listener)) {
+        process.removeListener('SIGTERM', listener as NodeJS.SignalsListener);
+      }
+    }
+
     // Restore original env variables
     if (originalEnvNoRelaunch !== undefined) {
       process.env['QWEN_CODE_NO_RELAUNCH'] = originalEnvNoRelaunch;
     } else {
       delete process.env['QWEN_CODE_NO_RELAUNCH'];
     }
+    vi.restoreAllMocks();
   });
 
   it('should call setRawMode and detectAndEnableKittyProtocol when isInteractive is true', async () => {
@@ -539,12 +1024,15 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
     } as unknown as Config);
@@ -558,6 +1046,8 @@ describe('gemini.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
     vi.mocked(parseArguments).mockResolvedValue({
       model: undefined,
@@ -570,15 +1060,16 @@ describe('gemini.tsx main function kitty protocol', () => {
       appendSystemPrompt: undefined,
       query: undefined,
       yolo: undefined,
+      bare: undefined,
       approvalMode: undefined,
       telemetry: undefined,
-      checkpointing: undefined,
       telemetryTarget: undefined,
       telemetryOtlpEndpoint: undefined,
       telemetryOtlpProtocol: undefined,
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
       experimentalAcp: undefined,
@@ -590,10 +1081,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       openaiLoggingDir: undefined,
       proxy: undefined,
       includeDirectories: undefined,
-      tavilyApiKey: undefined,
-      googleApiKey: undefined,
-      googleSearchEngineId: undefined,
-      webSearchDefault: undefined,
       screenReader: undefined,
       inputFormat: undefined,
       outputFormat: undefined,
@@ -602,8 +1089,11 @@ describe('gemini.tsx main function kitty protocol', () => {
       resume: undefined,
       coreTools: undefined,
       excludeTools: undefined,
+      disabledSlashCommands: undefined,
       authType: undefined,
       maxSessionTurns: undefined,
+      maxWallTime: undefined,
+      maxToolCalls: undefined,
       experimentalLsp: undefined,
       channel: undefined,
       chatRecording: undefined,
@@ -645,7 +1135,9 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
@@ -708,6 +1200,76 @@ describe('gemini.tsx main function kitty protocol', () => {
 
     throw new Error('KeypressProvider not found in rendered tree');
   });
+
+  it('should run cleanup before exiting on interactive SIGINT', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const processOnceSpy = vi.spyOn(process, 'once').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        signalHandlers.set(eventName, listener);
+      }
+      return process;
+    }) as typeof process.once);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      getModelsConfig: () => ({
+        getCurrentAuthType: () => null,
+        getGenerationConfig: () => ({}),
+      }),
+      getProxy: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      getProjectRoot: () => '/root',
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+} as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    await main();
+    signalHandlers.get('SIGINT')?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(setRawModeSpy).toHaveBeenCalledWith(false);
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('validateDnsResolutionOrder', () => {
@@ -751,6 +1313,8 @@ describe('startInteractiveUI', () => {
         hideWindowTitle: false,
       },
     },
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
   } as LoadedSettings;
   const mockStartupWarnings = ['warning1'];
   const mockWorkspaceRoot = '/root';
@@ -763,6 +1327,7 @@ describe('startInteractiveUI', () => {
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
     isKittyProtocolSupported: vi.fn(() => false),
     isKittyProtocolEnabled: vi.fn(() => false),
+    disableKittyProtocol: vi.fn(),
   }));
 
   vi.mock('./ui/utils/updateCheck.js', () => ({
@@ -810,6 +1375,7 @@ describe('startInteractiveUI', () => {
     expect(options).toEqual({
       exitOnCtrlC: false,
       isScreenReaderEnabled: false,
+      alternateScreen: false,
     });
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)

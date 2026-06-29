@@ -84,9 +84,11 @@ export function LoopDetectionConfirmation({
             </Box>
             <Box marginTop={1}>
               <Text color={theme.text.secondary}>
-                Note: To disable loop detection checks for all future sessions,
-                set &quot;model.skipLoopDetection&quot; to true in your
-                settings.json.
+                Note: Setting &quot;model.skipLoopDetection&quot; to true in
+                your settings.json disables only the heuristic loop checks for
+                future sessions; the always-on guard against consecutive
+                identical tool calls cannot be turned off there. Disabling for
+                this session above suppresses both.
               </Text>
             </Box>
           </Box>

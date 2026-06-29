@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { VSCodeAPI } from '../../hooks/useVSCode.js';
 
 /**
@@ -23,8 +23,39 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
   const [nextCursor, setNextCursor] = useState<number | undefined>(undefined);
   const [hasMore, setHasMore] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isSwitchingSession, setIsSwitchingSessionRaw] =
+    useState<boolean>(false);
+  const switchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const SWITCH_TIMEOUT_MS = 15000;
   const PAGE_SIZE = 20;
+
+  const setIsSwitchingSession = useCallback((value: boolean) => {
+    setIsSwitchingSessionRaw(value);
+    if (switchTimeoutRef.current) {
+      clearTimeout(switchTimeoutRef.current);
+      switchTimeoutRef.current = null;
+    }
+    if (value) {
+      switchTimeoutRef.current = setTimeout(() => {
+        console.warn(
+          '[useSessionManagement] Switch session timed out, clearing loading state',
+        );
+        setIsSwitchingSessionRaw(false);
+        switchTimeoutRef.current = null;
+      }, SWITCH_TIMEOUT_MS);
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (switchTimeoutRef.current) {
+        clearTimeout(switchTimeoutRef.current);
+        switchTimeoutRef.current = null;
+      }
+    },
+    [],
+  );
 
   /**
    * Filter session list
@@ -98,12 +129,39 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
       }
 
       console.log('[useSessionManagement] Switching to session:', sessionId);
+      setIsSwitchingSession(true);
       vscode.postMessage({
         type: 'switchQwenSession',
         data: { sessionId },
       });
     },
-    [currentSessionId, vscode],
+    [currentSessionId, vscode, setIsSwitchingSession],
+  );
+
+  /**
+   * Delete session
+   */
+  const handleDeleteSession = useCallback(
+    (sessionId: string) => {
+      vscode.postMessage({
+        type: 'deleteQwenSession',
+        data: { sessionId },
+      });
+    },
+    [vscode],
+  );
+
+  /**
+   * Rename session
+   */
+  const handleRenameSession = useCallback(
+    (sessionId: string, title: string) => {
+      vscode.postMessage({
+        type: 'renameQwenSession',
+        data: { sessionId, title },
+      });
+    },
+    [vscode],
   );
 
   return {
@@ -117,6 +175,7 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     nextCursor,
     hasMore,
     isLoading,
+    isSwitchingSession,
 
     // State setters
     setQwenSessions,
@@ -127,11 +186,14 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     setNextCursor,
     setHasMore,
     setIsLoading,
+    setIsSwitchingSession,
 
     // Operations
     handleLoadQwenSessions,
     handleNewQwenSession,
     handleSwitchSession,
     handleLoadMoreSessions,
+    handleDeleteSession,
+    handleRenameSession,
   };
 };

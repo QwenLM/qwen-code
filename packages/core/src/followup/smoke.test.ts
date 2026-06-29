@@ -17,7 +17,7 @@ import {
   saveCacheSafeParams,
   getCacheSafeParams,
   clearCacheSafeParams,
-} from './forkedQuery.js';
+} from '../utils/forkedAgent.js';
 import { ensureToolResultPairing } from './speculation.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { ApprovalMode } from '../config/config.js';

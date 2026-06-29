@@ -14,8 +14,9 @@ import {
   type Mock,
 } from 'vitest';
 import type { RipGrepToolParams } from './ripGrep.js';
-import { RipGrepTool } from './ripGrep.js';
+import { _resetRipGrepCachesForTest, RipGrepTool } from './ripGrep.js';
 import path from 'node:path';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os, { EOL } from 'node:os';
 import type { Config } from '../config/config.js';
@@ -23,6 +24,7 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { spawn } from 'node:child_process';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import { FileReadCache } from '../services/fileReadCache.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
@@ -40,7 +42,9 @@ describe('RipGrepTool', () => {
   let tempRootDir: string;
   let grepTool: RipGrepTool;
   let fileExclusionsMock: { getGlobExcludes: () => string[] };
+  let fileReadCache: FileReadCache;
   const abortSignal = new AbortController().signal;
+  const sep = '\x1f';
 
   const mockConfig = {
     getTargetDir: () => tempRootDir,
@@ -55,13 +59,20 @@ describe('RipGrepTool', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockSpawn.mockReset();
+    _resetRipGrepCachesForTest();
+    Object.assign(mockConfig, {
+      getTruncateToolOutputThreshold: () => 25000,
+    });
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     fileExclusionsMock = {
       getGlobExcludes: vi.fn().mockReturnValue([]),
     };
+    fileReadCache = new FileReadCache();
     Object.assign(mockConfig, {
       getFileExclusions: () => fileExclusionsMock,
       getFileFilteringOptions: () => DEFAULT_FILE_FILTERING_OPTIONS,
+      getFileReadCache: () => fileReadCache,
+      getFileReadCacheDisabled: () => false,
     });
     grepTool = new RipGrepTool(mockConfig);
 
@@ -109,6 +120,20 @@ describe('RipGrepTool', () => {
       expect(grepTool.validateToolParams(params)).toBeNull();
     });
 
+    it('should return null for a positive integer limit', () => {
+      const params: RipGrepToolParams = { pattern: 'hello', limit: 2 };
+      expect(grepTool.validateToolParams(params)).toBeNull();
+    });
+
+    it.each([
+      [0, 'params/limit must be >= 1'],
+      [-1, 'params/limit must be >= 1'],
+      [1.5, 'params/limit must be integer'],
+    ])('should return error for invalid limit %s', (limit, expectedError) => {
+      const params: RipGrepToolParams = { pattern: 'hello', limit };
+      expect(grepTool.validateToolParams(params)).toBe(expectedError);
+    });
+
     it('should return error if pattern is missing', () => {
       const params = { path: '.' } as unknown as RipGrepToolParams;
       expect(grepTool.validateToolParams(params)).toBe(
@@ -140,12 +165,27 @@ describe('RipGrepTool', () => {
       const params: RipGrepToolParams = { pattern: 'hello', path: filePath };
       expect(grepTool.validateToolParams(params)).toBeNull();
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped path',
+      async () => {
+        // Create a directory with a space so the unescaped path exists
+        const dirWithSpace = path.join(tempRootDir, 'sub dir');
+        await fs.mkdir(dirWithSpace);
+        const params: RipGrepToolParams = {
+          pattern: 'hello',
+          path: path.join(tempRootDir, 'sub\\ dir'),
+        };
+        expect(grepTool.validateToolParams(params)).toBeNull();
+        expect(params.path).toBe(dirWithSpace);
+      },
+    );
   });
 
   describe('execute', () => {
     it('should find matches for a simple pattern in all files', async () => {
       (runRipgrep as Mock).mockResolvedValue({
-        stdout: `fileA.txt:1:hello world${EOL}fileA.txt:2:second line with world${EOL}sub/fileC.txt:1:another world in sub dir${EOL}`,
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}fileA.txt${sep}2${sep}second line with world${EOL}sub/fileC.txt${sep}1${sep}another world in sub dir${EOL}`,
         truncated: false,
         error: undefined,
       });
@@ -162,6 +202,186 @@ describe('RipGrepTool', () => {
         'sub/fileC.txt:1:another world in sub dir',
       );
       expect(result.returnDisplay).toBe('Found 3 matches');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
+        path.join(tempRootDir, 'sub/fileC.txt'),
+      ]);
+
+      const fileAStats = await fs.stat(path.join(tempRootDir, 'fileA.txt'));
+      const fileCStats = await fs.stat(path.join(tempRootDir, 'sub/fileC.txt'));
+      const fileARead = fileReadCache.check(fileAStats);
+      const fileCRead = fileReadCache.check(fileCStats);
+      expect(fileARead.state).toBe('fresh');
+      expect(fileCRead.state).toBe('fresh');
+      if (fileARead.state === 'fresh') {
+        expect(fileARead.entry.lastReadWasFull).toBe(false);
+        expect(fileARead.entry.lastReadCacheable).toBe(true);
+      }
+      if (fileCRead.state === 'fresh') {
+        expect(fileCRead.entry.lastReadWasFull).toBe(false);
+        expect(fileCRead.entry.lastReadCacheable).toBe(true);
+      }
+    });
+
+    it('should treat summary-only JSON output as no matches', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${JSON.stringify({ type: 'summary', data: { stats: { matches: 0 } } })}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'missing' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toBe(
+        'No matches found for pattern "missing" in the workspace directory.',
+      );
+      expect(result.returnDisplay).toBe('No matches found');
+    });
+
+    it('parses JSON match events and records result paths', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${JSON.stringify({ type: 'match', data: { path: { text: 'src/foo.ts' }, lines: { text: 'content\n' }, line_number: 5 } })}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'content' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('src/foo.ts:5:content');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'src/foo.ts'),
+      ]);
+    });
+
+    it('parses JSON match events with byte-encoded paths', async () => {
+      const bytePath = 'src/byte-path.ts';
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${JSON.stringify({ type: 'match', data: { path: { bytes: Buffer.from(bytePath, 'utf8').toString('base64') }, lines: { text: 'content\n' }, line_number: 3 } })}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'content' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('src/byte-path.ts:3:content');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, bytePath),
+      ]);
+    });
+
+    it('handles JSON match events without a lines field', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${JSON.stringify({ type: 'match', data: { path: { text: 'fileA.txt' }, line_number: 1 } })}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('fileA.txt:1:');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
+      ]);
+    });
+
+    it('surfaces ripgrep system-level truncation in display metadata', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        truncated: true,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toBe('Found 1 match (truncated)');
+      expect(result.llmContent).toContain('[0 lines truncated] ...');
+    });
+
+    it('should preserve absolute result paths reported by ripgrep', async () => {
+      const absoluteMatchPath = path.join(
+        tempRootDir,
+        'packages/core/src/skills/target.ts',
+      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${absoluteMatchPath}${sep}1${sep}CORE_HELPER_TARGET_MARKER${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = {
+        pattern: 'CORE_HELPER_TARGET_MARKER',
+        glob: '**/*.ts',
+      };
+      const invocation = grepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.resultFilePaths).toEqual([absoluteMatchPath]);
+    });
+
+    it('should parse Windows-style absolute result paths reported by ripgrep', async () => {
+      const absoluteMatchPath =
+        'C:\\repo\\packages\\core\\src\\skills\\target.ts';
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${absoluteMatchPath}${sep}12${sep}CORE_HELPER_TARGET_MARKER${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({
+        pattern: 'CORE_HELPER_TARGET_MARKER',
+        glob: '**/*.ts',
+      });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.resultFilePaths).toEqual([absoluteMatchPath]);
+    });
+
+    it('includes result paths for partially rendered long file paths', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 30,
+      });
+      const longPath = 'packages/core/src/skills/very-long-named-file.ts';
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${longPath}${sep}1${sep}visible marker${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'marker', glob: '**/*.ts' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.llmContent).toContain('packages/core/src/skills/very');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, longPath),
+      ]);
+    });
+
+    it('only reports result paths for lines reached before character truncation', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 25,
+      });
+      const visiblePath = 'a.ts';
+      const hiddenPath = 'hidden-file-with-long-name.ts';
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${visiblePath}${sep}1${sep}visible marker${EOL}${hiddenPath}${sep}1${sep}hidden marker${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'marker', glob: '**/*.ts' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, visiblePath),
+        path.join(tempRootDir, hiddenPath),
+      ]);
     });
 
     it('should find matches in a specific path', async () => {
@@ -434,6 +654,30 @@ describe('RipGrepTool', () => {
         returnDisplay: 'Error: ripgrep binary not found.',
       });
     });
+
+    it('should pass useBuiltinRipgrep setting to ripgrep execution', async () => {
+      const systemOnlyConfig = {
+        ...mockConfig,
+        getUseBuiltinRipgrep: () => false,
+      } as unknown as Config;
+      const systemOnlyGrepTool = new RipGrepTool(systemOnlyConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = systemOnlyGrepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      expect(runRipgrep).toHaveBeenCalledWith(
+        expect.any(Array),
+        abortSignal,
+        false,
+      );
+    });
   });
 
   describe('multi-directory workspace', () => {
@@ -455,7 +699,7 @@ describe('RipGrepTool', () => {
       const multiDirGrepTool = new RipGrepTool(multiDirConfig);
 
       (runRipgrep as Mock).mockResolvedValue({
-        stdout: `fileA.txt:1:hello world${EOL}${secondDir}/extra.txt:1:hello from second dir${EOL}`,
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}${secondDir}${path.sep}extra.txt${sep}1${sep}hello from second dir${EOL}`,
         truncated: false,
         error: undefined,
       });
@@ -466,11 +710,21 @@ describe('RipGrepTool', () => {
 
       expect(result.llmContent).toContain('across 2 workspace directories');
       expect(result.llmContent).toContain('Found 2 matches');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileA.txt'),
+        path.join(secondDir, 'extra.txt'),
+      ]);
 
       // Verify both paths were passed to runRipgrep
       expect(runRipgrep).toHaveBeenCalledWith(
-        expect.arrayContaining([tempRootDir, secondDir]),
+        expect.arrayContaining([
+          '--json',
+          '--no-messages',
+          tempRootDir,
+          secondDir,
+        ]),
         expect.anything(),
+        true,
       );
 
       await fs.rm(secondDir, { recursive: true, force: true });
@@ -545,6 +799,378 @@ describe('RipGrepTool', () => {
       await fs.rm(secondDir, { recursive: true, force: true });
     });
 
+    it('should pass .agentignore and .aiignore to ripgrep when respected', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        'agent-secret.txt\n',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, '.aiignore'),
+        'ai-secret.txt\n',
+      );
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'secret' };
+      const invocation = grepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.agentignore'));
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.aiignore'));
+    });
+
+    it('should pass non-qwen ignore files unchanged so ripgrep preserves negations', async () => {
+      const qwenIgnorePath = path.join(tempRootDir, '.qwenignore');
+      const agentIgnorePath = path.join(tempRootDir, '.agentignore');
+
+      await fs.writeFile(qwenIgnorePath, '*.env\n');
+      await fs.writeFile(
+        agentIgnorePath,
+        '*.env\n!allowed.env\n\\!literal.txt\n',
+      );
+
+      (runRipgrep as Mock).mockImplementation(async (rgArgs: string[]) => {
+        const ignoreFileArgs = rgArgs.filter(
+          (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+        );
+        expect(ignoreFileArgs).toContain(qwenIgnorePath);
+        expect(ignoreFileArgs).toContain(agentIgnorePath);
+        expect(ignoreFileArgs.indexOf(agentIgnorePath)).toBeLessThan(
+          ignoreFileArgs.indexOf(qwenIgnorePath),
+        );
+
+        const agentIgnoreContent = await fs.readFile(agentIgnorePath, 'utf8');
+        expect(agentIgnoreContent).toContain('!allowed.env');
+
+        return {
+          stdout: '',
+          truncated: false,
+          error: undefined,
+        };
+      });
+
+      const invocation = grepTool.build({ pattern: 'API_KEY' });
+      await invocation.execute(abortSignal);
+    });
+
+    it('should preserve negation semantics within the same non-qwen ignore file', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        '*.env\n!allowed.env\n',
+      );
+      await fs.writeFile(path.join(tempRootDir, 'blocked.env'), 'API_KEY=1');
+      await fs.writeFile(path.join(tempRootDir, 'allowed.env'), 'API_KEY=2');
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `blocked.env${sep}1${sep}API_KEY=1${EOL}allowed.env${sep}1${sep}API_KEY=2${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'API_KEY' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 1 match');
+      expect(result.llmContent).toContain('allowed.env:1:API_KEY=2');
+      expect(result.llmContent).not.toContain('blocked.env');
+      expect(result.returnDisplay).toBe('Found 1 match');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'allowed.env'),
+      ]);
+    });
+
+    it('should not let a custom ignore negation expose .qwenignore matches in grep output', async () => {
+      const qwenIgnorePath = path.join(tempRootDir, '.qwenignore');
+      const agentIgnorePath = path.join(tempRootDir, '.agentignore');
+      await fs.writeFile(qwenIgnorePath, '*.env\n');
+      await fs.writeFile(agentIgnorePath, '!*.env\n');
+      await fs.writeFile(path.join(tempRootDir, 'allowed.env'), 'API_KEY=2');
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `allowed.env${sep}1${sep}API_KEY=2${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'API_KEY' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('No matches found');
+      expect(result.returnDisplay).toBe('No matches found');
+
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toEqual([agentIgnorePath, qwenIgnorePath]);
+    });
+
+    it('should post-filter matches ignored by another workspace .qwenignore', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(path.join(tempRootDir, '.qwenignore'), '*.env\n');
+      await fs.writeFile(path.join(secondDir, '.qwenignore'), '!*.env\n');
+      await fs.writeFile(path.join(tempRootDir, 'secret.env'), 'API_KEY=1');
+      await fs.writeFile(path.join(tempRootDir, 'visible.txt'), 'API_KEY=2');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `secret.env${sep}1${sep}API_KEY=1${EOL}visible.txt${sep}1${sep}API_KEY=2${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = multiDirGrepTool.build({ pattern: 'API_KEY' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 1 match');
+      expect(result.llmContent).toContain('visible.txt:1:API_KEY=2');
+      expect(result.llmContent).not.toContain('secret.env');
+      expect(result.returnDisplay).toBe('Found 1 match');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'visible.txt'),
+      ]);
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should preserve negation semantics within the same .qwenignore', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.qwenignore'),
+        '*.env\n!allowed.env\n',
+      );
+      await fs.writeFile(path.join(tempRootDir, 'blocked.env'), 'API_KEY=1');
+      await fs.writeFile(path.join(tempRootDir, 'allowed.env'), 'API_KEY=2');
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `blocked.env${sep}1${sep}API_KEY=1${EOL}allowed.env${sep}1${sep}API_KEY=2${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'API_KEY' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 1 match');
+      expect(result.llmContent).toContain('allowed.env:1:API_KEY=2');
+      expect(result.llmContent).not.toContain('blocked.env');
+      expect(result.returnDisplay).toBe('Found 1 match');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'allowed.env'),
+      ]);
+    });
+
+    it('should post-filter matches unignored by a custom nested .qwenignore', async () => {
+      await fs.mkdir(path.join(tempRootDir, 'nested'));
+      await fs.writeFile(path.join(tempRootDir, '.qwenignore'), '*.env\n');
+      await fs.writeFile(
+        path.join(tempRootDir, 'nested', '.qwenignore'),
+        '!*.env\n',
+      );
+      await fs.writeFile(path.join(tempRootDir, 'secret.env'), 'API_KEY=1');
+      await fs.writeFile(path.join(tempRootDir, 'visible.txt'), 'API_KEY=2');
+      Object.assign(mockConfig, {
+        getFileFilteringOptions: () => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['nested/.qwenignore'],
+        }),
+      });
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `secret.env${sep}1${sep}API_KEY=1${EOL}visible.txt${sep}1${sep}API_KEY=2${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'API_KEY' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 1 match');
+      expect(result.llmContent).toContain('visible.txt:1:API_KEY=2');
+      expect(result.llmContent).not.toContain('secret.env');
+      expect(result.returnDisplay).toBe('Found 1 match');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'visible.txt'),
+      ]);
+
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toEqual([
+        path.join(tempRootDir, 'nested', '.qwenignore'),
+        path.join(tempRootDir, '.qwenignore'),
+      ]);
+    });
+
+    it('should pass configured custom ignore files to ripgrep', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.cursorignore'),
+        'cursor-secret.txt\n',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        'agent-secret.txt\n',
+      );
+      Object.assign(mockConfig, {
+        getFileFilteringOptions: () => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        }),
+      });
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'secret' };
+      const invocation = grepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.cursorignore'));
+      expect(ignoreFileArgs).not.toContain(
+        path.join(tempRootDir, '.agentignore'),
+      );
+    });
+
+    it('should resolve ignore files from the workspace root for subdirectory searches', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.cursorignore'),
+        'cursor-secret.txt\n',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'sub', '.cursorignore'),
+        'sub-secret.txt\n',
+      );
+      Object.assign(mockConfig, {
+        getFileFilteringOptions: () => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        }),
+      });
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = {
+        pattern: 'secret',
+        path: 'sub',
+      };
+      const invocation = grepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.cursorignore'));
+      expect(ignoreFileArgs).not.toContain(
+        path.join(tempRootDir, 'sub', '.cursorignore'),
+      );
+    });
+
+    it('should not load ignore files from relative external search paths', async () => {
+      const testCwd = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-cwd-'),
+      );
+      const outsideDir = path.join(testCwd, 'outside');
+      const originalCwd = process.cwd();
+
+      try {
+        await fs.mkdir(outsideDir);
+        await fs.writeFile(
+          path.join(outsideDir, '.cursorignore'),
+          'cursor-secret.txt\n',
+        );
+        Object.assign(mockConfig, {
+          getFileFilteringOptions: () => ({
+            respectGitIgnore: true,
+            respectQwenIgnore: true,
+            customIgnoreFiles: ['.cursorignore'],
+          }),
+        });
+
+        (runRipgrep as Mock).mockResolvedValue({
+          stdout: '',
+          truncated: false,
+          error: undefined,
+        });
+
+        process.chdir(testCwd);
+
+        const invocation = grepTool.build({
+          pattern: 'secret',
+        }) as unknown as {
+          performRipgrepSearch(options: {
+            pattern: string;
+            paths: string[];
+            signal: AbortSignal;
+          }): Promise<{ stdout: string; truncated: boolean }>;
+        };
+        await invocation.performRipgrepSearch({
+          pattern: 'secret',
+          paths: ['outside'],
+          signal: abortSignal,
+        });
+
+        const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+        const ignoreFileArgs = rgArgs.filter(
+          (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+        );
+        expect(ignoreFileArgs).toEqual([]);
+      } finally {
+        process.chdir(originalCwd);
+        await fs.rm(testCwd, { recursive: true, force: true });
+      }
+    });
+
+    it('should cache resolved relative result paths across filtering and result metadata', async () => {
+      const existsSyncSpy = vi.spyOn(fsSync, 'existsSync');
+      const repeatedLine = `fileA.txt${sep}1${sep}hello world`;
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${repeatedLine}${EOL}${repeatedLine}${EOL}${repeatedLine}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      await invocation.execute(abortSignal);
+
+      const fileAPath = path.join(tempRootDir, 'fileA.txt');
+      const fileAProbeCount = existsSyncSpy.mock.calls.filter(
+        ([candidate]) => String(candidate) === fileAPath,
+      ).length;
+      expect(fileAProbeCount).toBe(1);
+    });
+
     it('should deduplicate matches from overlapping workspace directories', async () => {
       // This tests the fix: when ripgrep receives overlapping search paths
       // (e.g. /parent and /parent/sub), it may report the same file twice.
@@ -560,7 +1186,7 @@ describe('RipGrepTool', () => {
       const multiDirGrepTool = new RipGrepTool(multiDirConfig);
 
       // Simulate ripgrep returning the same file:line twice (once from each search root)
-      const dupLine = `${path.join(subDir, 'fileC.txt')}:1:hello world`;
+      const dupLine = `${path.join(subDir, 'fileC.txt')}${sep}1${sep}hello world`;
       (runRipgrep as Mock).mockResolvedValue({
         stdout: `${dupLine}${EOL}${dupLine}${EOL}`,
         truncated: false,
@@ -890,6 +1516,16 @@ describe('RipGrepTool', () => {
 
     it('should return ask for paths outside workspace', async () => {
       const params: RipGrepToolParams = { pattern: 'hello', path: '/tmp' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it('should return ask for tilde paths outside workspace', async () => {
+      const params: RipGrepToolParams = {
+        pattern: 'hello',
+        path: '~/outside-workspace',
+      };
       const invocation = grepTool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('ask');

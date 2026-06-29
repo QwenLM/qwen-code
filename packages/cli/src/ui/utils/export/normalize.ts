@@ -5,8 +5,9 @@
  */
 
 import type { Part } from '@google/genai';
-import { ExitPlanModeTool, ToolNames } from '@qwen-code/qwen-code-core';
+import { ToolNames } from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Config, Kind } from '@qwen-code/qwen-code-core';
+import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 import type { ExportMessage, ExportSessionData } from './types.js';
 
 /**
@@ -244,7 +245,11 @@ function resolveToolMetadata(
  * Maps tool kind to allowed export kinds.
  */
 function mapToolKind(kind: Kind | undefined, toolName?: string): string {
-  if (toolName && toolName === ExitPlanModeTool.Name) {
+  if (
+    toolName &&
+    (toolName === ToolNames.EXIT_PLAN_MODE ||
+      toolName === ToolNames.ENTER_PLAN_MODE)
+  ) {
     return 'switch_mode';
   }
 
@@ -283,6 +288,18 @@ function extractDiffContent(
 
   const display = resultDisplay as Record<string, unknown>;
   if ('fileName' in display && 'newContent' in display) {
+    if (display['truncatedForSession'] === true) {
+      return [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: buildTruncatedDiffPreviewText(display),
+          },
+        },
+      ];
+    }
+
     return [
       {
         type: 'diff',

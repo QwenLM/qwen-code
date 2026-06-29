@@ -5,16 +5,16 @@
  */
 
 import { createContext, useContext } from 'react';
-import type { HistoryItemWithoutId } from '../types.js';
 
 interface CompactModeContextType {
   compactMode: boolean;
-  frozenSnapshot: HistoryItemWithoutId[] | null;
+  compactInline: boolean;
+  setCompactMode?: (value: boolean) => void;
 }
 
 const CompactModeContext = createContext<CompactModeContextType>({
   compactMode: false,
-  frozenSnapshot: null,
+  compactInline: false,
 });
 
 export const useCompactMode = (): CompactModeContextType =>

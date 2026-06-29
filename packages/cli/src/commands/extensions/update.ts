@@ -7,9 +7,9 @@
 import type { CommandModule } from 'yargs';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { ExtensionUpdateState } from '../../ui/state/extensions.js';
 import {
   checkForExtensionUpdate,
+  ExtensionUpdateState,
   type ExtensionUpdateInfo,
 } from '@qwen-code/qwen-code-core';
 import { getExtensionManager } from './utils.js';

@@ -139,6 +139,28 @@ describe('SessionRouter', () => {
     });
   });
 
+  describe('getSession', () => {
+    it('returns the session for the configured scope without creating one', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sid = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.getSession('ch', 'bob', 'chat1', 'thread1')).toBe(sid);
+      expect(
+        router.getSession('ch', 'bob', 'chat1', 'thread2'),
+      ).toBeUndefined();
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('respects per-channel single scope overrides', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelScope('telegram', 'single');
+      const sid = await router.resolve('telegram', 'alice', 'chat1');
+
+      expect(router.getSession('telegram', 'bob', 'chat2')).toBe(sid);
+      expect(router.getSession('other', 'bob', 'chat2')).toBeUndefined();
+    });
+  });
+
   describe('hasSession', () => {
     it('returns true for existing session with chatId', async () => {
       const router = new SessionRouter(bridge, '/tmp');
@@ -156,6 +178,14 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1');
       expect(router.hasSession('ch', 'alice')).toBe(true);
       expect(router.hasSession('ch', 'bob')).toBe(false);
+    });
+
+    it('does not match a different sender that shares an id prefix', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      await router.resolve('ch', 'bobby', 'chat1');
+      // 'bob' is a prefix of 'bobby' but is a distinct sender with no session.
+      expect(router.hasSession('ch', 'bob')).toBe(false);
+      expect(router.hasSession('ch', 'bobby')).toBe(true);
     });
   });
 
@@ -180,6 +210,15 @@ describe('SessionRouter', () => {
       const removed = router.removeSession('ch', 'alice');
       expect(removed).toHaveLength(2);
       expect(router.hasSession('ch', 'alice')).toBe(false);
+    });
+
+    it('does not remove a different sender that shares an id prefix', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const bobby = await router.resolve('ch', 'bobby', 'chat1');
+      // Removing 'bob' (a prefix of 'bobby') must not tear down 'bobby'.
+      expect(router.removeSession('ch', 'bob')).toEqual([]);
+      expect(router.hasSession('ch', 'bobby')).toBe(true);
+      expect(router.getTarget(bobby)).toBeDefined();
     });
 
     it('cleans up target mapping after removal', async () => {

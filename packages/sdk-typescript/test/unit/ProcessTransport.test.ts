@@ -120,6 +120,32 @@ describe('ProcessTransport', () => {
   });
 
   describe('Construction and Initialization', () => {
+    it('should not add one process exit listener per transport instance', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+
+      const transports: ProcessTransport[] = [];
+      const initialExitListeners = process.listeners('exit').length;
+
+      for (let i = 0; i < 12; i++) {
+        mockSpawn.mockReturnValue(createMockChildProcess());
+        transports.push(
+          new ProcessTransport({
+            pathToQwenExecutable: 'qwen',
+          }),
+        );
+      }
+
+      const finalExitListeners = process.listeners('exit').length;
+      expect(finalExitListeners - initialExitListeners).toBeLessThanOrEqual(1);
+
+      await Promise.all(transports.map((transport) => transport.close()));
+    });
+
     it('should create transport with required options', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',
@@ -166,7 +192,7 @@ describe('ProcessTransport', () => {
         permissionMode: 'auto-edit',
         maxSessionTurns: 10,
         coreTools: ['read_file', 'write_file'],
-        excludeTools: ['web_search'],
+        excludeTools: ['web_fetch'],
         authType: 'api-key',
       };
 
@@ -188,7 +214,7 @@ describe('ProcessTransport', () => {
           '--core-tools',
           'read_file,write_file',
           '--exclude-tools',
-          'web_search',
+          'web_fetch',
           '--auth-type',
           'api-key',
         ]),
@@ -972,17 +998,19 @@ describe('ProcessTransport', () => {
       });
       mockSpawn.mockReturnValue(mockChildProcess);
 
-      const processOnSpy = vi.spyOn(process, 'on');
+      const initialExitListeners = process.listeners('exit').length;
 
       const options: TransportOptions = {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      const transport = new ProcessTransport(options);
 
-      expect(processOnSpy).toHaveBeenCalledWith('exit', expect.any(Function));
+      const finalExitListeners = process.listeners('exit').length;
+      expect(finalExitListeners).toBeGreaterThanOrEqual(initialExitListeners);
+      expect(finalExitListeners).toBeLessThanOrEqual(initialExitListeners + 1);
 
-      processOnSpy.mockRestore();
+      void transport.close();
     });
 
     it('should remove event listeners on close', async () => {
@@ -994,7 +1022,7 @@ describe('ProcessTransport', () => {
       });
       mockSpawn.mockReturnValue(mockChildProcess);
 
-      const processOffSpy = vi.spyOn(process, 'off');
+      const initialExitListeners = process.listeners('exit').length;
 
       const options: TransportOptions = {
         pathToQwenExecutable: 'qwen',
@@ -1004,9 +1032,41 @@ describe('ProcessTransport', () => {
 
       await transport.close();
 
-      expect(processOffSpy).toHaveBeenCalledWith('exit', expect.any(Function));
+      expect(process.listeners('exit').length).toBe(initialExitListeners);
+    });
 
-      processOffSpy.mockRestore();
+    it('should terminate all active child processes from the global exit handler', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+
+      const childA = createMockChildProcess();
+      const childB = createMockChildProcess();
+      mockSpawn.mockReturnValueOnce(childA).mockReturnValueOnce(childB);
+
+      const transportA = new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+      });
+      const transportB = new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+      });
+
+      (
+        ProcessTransport as unknown as {
+          globalProcessExitHandler: () => void;
+        }
+      ).globalProcessExitHandler();
+
+      expect(childA.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(childA.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(childB.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(childB.kill).toHaveBeenCalledWith('SIGKILL');
+
+      await transportA.close();
+      await transportB.close();
     });
 
     it('should register abort listener', () => {

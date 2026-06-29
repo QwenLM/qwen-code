@@ -59,6 +59,16 @@ export class SessionRouter {
     }
   }
 
+  /**
+   * Sender-scoped key prefix for by-sender (no chatId) scans. The trailing
+   * ':' delimiter ensures a sender id matches as a whole segment — without it
+   * sender "bob" would also match another sender "bobby"
+   * (key `${channelName}:bobby:${chatId}`).
+   */
+  private senderPrefix(channelName: string, senderId: string): string {
+    return `${channelName}:${senderId}:`;
+  }
+
   async resolve(
     channelName: string,
     senderId: string,
@@ -85,14 +95,26 @@ export class SessionRouter {
     return this.toTarget.get(sessionId);
   }
 
+  getSession(
+    channelName: string,
+    senderId: string,
+    chatId: string,
+    threadId?: string,
+  ): string | undefined {
+    return this.toSession.get(
+      this.routingKey(channelName, senderId, chatId, threadId),
+    );
+  }
+
   hasSession(channelName: string, senderId: string, chatId?: string): boolean {
-    const key = chatId
-      ? this.routingKey(channelName, senderId, chatId)
-      : `${channelName}:${senderId}`;
-    // If chatId is provided, do exact lookup; otherwise prefix-scan for any match
-    if (chatId) return this.toSession.has(key);
+    // If chatId is provided, do an exact lookup; otherwise prefix-scan for any
+    // session belonging to this sender on this channel.
+    if (chatId) {
+      return this.toSession.has(this.routingKey(channelName, senderId, chatId));
+    }
+    const prefix = this.senderPrefix(channelName, senderId);
     for (const k of this.toSession.keys()) {
-      if (k.startsWith(`${channelName}:${senderId}`)) return true;
+      if (k.startsWith(prefix)) return true;
     }
     return false;
   }
@@ -111,8 +133,8 @@ export class SessionRouter {
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
     } else {
-      // No chatId: remove all sessions for this sender on this channel
-      const prefix = `${channelName}:${senderId}`;
+      // No chatId: remove all sessions for this sender on this channel.
+      const prefix = this.senderPrefix(channelName, senderId);
       for (const k of [...this.toSession.keys()]) {
         if (k.startsWith(prefix)) {
           const sessionId = this.deleteByKey(k);

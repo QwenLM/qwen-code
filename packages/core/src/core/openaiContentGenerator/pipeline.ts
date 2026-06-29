@@ -9,11 +9,25 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
-import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
-import type { ErrorHandler, RequestContext } from './errorHandler.js';
+import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
+import { isDeepSeekHostname } from './provider/deepseek.js';
+import { openaiRequestCaptureContext } from './requestCaptureContext.js';
+import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import { TaggedThinkingParser } from './taggedThinkingParser.js';
+import type { PipelineConfig, RequestContext } from './types.js';
+import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
+import { createChildAbortController } from '../../utils/abortController.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+} from './constants.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -28,25 +42,157 @@ export class StreamContentError extends Error {
   }
 }
 
-export interface PipelineConfig {
-  cliConfig: Config;
-  provider: OpenAICompatibleProvider;
-  contentGeneratorConfig: ContentGeneratorConfig;
-  errorHandler: ErrorHandler;
+/**
+ * Thrown when a streaming response goes silent past the inactivity timeout.
+ * `code: 'ETIMEDOUT'` makes `classifyRetryError` treat it as a retryable
+ * transport error, identical to a real socket read timeout.
+ */
+export class StreamInactivityTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly idleMs: number,
+    readonly chunksReceived: number,
+    readonly streamLifetimeMs: number,
+  ) {
+    super(
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks (stream lifetime: ${streamLifetimeMs}ms)`,
+    );
+    this.name = 'StreamInactivityTimeoutError';
+  }
 }
+
+/**
+ * Resolve the effective streaming inactivity timeout (ms). Precedence:
+ * explicit `ContentGeneratorConfig.streamIdleTimeoutMs` (programmatic, wins —
+ * including `0` to disable) > the `QWEN_STREAM_IDLE_TIMEOUT_MS` env deployment
+ * knob > the built-in default. A malformed env value is ignored (with a
+ * `console.warn`) rather than failing the request.
+ */
+function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+  // 1. Explicit config field (programmatic) wins:
+  //    - `<= 0` disables the watchdog (downstream `idleMs > 0` guard skips it).
+  //    - Values above the JS timer ceiling are rejected: setTimeout silently
+  //      compresses them to 1ms, which would fire near-immediately.
+  //    - NaN/Infinity/non-integer are invalid.
+  const fromConfig = config.streamIdleTimeoutMs;
+  if (typeof fromConfig === 'number') {
+    if (
+      Number.isInteger(fromConfig) &&
+      fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS
+    ) {
+      return fromConfig;
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring out-of-range streamIdleTimeoutMs=${fromConfig} ` +
+        `(expected an integer in (-∞, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `falling back to ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}/default.`,
+    );
+  }
+  // 2. Env deployment knob. Strict decimal integer only — reject hex/scientific
+  //    notation/floats/signs so a typo can't silently become a surprising
+  //    timeout. `0` disables; values above the timer ceiling are rejected.
+  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV];
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (parsed <= MAX_STREAM_IDLE_TIMEOUT_MS) {
+        return parsed;
+      }
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
+        `(expected an integer of milliseconds in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `using default ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms.`,
+    );
+  }
+  return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+}
+
+/**
+ * Wraps a streaming chunk source with an inactivity watchdog. If no chunk
+ * arrives for `idleMs`, `abortRequest()` is invoked (to abort the underlying
+ * request and free the socket) and the iterator throws — a user `AbortError`
+ * when the parent signal was cancelled, otherwise a retryable ETIMEDOUT. The
+ * timer resets on every chunk (including thinking/reasoning deltas), so an
+ * actively streaming model is never interrupted.
+ */
+async function* withStreamInactivityTimeout(
+  source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+  idleMs: number,
+  abortRequest: () => void,
+  parentSignal: AbortSignal | undefined,
+): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
+  const it = source[Symbol.asyncIterator]();
+  const streamStartedAt = Date.now();
+  let chunksReceived = 0;
+  try {
+    while (true) {
+      const nextPromise = it.next();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          if (parentSignal?.aborted) {
+            // Plain Error (not DOMException) so error redaction's prototype
+            // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
+            const abortErr = new Error('Aborted');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          } else {
+            abortRequest();
+            reject(
+              new StreamInactivityTimeoutError(
+                idleMs,
+                chunksReceived,
+                Date.now() - streamStartedAt,
+              ),
+            );
+          }
+        }, idleMs);
+        timer.unref?.();
+      });
+      let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
+      try {
+        result = await Promise.race([nextPromise, timeout]);
+      } catch (err) {
+        // Once abortRequest() aborts the request, the orphaned next() rejects
+        // with an AbortError; swallow it so it is not an unhandled rejection.
+        void Promise.resolve(nextPromise).catch(() => {});
+        throw err;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (result.done) return;
+      chunksReceived += 1;
+      yield result.value;
+    }
+  } finally {
+    abortRequest();
+    try {
+      await it.return?.();
+    } catch {
+      // The abort above is the cleanup that matters; ignore return failures.
+    }
+  }
+}
+
+export type { PipelineConfig } from './types.js';
 
 export class ContentGenerationPipeline {
   client: OpenAI;
-  private converter: OpenAIContentConverter;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  // Resolved once (config field > env > default) so the env read + any
+  // invalid-value warning happen per pipeline, not per streaming request.
+  private readonly streamIdleTimeoutMs: number;
 
   constructor(private config: PipelineConfig) {
     this.contentGeneratorConfig = config.contentGeneratorConfig;
     this.client = this.config.provider.buildClient();
-    this.converter = new OpenAIContentConverter(
-      this.contentGeneratorConfig.model,
-      this.contentGeneratorConfig.schemaCompliance,
-      this.contentGeneratorConfig.modalities ?? {},
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      this.contentGeneratorConfig,
     );
   }
 
@@ -54,28 +200,37 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    // Use request.model when explicitly provided (e.g., fastModel for suggestion
-    // generation), falling back to the configured model as the default.
-    const effectiveModel = request.model || this.contentGeneratorConfig.model;
-    this.converter.setModel(effectiveModel);
-    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
       request,
       userPromptId,
       false,
-      effectiveModel,
-      async (openaiRequest) => {
-        const openaiResponse = (await this.client.chat.completions.create(
-          openaiRequest,
-          {
-            signal: request.config?.abortSignal,
-          },
-        )) as OpenAI.Chat.ChatCompletion;
+      async (openaiRequest, context) => {
+        // Wrap in a per-request child so the OpenAI SDK's leaked abort
+        // listener (client.mjs fetchWithTimeout — no {once:true}, no
+        // removeEventListener) stays on a short-lived signal instead of
+        // accumulating on the caller's long-lived round signal.
+        const parentSignal = request.config?.abortSignal;
+        const perRequestAc = parentSignal
+          ? createChildAbortController(parentSignal)
+          : undefined;
+        try {
+          const openaiResponse = (await this.client.chat.completions.create(
+            openaiRequest,
+            {
+              signal: perRequestAc?.signal,
+            },
+          )) as OpenAI.Chat.ChatCompletion;
 
-        const geminiResponse =
-          this.converter.convertOpenAIResponseToGemini(openaiResponse);
+          const geminiResponse =
+            OpenAIContentConverter.convertOpenAIResponseToGemini(
+              openaiResponse,
+              context,
+            );
 
-        return geminiResponse;
+          return geminiResponse;
+        } finally {
+          perRequestAc?.abort();
+        }
       },
     );
   }
@@ -84,25 +239,60 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    const effectiveModel = request.model || this.contentGeneratorConfig.model;
-    this.converter.setModel(effectiveModel);
-    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
       request,
       userPromptId,
       true,
-      effectiveModel,
       async (openaiRequest, context) => {
-        // Stage 1: Create OpenAI stream
-        const stream = (await this.client.chat.completions.create(
-          openaiRequest,
-          {
-            signal: request.config?.abortSignal,
-          },
-        )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        // Always use a per-request controller so the inactivity watchdog can
+        // abort the SDK request even when the caller did not provide a signal.
+        const parentSignal = request.config?.abortSignal;
+        const perRequestAc = createChildAbortController(parentSignal);
+        let stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        try {
+          // Stage 1: Create OpenAI stream. Wrapped in try so a network /
+          // DNS / proxy error during the SDK call still cleans up the
+          // per-request child (same pattern as the non-streaming path).
+          stream = (await this.client.chat.completions.create(openaiRequest, {
+            signal: perRequestAc.signal,
+          })) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        } catch (e) {
+          perRequestAc.abort();
+          throw e;
+        }
 
-        // Stage 2: Process stream with conversion and logging
-        return this.processStreamWithLogging(stream, context, request);
+        // Inactivity watchdog: the SDK `timeout` only bounds connect + first
+        // response, so a stream that returns 200 then goes silent is otherwise
+        // unbounded. Abort + surface a retryable ETIMEDOUT after `idleMs` of no
+        // chunks. `<= 0` disables it.
+        const idleMs = this.streamIdleTimeoutMs;
+        const guarded =
+          idleMs > 0
+            ? withStreamInactivityTimeout(
+                stream,
+                idleMs,
+                () => perRequestAc.abort(),
+                parentSignal,
+              )
+            : stream;
+
+        // Stage 2: Process stream with conversion and logging.
+        // Wrap in an async generator that aborts the per-request controller
+        // once the stream is fully consumed or abandoned, releasing the SDK
+        // request and any parent listener.
+        const innerStream = this.processStreamWithLogging(
+          guarded,
+          context,
+          request,
+        );
+        async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
+          try {
+            yield* innerStream;
+          } finally {
+            perRequestAc.abort();
+          }
+        }
+        return drainThenCleanup();
       },
     );
   }
@@ -122,9 +312,6 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
   ): AsyncGenerator<GenerateContentResponse> {
     const collectedGeminiResponses: GenerateContentResponse[] = [];
-
-    // Reset streaming tool calls to prevent data pollution from previous streams
-    this.converter.resetStreamingToolCalls();
 
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
@@ -150,7 +337,10 @@ export class ContentGenerationPipeline {
           throw new StreamContentError(errorContent);
         }
 
-        const response = this.converter.convertOpenAIChunkToGemini(chunk);
+        const response = OpenAIContentConverter.convertOpenAIChunkToGemini(
+          chunk,
+          context,
+        );
 
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
@@ -210,17 +400,22 @@ export class ContentGenerationPipeline {
       if (pendingFinishResponse && !finishYielded) {
         yield pendingFinishResponse;
       }
-
-      // Stage 2e: Stream completed successfully
-      context.duration = Date.now() - context.startTime;
     } catch (error) {
-      // Clear streaming tool calls on error to prevent data pollution
-      this.converter.resetStreamingToolCalls();
-
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
-        throw error;
+        throw redactProxyError(error);
+      }
+
+      // Bypass handleError: it strips `code` from timeout errors, which would
+      // prevent classifyRetryError from recognizing retryable ETIMEDOUT.
+      if (error instanceof StreamInactivityTimeoutError) {
+        debugLogger.warn('OpenAI stream inactivity timeout', {
+          idleMs: error.idleMs,
+          chunksReceived: error.chunksReceived,
+          streamLifetimeMs: error.streamLifetimeMs,
+        });
+        throw redactProxyError(error);
       }
 
       // Use shared error handling logic
@@ -310,32 +505,41 @@ export class ContentGenerationPipeline {
   private async buildRequest(
     request: GenerateContentParameters,
     userPromptId: string,
-    streaming: boolean = false,
-    effectiveModel: string,
+    context: RequestContext,
+    isStreaming: boolean,
   ): Promise<OpenAI.Chat.ChatCompletionCreateParams> {
-    const messages = this.converter.convertGeminiRequestToOpenAI(request);
+    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+      request,
+      context,
+    );
 
     // Apply provider-specific enhancements
     const baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-      model: effectiveModel,
+      model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
     };
 
-    // Add streaming options if present
-    if (streaming) {
+    if (isStreaming) {
       (
         baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming
       ).stream = true;
       baseRequest.stream_options = { include_usage: true };
+    } else {
+      // Explicit false required: some gateways default to SSE when the field is absent.
+      (
+        baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming
+      ).stream = false;
     }
 
     // Add tools if present and non-empty.
     // Some providers reject tools: [] (empty array), so skip when there are no tools.
     if (request.config?.tools && request.config.tools.length > 0) {
-      baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
-        request.config.tools,
-      );
+      baseRequest.tools =
+        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
+          request.config.tools,
+          this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+        );
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
@@ -344,19 +548,67 @@ export class ContentGenerationPipeline {
       userPromptId,
     );
 
-    // When thinking is explicitly disabled (e.g., forked queries for suggestions),
-    // override thinking-related keys that may have been injected by extra_body.
-    // extra_body is spread last in provider.buildRequest, so it overrides
-    // buildReasoningConfig's decision — we must post-process here.
-    if (request.config?.thinkingConfig?.includeThoughts === false) {
+    // Reasoning is disabled when either:
+    //   - the per-request opt-out is set (forked queries for suggestions),
+    //   - the config-level opt-out is set (`reasoning: false`).
+    // In both cases we want the wire shape to actually disable thinking,
+    // not just remove the effort knob — otherwise providers whose default
+    // is "thinking enabled" (DeepSeek V4+, qwen3) keep paying thinking
+    // latency/cost.
+    const reasoningDisabled =
+      request.config?.thinkingConfig?.includeThoughts === false ||
+      this.contentGeneratorConfig.reasoning === false;
+    if (reasoningDisabled) {
       const typed = providerRequest as unknown as Record<string, unknown>;
-      if ('enable_thinking' in typed) {
+      // Provider buildRequest doesn't auto-inject `enable_thinking`, so a
+      // guarded `in typed` check would never fire for default qwen3 configs.
+      // Hostname + model-name gate avoids leaking this qwen-specific field
+      // to non-qwen routings on the same DashScope hostname (GLM uses
+      // `extra_body.thinking.enabled`, DeepSeek-on-DashScope uses
+      // `thinking: { type: 'disabled' }`; sending `enable_thinking` to them
+      // is at best a no-op, at worst forwarded upstream and rejected).
+      //
+      // Gate on the *wire* model (`context.model`, i.e.
+      // `request.model || contentGeneratorConfig.model` — the same value
+      // baseRequest.model is built from above), not on the config model. A
+      // request-level model override would otherwise desync the gate from
+      // what actually ships: a qwen config with a non-qwen request model
+      // would leak the field, and a non-qwen config with a qwen request
+      // model would miss the disable signal (the regression).
+      //
+      // `coder-model` is the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
+      // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
+      // start with `qwen` but is the most common hybrid-thinking model
+      // for first-time users, so it must be covered.
+      const model = (context.model ?? '').toLowerCase();
+      if (
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+          this.contentGeneratorConfig,
+        ) &&
+        (model.startsWith('qwen') || model === 'coder-model')
+      ) {
         typed['enable_thinking'] = false;
       }
-      // Also strip reasoning config — extra_body could inject it, overriding
+      // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
+      // The provider hook (e.g. DeepSeekOpenAICompatibleProvider.buildRequest
+      // → translateReasoningEffort) runs earlier in this same pass and may
+      // have flattened the nested `reasoning` into a top-level
+      // `reasoning_effort`, so we strip both shapes here.
       if ('reasoning' in typed) {
         delete typed['reasoning'];
+      }
+      if ('reasoning_effort' in typed) {
+        delete typed['reasoning_effort'];
+      }
+      // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
+      // the effort knob alone leaves thinking on. Emit the explicit
+      // `thinking: { type: 'disabled' }` shape from DeepSeek's API spec.
+      // Hostname-gated: self-hosted DeepSeek (sglang/vllm) or older
+      // DeepSeek versions may not accept the V4 thinking parameter, so
+      // we don't push it there. See https://api-docs.deepseek.com/.
+      if (isDeepSeekHostname(this.contentGeneratorConfig)) {
+        typed['thinking'] = { type: 'disabled' };
       }
     }
 
@@ -399,6 +651,14 @@ export class ContentGenerationPipeline {
       return value !== undefined ? { [key]: value } : {};
     };
 
+    // When samplingParams is set, its keys pass through to the wire verbatim.
+    // This lets users target provider-specific parameter names
+    // (e.g. `max_completion_tokens` for GPT-5 / o-series) without a client release.
+    // When absent, the historical default behavior applies.
+    if (configSamplingParams !== undefined) {
+      return { ...configSamplingParams };
+    }
+
     const params: Record<string, unknown> = {
       // Parameters with request fallback but no defaults
       ...addParameterIfDefined('temperature', 'temperature', 'temperature'),
@@ -432,11 +692,12 @@ export class ContentGenerationPipeline {
     // Reasoning configuration for OpenAI-compatible endpoints is highly fragmented.
     // For example, across common providers and models:
     //
-    //   - deepseek-reasoner   — thinking is enabled by default and cannot be disabled
-    //   - glm-4.7             — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
-    //   - kimi-k2-thinking    — thinking is enabled by default and cannot be disabled
-    //   - gpt-5.x series      — thinking is enabled by default; can be disabled via `reasoning.effort`
-    //   - qwen3 series        — model-dependent; can be manually disabled via `extra_body.enable_thinking`
+    //   - deepseek-reasoner — thinking is enabled by default and cannot be disabled
+    //   - glm-4.7 — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
+    //   - kimi-k2-thinking — thinking is enabled by default and cannot be disabled
+    //   - gpt-5.x series — thinking is enabled by default; can be disabled via `reasoning.effort`
+    //   - qwen3 series — model-dependent; emitted as `enable_thinking: false`
+    //                           on DashScope endpoints when reasoning is disabled
     //
     // Given this inconsistency, we avoid mapping values and only pass through the
     // configured reasoning object when explicitly enabled. This keeps provider- and
@@ -462,29 +723,28 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
     isStreaming: boolean,
-    effectiveModel: string,
     executor: (
       openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
       context: RequestContext,
     ) => Promise<T>,
   ): Promise<T> {
-    const context = this.createRequestContext(
-      userPromptId,
-      isStreaming,
-      effectiveModel,
-    );
+    const context = this.createRequestContext(request, isStreaming);
 
     try {
       const openaiRequest = await this.buildRequest(
         request,
         userPromptId,
+        context,
         isStreaming,
-        effectiveModel,
       );
 
-      const result = await executor(openaiRequest, context);
+      // Position is load-bearing: capture must run after buildRequest (post
+      // provider enhancement, post disable-reasoning) and before the SDK call
+      // so the logger sees the exact bytes sent on the wire.
+      openaiRequestCaptureContext.getStore()?.(openaiRequest);
+      runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
 
-      context.duration = Date.now() - context.startTime;
+      const result = await executor(openaiRequest, context);
       return result;
     } catch (error) {
       // Use shared error handling logic
@@ -501,25 +761,51 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     request: GenerateContentParameters,
   ): Promise<never> {
-    context.duration = Date.now() - context.startTime;
-    this.config.errorHandler.handle(error, context, request);
+    this.config.errorHandler.handle(redactProxyError(error), context, request);
   }
 
   /**
    * Create request context with common properties
    */
   private createRequestContext(
-    userPromptId: string,
+    request: GenerateContentParameters,
     isStreaming: boolean,
-    effectiveModel: string,
   ): RequestContext {
+    const effectiveModel = request.model || this.contentGeneratorConfig.model;
+    const providerOverrides =
+      this.config.provider.getRequestContextOverrides?.() ?? {};
+    const toolCallParser = isStreaming
+      ? new StreamingToolCallParser()
+      : undefined;
+    const responseParsingOptions =
+      this.config.provider.getResponseParsingOptions?.();
+    const taggedThinkingParser =
+      isStreaming && responseParsingOptions?.taggedThinkingTags
+        ? new TaggedThinkingParser()
+        : undefined;
+
     return {
-      userPromptId,
       model: effectiveModel,
-      authType: this.contentGeneratorConfig.authType || 'unknown',
+      modalities: this.contentGeneratorConfig.modalities ?? {},
       startTime: Date.now(),
-      duration: 0,
-      isStreaming,
+      splitToolMedia:
+        providerOverrides.splitToolMedia ??
+        this.contentGeneratorConfig.splitToolMedia ??
+        // Default true: the OpenAI Chat Completions spec only permits text on
+        // `role: "tool"` messages, so tool-returned media (e.g. an image read
+        // by read_file) embedded there is silently dropped or rejected by
+        // strict providers (doubao / new-api / LM Studio) and the model never
+        // sees it (QwenLM/qwen-code#4876). Splitting it into a follow-up user
+        // message is spec-compliant and safe for permissive providers too.
+        // Opt out via generationConfig.splitToolMedia = false.
+        true,
+      toolResultContentFormat:
+        providerOverrides.toolResultContentFormat ??
+        this.contentGeneratorConfig.toolResultContentFormat ??
+        'parts',
+      ...(toolCallParser ? { toolCallParser } : {}),
+      ...(responseParsingOptions ? { responseParsingOptions } : {}),
+      ...(taggedThinkingParser ? { taggedThinkingParser } : {}),
     };
   }
 }

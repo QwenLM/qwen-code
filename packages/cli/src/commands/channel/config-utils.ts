@@ -1,4 +1,5 @@
 import type { ChannelConfig } from '@qwen-code/channel-base';
+import { resolvePath } from '@qwen-code/channel-base';
 import * as path from 'node:path';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -24,6 +25,23 @@ export function findCliEntryPath(): string {
   throw new Error('Cannot determine CLI entry path');
 }
 
+function resolveOptionalStringField(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+  field: 'token' | 'clientId' | 'clientSecret',
+): string | undefined {
+  const value = rawConfig[field];
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw new Error(
+      `Channel "${channelName}" field "${field}" must be a string.`,
+    );
+  }
+  return resolveEnvVars(value);
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
@@ -43,7 +61,8 @@ export async function parseChannelConfig(
 
   // Validate plugin-required fields
   for (const field of plugin.requiredConfigFields ?? []) {
-    if (!rawConfig[field]) {
+    const value = rawConfig[field];
+    if (value === undefined || value === null || value === '') {
       throw new Error(
         `Channel "${name}" (${channelType}) requires "${field}".`,
       );
@@ -51,15 +70,13 @@ export async function parseChannelConfig(
   }
 
   // Resolve env vars for known credential fields
-  const token = rawConfig['token']
-    ? resolveEnvVars(rawConfig['token'] as string)
-    : '';
-  const clientId = rawConfig['clientId']
-    ? resolveEnvVars(rawConfig['clientId'] as string)
-    : undefined;
-  const clientSecret = rawConfig['clientSecret']
-    ? resolveEnvVars(rawConfig['clientSecret'] as string)
-    : undefined;
+  const token = resolveOptionalStringField(name, rawConfig, 'token') ?? '';
+  const clientId = resolveOptionalStringField(name, rawConfig, 'clientId');
+  const clientSecret = resolveOptionalStringField(
+    name,
+    rawConfig,
+    'clientSecret',
+  );
 
   return {
     ...rawConfig,
@@ -73,7 +90,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
-    cwd: (rawConfig['cwd'] as string) || process.cwd(),
+    cwd: resolvePath((rawConfig['cwd'] as string) || process.cwd()),
     approvalMode: rawConfig['approvalMode'] as string | undefined,
     instructions: rawConfig['instructions'] as string | undefined,
     model: rawConfig['model'] as string | undefined,

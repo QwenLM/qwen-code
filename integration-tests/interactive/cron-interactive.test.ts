@@ -26,7 +26,6 @@ function makeEnv(): NodeJS.ProcessEnv {
   delete env['NO_COLOR'];
   return {
     ...env,
-    QWEN_CODE_ENABLE_CRON: '1',
     FORCE_COLOR: '1',
     TERM: 'xterm-256color',
     NODE_NO_WARNINGS: '1',
@@ -55,15 +54,15 @@ function makeEnv(): NodeJS.ProcessEnv {
     );
 
     await session.waitForScreen(
-      (scr) => scr.split('\n').some((l) => l.trim() === '> PONG7742'),
-      'cron-injected prompt "> PONG7742"',
+      (scr) => scr.includes('Cron: PONG7742'),
+      'cron notification "Cron: PONG7742"',
       90_000,
     );
 
     await session.idle(5000);
     const finalScreen = await session.screen();
     const afterPrompt = finalScreen.slice(
-      finalScreen.lastIndexOf('> PONG7742'),
+      finalScreen.lastIndexOf('Cron: PONG7742'),
     );
     expect(afterPrompt).toContain('✦');
   });
@@ -79,8 +78,8 @@ function makeEnv(): NodeJS.ProcessEnv {
     );
 
     await session.waitForScreen(
-      (scr) => scr.split('\n').some((l) => l.trim() === '> CRONTICK99'),
-      'first cron fire "> CRONTICK99"',
+      (scr) => scr.includes('Cron: CRONTICK99'),
+      'first cron fire "Cron: CRONTICK99"',
       90_000,
     );
 
@@ -125,13 +124,14 @@ function makeEnv(): NodeJS.ProcessEnv {
       await session.send(
         'Call cron_list and tell me how many jobs exist. Say "COUNT: N"',
       );
-      await session.idle(8000);
-      const screen = await session.screen();
-      expect(
-        screen.includes('COUNT: 1') ||
+      await session.waitForScreen(
+        (screen) =>
+          screen.includes('COUNT: 1') ||
           screen.includes('1 job') ||
           screen.includes('Active cron jobs (1)'),
-      ).toBe(true);
+        'cron list showing one active job',
+        60_000,
+      );
     },
   );
 });

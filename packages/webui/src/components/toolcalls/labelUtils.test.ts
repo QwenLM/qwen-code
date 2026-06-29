@@ -14,21 +14,20 @@ describe('getToolDisplayLabel', () => {
     expect(getToolDisplayLabel({ kind: 'command' })).toBe('Shell');
   });
 
-  it('uses core names for web fetch and web search', () => {
+  it('uses core names for web fetch', () => {
     expect(getToolDisplayLabel({ kind: 'web_fetch' })).toBe('WebFetch');
-    expect(getToolDisplayLabel({ kind: 'web_search' })).toBe('WebSearch');
   });
 
   it('normalizes todo write labels even when older titles are still present', () => {
     expect(
       getToolDisplayLabel({ kind: 'todo_write', title: 'Updated Plan' }),
-    ).toBe('TodoWrite');
+    ).toBe('TodoList');
     expect(
       getToolDisplayLabel({ kind: 'update_todos', title: 'Update Todos' }),
-    ).toBe('TodoWrite');
+    ).toBe('TodoList');
     expect(
       getToolDisplayLabel({ kind: 'updated_plan', title: 'Updated Plan' }),
-    ).toBe('TodoWrite');
+    ).toBe('TodoList');
   });
 
   it('uses core names for read-family tools by kind', () => {
@@ -72,5 +71,26 @@ describe('getToolDisplayLabel', () => {
       'ExitPlanMode',
     );
     expect(getToolDisplayLabel({ kind: 'switch_mode' })).toBe('ExitPlanMode');
+  });
+
+  it('returns EnterPlanMode for enter_plan_mode kind', () => {
+    expect(getToolDisplayLabel({ kind: 'enter_plan_mode' })).toBe(
+      'EnterPlanMode',
+    );
+  });
+
+  it('disambiguates switch_mode as EnterPlanMode when title contains "enter plan"', () => {
+    expect(
+      getToolDisplayLabel({
+        kind: 'switch_mode',
+        title: 'EnterPlanMode',
+      }),
+    ).toBe('EnterPlanMode');
+    expect(
+      getToolDisplayLabel({
+        kind: 'switch_mode',
+        title: 'Enter plan mode',
+      }),
+    ).toBe('EnterPlanMode');
   });
 });
