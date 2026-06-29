@@ -986,6 +986,72 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     t.dispose();
   });
 
+  it('rejects (does not parse garbage / hang) a no-subscriber session/prompt when the reply pump GET returns a non-SSE content-type (M3pAM)', async () => {
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const headers: Record<string, string> = {};
+        if (init?.headers && typeof init.headers === 'object') {
+          for (const [k, v] of Object.entries(
+            init.headers as Record<string, string>,
+          )) {
+            headers[k.toLowerCase()] = v;
+          }
+        }
+        const body = typeof init?.body === 'string' ? init.body : null;
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          if (parsed.method === 'initialize') {
+            return jsonResponse(
+              200,
+              { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+              { 'acp-connection-id': 'conn-1' },
+            );
+          }
+          if (parsed.method === 'session/prompt') {
+            return new Response(null, { status: 202 });
+          }
+          return jsonResponse(200, {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { ok: true },
+          });
+        }
+        // Reply pump GET → 200 but a non-SSE HTML body (CDN/proxy error page).
+        // Must be rejected by the content-type guard, not fed to the parser.
+        if (
+          url.endsWith('/acp') &&
+          method === 'GET' &&
+          headers['acp-session-id']
+        ) {
+          return new Response('<html>error</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        if (url.endsWith('/acp') && method === 'GET') {
+          return sseResponse([]);
+        }
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    await expect(
+      t.fetch('http://d/session/sess-1/prompt', {
+        method: 'POST',
+        body: JSON.stringify({ prompt: [{ type: 'text', text: 'hi' }] }),
+      }),
+    ).rejects.toThrow();
+    t.dispose();
+  });
+
   it('a connection-stream failure rejects only CONNECTION-scoped pendings, never a session-scoped reply the session stream will deliver (MselM)', async () => {
     // The two stream pumps share one `pending` map. A connection-stream error
     // must sweep only its own scope — rejecting a session-scoped `session/prompt`

@@ -1072,6 +1072,22 @@ export class AcpHttpTransport implements DaemonTransport {
         `session reply pump: HTTP ${res.status} ${res.statusText}`,
       );
     }
+    // Validate the content-type before parsing as SSE — mirror
+    // `subscribeEventsInner`. A non-SSE 2xx body (an HTML error page / a JSON
+    // proxy error injected by a CDN) would otherwise be fed to the frame parser,
+    // which would consume garbage or hang waiting for `data:` lines that never
+    // come. Don't leave the reply channel with weaker validation than events.
+    const ct = res.headers.get('content-type') ?? '';
+    if (!ct.toLowerCase().includes('text/event-stream')) {
+      try {
+        await res.body.cancel();
+      } catch {
+        /* body already consumed or no body */
+      }
+      throw new Error(
+        `session reply pump: expected content-type text/event-stream, got "${ct}"`,
+      );
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
