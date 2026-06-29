@@ -2064,6 +2064,20 @@ export async function runQwenServe(
         clearTimeout(runtimeStartAfterHealthTimer);
         runtimeStartAfterHealthTimer = undefined;
       };
+      const stopDeferredRuntimeStartupBeforeStart = (): void => {
+        if (
+          !deferRuntimeUntilFirstHealth ||
+          runtimeStarting ||
+          runtimeStartupSettled
+        )
+          return;
+        runtimeStartupSettled = true;
+        const error = new Error(
+          'Server closed before deferred runtime startup began.',
+        );
+        runtimeStartupError = error.message;
+        markRuntimeFailed(error);
+      };
       const shutdownBridgeAfterFailedStartup = async (
         bridge: AcpSessionBridge | undefined,
       ): Promise<void> => {
@@ -2260,6 +2274,7 @@ export async function runQwenServe(
             shuttingDown = true;
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
+            stopDeferredRuntimeStartupBeforeStart();
             // NOTE: the SIGINT/SIGTERM handlers stay attached during the
             // drain. Their `if (shuttingDown) return` guard makes a second
             // signal a no-op. Detaching them up front would leave Node's

@@ -29,6 +29,7 @@ export function getHeadlessYoloSafetyWarning(
   config: Pick<Config, 'getApprovalMode' | 'getSandbox'>,
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
+  // Keep this literal in sync with ApprovalMode.YOLO without importing core at runtime.
   if (config.getApprovalMode() !== 'yolo') return null;
   if (config.getSandbox()) return null;
   // `SANDBOX` is set by the sandbox transport itself: macOS seatbelt sets

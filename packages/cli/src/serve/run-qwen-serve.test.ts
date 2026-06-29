@@ -799,7 +799,7 @@ describe('runQwenServe runtime startup failures', () => {
       expect(await healthRes.json()).toEqual({ status: 'ok' });
 
       await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
-        timeout: 750,
+        timeout: 500,
       });
       expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
@@ -877,6 +877,53 @@ describe('runQwenServe runtime startup failures', () => {
     await new Promise((resolve) => setTimeout(resolve, 1100));
 
     expect(createBridge).not.toHaveBeenCalled();
+    await expect(handle.runtimeReady).rejects.toThrow(
+      'Server closed before deferred runtime startup began.',
+    );
+  });
+
+  it('does not start deferred runtime after close following first health', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-after-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    const healthRes = await fetch(`${handle.url}/health`);
+    expect(healthRes.status).toBe(200);
+    expect(await healthRes.json()).toEqual({ status: 'ok' });
+
+    await handle.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(createBridge).not.toHaveBeenCalled();
+    await expect(handle.runtimeReady).rejects.toThrow(
+      'Server closed before deferred runtime startup began.',
+    );
   });
 
   it('flushes runtime startup failures to the daemon log when closing', async () => {
