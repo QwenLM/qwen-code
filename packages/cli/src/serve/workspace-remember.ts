@@ -168,6 +168,7 @@ class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = errorCode(err);
+        debugLogger.error('Remember task failed:', err);
         task.status = 'failed';
         task.error = {
           code,
