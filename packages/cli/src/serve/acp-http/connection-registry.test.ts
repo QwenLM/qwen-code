@@ -466,6 +466,48 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('logs a stderr breadcrumb when a resume arms replay deferral, and stays silent on a fresh connect', () => {
+    const registry = new ConnectionRegistry();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      // Fresh connect (no cursor): nothing to defer → no breadcrumb.
+      conn.attachSessionStream(
+        'sess-1',
+        new FakeStream('sse'),
+        new AbortController(),
+      );
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('replay deferral armed'),
+        ),
+      ).toBe(false);
+
+      // Resumptive attach (cursor present): arming the deferral logs once with
+      // the session id and the cursor it resumed from.
+      conn.attachSessionStream(
+        'sess-1',
+        new FakeStream('sse'),
+        new AbortController(),
+        5,
+      );
+      const armed = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes('replay deferral armed'));
+      expect(armed).toHaveLength(1);
+      expect(armed[0]).toContain('from id 5');
+    } finally {
+      stderr.mockRestore();
+      registry.dispose();
+    }
+  });
+
   it('holds a deferred reply until the pump delivers through its anchor (MsyIt) — a result produced during a slow replay lands after live tail content, not at replay_complete', () => {
     const registry = new ConnectionRegistry();
     try {

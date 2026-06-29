@@ -39,8 +39,17 @@ const MAX_SSE_BUF_CHARS = 16 * 1024 * 1024;
  * replies on the connection stream the transport already pumps. For these, a
  * `sendRequest` made without an active `subscribeEvents` consumer must open a
  * background session-reply pump or it would hang. All require an already-owned
- * session, so the pump's `GET /acp` is always authorized. Kept in sync with the
- * `replySession` call sites in the daemon dispatcher.
+ * session, so the pump's `GET /acp` is always authorized.
+ *
+ * INVARIANT: this set must mirror the `replySession` call sites in the daemon
+ * dispatcher at `packages/cli/src/serve/acp-http/dispatch.ts`. That file lives
+ * in a different package the SDK doesn't import, so the coupling can't be
+ * type-checked. If a future PR adds a `replySession(...)` for a new method
+ * without adding it here, a no-subscriber `sendRequest` for that method opens
+ * no reply pump and HANGS until abort; removing one here that the daemon still
+ * routes to the session stream has the same effect. A build-time grep check or
+ * a shared method-name constant would enforce this mechanically — tracked as a
+ * follow-up (out of this PR's scope).
  */
 const SESSION_STREAM_REPLY_METHODS = new Set<string>([
   'session/prompt',

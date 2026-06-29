@@ -533,6 +533,17 @@ export class AcpConnection {
     // every later `sendSessionReply` — including `session/prompt` results —
     // behind a replay boundary this live-only subscription will never emit.
     binding.replayPending = resumeFromEventId !== undefined;
+    if (binding.replayPending) {
+      // Breadcrumb: while armed, `sendSessionReply` defers every out-of-band
+      // reply (e.g. `session/prompt` results) until the pump delivers
+      // `replay_complete`. If that sentinel never arrives — a dropped frame or
+      // a pump error — the replies stay buffered indefinitely with no other
+      // trace. Logging the arm gives operators a starting point when responses
+      // look stuck behind the replay window.
+      writeStderrLine(
+        `qwen serve: /acp replay deferral armed (${logSafe(sessionId)}, from id ${resumeFromEventId})`,
+      );
+    }
     for (const entry of binding.buffer.splice(0)) {
       if (resumeFromEventId === undefined) {
         void stream.send(entry.frame, entry.id); // fresh connect: flush all now
