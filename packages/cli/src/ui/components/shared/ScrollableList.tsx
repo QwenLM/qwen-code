@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useRef, forwardRef, useImperativeHandle, useCallback } from 'react';
+import {
+  useRef,
+  forwardRef,
+  useImperativeHandle,
+  useCallback,
+  useEffect,
+} from 'react';
 import type React from 'react';
 import {
   VirtualizedList,
@@ -104,30 +110,87 @@ function ScrollableList<T>(
   // native scrollback. In VP mode the list owns the visible region, so route
   // wheel ticks and scrollbar drags to the virtualized viewport.
   const WHEEL_LINES_PER_TICK = 3;
-  const handleMouseEvent = useCallback((event: MouseEvent) => {
-    if (!virtualizedListRef.current) return;
-    if (event.name === 'left-release') {
-      isDraggingScrollbar.current = false;
+
+  // Terminal mouse reporting emits one event per row the pointer crosses, so a
+  // brisk wheel spin or scrollbar drag fires a rapid burst. Applying each event
+  // synchronously forced one Ink reflow + terminal flush per event — the source
+  // of the "一顿一顿" stutter. Coalesce a burst into a single viewport update per
+  // frame: accumulate the intent in refs and flush on a short timer. A drag is
+  // absolute (snap to the newest row); a wheel burst is relative (sum the
+  // ticks); a drag in the same window wins. Tests drive real timers and only
+  // await microtasks, so apply synchronously under NODE_ENV==='test' (the same
+  // escape hatch VirtualizedList uses for its readiness gate).
+  const SCROLL_FRAME_MS = 16;
+  const pendingWheelDelta = useRef(0);
+  const pendingDragRow = useRef<number | null>(null);
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const applyPendingScroll = useCallback(() => {
+    flushTimer.current = null;
+    const list = virtualizedListRef.current;
+    const dragRow = pendingDragRow.current;
+    const wheelDelta = pendingWheelDelta.current;
+    pendingDragRow.current = null;
+    pendingWheelDelta.current = 0;
+    if (!list) return;
+    if (dragRow !== null) {
+      list.scrollToScrollbarRow(dragRow);
       return;
     }
-    if (event.name === 'left-press') {
-      isDraggingScrollbar.current =
-        virtualizedListRef.current.hitTestScrollbar(event);
-      if (isDraggingScrollbar.current) {
-        virtualizedListRef.current.scrollToScrollbarRow(event.row);
-      }
-      return;
-    }
-    if (event.name === 'move' && isDraggingScrollbar.current) {
-      virtualizedListRef.current.scrollToScrollbarRow(event.row);
-      return;
-    }
-    if (event.name === 'scroll-up') {
-      virtualizedListRef.current.scrollBy(-WHEEL_LINES_PER_TICK);
-    } else if (event.name === 'scroll-down') {
-      virtualizedListRef.current.scrollBy(WHEEL_LINES_PER_TICK);
+    if (wheelDelta !== 0) {
+      list.scrollBy(wheelDelta);
     }
   }, []);
+
+  const scheduleScrollFlush = useCallback(() => {
+    if (process.env['NODE_ENV'] === 'test') {
+      applyPendingScroll();
+      return;
+    }
+    if (flushTimer.current !== null) return;
+    flushTimer.current = setTimeout(applyPendingScroll, SCROLL_FRAME_MS);
+  }, [applyPendingScroll]);
+
+  useEffect(
+    () => () => {
+      if (flushTimer.current !== null) clearTimeout(flushTimer.current);
+    },
+    [],
+  );
+
+  const handleMouseEvent = useCallback(
+    (event: MouseEvent) => {
+      if (!virtualizedListRef.current) return;
+      if (event.name === 'left-release') {
+        isDraggingScrollbar.current = false;
+        return;
+      }
+      if (event.name === 'left-press') {
+        isDraggingScrollbar.current =
+          virtualizedListRef.current.hitTestScrollbar(event);
+        if (isDraggingScrollbar.current) {
+          // A press should feel instant — apply now and drop any stale
+          // pending drag row from a previous gesture.
+          pendingDragRow.current = null;
+          virtualizedListRef.current.scrollToScrollbarRow(event.row);
+        }
+        return;
+      }
+      if (event.name === 'move' && isDraggingScrollbar.current) {
+        pendingDragRow.current = event.row;
+        scheduleScrollFlush();
+        return;
+      }
+      if (event.name === 'scroll-up') {
+        pendingWheelDelta.current -= WHEEL_LINES_PER_TICK;
+        scheduleScrollFlush();
+      } else if (event.name === 'scroll-down') {
+        pendingWheelDelta.current += WHEEL_LINES_PER_TICK;
+        scheduleScrollFlush();
+      }
+    },
+    [scheduleScrollFlush],
+  );
 
   useMouseEvents(handleMouseEvent, { isActive: hasFocus });
 
