@@ -1275,6 +1275,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: false,
   },
 
+  compactionModel: {
+    type: 'string',
+    label: 'Compaction Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used for chat compression (auto-compaction). Set with /model --compaction. Leave empty to fall back to fastModel or the main model. A smaller/faster model reduces compression latency and cost.',
+    showInDialog: false,
+  },
+
   model: {
     type: 'object',
     label: 'Model',

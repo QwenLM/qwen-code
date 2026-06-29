@@ -33,6 +33,9 @@ const MAIN_MODEL_CONFIGURATION_HINT =
 const FAST_MODEL_CONFIGURATION_HINT =
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.';
 
+const COMPACTION_MODEL_CONFIGURATION_HINT =
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.';
+
 const VISION_MODEL_CONFIGURATION_HINT =
   'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.';
 
@@ -79,7 +82,7 @@ async function switchMainModel(
 }
 
 function formatUnavailableModelMessage(
-  kind: 'Model' | 'Fast model' | 'Vision model',
+  kind: 'Model' | 'Fast model' | 'Vision model' | 'Compaction model',
   modelName: string,
   authType: AuthType,
   availableModels: AvailableModel[],
@@ -97,7 +100,9 @@ function formatUnavailableModelMessage(
       ? FAST_MODEL_CONFIGURATION_HINT
       : kind === 'Vision model'
         ? VISION_MODEL_CONFIGURATION_HINT
-        : MAIN_MODEL_CONFIGURATION_HINT;
+        : kind === 'Compaction model'
+          ? COMPACTION_MODEL_CONFIGURATION_HINT
+          : MAIN_MODEL_CONFIGURATION_HINT;
 
   return (
     `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
@@ -106,10 +111,10 @@ function formatUnavailableModelMessage(
   );
 }
 
-// Fast and vision share the same "not configured for any auth type" message
+// Fast, vision, and compaction share the same "not configured for any auth type" message
 // shape, differing only in the label and the configuration hint.
 function formatUnavailableAuxModelMessage(
-  label: 'Fast model' | 'Vision model',
+  label: 'Fast model' | 'Vision model' | 'Compaction model',
   modelName: string,
   availableModels: AvailableModel[],
   hint: string,
@@ -153,6 +158,18 @@ function formatUnavailableVisionModelMessage(
   );
 }
 
+function formatUnavailableCompactionModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  return formatUnavailableAuxModelMessage(
+    'Compaction model',
+    modelName,
+    availableModels,
+    COMPACTION_MODEL_CONFIGURATION_HINT,
+  );
+}
+
 // Shown when a user pins a model that isn't known to accept images. The pin is
 // still honored, but the bridge will send images to it, so flag it. Reuses the
 // same translated key the model dialog emits (ModelDialog.tsx) so both paths
@@ -191,7 +208,7 @@ function formatUnavailableVoiceModelMessage(
 // Get an array of the available model IDs as strings, filtered by mode
 function getAvailableModelIds(
   context: CommandContext,
-  mode: 'main' | 'fast' | 'voice' | 'vision' = 'main',
+  mode: 'main' | 'fast' | 'voice' | 'vision' | 'compaction' = 'main',
 ) {
   const { services } = context;
   const { config } = services;
@@ -199,7 +216,7 @@ function getAvailableModelIds(
     return [];
   }
   const availableModels = config.getAvailableModels().filter((m) => {
-    if (mode === 'fast') return !m.voiceOnly;
+    if (mode === 'fast' || mode === 'compaction') return !m.voiceOnly;
     if (mode === 'voice') return !m.fastOnly;
     // 'vision' and 'main' both exclude fast/voice-only models.
     return !m.fastOnly && !m.voiceOnly;
@@ -212,10 +229,10 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, [model-id] to switch immediately).',
     );
   },
-  argumentHint: '[--fast|--voice|--vision] [<model-id>]',
+  argumentHint: '[--fast|--voice|--vision|--compaction] [<model-id>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -237,13 +254,19 @@ export const modelCommand: SlashCommand = {
             'Set the image-capable model used to transcribe images for a text-only main model',
           ),
         },
+        {
+          value: '--compaction',
+          description: t(
+            'Set the model used for chat compression (auto-compaction)',
+          ),
+        },
       ].filter((item) => item.value.startsWith(partialArg));
       if (flagCompletions.length > 0) {
         return flagCompletions;
       }
       const trimmed = partialArg.trim();
       if (trimmed) {
-        let mode: 'main' | 'fast' | 'voice' | 'vision' = 'main';
+        let mode: 'main' | 'fast' | 'voice' | 'vision' | 'compaction' = 'main';
         let modelPrefix = trimmed;
         if (trimmed.startsWith('--fast ')) {
           mode = 'fast';
@@ -254,6 +277,9 @@ export const modelCommand: SlashCommand = {
         } else if (trimmed.startsWith('--vision ')) {
           mode = 'vision';
           modelPrefix = trimmed.slice('--vision '.length);
+        } else if (trimmed.startsWith('--compaction ')) {
+          mode = 'compaction';
+          modelPrefix = trimmed.slice('--compaction '.length);
         }
         return getAvailableModelIds(context, mode).filter((id) =>
           id.startsWith(modelPrefix),
@@ -534,6 +560,85 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: t('Vision Model') + ': ' + modelName + visionWarning,
+      };
+    }
+
+    const isCompactionModelCommand =
+      args === '--compaction' || args.startsWith('--compaction ');
+    if (isCompactionModelCommand) {
+      const modelName = args.replace('--compaction', '').trim();
+      if (!modelName) {
+        if (context.executionMode !== 'interactive') {
+          const compactionModel =
+            context.services.settings?.merged?.compactionModel?.trim() ||
+            t('not set (falls back to fast model, then main model)');
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: t(
+              'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.',
+              { compactionModel },
+            ),
+          };
+        }
+        return {
+          type: 'dialog',
+          dialog: 'compaction-model',
+        };
+      }
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
+      }
+
+      const selector = (() => {
+        try {
+          return resolveModelId(modelName);
+        } catch {
+          return undefined;
+        }
+      })();
+      if (!selector) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnavailableCompactionModelMessage(modelName, []),
+        };
+      }
+
+      const availableModels = (
+        selector.authType
+          ? config.getAvailableModelsForAuthType(selector.authType)
+          : config.getAllConfiguredModels()
+      ).filter((m) => !m.voiceOnly);
+      if (!availableModels.some((model) => model.id === selector.modelId)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: selector.authType
+            ? formatUnavailableModelMessage(
+                'Compaction model',
+                selector.modelId,
+                selector.authType,
+                availableModels,
+              )
+            : formatUnavailableCompactionModelMessage(
+                modelName,
+                availableModels,
+              ),
+        };
+      }
+
+      persistSetting(settings, 'compactionModel', modelName);
+      // Sync runtime Config so the compression service picks it up immediately.
+      config.setCompactionModel(modelName);
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Compaction Model') + ': ' + modelName,
       };
     }
 

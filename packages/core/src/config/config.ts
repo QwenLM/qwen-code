@@ -1024,6 +1024,12 @@ export interface ConfigParameters {
    */
   visionModel?: string;
   /**
+   * Dedicated model for chat compression (auto-compaction). Falls back to
+   * fastModel, then the main model. Corresponds to the `compactionModel` setting
+   * (configurable via `/model --compaction`).
+   */
+  compactionModel?: string;
+  /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
@@ -1487,6 +1493,7 @@ export class Config {
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
   private visionModel?: string;
+  private compactionModel?: string;
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
@@ -1778,6 +1785,7 @@ export class Config {
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
     this.visionModel = params.visionModel || undefined;
+    this.compactionModel = params.compactionModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
@@ -2955,6 +2963,62 @@ export class Config {
    */
   setVisionModel(model: string | undefined): void {
     this.visionModel = model || undefined;
+  }
+
+  /**
+   * Resolve the compaction model for chat compression (auto-compaction).
+   * Priority: compactionModel (if set) → fastModel (if set) → main model.
+   */
+  getCompactionModel(): string | undefined {
+    const selector = this.resolveCompactionModelSelector();
+    if (selector) {
+      const available = selector.authType
+        ? this.getAllConfiguredModels([selector.authType])
+        : this.getAllConfiguredModels();
+      if (!available.some((m) => m.id === selector.modelId)) {
+        return undefined;
+      }
+      const rawSelector = resolveModelId(this.compactionModel);
+      return rawSelector?.authType
+        ? `${rawSelector.authType}:${selector.modelId}`
+        : selector.modelId;
+    }
+    // Fallback: fastModel → main model
+    return this.getFastModel() ?? this.getModel();
+  }
+
+  private resolveCompactionModelSelector() {
+    if (!this.compactionModel) return undefined;
+    try {
+      const rawSelector = resolveModelId(this.compactionModel);
+      if (!rawSelector) return undefined;
+      if (rawSelector.authType) return rawSelector;
+
+      const currentAuthType = this.getContentGeneratorConfig()?.authType;
+      if (!currentAuthType) {
+        this.debugLogger.debug(
+          'No active auth type; skipping bare compaction model resolution',
+        );
+        return undefined;
+      }
+
+      return resolveModelId(this.compactionModel, {
+        currentAuthType,
+        getAvailableModels: () =>
+          this.getAllConfiguredModels([currentAuthType]),
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Update the compaction model at runtime (e.g. `/model --compaction <model>`).
+   * Pass undefined or an empty string to clear the override and fall back to
+   * fastModel, then the main model.
+   */
+  setCompactionModel(model: string | undefined): void {
+    this.compactionModel = model || undefined;
   }
 
   /**

@@ -1097,6 +1097,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFastModelMode,
     isVoiceModelMode,
     isVisionModelMode,
+    isCompactionModelMode,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -3664,6 +3665,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      isCompactionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3803,6 +3805,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      isCompactionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
