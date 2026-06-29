@@ -491,10 +491,16 @@ export function mountAcpHttp(
           // — reaping then would 404 the imminent session resume and abort the
           // in-flight prompt before SESSION_GRACE_MS promised.
           conn.clearGraceTimer();
-          conn.connGraceTimer = setTimeout(() => {
+          // Reap iff the grace has elapsed and this dead conn stream is still
+          // current with nothing live or mid-reconnect. Shared by the grace
+          // timer and the post-session-grace re-check (below) so a connection
+          // blocked from reaping by a then-recoverable session doesn't linger
+          // until the 30-min idle sweep after that session finally tears down.
+          const reapConnIfDead = () => {
             if (
               registry.get(connId) === conn &&
               conn.connStream === stream &&
+              conn.connGraceExpired &&
               !conn.hasLiveSessionStream() &&
               !conn.hasRecoverableSession()
             ) {
@@ -503,8 +509,15 @@ export function mountAcpHttp(
               );
               registry.delete(connId);
             }
+          };
+          conn.connGraceTimer = setTimeout(() => {
+            conn.connGraceExpired = true;
+            reapConnIfDead();
           }, CONN_GRACE_MS);
           conn.connGraceTimer.unref?.();
+          // When a session's reclaim grace expires it may have been the last
+          // thing blocking this reap; re-evaluate then too.
+          conn.onSessionGraceExpired = reapConnIfDead;
         },
         () => conn.touch(),
       );

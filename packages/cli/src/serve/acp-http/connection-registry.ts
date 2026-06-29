@@ -46,6 +46,15 @@ export type DetachSessionFn = (
 interface BufferedSessionFrame {
   frame: unknown;
   id?: number;
+  /**
+   * For DEFERRED out-of-band replies only (`sendSessionReply`, always id-less):
+   * the bus head id at the moment the reply was produced. The reply must not be
+   * released to the wire until the pump has delivered every content event up to
+   * this id — otherwise a prompt result produced during a slow ring replay could
+   * land ahead of tail content that is still queued behind `replay_complete`
+   * (§1.8 W1). `undefined` ⇒ release at the next boundary unconditionally.
+   */
+  anchorId?: number;
 }
 
 /**
@@ -98,13 +107,19 @@ export interface SessionBinding {
    */
   graceTimer?: ReturnType<typeof setTimeout>;
   /**
-   * Set on a resumptive attach (`attachSessionStream` with a `Last-Event-ID`)
-   * and cleared when the ring replay boundary passes (`replay_complete` →
+   * Set from the CURRENT attach mode on every `attachSessionStream`: armed on a
+   * resumptive attach (with a `Last-Event-ID`), cleared on a fresh one (no
+   * `Last-Event-ID`) — never a one-way latch, or an aborted resume that skipped
+   * its flush would strand the flag and buffer every later reply forever. Also
+   * cleared when the ring replay boundary passes (`replay_complete` →
    * `flushBufferedSessionFrames`). While set, OUT-OF-BAND session JSON-RPC
    * replies (`replySession` — e.g. a `session/prompt` result that finishes
    * mid-replay) are deferred into `buffer` instead of written live, so they
-   * can't overtake replay frames that haven't been sent yet. In-band pump
-   * frames (`translateEvent`, including the `replay_complete` frame itself)
+   * can't overtake replay frames that haven't been sent yet. The flush boundary
+   * is `replay_complete` ONLY: `state_resync_required` is deliberately NOT one —
+   * the EventBus emits it BEFORE the replay frames, so flushing there would put
+   * deferred replies ahead of replayed content (the §1.8 reordering bug). In-band
+   * pump frames (`translateEvent`, including the `replay_complete` frame itself)
    * are unaffected — they're already produced in replay order.
    */
   replayPending?: boolean;
@@ -195,6 +210,22 @@ export class AcpConnection {
    * `maxConnections`) for the full 30-min idle TTL.
    */
   connGraceTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * True once the connection grace timer has fired. The timer is one-shot, so
+   * if it fired while a session was still mid-reconnect (`hasRecoverableSession`
+   * blocked the reap), nothing would re-check the connection after that session
+   * later tore down — it would linger until the 30-min idle sweep. This flag
+   * lets `onSessionGraceExpired` (fired when a session grace expires) recognize
+   * "the conn grace already elapsed" and run the reap that was deferred.
+   */
+  connGraceExpired = false;
+  /**
+   * Set by the transport layer (`index.ts`) when the connection grace timer is
+   * armed. Invoked after a session's reclaim grace expires so a connection that
+   * was blocked from reaping by a then-recoverable session gets re-evaluated
+   * instead of leaking until the idle sweep.
+   */
+  onSessionGraceExpired?: () => void;
   lastActiveMs: number = Date.now();
   private idCounter = 0;
 
@@ -320,6 +351,9 @@ export class AcpConnection {
       clearTimeout(this.connGraceTimer);
       this.connGraceTimer = undefined;
     }
+    // A fresh grace window (or a reconnect that cancels one) starts clean — the
+    // prior window's "already expired" verdict must not carry over.
+    this.connGraceExpired = false;
   }
 
   /** Attach the connection-scoped stream and flush any buffered frames. */
@@ -355,34 +389,75 @@ export class AcpConnection {
    * Send an OUT-OF-BAND session JSON-RPC reply (a `session/prompt` result and
    * friends from `replySession`) — id-less on the wire (no ring cursor).
    *
-   * Identical to `sendSession` EXCEPT it honors `binding.replayPending`: if a
-   * resumptive ring replay is mid-flight, the reply is deferred into `buffer`
-   * (released after `replay_complete`) so a prompt that finishes DURING the
-   * replay window can't land ahead of replay frames that haven't been sent yet
-   * — the same original-order guarantee the detach-gap deferral gives, but for
-   * the post-attach window. Pump-generated frames keep using `sendSession`
-   * (they're already in replay order, and deferring the `replay_complete` frame
-   * itself would deadlock the release).
+   * Unlike `sendSession`, this defers the reply behind a watermark while a ring
+   * replay is catching up. `anchorId` is the bus head id at the moment the reply
+   * was produced (every content event that should precede the reply has id ≤
+   * `anchorId`). The reply is held until the pump has DELIVERED through that id
+   * (`releaseDeferredSessionReplies`), so a prompt that finishes during a slow
+   * replay can't land ahead of tail content still queued behind `replay_complete`
+   * (§1.8 W1 — the truncated-body reordering).
+   *
+   * It defers when EITHER a resume replay is in flight (`replayPending`) OR the
+   * stream is detached OR replies are already queued ahead of it (`buffer` not
+   * empty) — that last case keeps a just-produced reply from overtaking an
+   * earlier one still waiting on its watermark. Once the buffer drains and replay
+   * is done, replies go straight to the wire (steady state, unchanged from a
+   * non-resumed stream).
    */
-  sendSessionReply(sessionId: string, frame: unknown): void {
+  sendSessionReply(sessionId: string, frame: unknown, anchorId?: number): void {
     const binding = this.sessions.get(sessionId);
     if (!binding) return;
-    if (binding.replayPending) {
-      pushCapped(
-        binding.buffer,
-        { frame, id: undefined },
-        `session ${sessionId}`,
-      );
+    // Steady state — live stream, no replay in flight, nothing queued ahead —
+    // goes straight to the wire (same as a never-resumed stream). Otherwise
+    // defer with the watermark so ordering is preserved while catching up.
+    if (
+      binding.stream &&
+      !binding.stream.isClosed &&
+      !binding.replayPending &&
+      binding.buffer.length === 0
+    ) {
+      void binding.stream.send(frame);
       return;
     }
-    if (binding.stream && !binding.stream.isClosed) {
-      void binding.stream.send(frame);
-    } else {
-      pushCapped(
-        binding.buffer,
-        { frame, id: undefined },
-        `session ${sessionId}`,
-      );
+    pushCapped(
+      binding.buffer,
+      { frame, id: undefined, anchorId },
+      `session ${sessionId}`,
+    );
+  }
+
+  /**
+   * Release deferred out-of-band replies (`sendSessionReply`) whose watermark
+   * (`anchorId`) the pump has now passed: every leading id-less buffer entry
+   * with `anchorId ≤ deliveredId` is flushed to the live stream, in order. The
+   * pump calls this after delivering each content event (and at `replay_complete`
+   * with the last replayed id), so each reply lands immediately AFTER the last
+   * content event that preceded it — never ahead of tail content still queued.
+   *
+   * Stops at the first entry that is id-bearing (not a deferred reply) or whose
+   * anchor is still ahead of `deliveredId`, preserving stream order. No-op if the
+   * stream isn't live (the entries stay buffered for the next attach).
+   */
+  releaseDeferredSessionReplies(sessionId: string, deliveredId: number): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding || !binding.stream || binding.stream.isClosed) return;
+    while (binding.buffer.length > 0) {
+      const front = binding.buffer[0];
+      // Only id-less deferred replies are watermark-gated; anything else (a
+      // stray id-bearing frame) marks the end of the releasable prefix.
+      if (front.id !== undefined) break;
+      if (front.anchorId === undefined) {
+        // No watermark (rare: the bus head was unreadable when the reply was
+        // produced — a session-teardown race). It can't be sequenced against a
+        // content id, so hold it until the replay boundary passes
+        // (`endReplayDeferral` clears `replayPending`, then this releases it).
+        // Releasing mid-replay could land it ahead of not-yet-sent content.
+        if (binding.replayPending) break;
+      } else if (front.anchorId > deliveredId) {
+        break;
+      }
+      binding.buffer.shift();
+      void binding.stream.send(front.frame);
     }
   }
 
@@ -448,12 +523,16 @@ export class AcpConnection {
     // resume we DEFER id-less frames: leave them in the buffer for the pump to
     // flush after `replay_complete` (`flushBufferedSessionFrames`), preserving
     // original stream order.
-    if (resumeFromEventId !== undefined) {
-      // Resume: keep deferring out-of-band replies (`sendSessionReply`) until
-      // the replay boundary passes — not just the ones already buffered from
-      // the detach gap, but any prompt that finishes DURING the replay window.
-      binding.replayPending = true;
-    }
+    // Set the deferral flag from the CURRENT attach mode every time — never a
+    // one-way latch. Resume arms it (keep deferring out-of-band replies until
+    // the replay boundary passes — not just the ones already buffered from the
+    // detach gap, but any prompt that finishes DURING the replay window). A
+    // fresh connect CLEARS it: the prior resumptive attach may have been aborted
+    // before its pump reached `replay_complete` (the normal reclaim path skips
+    // the flush), which would otherwise leave the flag stuck true and buffer
+    // every later `sendSessionReply` — including `session/prompt` results —
+    // behind a replay boundary this live-only subscription will never emit.
+    binding.replayPending = resumeFromEventId !== undefined;
     for (const entry of binding.buffer.splice(0)) {
       if (resumeFromEventId === undefined) {
         void stream.send(entry.frame, entry.id); // fresh connect: flush all now
@@ -467,32 +546,48 @@ export class AcpConnection {
   }
 
   /**
-   * Flush any frames still buffered for a session to its live stream, in order.
-   * On resume, `attachSessionStream` defers id-less JSON-RPC replies (e.g. a
-   * `session/prompt` result that landed during the detach gap) into the buffer;
-   * the event pump calls this once the ring replay boundary (`replay_complete`)
-   * has passed, so those replies are delivered AFTER the content chunks they
-   * followed in the original stream. Clearing `replayPending` here also closes
-   * the post-attach window: out-of-band replies (`sendSessionReply`) resume
-   * live delivery now that replay has drained.
+   * The ring replay drained (`replay_complete`): stop deferring NEW replies that
+   * are anchored within the replayed range, and release every buffered reply
+   * whose watermark the replay already passed (`anchorId ≤ lastReplayedId`).
    *
-   * No-op for the actual frame flush if the session has no live stream (the
-   * frames stay buffered for the next attach), or if the stream is already
-   * closed (the frames stay buffered for the next reconnect rather than being
-   * dropped onto a dead socket) — but `replayPending` is cleared regardless,
-   * since the boundary has passed.
+   * Replies anchored ABOVE the replayed range stay buffered — their content
+   * hasn't been delivered yet because the turn was still running at reconnect
+   * (the content flows as LIVE events after `replay_complete`). The per-event
+   * `releaseDeferredSessionReplies` calls drain those as the matching live
+   * content arrives, so a result produced during a slow replay still lands after
+   * its tail content (§1.8 W1), not at the boundary.
+   */
+  endReplayDeferral(sessionId: string, lastReplayedId: number): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding) return;
+    // Replay boundary passed → new replies are no longer gated by the replay
+    // window itself (they may still defer behind a non-empty buffer).
+    binding.replayPending = false;
+    this.releaseDeferredSessionReplies(sessionId, lastReplayedId);
+  }
+
+  /**
+   * Final, UNCONDITIONAL flush of everything still buffered — used when the pump
+   * ends with no more events coming (clean iterator end / live-only subscription
+   * with no replay boundary). Releases any remaining deferred replies regardless
+   * of watermark: their anchored content will never arrive, so holding them
+   * would strand the result forever.
    *
-   * The frames are enqueued onto the stream synchronously, in buffer order:
-   * `SseStream` serializes every `send` through one `writeChain`, so the wire
-   * order is fixed by call order here. We deliberately do NOT `await` each
-   * `send` between `shift`s — doing so would open a window where a live event
-   * arriving mid-drain enqueues BETWEEN two deferred frames, reordering the
-   * very replies this deferral exists to keep in order (§1.8 W1).
+   * No-op if the session has no live stream (frames stay buffered for the next
+   * attach) — but `replayPending` is cleared regardless, since no replay is in
+   * flight once the pump has settled.
+   *
+   * The frames are enqueued synchronously, in buffer order: `SseStream`
+   * serializes every `send` through one `writeChain`, so wire order is fixed by
+   * call order here. We deliberately do NOT `await` each `send` between `shift`s
+   * — doing so would open a window where a live event arriving mid-drain enqueues
+   * BETWEEN two deferred frames, reordering the very replies this deferral exists
+   * to keep in order (§1.8 W1).
    */
   flushBufferedSessionFrames(sessionId: string): void {
     const binding = this.sessions.get(sessionId);
     if (!binding) return;
-    // Replay boundary passed → stop deferring out-of-band replies.
+    // Pump settled → no replay in flight; stop deferring out-of-band replies.
     binding.replayPending = false;
     if (
       !binding.stream ||
@@ -544,7 +639,23 @@ export class AcpConnection {
         `qwen serve: /acp session grace expired (${logSafe(sessionId)}), ` +
           `no reconnect within ${graceMs}ms — tearing down`,
       );
-      this.closeSessionStream(sessionId);
+      // `closeSessionStream` → `teardownBinding` runs external callbacks
+      // (`abandonPendingForSession`, `onDetachSession`) that can throw. This
+      // runs from a bare `setTimeout`, so an uncaught throw would crash the
+      // whole daemon process (taking down every other session). `destroy()`
+      // guards `teardownBinding` for the same reason; mirror it here.
+      try {
+        this.closeSessionStream(sessionId);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: /acp teardown failed during grace expiry ` +
+            `(${logSafe(sessionId)}): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+      // Grace expiry may have removed the last recoverable session that was
+      // blocking a pending connection reap; let the owner re-check.
+      this.onSessionGraceExpired?.();
     }, graceMs);
     binding.graceTimer.unref?.();
   }

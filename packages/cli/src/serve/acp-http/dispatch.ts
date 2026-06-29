@@ -2751,43 +2751,50 @@ export class AcpDispatcher {
       });
       // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
       // `session/prompt` result produced during the detach gap) so they land
-      // AFTER the ring replays the content chunks that preceded them. Release
-      // them once replay actually drains — i.e. on `replay_complete` ONLY.
+      // AFTER the content chunks that preceded them. Each deferred reply carries
+      // a WATERMARK (`anchorId` = the bus head id when it was produced); release
+      // it only once the pump has DELIVERED through that id. We track the highest
+      // delivered id and, after each content frame, release replies the pump has
+      // now caught up to (`releaseDeferredSessionReplies`).
       //
-      // NOT on `state_resync_required`: the EventBus emits that frame FIRST,
-      // BEFORE the replay frames, then still emits `replay_complete` at the end
-      // of replay (see eventBus.ts — both the `epoch_reset` and `ring_evicted`
-      // paths fall through to the replay loop + `replay_complete`). Flushing on
-      // the resync frame would put the deferred reply ahead of the replayed
-      // content — reintroducing the exact truncated-body reordering §1.8 fixes.
-      // The post-loop safety flush below covers the live-only case (no cursor ⇒
-      // no replay branch ⇒ no `replay_complete`). Once-guarded.
-      let deferredFlushed = false;
-      const flushDeferred = () => {
-        if (deferredFlushed) return;
-        deferredFlushed = true;
-        conn.flushBufferedSessionFrames(sessionId);
-      };
+      // `replay_complete` is the boundary for the REPLAY range only: it releases
+      // replies anchored within the replayed frames and stops gating new replies
+      // on the replay window. Replies anchored ABOVE the replay range (the turn
+      // was still running at reconnect, so the tail arrives as LIVE events after
+      // `replay_complete`) keep deferring until the per-event release below
+      // delivers their content — a result produced during a slow replay must not
+      // jump ahead of that tail (§1.8 W1, MsyIt).
+      //
+      // NOT released on `state_resync_required`: the EventBus emits that frame
+      // FIRST, before the replay frames (both the `epoch_reset` and
+      // `ring_evicted` paths fall through to the replay loop + `replay_complete`).
+      // It is id-less, so the per-event release skips it anyway.
+      let lastDeliveredId = lastEventId ?? 0;
       for await (const event of iterable) {
         if (signal.aborted) break;
         // Count event delivery as connection activity so a long, quiet prompt
         // (no inbound HTTP) isn't reaped by the idle-TTL sweep.
         conn.touch();
         this.translateEvent(conn, sessionId, event);
+        if (typeof event.id === 'number') {
+          lastDeliveredId = event.id;
+          conn.releaseDeferredSessionReplies(sessionId, event.id);
+        }
         if (event.type === 'replay_complete') {
-          flushDeferred();
+          conn.endReplayDeferral(sessionId, lastDeliveredId);
         }
       }
       // Safety: a live-only subscription (no cursor → no replay boundary) or a
-      // clean end without a boundary frame still releases anything deferred —
-      // but NOT if this pump was aborted. An abort means the stream was
-      // detached/reclaimed; flushing here could drain the deferred reply onto a
-      // RECLAIMING stream ahead of its own replay (reintroducing the very out-of-
-      // order delivery the deferral prevents). The reclaiming pump owns the
-      // buffer then and will flush after its replay boundary. On an iterator
-      // error mid-replay (the catch below) the deferred frames likewise stay
-      // buffered for the next attach — never lost, just delivered next round.
-      if (!signal.aborted) flushDeferred();
+      // clean end without a boundary frame still releases anything STILL deferred
+      // (its anchored content will never arrive now) — but NOT if this pump was
+      // aborted. An abort means the stream was detached/reclaimed; flushing here
+      // could drain the deferred reply onto a RECLAIMING stream ahead of its own
+      // replay (reintroducing the very out-of-order delivery the deferral
+      // prevents). The reclaiming pump owns the buffer then and will release
+      // after its replay boundary. On an iterator error mid-replay (the catch
+      // below) the deferred frames likewise stay buffered for the next attach —
+      // never lost, just delivered next round.
+      if (!signal.aborted) conn.flushBufferedSessionFrames(sessionId);
     } catch (err) {
       // Symmetric for the SYNC `subscribeEvents` throw and a MID-STREAM
       // iterator error: surface a `stream_error` to the client, then re-throw
@@ -3094,9 +3101,23 @@ export class AcpDispatcher {
     // the connection-scoped stream so an id'd request always gets its reply.
     if (conn.sessions.has(sessionId)) {
       // Out-of-band reply: `sendSessionReply` defers it behind an in-flight ring
-      // replay (`replayPending`) so a prompt finishing mid-replay can't overtake
-      // not-yet-sent replay frames (§1.8 W1).
-      conn.sendSessionReply(sessionId, frame);
+      // replay so a prompt finishing mid-replay can't overtake not-yet-sent
+      // content frames (§1.8 W1). Anchor the reply to the bus head id NOW —
+      // every content event that should precede it has id ≤ this — so the pump
+      // releases it only after delivering through that id, even when the tail
+      // content is still flowing as live events behind `replay_complete`.
+      //
+      // The ACP binding can outlive the bridge session for a beat (concurrent
+      // teardown); `getSessionLastEventId` throws then. Fall back to an
+      // unanchored defer (released at the next boundary) — never let a missing
+      // watermark turn a reply into a thrown error.
+      let anchorId: number | undefined;
+      try {
+        anchorId = this.bridge.getSessionLastEventId(sessionId);
+      } catch {
+        anchorId = undefined;
+      }
+      conn.sendSessionReply(sessionId, frame, anchorId);
     } else {
       // Fallback fired — log it so an operator can correlate "reply arrived on
       // the connection stream, not the session stream" with a mid-flight

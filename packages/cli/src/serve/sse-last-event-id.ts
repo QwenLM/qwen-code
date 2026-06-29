@@ -5,17 +5,17 @@
  */
 
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { logSafe } from './acp-http/json-rpc.js';
 
 /** Truncate + sanitize an untrusted header value for a single log line. */
 function safeLogValue(raw: unknown): string {
   const s = typeof raw === 'string' ? raw : String(raw);
   const clipped = s.length > 64 ? `${s.slice(0, 64)}…` : s;
-  // Strip ALL C0 control chars + DEL (covers CR/LF log-forging AND ANSI ESC
-  // `\x1b` / null bytes a crafted header could use to manipulate an operator's
-  // terminal when this value is written to stderr). Matching control chars in
-  // the regex is the intent here, so the lint rule is deliberately disabled.
-  // eslint-disable-next-line no-control-regex
-  return clipped.replace(/[\x00-\x1f\x7f]+/g, ' ');
+  // Reuse the shared sanitizer so this surface can't drift: `logSafe` strips C0
+  // controls + DEL AND the C1 controls (\x80-\x9f, incl. 8-bit CSI \x9b) and
+  // Unicode bidi/format chars (U+202E RTL override, zero-width, BOM) a crafted
+  // `Last-Event-ID` could use to spoof or split an operator's stderr log line.
+  return logSafe(clipped);
 }
 
 /**

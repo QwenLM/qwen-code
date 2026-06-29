@@ -435,6 +435,144 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('clears replayPending on a fresh re-attach after an aborted resume (MsyIq/MylZ4) — a later reply is delivered live, not stranded behind a replay boundary that never arrives', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      // Resumptive attach arms replayPending.
+      const s1 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s1, new AbortController(), 5);
+      expect(conn.sessions.get('sess-1')?.replayPending).toBe(true);
+
+      // The resume is aborted before replay_complete (the normal reclaim path
+      // skips the flush, so no boundary clears the flag). A FRESH reconnect with
+      // no cursor must reset it from the current attach mode.
+      const s2 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s2, new AbortController());
+      expect(conn.sessions.get('sess-1')?.replayPending).toBe(false);
+
+      // A later prompt result reaches the wire immediately — not buffered behind
+      // a replay boundary this live-only subscription will never emit.
+      conn.sendSessionReply('sess-1', { promptResult: true });
+      expect(s2.sent).toEqual([
+        { message: { promptResult: true }, id: undefined },
+      ]);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('holds a deferred reply until the pump delivers through its anchor (MsyIt) — a result produced during a slow replay lands after live tail content, not at replay_complete', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      // Resume from cursor 5 while the turn is STILL running: its tail content
+      // (ids 8,9) will arrive as LIVE events AFTER replay_complete.
+      const s = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s, new AbortController(), 5);
+
+      // Replay redelivers the in-ring content (ids 6,7); the pump releases any
+      // replies it has caught up to after each frame.
+      conn.sendSession('sess-1', { chunk: 6 }, 6);
+      conn.releaseDeferredSessionReplies('sess-1', 6);
+      conn.sendSession('sess-1', { chunk: 7 }, 7);
+      conn.releaseDeferredSessionReplies('sess-1', 7);
+
+      // The prompt finishes mid-replay, anchored to the bus head (9) — two tail
+      // events (8,9) are still to come.
+      conn.sendSessionReply('sess-1', { promptResult: true }, 9);
+      expect(s.sent).toEqual([
+        { message: { chunk: 6 }, id: 6 },
+        { message: { chunk: 7 }, id: 7 },
+      ]);
+
+      // replay_complete releases only replies anchored within the replayed range
+      // (≤ 7). The reply (anchor 9) must STAY deferred — flushing it here is
+      // exactly the MsyIt reordering bug.
+      conn.endReplayDeferral('sess-1', 7);
+      expect(conn.sessions.get('sess-1')?.replayPending).toBe(false);
+      const hasReply = () =>
+        s.sent.some(
+          (f) => (f.message as { promptResult?: boolean }).promptResult,
+        );
+      expect(hasReply()).toBe(false);
+
+      // Live tail flows; the reply waits until id 9 is actually delivered.
+      conn.sendSession('sess-1', { chunk: 8 }, 8);
+      conn.releaseDeferredSessionReplies('sess-1', 8);
+      expect(hasReply()).toBe(false);
+
+      conn.sendSession('sess-1', { chunk: 9 }, 9);
+      conn.releaseDeferredSessionReplies('sess-1', 9);
+      expect(s.sent).toEqual([
+        { message: { chunk: 6 }, id: 6 },
+        { message: { chunk: 7 }, id: 7 },
+        { message: { chunk: 8 }, id: 8 },
+        { message: { chunk: 9 }, id: 9 },
+        { message: { promptResult: true }, id: undefined },
+      ]);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('invokes onSessionGraceExpired when a session reclaim grace expires (drives the deferred connection reap, MsyIs)', () => {
+    vi.useFakeTimers();
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const s1 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s1, new AbortController());
+
+      const onExpired = vi.fn();
+      conn.onSessionGraceExpired = onExpired;
+
+      conn.detachSessionStream('sess-1', s1, 10_000);
+      expect(onExpired).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(10_000);
+      expect(onExpired).toHaveBeenCalledTimes(1);
+    } finally {
+      registry.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('grace-expiry teardown swallows a throwing detach callback (MylZ8) — the setTimeout never crashes the process', () => {
+    vi.useFakeTimers();
+    const onDetach = vi.fn(() => {
+      throw new Error('boom');
+    });
+    const registry = new ConnectionRegistry(undefined, onDetach);
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const s1 = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s1, new AbortController());
+      conn.detachSessionStream('sess-1', s1, 10_000);
+
+      // Grace expiry → closeSessionStream → teardownBinding → onDetach throws.
+      // The try/catch must contain it so the bare setTimeout can't take the
+      // daemon down.
+      expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+      expect(onDetach).toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('aborts the connection signal when the connection is deleted', () => {
     const registry = new ConnectionRegistry();
     try {
