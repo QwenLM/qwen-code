@@ -3114,8 +3114,16 @@ export class AcpDispatcher {
       let anchorId: number | undefined;
       try {
         anchorId = this.bridge.getSessionLastEventId(sessionId);
-      } catch {
+      } catch (err) {
+        // Expected on the teardown race; log a breadcrumb so an operator can
+        // tell that benign case apart from an unexpected bridge regression that
+        // starts exercising this fallback (which would otherwise be invisible).
         anchorId = undefined;
+        writeStderrLine(
+          `qwen serve: /acp replySession(${logSafe(sessionId)}) ` +
+            `anchor unavailable, deferring unanchored: ` +
+            logSafe(err instanceof Error ? err.message : String(err)),
+        );
       }
       conn.sendSessionReply(sessionId, frame, anchorId);
     } else {
