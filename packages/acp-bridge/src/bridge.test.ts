@@ -473,6 +473,39 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('rejects malformed workspace memory remember responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/remember') {
+              return {
+                summary: 'saved',
+                filesTouched: ['/mem/MEMORY.md'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await expect(
+      bridge.runWorkspaceMemoryRemember({
+        content: 'Remember the workspace uses vitest.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toThrow('Malformed workspace memory remember response');
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
+
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({

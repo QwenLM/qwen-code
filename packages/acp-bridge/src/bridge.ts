@@ -426,6 +426,36 @@ function extractPermissionResponseMetadata(
   return undefined;
 }
 
+function parseWorkspaceMemoryRememberResult(
+  response: unknown,
+): BridgeWorkspaceMemoryRememberResult {
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    throw new Error('Malformed workspace memory remember response');
+  }
+  const record = response as Record<string, unknown>;
+  const summary = record['summary'];
+  const filesTouched = record['filesTouched'];
+  const touchedScopes = record['touchedScopes'];
+  if (
+    (summary !== undefined && typeof summary !== 'string') ||
+    !Array.isArray(filesTouched) ||
+    !filesTouched.every((file) => typeof file === 'string') ||
+    !Array.isArray(touchedScopes) ||
+    !touchedScopes.every((scope) => scope === 'user' || scope === 'project')
+  ) {
+    throw new Error('Malformed workspace memory remember response');
+  }
+  return {
+    ...(summary === undefined ? {} : { summary }),
+    filesTouched: filesTouched as string[],
+    touchedScopes: touchedScopes as Array<'user' | 'project'>,
+  };
+}
+
 /**
  * Echo a user prompt to the session bus so multi-client SSE subscribers
  * see the input alongside the agent response. Iterates content blocks
@@ -3889,7 +3919,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
           SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
         );
-        return response as unknown as BridgeWorkspaceMemoryRememberResult;
+        return parseWorkspaceMemoryRememberResult(response);
       } finally {
         if (info.sessionIds.size === 0 && info.pendingRestoreIds.size === 0) {
           await startIdleTimer(info, 'workspace memory remember');
