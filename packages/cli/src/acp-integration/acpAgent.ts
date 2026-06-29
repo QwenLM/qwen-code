@@ -60,6 +60,8 @@ import {
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
+  matchesAnyServerPattern,
+  matchesServerPattern,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -5596,17 +5598,22 @@ class QwenAgent implements Agent {
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded || [];
-            if (currentExcluded.includes(serverName)) {
+            if (matchesAnyServerPattern(serverName, currentExcluded)) {
               settings.setValue(
                 scope,
                 'mcp.excluded',
-                currentExcluded.filter((name: string) => name !== serverName),
+                currentExcluded.filter(
+                  (pattern: string) =>
+                    !matchesServerPattern(serverName, pattern),
+                ),
               );
             }
           }
           const currentExcluded = this.config.getExcludedMcpServers() || [];
           this.config.setExcludedMcpServers(
-            currentExcluded.filter((name: string) => name !== serverName),
+            currentExcluded.filter(
+              (pattern: string) => !matchesServerPattern(serverName, pattern),
+            ),
           );
           await toolRegistry.discoverToolsForServer(serverName);
           return { serverName, action, ok: true, changed: true };
@@ -5632,14 +5639,14 @@ class QwenAgent implements Agent {
           }
           const scopeSettings = settings.forScope(targetScope).settings;
           const currentExcluded = scopeSettings.mcp?.excluded || [];
-          if (!currentExcluded.includes(serverName)) {
+          if (!matchesAnyServerPattern(serverName, currentExcluded)) {
             settings.setValue(targetScope, 'mcp.excluded', [
               ...currentExcluded,
               serverName,
             ]);
           }
           const runtimeExcluded = this.config.getExcludedMcpServers() || [];
-          if (!runtimeExcluded.includes(serverName)) {
+          if (!matchesAnyServerPattern(serverName, runtimeExcluded)) {
             this.config.setExcludedMcpServers([...runtimeExcluded, serverName]);
           }
           await toolRegistry.disableMcpServer(serverName);

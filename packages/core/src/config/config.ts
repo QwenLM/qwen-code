@@ -5123,7 +5123,7 @@ export class Config {
 
     if (this.allowedMcpServers) {
       Object.entries(mcpServers).forEach(([key, server]) => {
-        const isAllowed = this.allowedMcpServers?.includes(key);
+        const isAllowed = matchesAnyServerPattern(key, this.allowedMcpServers);
         if (!isAllowed) {
           blockedMcpServers.push({
             name: key,

@@ -1177,6 +1177,26 @@ describe('Server Config (config.ts)', () => {
       config.setExcludedMcpServers(['*chrome*']);
       expect(config.getMcpServerUnavailableReason('chrome')).toBe('excluded');
     });
+
+    it('exclude takes precedence over allow with glob patterns', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { puppeteer: srvA, playwright: srvB },
+      });
+      await config.reinitializeMcpServers({
+        puppeteer: srvA,
+        playwright: srvB,
+      });
+
+      config.setAllowedMcpServers(['*']);
+      config.setExcludedMcpServers(['puppeteer']);
+      expect(config.getMcpServerUnavailableReason('puppeteer')).toBe(
+        'excluded',
+      );
+      expect(
+        config.getMcpServerUnavailableReason('playwright'),
+      ).toBeUndefined();
+    });
   });
 
   describe('MemoryPressureMonitor isolation', () => {
