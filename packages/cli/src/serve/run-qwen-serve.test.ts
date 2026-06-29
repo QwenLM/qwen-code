@@ -930,9 +930,7 @@ describe('runQwenServe runtime startup failures', () => {
     await new Promise((resolve) => setTimeout(resolve, 1100));
 
     expect(createBridge).not.toHaveBeenCalled();
-    await expect(handle.runtimeReady).rejects.toThrow(
-      'Server closed before deferred runtime startup began.',
-    );
+    await expect(handle.runtimeReady).resolves.toBeUndefined();
   });
 
   it('does not start deferred runtime after close following first health', async () => {
@@ -974,8 +972,65 @@ describe('runQwenServe runtime startup failures', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(createBridge).not.toHaveBeenCalled();
+    await expect(handle.runtimeReady).resolves.toBeUndefined();
+  });
+
+  it('does not cancel deferred runtime once startup is already running', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-running-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    const resolveTelemetrySettings = vi
+      .spyOn(qwenCore, 'resolveTelemetrySettings')
+      .mockReturnValue(telemetryPromise);
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    const healthRes = await fetch(`${handle.url}/health`);
+    expect(healthRes.status).toBe(200);
+    expect(await healthRes.json()).toEqual({ status: 'ok' });
+    await vi.waitFor(
+      () => expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1),
+      { timeout: 500 },
+    );
+
+    const closePromise = handle.close();
+    resolveTelemetry?.({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    await closePromise;
+
+    expect(createBridge).toHaveBeenCalledTimes(1);
     await expect(handle.runtimeReady).rejects.toThrow(
-      'Server closed before deferred runtime startup began.',
+      'Daemon runtime stopped before mounting.',
     );
   });
 
