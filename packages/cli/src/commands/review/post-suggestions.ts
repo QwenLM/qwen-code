@@ -83,14 +83,12 @@ async function runPostSuggestions(args: PostSuggestionsArgs): Promise<void> {
   ensureAuthenticated();
 
   const bodyContent = readFileSync(bodyFile, 'utf8');
+  if (!bodyContent.includes(SUMMARY_MARKER)) {
+    throw new Error(
+      `body-file must contain the summary marker (${SUMMARY_MARKER}) so the comment can be located and updated on subsequent runs`,
+    );
+  }
   const payload = JSON.stringify({ body: bodyContent });
-
-  // Stream the payload from a file so gh --input handles multi-line markdown
-  // bodies without arg-length or quoting issues. The payload file sits next
-  // to `out` so it inherits the per-target temp prefix and is swept by
-  // `qwen review cleanup`.
-  const payloadPath = `${out}.payload.json`;
-  writeFileSync(payloadPath, payload, 'utf8');
 
   const me = currentUser();
   const comments = ghApiAll(
@@ -99,10 +97,17 @@ async function runPostSuggestions(args: PostSuggestionsArgs): Promise<void> {
 
   const existing = findExistingSummary(comments, me);
 
+  // Stream the payload from a file so gh --input handles multi-line markdown
+  // bodies without arg-length or quoting issues. The payload file sits next
+  // to `out` so it inherits the per-target temp prefix and is swept by
+  // `qwen review cleanup`. Written inside try so finally cleanup is safe.
+  const payloadPath = `${out}.payload.json`;
+
   let commentId: number;
   let action: 'updated' | 'created';
 
   try {
+    writeFileSync(payloadPath, payload, 'utf8');
     if (existing) {
       const raw = gh(
         'api',
@@ -127,7 +132,11 @@ async function runPostSuggestions(args: PostSuggestionsArgs): Promise<void> {
       action = 'created';
     }
   } finally {
-    unlinkSync(payloadPath);
+    try {
+      unlinkSync(payloadPath);
+    } catch {
+      // best-effort cleanup — also swept by `qwen review cleanup`
+    }
   }
 
   writeFileSync(
