@@ -125,6 +125,36 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('hides background task notifications by metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'bg-1',
+        'assistant',
+        'Background agent "general-purpose: 查询百度云活动信息" completed.',
+        1,
+        false,
+        {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: { taskId: 'task-1', status: 'completed' },
+          },
+        },
+      ),
+      textBlock('assistant-1', 'assistant', '正常回复', 2),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: '正常回复',
+        isStreaming: false,
+        timestamp: 2,
+      },
+    ]);
+  });
+
   it('renders daemon plan status blocks as plan messages', () => {
     const plan = {
       sessionUpdate: 'plan',
@@ -200,6 +230,31 @@ describe('transcriptBlocksToDaemonMessages', () => {
           newSessionId: 'new',
           displayName: 'support-branch-new3 (Branch 2)',
         },
+      }),
+    ]);
+  });
+
+  it('localizes structured mid-turn inserted status blocks', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        statusBlock('mid-1', 'Inserted message: hello', 1, {
+          source: 'mid_turn_message_injected',
+          data: { sessionId: 's1', messages: ['你好'] },
+        }),
+      ],
+      {
+        labels: {
+          midTurnInserted: (message) => `已插入消息：${message}`,
+        },
+      },
+    );
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: '已插入消息：你好',
+        source: 'mid_turn_message_injected',
+        data: { sessionId: 's1', messages: ['你好'] },
       }),
     ]);
   });
@@ -393,7 +448,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     expect(messages).toMatchObject([
       { role: 'tool_group', tools: [{ callId: 'tc1' }] },
-      { role: 'assistant', thinking: 'next I should grep' },
+      { role: 'thinking', content: 'next I should grep' },
       { role: 'tool_group', tools: [{ callId: 'tc2' }] },
     ]);
   });
@@ -849,7 +904,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       textBlock('assistant-main', 'assistant', 'main continues', 40),
     ]);
 
-    expect(messages).toHaveLength(2);
+    expect(messages).toHaveLength(3);
     expect(messages[0]).toMatchObject({
       id: 'tg-agent-start',
       role: 'tool_group',
@@ -871,9 +926,13 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ).toBeUndefined();
     expect(messages[1]).toMatchObject({
       id: 'thought-main',
+      role: 'thinking',
+      content: 'wait for background agent',
+    });
+    expect(messages[2]).toMatchObject({
+      id: 'assistant-main',
       role: 'assistant',
       content: 'main continues',
-      thinking: 'wait for background agent',
     });
   });
 
@@ -898,7 +957,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       textBlock('assistant-main', 'assistant', 'waiting for agents', 40),
     ]);
 
-    expect(messages).toHaveLength(2);
+    expect(messages).toHaveLength(3);
     expect(messages[0]).toMatchObject({
       id: 'tg-agent-background',
       role: 'tool_group',
@@ -915,9 +974,13 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
     expect(messages[1]).toMatchObject({
       id: 'thought-main',
+      role: 'thinking',
+      content: 'server diff looks clean',
+    });
+    expect(messages[2]).toMatchObject({
+      id: 'assistant-main',
       role: 'assistant',
       content: 'waiting for agents',
-      thinking: 'server diff looks clean',
     });
   });
 
@@ -988,6 +1051,32 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'system',
       content: 'Shell command exited with code 0',
     });
+  });
+
+  it('filters language_changed daemon debug noise', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-1',
+        kind: 'debug',
+        text:
+          'language_changed (unrecognized daemon event): ' +
+          '{"sessionId":"dd699cc0-6ef7-4882-92d9-1076ac5b87e9",' +
+          '"language":"en","outputLanguage":"English","refreshed":true}',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('filters SDK model switch status noise', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('st1', 'Model switched: qwen3-coder-plus(openai)', 1),
+    ]);
+
+    expect(messages).toEqual([]);
   });
 
   it('preserves structured status source and data', () => {
@@ -1169,25 +1258,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
       textBlock('a2', 'assistant', ' response part 2', 6),
     ]);
 
-    const assistantMsgs = messages.filter((m) => m.role === 'assistant');
-    expect(assistantMsgs).toHaveLength(3);
-    expect(assistantMsgs[0]).toMatchObject({
-      role: 'assistant',
-      content: '',
-      thinking: 'thinking part 1',
-    });
-    expect(assistantMsgs[1]).toMatchObject({
-      role: 'assistant',
-      content: 'response part 1',
-      thinking: ' thinking part 2',
-    });
-    expect(assistantMsgs[2]).toMatchObject({
-      role: 'assistant',
-      content: ' response part 2',
-    });
-
-    const toolGroups = messages.filter((m) => m.role === 'tool_group');
-    expect(toolGroups).toHaveLength(2);
+    expect(messages).toMatchObject([
+      { role: 'thinking', content: 'thinking part 1' },
+      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
+      { role: 'thinking', content: ' thinking part 2' },
+      { role: 'assistant', content: 'response part 1' },
+      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+      { role: 'assistant', content: ' response part 2' },
+    ]);
   });
 
   it('keeps thought blocks after tool groups in transcript order', () => {
@@ -1202,13 +1280,13 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toMatchObject([
-      { role: 'assistant', thinking: 'first thought' },
+      { role: 'thinking', content: 'first thought' },
       { role: 'tool_group', tools: [{ callId: 'tc1' }] },
-      { role: 'assistant', thinking: 'second thought' },
+      { role: 'thinking', content: 'second thought' },
       { role: 'tool_group', tools: [{ callId: 'tc2' }] },
-      { role: 'assistant', thinking: 'third thought' },
+      { role: 'thinking', content: 'third thought' },
       { role: 'tool_group', tools: [{ callId: 'tc3' }] },
-      { role: 'assistant', thinking: 'final thought' },
+      { role: 'thinking', content: 'final thought' },
     ]);
   });
 
@@ -1787,7 +1865,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       textBlock('assistant-1', 'assistant', 'main turn continues', 4),
     ]);
 
-    expect(messages).toHaveLength(2);
+    expect(messages).toHaveLength(3);
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
       tools: [
@@ -1801,9 +1879,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(agent?.subContent).toBeUndefined();
     expect(messages[1]).toMatchObject({
+      role: 'thinking',
+      content: 'background agent is running',
+    });
+    expect(messages[2]).toMatchObject({
       role: 'assistant',
       content: 'main turn continues',
-      thinking: 'background agent is running',
     });
   });
 
@@ -1947,12 +2028,11 @@ describe('transcriptBlocksToDaemonMessages', () => {
       textBlock('a1', 'assistant', 'response text', 5),
     ]);
 
-    expect(messages).toHaveLength(3);
-    // First: thinking-only assistant
+    expect(messages).toHaveLength(4);
+    // First: thinking message
     expect(messages[0]).toMatchObject({
-      role: 'assistant',
-      thinking: 'first thinking',
-      content: '',
+      role: 'thinking',
+      content: 'first thinking',
     });
     // Second: completed agent card (not pending)
     const agentGroup = messages[1];
@@ -1964,10 +2044,13 @@ describe('transcriptBlocksToDaemonMessages', () => {
         endTime: 3,
       });
     }
-    // Third: second thinking + response (not absorbed into agent subContent)
+    // Third: second thinking, fourth: response (not absorbed into agent subContent)
     expect(messages[2]).toMatchObject({
+      role: 'thinking',
+      content: 'second thinking',
+    });
+    expect(messages[3]).toMatchObject({
       role: 'assistant',
-      thinking: 'second thinking',
       content: 'response text',
     });
   });
@@ -2023,16 +2106,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
       textBlock('a2', 'assistant', 'different approach', 5),
     ]);
 
-    const assistantMsgs = messages.filter((m) => m.role === 'assistant');
-    expect(assistantMsgs).toHaveLength(2);
-    expect(assistantMsgs[0]).toMatchObject({
-      thinking: 'first thinking',
-      content: 'let me try this',
-    });
-    expect(assistantMsgs[1]).toMatchObject({
-      thinking: 'second thinking',
-      content: 'different approach',
-    });
+    expect(messages).toMatchObject([
+      { role: 'thinking', content: 'first thinking' },
+      { role: 'assistant', content: 'let me try this' },
+      { role: 'thinking', content: 'second thinking' },
+      { role: 'assistant', content: 'different approach' },
+    ]);
   });
 
   it('converts error blocks to system error messages', () => {
@@ -2108,7 +2187,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('creates assistant message with empty content for thought-only blocks', () => {
+  it('creates thinking message for thought-only blocks', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('t1', 'thought', 'let me think about this', 1),
     ]);
@@ -2116,9 +2195,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([
       {
         id: 't1',
-        role: 'assistant',
-        content: '',
-        thinking: 'let me think about this',
+        role: 'thinking',
+        content: 'let me think about this',
         isStreaming: false,
         timestamp: 1,
       },
@@ -2209,7 +2287,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('merges thought and assistant without tools into single message', () => {
+  it('keeps thought and assistant as separate messages without tools', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('t1', 'thought', 'analyzing...', 1),
       textBlock('a1', 'assistant', 'here is my answer', 2),
@@ -2218,11 +2296,17 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([
       {
         id: 't1',
-        role: 'assistant',
-        content: 'here is my answer',
-        thinking: 'analyzing...',
+        role: 'thinking',
+        content: 'analyzing...',
         isStreaming: false,
         timestamp: 1,
+      },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'here is my answer',
+        isStreaming: false,
+        timestamp: 2,
       },
     ]);
   });
@@ -2270,6 +2354,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Request cancelled.',
         variant: 'info',
+        source: 'prompt_cancelled',
         timestamp: 20,
       },
     ]);
@@ -2287,6 +2372,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: '请求已取消。',
         variant: 'info',
+        source: 'prompt_cancelled',
         timestamp: 20,
       },
     ]);
@@ -2913,9 +2999,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toHaveLength(3);
-    const assistant = messages.find((message) => message.role === 'assistant');
-    expect(assistant).toMatchObject({
-      thinking: 'I need to review the PR diff.',
+    const thinking = messages.find((message) => message.role === 'thinking');
+    expect(thinking).toMatchObject({
+      content: 'I need to review the PR diff.',
     });
     const agentA =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;

@@ -211,6 +211,173 @@ describe('microcompactHistory', () => {
     ).toBe('grep results');
   });
 
+  it('uses integer QWEN_MC_KEEP_RECENT values over settings', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '3';
+    const history: Content[] = Array.from({ length: 4 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(3);
+    expect(result.meta!.toolsKept).toBe(3);
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it.each(['0', '-2'])(
+    'floors integer QWEN_MC_KEEP_RECENT=%s to 1',
+    (envValue) => {
+      process.env['QWEN_MC_KEEP_RECENT'] = envValue;
+      const history: Content[] = [
+        makeToolCall('read_file'),
+        makeToolResult('read_file', 'old content'),
+        makeToolCall('grep_search'),
+        makeToolResult('grep_search', 'grep results'),
+      ];
+
+      const result = microcompactHistory(history, twoHoursAgo, {
+        ...DEFAULT_SETTINGS,
+        toolResultsNumToKeep: 3,
+      });
+
+      expect(result.meta).toBeDefined();
+      expect(result.meta!.keepRecent).toBe(1);
+      expect(result.meta!.toolsKept).toBe(1);
+      expect(result.meta!.toolsCleared).toBe(1);
+      expect(
+        result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+      expect(
+        result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe('grep results');
+    },
+  );
+
+  it('ignores fractional QWEN_MC_KEEP_RECENT values', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '1.5';
+    const history: Content[] = [
+      makeUserMessage('first batch'),
+      makeInlineImage('image/png', 'IMAGE-OLDEST'),
+      makeUserMessage('second batch'),
+      makeInlineImage('image/jpeg', 'IMAGE-MIDDLE'),
+      makeUserMessage('third batch'),
+      makeInlineImage('image/png', 'IMAGE-NEWEST'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(2);
+    expect(result.meta!.mediaKept).toBe(2);
+    expect(result.meta!.mediaCleared).toBe(1);
+    expect(result.history[1]!.parts![0]!.text).toBe(
+      `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} image/png]`,
+    );
+  });
+
+  it('falls back to settings when QWEN_MC_KEEP_RECENT is fractional', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '1.5';
+    const history: Content[] = Array.from({ length: 4 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 3,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(3);
+    expect(result.meta!.toolsKept).toBe(3);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('checks env integer syntax before numeric conversion', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '9007199254740990.5';
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content'),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'grep results'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(1);
+    expect(result.meta!.toolsKept).toBe(1);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('ignores unsafe integer QWEN_MC_KEEP_RECENT values', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '9007199254740992';
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content'),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'grep results'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(1);
+    expect(result.meta!.toolsKept).toBe(1);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('uses the default keepRecent when settings are not a safe integer', () => {
+    const history: Content[] = Array.from({ length: 6 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: Number.MAX_SAFE_INTEGER + 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(5);
+    expect(result.meta!.toolsKept).toBe(5);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('uses the default keepRecent when settings are fractional', () => {
+    const history: Content[] = Array.from({ length: 6 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 1.5,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.keepRecent).toBe(5);
+    expect(result.meta!.toolsKept).toBe(5);
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
   it('should preserve non-functionResponse parts in cleared Content', () => {
     const history: Content[] = [
       {

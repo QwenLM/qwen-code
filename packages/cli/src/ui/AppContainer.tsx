@@ -208,6 +208,7 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from './contexts/BackgroundTaskViewContext.js';
+import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -1095,6 +1096,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isModelDialogOpen,
     isFastModelMode,
     isVoiceModelMode,
+    isVisionModelMode,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -1208,6 +1210,99 @@ export const AppContainer = (props: AppContainerProps) => {
   const closeDiffDialog = useCallback(() => {
     setIsDiffDialogOpen(false);
   }, []);
+
+  // Skill-review dialog: confirms auto-generated skills before they enter the
+  // skill library. This state is populated by the skill-review subscription
+  // effect below; the dialog component itself lives in SkillReviewDialog.tsx.
+  const [isSkillReviewDialogOpen, setIsSkillReviewDialogOpen] = useState(false);
+  const [skillReviewPending, setSkillReviewPending] =
+    useState<UIState['skillReviewPending']>(null);
+  // Batches the user dismissed via Esc ("decide later"), so the idle effect
+  // doesn't immediately reopen them. A Set (not a single value) so dismissing
+  // batch B can't accidentally re-arm a still-dismissed batch A.
+  const skillReviewDismissedTaskIdsRef = useRef<Set<string>>(new Set());
+  // Esc: defer the current batch — record it and close.
+  const dismissSkillReviewDialog = useCallback(() => {
+    if (skillReviewPending) {
+      skillReviewDismissedTaskIdsRef.current.add(skillReviewPending.taskId);
+    }
+    setIsSkillReviewDialogOpen(false);
+  }, [skillReviewPending]);
+  // Worked through the batch (keep/discard/all): close WITHOUT marking it
+  // dismissed, so if some accepts failed the unresolved skills can reopen.
+  const closeSkillReviewDialog = useCallback(
+    () => setIsSkillReviewDialogOpen(false),
+    [],
+  );
+  const acceptPendingSkill = useCallback(
+    (skillName: string) => {
+      if (!skillReviewPending) return;
+      void config
+        .getMemoryManager()
+        .acceptPendingSkillFromTask(skillReviewPending.taskId, skillName)
+        .catch(() => {
+          // Failure is logged in the manager; swallow here so an unhandled
+          // rejection doesn't surface in the UI. The skill stays pending.
+        });
+    },
+    [config, skillReviewPending],
+  );
+  const rejectPendingSkill = useCallback(
+    (skillName: string) => {
+      if (!skillReviewPending) return;
+      void config
+        .getMemoryManager()
+        .rejectPendingSkillFromTask(skillReviewPending.taskId, skillName)
+        .catch(() => {
+          // Failure is logged in the manager; swallow here so an unhandled
+          // rejection doesn't surface in the UI. The skill stays pending.
+        });
+    },
+    [config, skillReviewPending],
+  );
+
+  // Subscribe to skill-review task changes and keep skillReviewPending in sync.
+  useEffect(() => {
+    const mgr = config.getMemoryManager();
+    const projectRoot = config.getProjectRoot();
+    // Skip the state update (and the re-render of every UIState consumer) when
+    // the pending set hasn't actually changed — skill-review notifications fire
+    // for unrelated transitions too.
+    let lastSig = '';
+    const refresh = () => {
+      const tasks = mgr.listTasksByType('skill-review', projectRoot);
+      const withPending = tasks.find((tk) => {
+        const p = tk.metadata?.['pendingSkills'];
+        return Array.isArray(p) && p.length > 0;
+      });
+      if (!withPending) {
+        if (lastSig !== '') {
+          lastSig = '';
+          setSkillReviewPending(null);
+        }
+        return;
+      }
+      const pendingSkills = withPending.metadata!['pendingSkills'] as Array<{
+        name: string;
+        description: string;
+      }>;
+      const sig = `${withPending.id}|${pendingSkills
+        .map((p) => p.name)
+        .join(' ')}`;
+      if (sig === lastSig) return;
+      lastSig = sig;
+      setSkillReviewPending({
+        taskId: withPending.id,
+        skills: pendingSkills.map((p) => ({
+          name: p.name,
+          description: p.description,
+        })),
+      });
+    };
+    const unsub = mgr.subscribe(refresh, { taskType: 'skill-review' });
+    refresh();
+    return unsub;
+  }, [config]);
 
   const slashCommandActions = useMemo(
     () => ({
@@ -1557,6 +1652,18 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [streamingState]);
 
+  // Auto-open the skill-review dialog when idle and there are pending skills.
+  useEffect(() => {
+    if (
+      skillReviewPending &&
+      skillReviewPending.skills.length > 0 &&
+      streamingState === StreamingState.Idle &&
+      !skillReviewDismissedTaskIdsRef.current.has(skillReviewPending.taskId)
+    ) {
+      setIsSkillReviewDialogOpen(true);
+    }
+  }, [skillReviewPending, streamingState]);
+
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
   // (sessionCount increment + disk write) when the user has opted out.
@@ -1584,7 +1691,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
-  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
+  const {
+    dialogOpen: bgTasksDialogOpen,
+    entries: bgTaskEntries,
+    livePanelFocused: bgLivePanelFocused,
+  } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
@@ -1995,9 +2106,10 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager.history, pendingHistoryItems],
   );
   const stickyTodos = useStableStickyTodos(rawStickyTodos);
+  const hasExecutingTool = isToolExecuting(pendingHistoryItems);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
-  useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
+  useTerminalProgress(streamingState, hasExecutingTool);
 
   cancelHandlerRef.current = useCallback(
     (info?: CancelSubmitInfo) => {
@@ -2515,6 +2627,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
     isDiffDialogOpen ||
+    isSkillReviewDialogOpen ||
     bgTasksDialogOpen ||
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
@@ -2535,6 +2648,15 @@ export const AppContainer = (props: AppContainerProps) => {
       )
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
+
+  // Re-measure the footer whenever the LiveAgentPanel's height can change
+  // (agents launching / finishing / focus), so `controlsHeight` — and thus
+  // `availableTerminalHeight` — never goes stale below the composer. See
+  // getLiveAgentPanelLayoutKey for the full rationale (#5798).
+  const liveAgentPanelLayoutKey = getLiveAgentPanelLayoutKey(
+    bgTaskEntries,
+    bgLivePanelFocused,
+  );
 
   useLayoutEffect(() => {
     if (!mainControlsRef.current) {
@@ -2557,6 +2679,7 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     dialogsVisible,
     stickyTodosLayoutKey,
+    liveAgentPanelLayoutKey,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -2962,6 +3085,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings.merged.ui?.customWittyPhrases,
     responseCandidateTokens,
     streamingResponseLengthRef.current,
+    hasExecutingTool,
   );
 
   useAttentionNotifications({
@@ -3021,6 +3145,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackClose,
     isHelpDialogOpen,
     closeHelpDialog,
+    isSkillReviewDialogOpen,
+    dismissSkillReviewDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
     isDiffDialogOpen,
@@ -3331,8 +3457,12 @@ export const AppContainer = (props: AppContainerProps) => {
         // character left if the prompt has focus. Cosmetic; tracked
         // for a follow-up that introduces a `consumed` return value
         // on KeypressHandler so global handlers can swallow keys.
-        const executingShell = pendingToolCallsRef.current.find(
-          (tc) =>
+        const promotableShells = pendingToolCallsRef.current.filter(
+          (
+            tc,
+          ): tc is TrackedExecutingToolCall & {
+            promoteAbortController: AbortController;
+          } =>
             tc.status === 'executing' &&
             // Defense-in-depth: also gate on the tool name. Today only
             // the shell tool's invocation wires `promoteAbortController`,
@@ -3342,8 +3472,9 @@ export const AppContainer = (props: AppContainerProps) => {
             // whose service has no promote-handoff handler.
             tc.request.name === ToolNames.SHELL &&
             tc.promoteAbortController !== undefined,
-        ) as TrackedExecutingToolCall | undefined;
-        if (executingShell?.promoteAbortController) {
+        );
+        if (promotableShells.length === 1) {
+          const executingShell = promotableShells[0];
           debugLogger.debug(
             `Ctrl+B promote: matched executing shell tool call ${executingShell.request.callId}`,
           );
@@ -3353,9 +3484,10 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
         debugLogger.debug(
-          `Ctrl+B promote: no executing shell tool call; falling through ` +
+          `Ctrl+B promote: expected exactly one executing shell tool call; falling through ` +
             `(streamingState=${streamingState}, ` +
-            `pendingToolCalls=${pendingToolCallsRef.current.length})`,
+            `pendingToolCalls=${pendingToolCallsRef.current.length}, ` +
+            `promotableShells=${promotableShells.length})`,
         );
       }
     },
@@ -3497,9 +3629,12 @@ export const AppContainer = (props: AppContainerProps) => {
       statusLineSettingsVersion,
       statusLineConfigOverride,
       isMemoryDialogOpen,
+      isSkillReviewDialogOpen,
+      skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3633,9 +3768,12 @@ export const AppContainer = (props: AppContainerProps) => {
       statusLineSettingsVersion,
       statusLineConfigOverride,
       isMemoryDialogOpen,
+      isSkillReviewDialogOpen,
+      skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3763,6 +3901,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      dismissSkillReviewDialog,
+      closeSkillReviewDialog,
+      acceptPendingSkill,
+      rejectPendingSkill,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -3849,6 +3991,10 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      dismissSkillReviewDialog,
+      closeSkillReviewDialog,
+      acceptPendingSkill,
+      rejectPendingSkill,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,

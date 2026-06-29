@@ -17,6 +17,9 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
+  DaemonRewindResult,
+  DaemonRewindSnapshotInfo,
+  DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskStatus,
@@ -149,6 +152,7 @@ export type DaemonNoticeOperation =
   | 'cancel_prompt'
   | 'load_session'
   | 'resume_session'
+  | 'create_session'
   | 'close_session'
   | 'rename_session'
   | 'release_session'
@@ -159,6 +163,8 @@ export type DaemonNoticeOperation =
   | 'cancel_task'
   | 'clear_goal'
   | 'load_stats'
+  | 'rewind_snapshots'
+  | 'rewind_session'
   | 'refresh_commands'
   | 'recap_session'
   | 'btw_session'
@@ -275,9 +281,12 @@ export interface DaemonSessionActions {
     answers?: Record<string, string>,
   ): Promise<boolean>;
   heartbeat(): Promise<HeartbeatResult | undefined>;
-  listSessions(): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string): Promise<void>;
-  resumeSession(sessionId: string): Promise<void>;
+  listSessions(options?: {
+    pageSize?: number;
+  }): Promise<DaemonSessionSummary[]>;
+  loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  createSession(): Promise<DaemonSession>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
@@ -288,6 +297,11 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  getRewindSnapshots(): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
+  rewindSession(
+    promptId: string,
+    opts?: { rewindFiles?: boolean },
+  ): Promise<DaemonRewindResult>;
   btwSession(
     question: string,
     opts?: { signal?: AbortSignal },
@@ -314,6 +328,10 @@ export interface DaemonSessionActions {
     name?: string,
   ): Promise<{ sessionId: string; displayName: string }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
+}
+
+export interface SessionSwitchOptions {
+  deferTranscriptReset?: boolean;
 }
 
 export interface DaemonSessionContextValue {

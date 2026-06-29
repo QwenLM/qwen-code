@@ -47,7 +47,7 @@ describe('renderSoftwareCursor', () => {
   });
 });
 
-describe('getSoftwareCursorBackground theme-derived default', () => {
+describe('getSoftwareCursorBackground terminal-derived default', () => {
   function setDetectedTerminal(value: 'dark' | 'light') {
     (
       themeManager as unknown as { cachedAutoDetection: 'dark' | 'light' }
@@ -66,24 +66,22 @@ describe('getSoftwareCursorBackground theme-derived default', () => {
     ).terminalBackground = undefined;
   });
 
-  it('contrasts against the theme background when it matches the terminal', () => {
-    themeManager.setActiveTheme('Qwen Dark');
+  it('uses a light cursor on a dark terminal', () => {
     setDetectedTerminal('dark');
     expect(getSoftwareCursorBackground()).toBe('#D4D4D4');
   });
 
-  it('stays visible (light cursor) for a light theme forced onto a dark terminal', () => {
-    themeManager.setActiveTheme('Qwen Light');
-    setDetectedTerminal('dark');
-    // Without the terminal-aware default this would contrast against the light
-    // theme background and render a dark, near-invisible cursor on the dark
-    // terminal.
-    expect(getSoftwareCursorBackground()).toBe('#D4D4D4');
-  });
-
-  it('stays visible (dark cursor) for a dark theme forced onto a light terminal', () => {
-    themeManager.setActiveTheme('Qwen Dark');
+  it('uses a dark cursor on a light terminal', () => {
     setDetectedTerminal('light');
     expect(getSoftwareCursorBackground()).toBe('#3A3A3A');
+  });
+
+  it('derives contrast from the terminal, not the active theme', () => {
+    // The TUI never paints the theme background, so a light theme forced onto a
+    // dark terminal must still yield a light cursor that stays visible on the
+    // dark terminal.
+    themeManager.setActiveTheme('Qwen Light');
+    setDetectedTerminal('dark');
+    expect(getSoftwareCursorBackground()).toBe('#D4D4D4');
   });
 });

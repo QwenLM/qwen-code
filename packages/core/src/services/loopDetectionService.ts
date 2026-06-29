@@ -50,6 +50,12 @@ const FILE_READ_WINDOW = 15;
 // Action stagnation tracking
 const STAGNATION_THRESHOLD = 8;
 
+// Similar shell inspection commands are precise enough to guard always-on
+// when the model keeps rewriting overview-style repository checks instead of
+// making progress. Use the same threshold as the heuristic action-stagnation
+// guard to leave room for legitimate branch-review inspection.
+const SHELL_COMMAND_STAGNATION_THRESHOLD = STAGNATION_THRESHOLD;
+
 // Global tool call duplicate tracking: how many times the same (tool, args)
 // pair must appear across the entire turn (not necessarily consecutively)
 // before it is treated as a loop.
@@ -98,6 +104,12 @@ export class LoopDetectionService {
   // the model keeps calling one tool with varying arguments.
   private sameNameStreak = 0;
   private lastSeenToolName: string | null = null;
+
+  // Always-on shell inspection stagnation tracking. This is narrower than
+  // action stagnation: it only covers overview-style git inspection commands
+  // and excludes file-specific diffs that are normal during code review.
+  private lastShellInspectionKey: string | null = null;
+  private shellInspectionStreak = 0;
 
   // Cold-start gate for READ_FILE_LOOP: the opening exploration of a prompt
   // is almost always read-heavy (list + parallel reads). Until at least one
@@ -166,12 +178,13 @@ export class LoopDetectionService {
 
   /**
    * Convenience aggregate that runs every tier in order: the always-on
-   * safeties (consecutive-identical guard + per-turn cap) followed by the
-   * opt-in heuristics. Intended as a single "check everything" entry point for
-   * unit tests. Production code (client.ts) intentionally calls the tiers
-   * separately so the `skipLoopDetection` gate can sit between them — a new
-   * guard added here will NOT take effect in production unless it is also
-   * wired into checkAlwaysOnSafeties or addAndCheckHeuristicLoops.
+   * safeties (consecutive-identical guard, shell inspection-command
+   * stagnation guard, and per-turn cap) followed by the opt-in heuristics.
+   * Intended as a single "check everything" entry point for unit tests.
+   * Production code (client.ts) intentionally calls the tiers separately so
+   * the `skipLoopDetection` gate can sit between them — a new guard added here
+   * will NOT take effect in production unless it is also wired into
+   * checkAlwaysOnSafeties or addAndCheckHeuristicLoops.
    * @param event - The stream event to process
    * @returns true if any tier detects a loop, false otherwise
    */
@@ -215,7 +228,7 @@ export class LoopDetectionService {
         // to avoid firing on a duplicated replay — e.g. 3 identical calls +
         // Retry + 3 more would otherwise hit the global-duplicate threshold of
         // 6. The always-on guards reset their own counters in
-        // checkAlwaysOnSafeties' Retry branch (cap rollback + consecutive
+        // checkAlwaysOnSafeties' Retry branch (cap rollback + always-on
         // streak reset).
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
@@ -238,9 +251,10 @@ export class LoopDetectionService {
 
   /**
    * Always-on safety checks that fire regardless of the `skipLoopDetection`
-   * config default. Enforces two guards: the consecutive-identical tool-call
-   * loop and the per-turn tool-call cap. Call this before the gated heuristic
-   * checks so neither guard can be bypassed by configuration.
+   * config default. Enforces three guards: the consecutive-identical tool-call
+   * loop, the shell inspection-command stagnation loop, and the per-turn
+   * tool-call cap. Call this before the gated heuristic checks so none of the
+   * guards can be bypassed by configuration.
    */
   checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
     if (this.loopDetected) {
@@ -285,6 +299,14 @@ export class LoopDetectionService {
       return true;
     }
 
+    if (
+      !this.disabledForSession &&
+      this.checkShellCommandStagnation(event.value)
+    ) {
+      this.loopDetected = true;
+      return true;
+    }
+
     if (this.checkTurnToolCallCap()) {
       this.loopDetected = true;
       return true;
@@ -312,6 +334,112 @@ export class LoopDetectionService {
       return true;
     }
     return false;
+  }
+
+  private checkShellCommandStagnation(toolCall: {
+    name: string;
+    args: object;
+  }): boolean {
+    const key = this.getShellInspectionKey(toolCall);
+    if (!key) {
+      this.lastShellInspectionKey = null;
+      this.shellInspectionStreak = 0;
+      return false;
+    }
+
+    if (this.lastShellInspectionKey === key) {
+      this.shellInspectionStreak++;
+    } else {
+      this.lastShellInspectionKey = key;
+      this.shellInspectionStreak = 1;
+    }
+
+    if (this.shellInspectionStreak >= SHELL_COMMAND_STAGNATION_THRESHOLD) {
+      this.lastLoopType = LoopType.SHELL_COMMAND_STAGNATION;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.SHELL_COMMAND_STAGNATION, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  private getShellInspectionKey(toolCall: {
+    name: string;
+    args: object;
+  }): string | null {
+    if (toolCall.name !== 'run_shell_command') {
+      return null;
+    }
+
+    const command = (toolCall.args as { command?: unknown }).command;
+    if (typeof command !== 'string') {
+      return null;
+    }
+
+    return this.isGitOverviewInspectionCommand(command)
+      ? 'run_shell_command:git-inspection'
+      : null;
+  }
+
+  private isGitOverviewInspectionCommand(command: string): boolean {
+    // Only classify a command as overview inspection when *every* segment of
+    // the shell chain is a git status/diff/ls-files overview. A chain that also
+    // stages, commits, runs another tool, or inspects file-specific diffs is
+    // making progress, so it must not share the stagnation bucket and trip a
+    // false halt. Failing open is the safe direction for an always-on guard.
+    const segments = command
+      .split(/&&|\|\||[;&|\n]/)
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length === 0) {
+      return false;
+    }
+    return segments.every((segment) => {
+      const match =
+        /^git(?:\s+(?:-C\s+\S+|--no-pager))*\s+(status|diff|ls-files)\b/i.exec(
+          segment,
+        );
+      if (!match) {
+        return false;
+      }
+      return (
+        match[1]?.toLowerCase() !== 'diff' ||
+        this.isOverviewGitDiff(segment.slice(match[0].length))
+      );
+    });
+  }
+
+  private isOverviewGitDiff(args: string): boolean {
+    const trimmedArgs = args.trim();
+    if (!trimmedArgs) {
+      return true;
+    }
+
+    const tokens = trimmedArgs.split(/\s+/);
+    const pathspecSeparatorIndex = tokens.indexOf('--');
+    if (
+      pathspecSeparatorIndex !== -1 &&
+      pathspecSeparatorIndex < tokens.length - 1
+    ) {
+      return false;
+    }
+
+    return tokens.every(
+      (token) => token.startsWith('-') || this.isGitRevisionToken(token),
+    );
+  }
+
+  private isGitRevisionToken(token: string): boolean {
+    return (
+      token === 'HEAD' ||
+      token === '@' ||
+      /^(?:HEAD|@)(?:[~^]\d*)+$/.test(token) ||
+      /^[0-9a-f]{7,40}$/i.test(token) ||
+      /^[^\s]+\.{2,3}[^\s]+$/.test(token)
+    );
   }
 
   /**
@@ -752,6 +880,8 @@ export class LoopDetectionService {
   private resetToolCallCount(): void {
     this.lastToolCallKey = null;
     this.toolCallRepetitionCount = 0;
+    this.lastShellInspectionKey = null;
+    this.shellInspectionStreak = 0;
   }
 
   private resetContentTracking(resetHistory = true): void {

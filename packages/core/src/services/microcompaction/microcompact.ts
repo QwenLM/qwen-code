@@ -23,6 +23,7 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.GREP,
   ToolNames.GLOB,
   ToolNames.WEB_FETCH,
+  ToolNames.READ_MCP_RESOURCE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
 ]);
@@ -460,14 +461,10 @@ export function microcompactHistory(
   settings: ClearContextOnIdleSettings,
   opts?: MicrocompactOptions,
 ): { history: Content[]; meta?: MicrocompactMeta } {
-  const envKeep = process.env['QWEN_MC_KEEP_RECENT'];
-  const rawKeepRecent =
-    envKeep !== undefined && Number.isFinite(Number(envKeep))
-      ? Number(envKeep)
-      : (settings.toolResultsNumToKeep ?? 5);
-  const keepRecent = Number.isFinite(rawKeepRecent)
-    ? Math.max(1, rawKeepRecent)
-    : 5;
+  const keepRecent = resolveKeepRecent(
+    process.env['QWEN_MC_KEEP_RECENT'],
+    settings.toolResultsNumToKeep,
+  );
 
   let triggerReason: MicrocompactTriggerReason | undefined;
   let gapMs = 0;
@@ -668,4 +665,24 @@ export function microcompactHistory(
       unresolvedEvictedReads,
     },
   };
+}
+
+function resolveKeepRecent(
+  envValue: string | undefined,
+  settingsValue: number | undefined,
+): number {
+  const normalize = (value: number | undefined): number | undefined => {
+    if (value === undefined || !Number.isSafeInteger(value)) return undefined;
+    return Math.max(1, value);
+  };
+
+  if (envValue !== undefined) {
+    const trimmed = envValue.trim();
+    if (/^-?\d+$/.test(trimmed)) {
+      const envKeep = normalize(Number(trimmed));
+      if (envKeep !== undefined) return envKeep;
+    }
+  }
+
+  return normalize(settingsValue) ?? 5;
 }

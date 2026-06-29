@@ -29,6 +29,8 @@ vi.mock('../hooks/useMouseEvents.js', () => ({
   useMouseEvents: vi.fn(),
 }));
 
+import { toggleKeyHint } from './messages/ConversationMessages.js';
+
 describe('<HistoryItemDisplay />', () => {
   const mockConfig = {
     getChatRecordingService: () => undefined,
@@ -94,6 +96,20 @@ describe('<HistoryItemDisplay />', () => {
     const output = lastFrame() ?? '';
     expect(output.startsWith('\n')).toBe(false);
     expect(output).toContain('Read txt files');
+  });
+
+  it('renders the dim 🔎 notice for "vision_notice" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: MessageType.VISION_NOTICE,
+      text: 'Converted 1 image(s) to text via vm.',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('🔎');
+    expect(output).toContain('Converted 1 image(s) to text via vm.');
   });
 
   it('renders StatsDisplay for "stats" type', () => {
@@ -164,6 +180,21 @@ describe('<HistoryItemDisplay />', () => {
     );
     expect(lastFrame()).toContain(
       'No tool calls have been made in this session.',
+    );
+  });
+
+  it('renders SkillStatsDisplay for "skill_stats" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'skill_stats',
+    };
+    const { lastFrame } = renderWithProviders(
+      <SessionStatsProvider>
+        <HistoryItemDisplay {...baseItem} item={item} />
+      </SessionStatsProvider>,
+    );
+    expect(lastFrame()).toContain(
+      'No skill calls have been made in this session.',
     );
   });
 
@@ -358,7 +389,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('alt+t to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
     expect(output).not.toContain('Inspecting the repository');
   });
 
@@ -394,7 +425,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('alt+t to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
     expect(output).not.toContain('Inspecting the repository');
   });
 
@@ -414,7 +445,7 @@ describe('<HistoryItemDisplay />', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('Thought for');
-    expect(output).toContain('alt+t to collapse');
+    expect(output).toContain(`${toggleKeyHint} to collapse`);
     expect(output).toContain('Inspecting the repository');
   });
 

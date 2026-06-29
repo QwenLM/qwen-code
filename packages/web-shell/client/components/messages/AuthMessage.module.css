@@ -1,113 +1,194 @@
 .panel {
-  margin: 0 0 12px 14px;
-  padding: 10px 14px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--foreground);
   font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-primary);
-  background: var(--bg-primary);
-  max-width: min(920px, calc(100vw - 64px));
+  font-size: 12px;
 }
 
-.title {
-  font-weight: bold;
-  margin-bottom: 10px;
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stepPill {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+}
+
+.stepPillActive {
+  border-color: var(--agent-blue-500);
+  color: var(--agent-blue-500);
+}
+
+.stepPillDone {
+  color: var(--foreground);
+}
+
+.stepNumber {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--muted);
+  font-size: 11px;
+}
+
+.stepLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.body {
+  min-height: 220px;
 }
 
 .text {
-  color: var(--text-primary);
-  margin: 8px 0;
+  margin: 0 0 8px;
+  color: var(--foreground);
 }
 
 .muted {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .options {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin: 8px 0;
+  gap: 6px;
 }
 
 .option {
   display: flex;
-  gap: 6px;
-  align-items: baseline;
-  padding: 1px 0;
+  width: 100%;
+  min-width: 0;
+  align-items: flex-start;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--foreground);
+  background: transparent;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
 
-.optionActive .label {
-  color: var(--accent-color);
+.option:hover,
+.optionActive {
+  background: var(--secondary);
 }
 
-.pointer {
-  width: 2ch;
-  flex-shrink: 0;
-  color: var(--accent-color);
-  font-weight: bold;
+.optionActive .label {
+  color: var(--agent-blue-500);
+}
+
+.optionText {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .label {
-  color: var(--text-primary);
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--foreground);
+  font-weight: 500;
 }
 
 .description {
-  color: var(--text-secondary);
+  margin-top: 3px;
+  color: var(--muted-foreground);
   font-size: 12px;
-  margin-left: 2ch;
+  line-height: 1.45;
 }
 
 .input {
-  width: min(680px, 100%);
+  width: 100%;
   margin-top: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-primary);
-  background: var(--bg-secondary, var(--bg-primary));
-  font-family: var(--font-mono);
-  font-size: 13px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  background: var(--background);
+  font: inherit;
 }
 
 .input:focus {
-  outline: 1px solid var(--accent-color);
+  border-color: var(--agent-blue-500);
+  outline: none;
 }
 
 .preview {
-  max-height: 220px;
+  max-height: 260px;
   overflow: auto;
   margin-top: 8px;
   padding: 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  background: var(--bg-secondary, var(--bg-primary));
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  background: var(--background);
   white-space: pre-wrap;
 }
 
 .error {
-  margin-top: 8px;
-  color: var(--error-color, #e06c75);
+  color: var(--error-color, #ef4444);
 }
 
 .link {
   display: inline-block;
   margin-top: 8px;
-  color: var(--link-color, var(--accent-color));
+  color: var(--link-color, var(--agent-blue-500));
+  text-decoration: none;
+}
+
+.link:hover {
   text-decoration: underline;
 }
 
 .terms {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-color);
-  color: var(--text-primary);
+  margin-top: 10px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--muted-foreground);
 }
 
-.footer {
-  margin-top: 10px;
-  color: var(--text-secondary);
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.actionButton {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  background: var(--background);
+  font: inherit;
+  cursor: pointer;
+}
+
+.actionButton:hover:not(:disabled) {
+  background: var(--secondary);
+}
+
+.actionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }

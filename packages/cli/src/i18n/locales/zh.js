@@ -204,6 +204,7 @@ export default {
   'toolDisplayName.EnterWorktree': '进入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
+  'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -695,6 +696,7 @@ export default {
   'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
+  'Show skill-specific usage statistics.': '显示技能相关的使用统计信息',
   'Show daily token usage statistics.': '显示每日 token 使用统计信息',
   'Show monthly token usage statistics.': '显示每月 token 使用统计信息',
   'Export token usage statistics to CSV or JSON.':
@@ -1342,12 +1344,20 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
+    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换）',
+  "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
+    "⚠ '{{model}}' 不是已知的图像能力模型；视觉桥接处理图片时可能会失败。",
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
   'Toggle voice dictation input': '切换语音听写输入',
   'Set the model for voice transcription': '设置语音转写模型',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    '设置用于为纯文本主模型转写图像的图像能力模型',
   'Select Fast Model': '选择快速模型',
+  'Select Vision Model': '选择视觉模型',
   'Select Voice Model': '选择语音模型',
+  'Vision Model': '视觉模型',
   'Voice Model': '语音模型',
   'Selected voice model is unavailable.': '所选语音模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
@@ -1386,8 +1396,10 @@ export default {
     '语音听写需要麦克风访问。macOS 会在你首次录音时弹出授权请求——请同意后重新开始。弹窗打开期间的首次录音可能为空。',
   'Voice: recording': '语音：录音中',
   'Voice: transcribing': '语音：转写中',
+  'Voice: refining': '语音：优化中',
   'listening…': '聆听中…',
   'transcribing…': '转写中…',
+  'refining…': '优化中…',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1577,6 +1589,8 @@ export default {
   'not set': '未设置',
   'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
     '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
+  'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
+    '当前视觉模型：{{visionModel}}\n使用 "/model --vision <model-id>" 设置视觉桥接模型。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "语音模型 '{{modelName}}' 不唯一。请先配置唯一的模型 ID，再使用 /model --voice。",
   none: '无',
@@ -2158,6 +2172,7 @@ export default {
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
   'needs approval': '待审批',
+  'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
   Running: '运行中',

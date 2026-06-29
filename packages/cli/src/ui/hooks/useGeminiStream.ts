@@ -60,6 +60,8 @@ import {
   setActiveGoal,
   clearActiveGoal,
   createDuplicateProviderToolCallResponse,
+  markDuplicateProviderToolCallResponseSent,
+  findRepeatedDuplicateProviderToolCall,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -107,11 +109,6 @@ const debugLogger = createDebugLogger('GEMINI_STREAM');
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
-const VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT = 2048;
-// Untrusted vision-model output is shown in the terminal; strip ANSI/C0+C1
-// control escapes (keep \t, \n) so a crafted image can't inject sequences.
-// eslint-disable-next-line no-control-regex
-const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
@@ -119,26 +116,17 @@ interface PendingDuplicateToolResponses {
   responseParts: Part[];
 }
 
-function truncateVisionBridgeTranscript(transcript: string): string {
-  const safe = transcript.replace(TERMINAL_CONTROL_CHARS, '');
-  if (safe.length <= VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT) {
-    return safe;
-  }
-  return `${safe
-    .slice(0, VISION_BRIDGE_TRANSCRIPT_NOTICE_LIMIT)
-    .trimEnd()}\n[Transcript truncated]`;
-}
-
 /**
  * Build the user-facing notice shown when the vision bridge runs. On success it
  * states which model was used, how many images were converted (and omitted),
- * discloses the data egress (and endpoint, since auto-select can route to a
- * different host than the primary model), and includes the generated
- * transcription so the user can catch misreads. On failure it surfaces the
- * reason.
+ * and discloses the data egress (and endpoint, since auto-select can route to a
+ * different host than the primary model). On failure it surfaces the reason.
+ *
+ * The transcription itself is not shown: it is fed to the primary model and
+ * surfaced in its answer, so repeating it here only duplicated the description.
  *
  * @param result The structured result returned by the vision bridge.
- * @returns A multi-line notice string for the message history.
+ * @returns A notice string for the message history.
  */
 function formatVisionBridgeNotice(result: VisionBridgeResult): string {
   const modelName = result.modelId ?? 'vision model';
@@ -148,22 +136,23 @@ function formatVisionBridgeNotice(result: VisionBridgeResult): string {
   const egressNote = result.egressOccurred
     ? ` Your image and prompt/context were sent to ${target}.`
     : '';
+  // No leading glyph here: the renderer supplies the gutter prefix (🔎 for the
+  // dim notice, ✕ for the error variant). Baking one in too produced a doubled
+  // marker (e.g. `● 🔎 …`).
   if (result.status === 'failed') {
     const reason = result.egressOccurred
       ? 'the vision model request failed'
       : 'the vision bridge could not run';
-    return `⚠ Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+    return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
   }
   if (result.status === 'skipped') {
-    return `🔎 Vision bridge cancelled.${egressNote}`;
+    return `Vision bridge cancelled.${egressNote}`;
   }
   // On success the image was always sent, so disclose egress unconditionally.
   const omitted =
     result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
-  const header = `🔎 Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
-  return result.transcript
-    ? `${header}\n${truncateVisionBridgeTranscript(result.transcript)}`
-    : header;
+  const header = `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
+  return header;
 }
 
 /**
@@ -513,6 +502,11 @@ export const useGeminiStream = (
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
+  // Scoped to a top-level submit and cleared below before a new user prompt.
+  // Repeated duplicate provider ids within that submit are terminal/drop-only.
+  const duplicateProviderToolCallResponseIdsRef = useRef<Set<string>>(
+    new Set(),
+  );
   const pendingDuplicateToolResponsesRef = useRef<
     PendingDuplicateToolResponses[]
   >([]);
@@ -775,6 +769,12 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
+    // Aborting a tick-in-flight ends any self-paced /loop: drop pending loop
+    // wakeups so the loop doesn't resume after the cancelled tick. Only clears
+    // session wakeups (never cron jobs); lazily-creating an empty scheduler
+    // here is inert.
+    const loopWakeupsCancelled =
+      config.getCronScheduler()?.cancelAllWakeups() ?? 0;
     // Cancel any in-flight auxiliary work so its Promise.then doesn't add
     // stale content after the user cancelled.
     for (const ac of auxiliaryAbortRefsRef.current) {
@@ -794,6 +794,7 @@ export const useGeminiStream = (
       config.getModel(),
       prompt_id,
       config.getContentGeneratorConfig()?.authType,
+      loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
     );
     logApiCancel(config, cancellationEvent);
 
@@ -807,6 +808,17 @@ export const useGeminiStream = (
       },
       Date.now(),
     );
+    if (loopWakeupsCancelled > 0) {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: `Stopped the self-paced loop: cancelled ${loopWakeupsCancelled} pending wakeup${
+            loopWakeupsCancelled === 1 ? '' : 's'
+          }.`,
+        },
+        Date.now(),
+      );
+    }
     setPendingHistoryItem(null);
     clearRetryCountdown();
     // Wrap the consumer callback so a throw in AppContainer's cancel
@@ -873,7 +885,7 @@ export const useGeminiStream = (
             type:
               bridgeResult.status === 'failed'
                 ? MessageType.ERROR
-                : MessageType.INFO,
+                : MessageType.VISION_NOTICE,
             text: formatVisionBridgeNotice(bridgeResult),
           },
           timestamp,
@@ -1226,6 +1238,7 @@ export const useGeminiStream = (
         return newThoughtBuffer;
       }
 
+      streamingResponseLengthRef.current += thoughtText.length;
       const startingNewThought = currentThoughtBuffer.trim().length === 0;
       const description = startingNewThought
         ? stripLeadingBlankLines(newThoughtBuffer)
@@ -1976,6 +1989,23 @@ export const useGeminiStream = (
         const historyCallIdsWithResponse: Set<string> = geminiClient
           ? geminiClient.getHistoryFunctionResponseIds()
           : new Set<string>();
+        const handledProviderIds = new Set([
+          ...handledProviderToolCallIdsRef.current,
+          ...historyCallIdsWithResponse,
+        ]);
+        const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
+          toolCallRequests,
+          (request) => request.providerCallId,
+          handledProviderIds,
+          duplicateProviderToolCallResponseIdsRef.current,
+        );
+        if (repeatedDuplicateRequest?.providerCallId) {
+          debugLogger.debug(
+            `[processGeminiStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
+          );
+          loopDetectedRef.current = true;
+          return StreamProcessingStatus.Completed;
+        }
 
         for (const request of toolCallRequests) {
           const providerCallId = request.providerCallId;
@@ -1988,6 +2018,11 @@ export const useGeminiStream = (
             handledProviderToolCallIdsRef.current.has(providerCallId) ||
             historyCallIdsWithResponse.has(providerCallId)
           ) {
+            markDuplicateProviderToolCallResponseSent(
+              providerCallId,
+              duplicateProviderToolCallResponseIdsRef.current,
+            );
+
             const response = createDuplicateProviderToolCallResponse(request);
             debugLogger.debug(
               `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
@@ -2115,6 +2150,7 @@ export const useGeminiStream = (
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
         handledProviderToolCallIdsRef.current.clear();
+        duplicateProviderToolCallResponseIdsRef.current.clear();
         pendingDuplicateToolResponsesRef.current = [];
         immediateDuplicateToolResponsesRef.current = null;
       }

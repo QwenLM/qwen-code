@@ -1809,6 +1809,7 @@ export async function loadCliConfig(
   }
 
   const modelProvidersConfig = settings.modelProviders;
+  const providerProtocolConfig = settings.providerProtocol;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -1884,9 +1885,15 @@ export async function loadCliConfig(
     toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
     mcpServers,
+    topTierMcpServers,
     pendingMcpServers,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
+      : undefined,
+    // The flag ONLY (not the settings-derived list) — the hot-reload upper
+    // bound. Undefined when `--allowed-mcp-server-names` was not passed.
+    cliAllowedMcpServerNames: argv.allowedMcpServerNames
+      ? argv.allowedMcpServerNames.filter(Boolean)
       : undefined,
     excludedMcpServers: excludedMcpServers
       ? Array.from(excludedMcpServers)
@@ -1943,9 +1950,25 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
-    computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
+    // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
+    // through chrome-devtools-mcp (far lighter than the OS-level computer-use
+    // driver), so disable computer-use to keep the agent off that heavy path.
+    computerUseEnabled: (() => {
+      const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
+      // Surface the override when it contradicts an explicit opt-in, so the
+      // effective config isn't a silent surprise during debugging.
+      if (tunnelOn && settings.tools?.computerUse?.enabled === true) {
+        writeStderrLine(
+          'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
+            'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
+            'through chrome-devtools-mcp, so computer-use stays disabled.',
+        );
+      }
+      return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);
+    })(),
     computerUseMaxImageDimension:
       settings.tools?.computerUse?.maxImageDimension,
+    computerUseIdleTimeoutMs: settings.tools?.computerUse?.idleTimeoutMs,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
@@ -1956,6 +1979,7 @@ export async function loadCliConfig(
     outputFormat,
     includePartialMessages,
     modelProvidersConfig,
+    providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
@@ -1966,6 +1990,7 @@ export async function loadCliConfig(
     cliVersion: await getCliVersion(),
     ideMode,
     chatCompression: settings.model?.chatCompression,
+    autoCompactThreshold: settings.context?.autoCompactThreshold,
     folderTrust,
     interactive,
     trustedFolder,
@@ -1991,10 +2016,20 @@ export async function loadCliConfig(
     enableManagedAutoDream: bareMode
       ? false
       : (settings.memory?.enableManagedAutoDream ?? true),
+    enableTeamMemory: bareMode
+      ? false
+      : (settings.memory?.enableTeamMemory ?? false),
+    enableTeamMemorySync: bareMode
+      ? false
+      : (settings.memory?.enableTeamMemorySync ?? false),
     enableAutoSkill: bareMode
       ? false
       : (settings.memory?.enableAutoSkill ?? true),
+    autoSkillConfirm: bareMode
+      ? false
+      : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
+    visionModel: settings.visionModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
       ? undefined

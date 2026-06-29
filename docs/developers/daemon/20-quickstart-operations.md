@@ -16,7 +16,7 @@ qwen serve: bound to workspace "/your/cwd"
 qwen serve: bearer auth disabled (loopback default). Set QWEN_SERVER_TOKEN to enable.
 ```
 
-Open `http://127.0.0.1:4170/demo` in a browser to see the debug console: chat UI, event stream, and workspace inspection. In the default loopback dev mode, `/demo` is registered **before** `bearerAuth` in the loopback route branch of `packages/cli/src/serve/server.ts`, so no token is required.
+Open `http://127.0.0.1:4170/demo` in a browser to see the debug console: chat UI, event stream, and workspace inspection. In the default loopback dev mode, `createServeApp()` mounts the `/demo` route from `packages/cli/src/serve/routes/health-demo.ts` **before** `bearerAuth`, so no token is required.
 
 ## 2. Launch recipes
 
@@ -202,11 +202,11 @@ When bearer auth is enabled, add `-H "Authorization: Bearer $QWEN_SERVER_TOKEN"`
 
 **Yes.** It is implemented by `getDemoHtml(port)` in `packages/cli/src/serve/demo.ts` as self-contained HTML with no external dependency.
 
-| Launch mode                       | Where `/demo` is registered                                         | Direct browser navigation                              |
-| --------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------ |
-| Loopback without `--require-auth` | `server.ts` loopback pre-auth route branch, **before** `bearerAuth` | Works without token                                    |
-| Loopback with `--require-auth`    | `server.ts` post-auth route branch, **after** `bearerAuth`          | Difficult to use from a plain browser; use curl or SDK |
-| Non-loopback bind                 | `server.ts` post-auth route branch, **after** `bearerAuth`          | Same as above                                          |
+| Launch mode                       | Where `/demo` is registered                                                    | Direct browser navigation                              |
+| --------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| Loopback without `--require-auth` | `routes/health-demo.ts`, mounted by `createServeApp()` **before** `bearerAuth` | Works without token                                    |
+| Loopback with `--require-auth`    | `routes/health-demo.ts`, mounted by `createServeApp()` **after** `bearerAuth`  | Difficult to use from a plain browser; use curl or SDK |
+| Non-loopback bind                 | `routes/health-demo.ts`, mounted by `createServeApp()` **after** `bearerAuth`  | Same as above                                          |
 
 CSP is `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'`, plus `X-Frame-Options: DENY`. The page can only fetch `'self'` (the daemon) and cannot load external scripts or styles.
 
@@ -272,15 +272,24 @@ Key facts:
 
 ## 10. HTTP route file split
 
-The main assembly happens in `createServeApp()` in `server.ts`, which mounts four modular route files:
+The main assembly happens in `createServeApp()` in `server.ts`, which wires middleware and mounts focused route modules:
 
-| Routes                                                                                                                    | File                                                  | Mounting entry                                |
-| ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------- |
-| `/health`, `/demo`, `/capabilities`, all session routes, device flow, permission vote, SSE, and single-server MCP restart | `packages/cli/src/serve/server.ts`                    | Registered directly inside `createServeApp()` |
-| `/workspace/memory` (GET/POST)                                                                                            | `packages/cli/src/serve/workspace-memory.ts`           | `mountWorkspaceMemoryRoutes()`                |
-| All `/workspace/agents` CRUD routes                                                                                       | `packages/cli/src/serve/workspace-agents.ts`           | `mountWorkspaceAgentsRoutes()`                |
-| `GET /file`, `/file/bytes`, `/list`, `/glob`, `/stat`                                                                     | `packages/cli/src/serve/routes/workspace-file-read.ts`  | `registerWorkspaceFileReadRoutes()`           |
-| `POST /file/write`, `/file/edit`                                                                                          | `packages/cli/src/serve/routes/workspace-file-write.ts` | `registerWorkspaceFileWriteRoutes()`          |
+| Routes                                                                                       | File                                                    | Mounting entry                                                                 |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `/health`, `/demo`                                                                           | `packages/cli/src/serve/routes/health-demo.ts`          | `healthDemoRoutes.register()`                                                  |
+| `/daemon/status`                                                                             | `packages/cli/src/serve/routes/daemon-status.ts`        | `registerDaemonStatusRoutes()`                                                 |
+| `/capabilities`, workspace init/tool/MCP mutation routes, ACP HTTP bridge                    | `packages/cli/src/serve/server.ts`                      | Registered directly inside `createServeApp()`                                  |
+| Workspace status, env, preflight, MCP/tool/provider/skill summaries                          | `packages/cli/src/serve/routes/workspace-status.ts`     | `registerWorkspaceStatusRoutes()`, `registerWorkspaceDiagnosticStatusRoutes()` |
+| Workspace extensions and extension operations                                                | `packages/cli/src/serve/routes/workspace-extensions.ts` | `registerWorkspaceExtensionRoutes()`                                           |
+| `/workspace/memory` (GET/POST)                                                               | `packages/cli/src/serve/workspace-memory.ts`            | `mountWorkspaceMemoryRoutes()`                                                 |
+| All `/workspace/agents` CRUD routes                                                          | `packages/cli/src/serve/workspace-agents.ts`            | `mountWorkspaceAgentsRoutes()`                                                 |
+| `GET /file`, `/file/bytes`, `/list`, `/glob`, `/stat`                                        | `packages/cli/src/serve/routes/workspace-file-read.ts`  | `registerWorkspaceFileReadRoutes()`                                            |
+| `POST /file/write`, `/file/edit`                                                             | `packages/cli/src/serve/routes/workspace-file-write.ts` | `registerWorkspaceFileWriteRoutes()`                                           |
+| Workspace setup, trust, settings, permissions, and voice routes                              | `packages/cli/src/serve/routes/workspace-*.ts`          | `registerWorkspaceSetupGithubRoutes()`, `registerWorkspaceTrustRoutes()`, etc. |
+| Workspace auth provider and device-flow routes                                               | `packages/cli/src/serve/routes/workspace-auth.ts`       | `registerWorkspaceAuthRoutes()`                                                |
+| Session lifecycle, prompt, metadata, language, shell, recap, rewind, branch, and list routes | `packages/cli/src/serve/routes/session.ts`              | `registerSessionRoutes()`                                                      |
+| `GET /session/:id/events` SSE stream                                                         | `packages/cli/src/serve/routes/sse-events.ts`           | `registerSseEventsRoutes()`                                                    |
+| Permission response routes                                                                   | `packages/cli/src/serve/routes/permission.ts`           | `registerPermissionRoutes()`                                                   |
 
 For the complete route and wire protocol reference, see [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md). For architecture, see [`01-architecture.md`](./01-architecture.md).
 

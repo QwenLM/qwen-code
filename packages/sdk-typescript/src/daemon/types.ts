@@ -143,6 +143,8 @@ export interface DaemonSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
 }
 
 /**
@@ -297,6 +299,21 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   description?: string;
   extensionName?: string;
   /**
+   * Count of MCP resources (`resources/list`) this server advertises.
+   * Rides the base status so a client can show "Resources: N" and gate a
+   * resource browser without a separate fetch. Absent on older daemons;
+   * present (including `0`) on newer daemons for non-disabled servers.
+   * The full list is fetched lazily via `workspaceMcpResources()`.
+   */
+  resourceCount?: number;
+  /**
+   * Count of MCP prompts (`prompts/list`) this server advertises.
+   * Inline-only — prompts have no drill-down endpoint (they surface as
+   * slash commands). Absent on older daemons; present (including `0`) on
+   * newer daemons for non-disabled servers.
+   */
+  promptCount?: number;
+  /**
    * Why this server is not live, when known.
    * `'config'`  -- operator-disabled via `disabledMcpServers`.
    * `'budget'`  -- refused by the workspace MCP client budget
@@ -377,6 +394,34 @@ export interface DaemonWorkspaceMcpToolsStatus {
   initialized: boolean;
   acpChannelLive: boolean;
   tools: DaemonWorkspaceMcpToolStatus[];
+  errors?: DaemonStatusCell[];
+}
+
+/**
+ * One resource advertised by an MCP server (`resources/list`). Metadata
+ * only — content is read on demand in-chat via the `@<serverName>:<uri>`
+ * reference reconstructed from the parent `serverName` + this `uri`.
+ */
+export interface DaemonWorkspaceMcpResourceStatus {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/**
+ * Drill-down payload returned by `workspaceMcpResources(serverName)`.
+ * Mirrors `DaemonWorkspaceMcpToolsStatus`.
+ */
+export interface DaemonWorkspaceMcpResourcesStatus {
+  v: 1;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  resources: DaemonWorkspaceMcpResourceStatus[];
   errors?: DaemonStatusCell[];
 }
 
@@ -988,6 +1033,12 @@ export interface DaemonSessionStatsToolByName {
   };
 }
 
+export interface DaemonSessionStatsSkillByName {
+  count: number;
+  success: number;
+  fail: number;
+}
+
 /** Returned from `GET /session/:id/stats`. */
 export interface DaemonSessionStatsStatus {
   v: 1;
@@ -1007,6 +1058,12 @@ export interface DaemonSessionStatsStatus {
   files: {
     totalLinesAdded: number;
     totalLinesRemoved: number;
+  };
+  skills?: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    byName: Record<string, DaemonSessionStatsSkillByName>;
   };
 }
 
@@ -1101,6 +1158,107 @@ export interface DaemonSettingUpdateResult {
   requiresRestart: boolean;
 }
 
+export type DaemonVoiceMode = 'hold' | 'tap';
+
+export type DaemonVoiceTransport =
+  | 'qwen-asr-chat'
+  | 'qwen-asr-realtime'
+  | 'dashscope-task-realtime';
+
+export interface DaemonVoiceModelDescriptor {
+  id: string;
+  transport: DaemonVoiceTransport;
+}
+
+export interface DaemonWorkspaceVoiceStatus {
+  v: 1;
+  workspaceCwd: string;
+  enabled: boolean;
+  mode: DaemonVoiceMode;
+  language: string;
+  voiceModel: string | null;
+  availableVoiceModels: DaemonVoiceModelDescriptor[];
+}
+
+export interface DaemonWorkspaceVoiceUpdate {
+  enabled?: boolean;
+  mode?: DaemonVoiceMode;
+  language?: string;
+  voiceModel?: string;
+}
+
+export type DaemonVoiceAudioInput = Blob | ArrayBuffer | Uint8Array;
+
+export interface DaemonWorkspaceVoiceTranscribeOptions {
+  mimeType: string;
+  voiceModel?: string;
+  clientId?: string;
+}
+
+export interface DaemonWorkspaceVoiceTranscriptionResult {
+  v: 1;
+  text: string;
+  model: string;
+  transport: DaemonVoiceTransport;
+}
+
+export type DaemonWorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
+
+export type DaemonWorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';
+
+export type DaemonWorkspaceTrustLevel =
+  | 'TRUST_FOLDER'
+  | 'TRUST_PARENT'
+  | 'DO_NOT_TRUST';
+
+export interface DaemonWorkspaceTrustStatus {
+  v: 1;
+  workspaceCwd: string;
+  folderTrustEnabled: boolean;
+  effective: {
+    state: DaemonWorkspaceTrustState;
+    source: DaemonWorkspaceTrustSource;
+  };
+  explicitTrustLevel: DaemonWorkspaceTrustLevel | null;
+  requiresDaemonRestartForChanges: true;
+}
+
+export type DaemonWorkspaceTrustDesiredState = 'trusted' | 'untrusted';
+
+export interface DaemonWorkspaceTrustChangeRequest {
+  desiredState: DaemonWorkspaceTrustDesiredState;
+  reason?: string;
+}
+
+export interface DaemonWorkspaceTrustChangeResult {
+  accepted: boolean;
+  desiredState: DaemonWorkspaceTrustDesiredState;
+  requiresOperatorAction: true;
+}
+
+export type DaemonPermissionScope = 'user' | 'workspace';
+
+export type DaemonPermissionRuleType = 'allow' | 'ask' | 'deny';
+
+export interface DaemonPermissionRuleSet {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
+export interface DaemonWorkspacePermissionScopeState {
+  path: string;
+  rules: DaemonPermissionRuleSet;
+}
+
+export interface DaemonWorkspacePermissionsStatus {
+  v: 1;
+  user: DaemonWorkspacePermissionScopeState;
+  workspace: DaemonWorkspacePermissionScopeState;
+  merged: DaemonPermissionRuleSet;
+  isTrusted: boolean;
+}
+
 /**
  * Result body of `POST /workspace/init`.
  *
@@ -1120,6 +1278,38 @@ export interface DaemonSettingUpdateResult {
 export interface DaemonInitWorkspaceResult {
   path: string;
   action: 'created' | 'overwrote' | 'noop';
+}
+
+export interface DaemonGithubSetupRequest {
+  consent: true;
+}
+
+export interface DaemonGithubSetupWorkflowResult {
+  sourcePath: string;
+  path: string;
+  status: 'written' | 'failed';
+  sizeBytes?: number;
+  error?: string;
+}
+
+export interface DaemonGithubSetupGitignoreResult {
+  path: '.gitignore';
+  status: 'created' | 'updated' | 'unchanged' | 'failed' | 'skipped';
+  added?: string[];
+  error?: string;
+}
+
+export interface DaemonGithubSetupResult {
+  kind: 'github_setup';
+  workspaceCwd: string;
+  gitRepoRoot: string;
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: DaemonGithubSetupWorkflowResult[];
+  gitignore: DaemonGithubSetupGitignoreResult;
+  warnings: string[];
+  partial?: boolean;
 }
 
 /**

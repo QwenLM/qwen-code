@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, Extension } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isNodeError,
@@ -16,6 +16,9 @@ import {
   unescapePath,
   readManyFiles,
   shouldRunVisionBridge,
+  emptyMcpResourceText,
+  formatMcpResourceContents,
+  summarizeMcpResource,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemToolGroup,
@@ -24,16 +27,13 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { matchMcpServerPrefix } from './mcpResourceRef.js';
-
-/**
- * Per-resource caps for `@server:uri` injection. Files are bounded by
- * `readManyFiles`; MCP resource content is server-supplied and otherwise
- * unbounded, so cap the text that lands in the context window and skip
- * attachments too large to inline, to avoid context overflow / OOM from a
- * misbehaving or hostile server.
- */
-const MAX_MCP_RESOURCE_TEXT_CHARS = 100_000;
-const MAX_MCP_RESOURCE_BLOB_CHARS = 8_000_000; // ~6 MB binary as base64
+import {
+  parseExtensionRef,
+  matchExtensionByRef,
+  buildExtensionContextText,
+  buildExtensionRef,
+  sanitizeDisplayText,
+} from './extension-mention-ref.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -212,6 +212,13 @@ export async function resolveAtCommandQuery({
     uri: string;
   }> = [];
 
+  // Extension references (`@ext:<name>`) collected during the loop.
+  const activeExtensions = config.getActiveExtensions?.() ?? [];
+  const extensionMentions: Array<{
+    originalAtPath: string;
+    extension: Extension;
+  }> = [];
+
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
 
@@ -223,6 +230,28 @@ export async function resolveAtCommandQuery({
     }
 
     const pathName = originalAtPath.substring(1);
+
+    // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
+    // resolution. Only matches when the path starts with `ext:` and the name
+    // corresponds to an active extension.
+    const extRef = parseExtensionRef(pathName);
+    if (extRef) {
+      const extension = matchExtensionByRef(extRef.name, activeExtensions);
+      if (extension) {
+        if (
+          !extensionMentions.some((m) => m.extension.name === extension.name)
+        ) {
+          extensionMentions.push({ originalAtPath, extension });
+        }
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        continue;
+      }
+      onDebugMessage(
+        `Extension "${extRef.name}" not found among active extensions. ` +
+          `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+      );
+      continue;
+    }
 
     // MCP resource reference (`@server:uri`): detected BEFORE filesystem
     // resolution so a resource URI containing ':' / '//' isn't mistaken for
@@ -421,96 +450,42 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
-    // Build the injected parts framed with attribution delimiters, and cap
-    // the text so a misbehaving/hostile server can't blow the context window
-    // (files are capped by readManyFiles; resource content was previously
-    // uncapped). The framing also gives the model a clear boundary between
-    // its user's prompt and untrusted server-supplied content.
-    const contentParts: Part[] = [];
-    let textChars = 0;
-    let blobChars = 0;
-    let blobCount = 0;
-    let truncated = false;
-    for (const content of outcome.value.contents ?? []) {
-      if ('text' in content && typeof content.text === 'string') {
-        const remaining = MAX_MCP_RESOURCE_TEXT_CHARS - textChars;
-        if (remaining <= 0) {
-          truncated = content.text.length > 0 || truncated;
-          continue;
-        }
-        const text =
-          content.text.length > remaining
-            ? content.text.slice(0, remaining)
-            : content.text;
-        if (text.length < content.text.length) {
-          truncated = true;
-        }
-        if (text.length > 0) {
-          contentParts.push({ text });
-          textChars += text.length;
-        }
-      } else if ('blob' in content && typeof content.blob === 'string') {
-        // Cap CUMULATIVE blob size per resource, not just each blob: a server
-        // returning many sub-limit blobs in one response could otherwise still
-        // inject unbounded data (e.g. 50 × 7.9 MB) into the prompt / API call.
-        if (blobChars + content.blob.length > MAX_MCP_RESOURCE_BLOB_CHARS) {
-          truncated = true;
-          continue;
-        }
-        blobChars += content.blob.length;
-        contentParts.push({
-          inlineData: {
-            mimeType:
-              typeof content.mimeType === 'string'
-                ? content.mimeType
-                : 'application/octet-stream',
-            data: content.blob,
-          },
-        });
-        blobCount += 1;
-      }
-    }
-
-    if (contentParts.length > 0) {
-      resourceParts.push({
-        text: `\n--- Content from MCP resource ${label} ---\n`,
-      });
-      resourceParts.push(...contentParts);
-      resourceParts.push({ text: `\n--- End of MCP resource ${label} ---\n` });
+    // Shared formatter (see `formatMcpResourceContents`): caps text/blob size,
+    // promotes blobs to media parts, and frames the content with attribution
+    // delimiters so the model gets a clear boundary around untrusted,
+    // server-supplied content. Kept identical to the `read_mcp_resource` tool.
+    const formatted = formatMcpResourceContents(outcome.value, label);
+    if (formatted.parts.length > 0) {
+      resourceParts.push(...formatted.parts);
+    } else {
+      // Empty read: inject the same attributed diagnostic the `read_mcp_resource`
+      // tool surfaces, so the model never gets a dangling `@server:uri` with zero
+      // content and zero explanation (the two paths must not diverge).
+      resourceParts.push({ text: emptyMcpResourceText(formatted, label) });
     }
     resourceLabels.push(label);
 
     // Reflect what was actually injected so a success card never hides an
     // empty/truncated read (no `contents`, or only non-text/non-blob entries
     // such as resource links / metadata).
-    const summary: string[] = [];
-    if (textChars > 0) {
-      summary.push(`${textChars} chars`);
-    }
-    if (blobCount > 0) {
-      summary.push(`${blobCount} attachment${blobCount === 1 ? '' : 's'}`);
-    }
-    // `truncated` is a top-level suffix so it also surfaces for skipped/
-    // capped blobs, not just text.
     resourceDisplays.push({
       callId,
       name: 'Read MCP Resource',
       description: `Read resource ${label}`,
       status: ToolCallStatus.Success,
-      resultDisplay:
-        summary.length > 0
-          ? `Injected ${summary.join(' + ')}${truncated ? ' (truncated)' : ''}`
-          : truncated
-            ? '(content too large — skipped)'
-            : '(no readable content)',
+      resultDisplay: summarizeMcpResource(formatted),
       confirmationDetails: undefined,
     });
   }
 
   // Fallback for lone "@" or completely invalid @-commands resulting in empty
   // initialQueryText — only when there is nothing to read at all (no valid
-  // file paths AND no resource references).
-  if (pathSpecsToRead.length === 0 && mcpResourceRefs.length === 0) {
+  // file paths, resource references, or extension mentions).
+  if (
+    pathSpecsToRead.length === 0 &&
+    mcpResourceRefs.length === 0 &&
+    extensionMentions.length === 0
+  ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
@@ -526,8 +501,95 @@ export async function resolveAtCommandQuery({
     };
   }
 
+  // Build extension context parts and display cards for @-mentioned extensions.
+  // Processed BEFORE file reads so that extension labels/displays are available
+  // in the file-read error path (mirroring how resourceDisplays/resourceLabels
+  // are already built before the file read).
+  // Aggregate cap across all extensions to prevent unbounded context injection.
+  const EXTENSION_CONTEXT_BUDGET = 200_000; // 200KB total
+  const PER_FILE_CAP = 50_000; // 50KB per context file
+  let extensionContextBudgetRemaining = EXTENSION_CONTEXT_BUDGET;
+
+  const extensionParts: Part[] = [];
+  const extensionDisplays: IndividualToolCallDisplay[] = [];
+  const extensionLabels: string[] = [];
+  for (let i = 0; i < extensionMentions.length; i++) {
+    const { extension } = extensionMentions[i];
+    const displayName =
+      sanitizeDisplayText(extension.displayName || extension.name) ||
+      extension.name;
+    const callId = `client-extension-${userMessageTimestamp}-${i}`;
+
+    let contextText = buildExtensionContextText(extension);
+
+    // Read extension context files in parallel, with symlink-aware path
+    // traversal and budget checks.
+    if (extension.contextFiles && extension.contextFiles.length > 0) {
+      const fileReads = await Promise.allSettled(
+        extension.contextFiles.map(async (contextFilePath) => {
+          // Resolve symlinks to prevent path traversal via symlinks within
+          // the extension directory (e.g., context.md -> ~/.ssh/id_rsa).
+          let realPath: string;
+          let realExtPath: string;
+          try {
+            realPath = await fs.realpath(contextFilePath);
+            realExtPath = await fs.realpath(extension.path);
+          } catch {
+            onDebugMessage(
+              `Skipping unreadable context file: ${contextFilePath}`,
+            );
+            return null;
+          }
+          if (!isSubpath(realExtPath, realPath)) {
+            onDebugMessage(
+              `Skipping context file outside extension directory: ${contextFilePath}`,
+            );
+            return null;
+          }
+          return fs.readFile(realPath, { encoding: 'utf-8', signal });
+        }),
+      );
+
+      for (let j = 0; j < fileReads.length; j++) {
+        const outcome = fileReads[j];
+        if (outcome.status === 'rejected') {
+          onDebugMessage(
+            `Failed to read extension context file ${extension.contextFiles[j]}: ${getErrorMessage(outcome.reason)}`,
+          );
+          continue;
+        }
+        const content = outcome.value;
+        if (!content || !content.trim()) continue;
+        if (extensionContextBudgetRemaining <= 0) {
+          onDebugMessage(
+            `Extension context budget exhausted, skipping remaining files.`,
+          );
+          break;
+        }
+        const cap = Math.min(PER_FILE_CAP, extensionContextBudgetRemaining);
+        const cappedContent =
+          content.length > cap
+            ? content.slice(0, cap) + '\n... (truncated)'
+            : content;
+        contextText += `\n\n${cappedContent}`;
+        extensionContextBudgetRemaining -= cappedContent.length;
+      }
+    }
+
+    extensionParts.push({ text: contextText });
+    extensionLabels.push(buildExtensionRef(extension.name));
+    extensionDisplays.push({
+      callId,
+      name: 'Activate Extension',
+      description: `Activated extension ${displayName}`,
+      status: ToolCallStatus.Success,
+      resultDisplay: undefined,
+      confirmationDetails: undefined,
+    });
+  }
+
   // Read files (if any). A hard read error aborts the turn, as before — but
-  // any resource tool-cards already gathered are still surfaced.
+  // any extension/resource tool-cards already gathered are still surfaced.
   const fileParts: Part[] = [];
   let fileDisplays: IndividualToolCallDisplay[] = [];
   if (pathSpecsToRead.length > 0) {
@@ -542,7 +604,6 @@ export async function resolveAtCommandQuery({
         ? result.contentParts
         : [result.contentParts];
 
-      // Create individual tool call displays for each file read
       fileDisplays = result.files.map((file, index) => ({
         callId: `client-read-${userMessageTimestamp}-${index}`,
         name: file.isDirectory ? 'Read Directory' : 'Read File',
@@ -557,7 +618,6 @@ export async function resolveAtCommandQuery({
       }));
 
       if (parts.length > 0 && !result.error) {
-        // readManyFiles now returns properly formatted parts with headers and prefixes
         for (const part of parts) {
           fileParts.push(typeof part === 'string' ? { text: part } : part);
         }
@@ -577,14 +637,19 @@ export async function resolveAtCommandQuery({
         typeof errorToolCallDisplay.resultDisplay === 'string'
           ? errorToolCallDisplay.resultDisplay
           : undefined;
-      // Resource labels are merged in too: a resource may have been read
-      // successfully before the file read failed, and its card is already in
-      // `resourceDisplays` above — the audit trail must not drop it.
-      const labelsOnError = [...contentLabelsForDisplay, ...resourceLabels];
+      const labelsOnError = [
+        ...extensionLabels,
+        ...contentLabelsForDisplay,
+        ...resourceLabels,
+      ];
       return {
         processedQuery: null,
         shouldProceed: false,
-        toolDisplays: [...resourceDisplays, errorToolCallDisplay],
+        toolDisplays: [
+          ...extensionDisplays,
+          ...resourceDisplays,
+          errorToolCallDisplay,
+        ],
         filesRead: labelsOnError,
         recording: {
           filesRead: labelsOnError,
@@ -602,15 +667,20 @@ export async function resolveAtCommandQuery({
   // positional alignment, so grouping is safe.
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
+    ...extensionParts,
     ...fileParts,
     ...resourceParts,
   ];
-  const allLabels = [...contentLabelsForDisplay, ...resourceLabels];
+  const allLabels = [
+    ...extensionLabels,
+    ...contentLabelsForDisplay,
+    ...resourceLabels,
+  ];
 
   return {
     processedQuery: processedQueryParts,
     shouldProceed: true,
-    toolDisplays: [...fileDisplays, ...resourceDisplays],
+    toolDisplays: [...extensionDisplays, ...fileDisplays, ...resourceDisplays],
     filesRead: allLabels,
     recording: {
       filesRead: allLabels,

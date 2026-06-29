@@ -173,6 +173,13 @@ export type HistoryItemRetryCountdown = HistoryItemBase & {
   text: string;
 };
 
+// Dim, tip-style disclosure shown when the vision bridge runs (success or
+// cancellation). Failures use the prominent ERROR variant instead.
+export type HistoryItemVisionNotice = HistoryItemBase & {
+  type: 'vision_notice';
+  text: string;
+};
+
 export type HistoryItemAbout = HistoryItemBase & {
   type: 'about';
   systemInfo: {
@@ -245,6 +252,10 @@ export type HistoryItemModelStats = HistoryItemBase & {
 
 export type HistoryItemToolStats = HistoryItemBase & {
   type: 'tool_stats';
+};
+
+export type HistoryItemSkillStats = HistoryItemBase & {
+  type: 'skill_stats';
 };
 
 export type HistoryItemQuit = HistoryItemBase & {
@@ -602,6 +613,7 @@ export type HistoryItemWithoutId =
   | HistoryItemWarning
   | HistoryItemSuccess
   | HistoryItemRetryCountdown
+  | HistoryItemVisionNotice
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
@@ -609,6 +621,7 @@ export type HistoryItemWithoutId =
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
+  | HistoryItemSkillStats
   | HistoryItemQuit
   | HistoryItemCompression
   | HistoryItemSummary
@@ -645,6 +658,7 @@ export enum MessageType {
   STATS = 'stats',
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
+  SKILL_STATS = 'skill_stats',
   QUIT = 'quit',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',
@@ -661,6 +675,7 @@ export enum MessageType {
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
+  VISION_NOTICE = 'vision_notice',
 }
 
 export interface InsightProgressProps {
@@ -722,6 +737,11 @@ export type Message =
     }
   | {
       type: MessageType.TOOL_STATS;
+      timestamp: Date;
+      content?: string;
+    }
+  | {
+      type: MessageType.SKILL_STATS;
       timestamp: Date;
       content?: string;
     }

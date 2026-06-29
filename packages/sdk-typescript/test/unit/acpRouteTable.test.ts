@@ -279,6 +279,12 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s18/lsp', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/lsp');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ sessionId: 's18' });
   });
 
   // ---- Granular workspace routes ----------------------------------------
@@ -317,6 +323,78 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/workspace/init', 'POST');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/workspace/init');
+  });
+
+  it('GET /workspace/trust maps to _qwen/workspace/trust', () => {
+    const result = matchRoute('/workspace/trust', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/trust');
+  });
+
+  it('POST /workspace/trust/request maps to _qwen/workspace/trust/request', () => {
+    const result = matchRoute('/workspace/trust/request', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/trust/request');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { desiredState: 'trusted', reason: 'operator prompt' },
+      'POST',
+    );
+    expect(params).toEqual({
+      desiredState: 'trusted',
+      reason: 'operator prompt',
+    });
+  });
+
+  it('GET /workspace/permissions maps to _qwen/workspace/permissions', () => {
+    const result = matchRoute('/workspace/permissions', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/permissions');
+  });
+
+  it('POST /workspace/permissions maps to _qwen/workspace/permissions/set', () => {
+    const body = {
+      scope: 'workspace',
+      ruleType: 'deny',
+      rules: ['Read(.env)'],
+    };
+    const result = matchRoute('/workspace/permissions', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/permissions/set');
+    expect(result!.mapping.extractParams(result!.segments, body, 'POST')).toBe(
+      body,
+    );
+  });
+
+  it('GET /workspace/voice maps to _qwen/workspace/voice', () => {
+    const result = matchRoute('/workspace/voice', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/voice');
+  });
+
+  it('POST /workspace/voice maps to _qwen/workspace/voice/set', () => {
+    const body = {
+      enabled: true,
+      mode: 'tap',
+      language: 'english',
+      voiceModel: 'qwen3-asr-flash',
+    };
+    const result = matchRoute('/workspace/voice', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/voice/set');
+    expect(result!.mapping.extractParams(result!.segments, body, 'POST')).toBe(
+      body,
+    );
+  });
+
+  it('POST /workspace/setup-github maps to _qwen/workspace/setup-github', () => {
+    const body = { consent: true };
+    const result = matchRoute('/workspace/setup-github', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/setup-github');
+    expect(result!.mapping.extractParams(result!.segments, body, 'POST')).toBe(
+      body,
+    );
   });
 
   it('GET /workspace/tools maps to _qwen/workspace/tools', () => {
@@ -383,6 +461,18 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/workspace/mcp/fs/tools', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/workspace/mcp/tools');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ serverName: 'fs' });
+  });
+
+  it('GET /workspace/mcp/:server/resources maps to _qwen/workspace/mcp/resources', () => {
+    const result = matchRoute('/workspace/mcp/fs/resources', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/resources');
     const params = result!.mapping.extractParams(
       result!.segments,
       undefined,

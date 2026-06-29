@@ -3,11 +3,13 @@ import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
+import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
   onConfirm: (id: string, selectedOption: string) => void;
+  variant?: 'inline' | 'floating';
 }
 
 export function parseTitle(title?: string): {
@@ -43,10 +45,13 @@ function extractContentText(request: PermissionRequest): string {
 }
 
 function isExecKind(request: PermissionRequest): boolean {
+  const toolName = request.toolName?.toLowerCase();
   return (
     request.kind === 'bash' ||
     request.kind === 'exec' ||
-    request.kind === 'shell'
+    request.kind === 'execute' ||
+    request.kind === 'shell' ||
+    toolName === 'run_shell_command'
   );
 }
 
@@ -56,6 +61,14 @@ function getCommandFromRawInput(request: PermissionRequest): string | null {
   if (typeof raw.command === 'string') return raw.command;
   if (typeof raw.input === 'string') return raw.input;
   return null;
+}
+
+function getDescriptionText(request: PermissionRequest): string | undefined {
+  const description = request.rawInput?.description;
+  if (typeof description === 'string' && description.trim()) {
+    return description.trim();
+  }
+  return request.title;
 }
 
 function getSafeDefaultIndex(options: PermissionRequest['options']): number {
@@ -72,20 +85,27 @@ function getSafeDefaultIndex(options: PermissionRequest['options']): number {
 }
 
 function getOptionRank(option: PermissionRequest['options'][number]): number {
-  if (option.kind === 'allow_once') return 0;
+  if (option.kind === 'reject_once' || option.kind === 'reject_always') {
+    return 0;
+  }
+  if (option.kind === 'allow_always' && option.id === 'proceed_always_user') {
+    return 1;
+  }
   if (
     option.kind === 'allow_always' &&
     option.id === 'proceed_always_project'
   ) {
-    return 1;
-  }
-  if (option.kind === 'allow_always' && option.id === 'proceed_always_user') {
     return 2;
   }
-  if (option.kind === 'allow_always') return 3;
-  if (option.kind === 'reject_once' || option.kind === 'reject_always') {
-    return 4;
+  if (
+    option.kind === 'allow_always' &&
+    (option.id === 'proceed_always_server' ||
+      option.id === 'proceed_always_tool')
+  ) {
+    return 3;
   }
+  if (option.kind === 'allow_always') return 3;
+  if (option.kind === 'allow_once') return 4;
   return 5;
 }
 
@@ -111,12 +131,31 @@ function getOptionI18nKey(
       return 'approval.option.allowAlwaysProject';
     if (option.id === 'proceed_always_user')
       return 'approval.option.allowAlwaysUser';
+    if (option.id === 'proceed_always_server')
+      return 'approval.option.allowAlwaysServer';
+    if (option.id === 'proceed_always_tool')
+      return 'approval.option.allowAlwaysTool';
     if (option.id === 'proceed_always') return 'approval.option.allowAllEdits';
   }
   return undefined;
 }
 
-export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
+function getOptionClassName(
+  option: PermissionRequest['options'][number],
+): string {
+  if (option.kind === 'allow_once') return styles.optionPrimary;
+  if (option.kind === 'allow_always') return styles.optionSecondary;
+  if (option.kind === 'reject_once' || option.kind === 'reject_always') {
+    return styles.optionPlain;
+  }
+  return styles.optionSecondary;
+}
+
+export function ToolApproval({
+  request,
+  onConfirm,
+  variant = 'inline',
+}: ToolApprovalProps) {
   const { t } = useI18n();
   const displayOptions = useMemo(
     () => orderPermissionOptions(request.options),
@@ -141,7 +180,11 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
     setSelected(safeDefaultIndex);
   }, [request.id]);
 
-  const { toolName, description } = parseTitle(request.title);
+  const parsedTitle = parseTitle(request.title);
+  const rawToolName =
+    request.toolName || parsedTitle.toolName || request.kind || 'Tool';
+  const toolName = localizeToolDisplayName(rawToolName, t);
+  const descriptionText = getDescriptionText(request);
   const contentText = extractContentText(request);
 
   const confirm = useCallback(
@@ -216,19 +259,34 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const command = getCommandFromRawInput(request);
 
   return (
-    <div className={styles.approval}>
+    <div
+      className={
+        variant === 'floating'
+          ? `${styles.approval} ${styles.floating}`
+          : styles.approval
+      }
+    >
       <div className={styles.header}>
         <span className={styles.icon}>?</span>
         <span className={styles.name}>{toolName}</span>
-        {description && <span className={styles.desc}>{description}</span>}
       </div>
+
+      {descriptionText && (
+        <div className={styles.desc} title={descriptionText}>
+          {descriptionText}
+        </div>
+      )}
 
       {isExec && command ? (
         <div className={styles.code}>
-          <pre className={styles.codeBlock}>{command}</pre>
+          <pre className={styles.codeBlock} title={command}>
+            {command}
+          </pre>
         </div>
       ) : contentText && contentText !== request.title ? (
-        <pre className={styles.content}>{contentText}</pre>
+        <pre className={styles.content} title={contentText}>
+          {contentText}
+        </pre>
       ) : null}
 
       <div className={styles.question}>
@@ -247,7 +305,9 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
           return (
             <div
               key={option.id}
-              className={`${styles.option} ${isSelected ? styles.optionActive : ''}`}
+              className={`${styles.option} ${getOptionClassName(option)} ${
+                isSelected ? styles.optionActive : ''
+              }`}
               onClick={() => confirm(option.id)}
             >
               <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>

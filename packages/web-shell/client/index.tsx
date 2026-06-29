@@ -1,8 +1,12 @@
+import type { ReactNode } from 'react';
 import {
   DaemonSessionProvider,
   DaemonWorkspaceProvider,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { RootErrorFallback } from './components/RootErrorFallback';
+import { normalizeLanguage, type WebShellLanguage } from './i18n';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -22,10 +26,45 @@ function resolveBaseUrl(baseUrl: string | undefined): string {
 }
 
 /**
- * Low-level UI component. Requires ancestor `DaemonWorkspaceProvider` and
- * `DaemonSessionProvider` from `@qwen-code/webui/daemon-react-sdk`.
+ * Top-level boundary so a catastrophic render failure degrades to a recoverable
+ * fallback instead of taking down the host page. Place it at the outermost point
+ * each entry owns: a boundary nested *inside* the daemon providers can't catch a
+ * throw from the providers themselves, so the batteries-included paths wrap the
+ * providers too.
  */
-export { App as WebShell };
+function RootBoundary({
+  language,
+  children,
+}: {
+  language?: WebShellLanguage;
+  children: ReactNode;
+}) {
+  return (
+    <ErrorBoundary
+      label="web-shell-root"
+      fallback={(error, reset) => (
+        <RootErrorFallback error={error} onRetry={reset} language={language} />
+      )}
+    >
+      {children}
+    </ErrorBoundary>
+  );
+}
+
+/**
+ * Low-level UI component. Requires ancestor `DaemonWorkspaceProvider` and
+ * `DaemonSessionProvider` from `@qwen-code/webui/daemon-react-sdk`. The consumer
+ * owns those providers, so this boundary covers only what we render (`App`).
+ */
+export function WebShell(props: WebShellProps) {
+  return (
+    <RootBoundary
+      language={props.language ? normalizeLanguage(props.language) : undefined}
+    >
+      <App {...props} />
+    </RootBoundary>
+  );
+}
 
 /**
  * Batteries-included component for product integrations. It wraps WebShell
@@ -42,34 +81,46 @@ export function WebShellWithProviders({
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
 
   return (
-    <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
-      <DaemonSessionProvider
-        initialSessionId={initialSessionId}
-        clientId={clientId}
-        suppressOwnUserEcho
-      >
-        <App {...webShellProps} />
-      </DaemonSessionProvider>
-    </DaemonWorkspaceProvider>
+    <RootBoundary
+      language={
+        webShellProps.language
+          ? normalizeLanguage(webShellProps.language)
+          : undefined
+      }
+    >
+      <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
+        <DaemonSessionProvider
+          initialSessionId={initialSessionId}
+          clientId={clientId}
+          suppressOwnUserEcho
+        >
+          <App {...webShellProps} />
+        </DaemonSessionProvider>
+      </DaemonWorkspaceProvider>
+    </RootBoundary>
   );
 }
 
 /** Alias for consumers who prefer a standalone naming style. */
 export const StandaloneWebShell = WebShellWithProviders;
 
-export type { WebShellProps } from './App';
+export type { WebShellProps, WebShellSidebarOptions } from './App';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
 export type {
   CommandDisplayCategory,
   CommandDisplayCategoryOrder,
 } from './utils/commandDisplay';
+export type { ComposerToolbarAction } from './components/ChatEditor';
 export type {
   MarkdownContentSource,
   MarkdownRenderContext,
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  ComposerToolbarStartRenderer,
+  WebShellComposerToolbarStartRenderInfo,
+  WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
   WebShellMarkdownCustomization,
 } from './customization';

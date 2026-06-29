@@ -42,6 +42,7 @@ import type {
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
@@ -141,7 +142,9 @@ export interface DaemonGlobResult {
 
 export interface DaemonWorkspaceActions {
   // Sessions
-  listSessions(): Promise<DaemonSessionSummary[]>;
+  listSessions(options?: {
+    pageSize?: number;
+  }): Promise<DaemonSessionSummary[]>;
   deleteSession(sessionId: string): Promise<boolean>;
   deleteSessions(sessionIds: string[]): Promise<{
     removed: string[];
@@ -152,6 +155,9 @@ export interface DaemonWorkspaceActions {
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
+  loadMcpResources(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpResourcesStatus>;
   restartMcpServer(serverName: string): Promise<DaemonMcpRestartResult>;
   manageMcpServer(
     serverName: string,

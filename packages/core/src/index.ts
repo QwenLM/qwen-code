@@ -33,10 +33,12 @@ export {
   type ModelConfigValidationResult,
   ModelRegistry,
   modelRegistryKey,
+  resolveProviderProtocol,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,
   type ModelProvidersConfig,
+  type ProviderProtocolConfig,
   type ModelSwitchMetadata,
   MODEL_GENERATION_CONFIG_FIELDS,
   type OnModelChangeCallback,
@@ -69,6 +71,7 @@ export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
 export * from './core/toolCallIdUtils.js';
 export * from './core/turn.js';
+export * from './core/turn-interruption.js';
 
 // ============================================================================
 // Tools
@@ -83,6 +86,9 @@ export * from './tools/tools.js';
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
+// Shared MCP resource content formatter (used by the `@` injection path and
+// the read_mcp_resource tool).
+export * from './tools/mcp-resource-content.js';
 // pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
@@ -105,6 +111,7 @@ export * from './tools/mcp-tool.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
+export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
@@ -136,6 +143,10 @@ export type { GlobTool, GlobToolParams, GlobPath } from './tools/glob.js';
 export type { GrepTool, GrepToolParams } from './tools/grep.js';
 export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';
 export type { LspTool, LspToolParams, LspOperation } from './tools/lsp.js';
+export type {
+  ReadMcpResourceTool,
+  ReadMcpResourceToolParams,
+} from './tools/read-mcp-resource.js';
 export type {
   ShellTool,
   ShellToolParams,
@@ -363,6 +374,8 @@ export {
 export * from './extension/index.js';
 export * from './prompts/mcp-prompts.js';
 export * from './skills/index.js';
+export * from './skills/bundled/loop/loop-task-file.js';
+export * from './skills/bundled/loop/loop-tick-resolver.js';
 export * from './subagents/index.js';
 export * from './agents/index.js';
 
@@ -501,6 +514,7 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
+export { buildContextUsage } from './hooks/context-usage.js';
 
 // ============================================================================
 // Goals (/goal command runtime)

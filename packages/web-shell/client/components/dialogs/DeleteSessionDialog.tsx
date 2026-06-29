@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 
@@ -29,10 +28,10 @@ export function DeleteSessionDialog({
   const [deleting, setDeleting] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (sessionsError) setMessage(sessionsError.message);
@@ -74,6 +73,10 @@ export function DeleteSessionDialog({
       | undefined;
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   const toggleSelection = useCallback(
     (sessionId: string) => {
@@ -184,152 +187,38 @@ export function DeleteSessionDialog({
     t,
   ]);
 
-  useDelayedGlobalKeyDown(
-    (e: KeyboardEvent) => {
-      if (deleting) return;
-      if (searchMode) {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          if (searchQuery) {
-            setSearchQuery('');
-          } else {
-            setSearchMode(false);
-          }
-          return;
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          if (filtered.length > 0) {
-            setSearchMode(false);
-            setSelectedIdx(0);
-          }
-          return;
-        }
-        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-          e.preventDefault();
-          setSearchMode(false);
-          if (e.key === 'ArrowDown') {
-            setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
-          }
-        }
-        return;
-      }
-
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        if (searchQuery) {
-          setSearchQuery('');
-          setSelectedIdx(0);
-        } else {
-          onClose();
-        }
-        return;
-      }
-      if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
-        setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
-        return;
-      }
-      if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
-        if (selectedIdx === 0) {
-          setSearchMode(true);
-        } else {
-          setSelectedIdx((i) => Math.max(i - 1, 0));
-        }
-        return;
-      }
-      if (e.key === ' ') {
-        e.preventDefault();
-        const session = filtered[selectedIdx];
-        if (session) toggleSelection(session.sessionId);
-        return;
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleDelete();
-        return;
-      }
-      if (e.key === '/') {
-        e.preventDefault();
-        setSearchMode(true);
-      }
-    },
-    [
-      deleting,
-      filtered,
-      handleDelete,
-      onClose,
-      searchMode,
-      searchQuery,
-      selectedIdx,
-      toggleSelection,
-    ],
-  );
-
   const hasSelection = selectedIds.size > 0;
+  const canDelete = !deleting && !loading && hasSelection;
 
   return (
-    // Hover selection is intentionally disabled here: otherwise a stationary
-    // mouse can override the row selected by keyboard ↑↓ navigation.
-    <div className={dp('resume-picker', 'resume-picker-keyboard-only')}>
-      <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>{t('delete.title')}</span>
-        {hasSelection && (
-          <span className={dp('resume-picker-count')}>
-            ({t('delete.selected', { count: selectedIds.size })})
-          </span>
-        )}
-        {!hasSelection && searchQuery && (
-          <span className={dp('resume-picker-count')}>
-            ({t('delete.matches', { count: filtered.length })})
-          </span>
-        )}
-        <button
-          className={dp('resume-picker-close')}
-          onClick={onClose}
-          title={t('common.close')}
-        >
-          ESC
-        </button>
-      </div>
-
+    <div className={dp('resume-picker', 'resume-picker-in-shell')}>
       <div className={dp('resume-picker-search')}>
-        {searchMode ? (
-          <>
-            <span className={dp('resume-picker-search-label')}>
-              {t('resume.search')}:{' '}
-            </span>
-            <input
-              className={dp('resume-picker-search-input')}
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setSelectedIdx(0);
-              }}
-              autoFocus
-              placeholder=""
-            />
-          </>
-        ) : searchQuery ? (
-          <>
-            <span className={dp('resume-picker-search-label')}>
-              {t('resume.filter')}:{' '}
-            </span>
-            <span className={dp('resume-picker-search-value')}>
-              {searchQuery}
-            </span>
-          </>
-        ) : (
-          <span className={dp('resume-picker-search-hint')}>
-            {message ||
-              (deleting
-                ? t('delete.deleting')
-                : loading
-                  ? t('common.loading')
-                  : t('delete.pressSearch'))}
-          </span>
-        )}
+        <span className={dp('resume-picker-search-label')}>
+          {t('resume.search')}:{' '}
+        </span>
+        <input
+          ref={inputRef}
+          className={dp('resume-picker-search-input')}
+          value={searchQuery}
+          onChange={(e) => {
+            setSearchQuery(e.target.value);
+            setSelectedIdx(0);
+            setSelectedIds(new Set());
+          }}
+          placeholder=""
+        />
+        <span className={dp('resume-picker-search-hint')}>
+          {message ||
+            (deleting
+              ? t('delete.deleting')
+              : loading
+                ? t('common.loading')
+                : hasSelection
+                  ? t('delete.selected', { count: selectedIds.size })
+                  : searchQuery
+                    ? t('delete.matches', { count: filtered.length })
+                    : '')}
+        </span>
       </div>
 
       <div className={dp('resume-picker-sep')} />
@@ -361,7 +250,7 @@ export function DeleteSessionDialog({
                 className={dp(
                   'resume-picker-item',
                   'resume-picker-session-item',
-                  i === selectedIdx && !searchMode ? 'selected' : undefined,
+                  isChecked ? 'selected' : undefined,
                   isCurrent ? 'resume-picker-item-current' : undefined,
                   isCurrent ? 'disabled' : undefined,
                 )}
@@ -371,9 +260,6 @@ export function DeleteSessionDialog({
                 }}
               >
                 <div className={dp('resume-picker-item-row')}>
-                  <span className={dp('resume-picker-item-prefix')}>
-                    {i === selectedIdx && !searchMode ? '›' : ' '}
-                  </span>
                   <span className={dp('resume-picker-item-checkbox')}>
                     {checkbox}
                   </span>
@@ -406,9 +292,23 @@ export function DeleteSessionDialog({
       </div>
 
       <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-footer')}>
-        {searchMode ? t('dialog.footer.search') : t('delete.footer')}
+      <div className={dp('dialog-footer-actions')}>
+        <button
+          type="button"
+          className={dp('dialog-inline-button')}
+          onClick={onClose}
+          disabled={deleting}
+        >
+          {t('common.cancel')}
+        </button>
+        <button
+          type="button"
+          className={dp('dialog-danger-button')}
+          onClick={handleDelete}
+          disabled={!canDelete}
+        >
+          {deleting ? t('delete.deleting') : t('delete.action')}
+        </button>
       </div>
     </div>
   );

@@ -8,9 +8,13 @@ Your plugin sits in the Platform Adapter layer. You handle platform-specific con
 
 ```
 Your Plugin  →  builds Envelope  →  handleInbound()
-ChannelBase  →  gates → commands → routing → AcpBridge.prompt()
+ChannelBase  →  gates → commands → routing → ChannelAgentBridge.prompt()
 ChannelBase  →  calls your sendMessage() with the agent's response
 ```
+
+`ChannelAgentBridge` is the adapter-facing bridge contract. The current standalone `qwen channel start` path provides an `AcpBridge`, but plugin code should type constructor parameters as `ChannelAgentBridge` so the same adapter can run behind other bridge implementations later.
+
+Migration note for existing TypeScript plugins: if your adapter constructor or factory explicitly types `bridge` as `AcpBridge`, change that annotation to `ChannelAgentBridge` and keep using only the methods exposed by that contract. JavaScript plugins are unaffected at runtime, and standalone `qwen channel start` still passes the current `AcpBridge` implementation.
 
 ## The Plugin Object
 
@@ -35,9 +39,23 @@ Extend `ChannelBase` and implement three methods:
 
 ```typescript
 import { ChannelBase } from '@qwen-code/channel-base';
-import type { Envelope } from '@qwen-code/channel-base';
+import type {
+  ChannelBaseOptions,
+  ChannelAgentBridge,
+  ChannelConfig,
+  Envelope,
+} from '@qwen-code/channel-base';
 
 export class MyChannel extends ChannelBase {
+  constructor(
+    name: string,
+    config: ChannelConfig,
+    bridge: ChannelAgentBridge,
+    options?: ChannelBaseOptions,
+  ) {
+    super(name, config, bridge, options);
+  }
+
   async connect(): Promise<void> {
     // Connect to your platform, register message handlers
     // When a message arrives:
@@ -63,6 +81,8 @@ export class MyChannel extends ChannelBase {
   }
 }
 ```
+
+Most adapters should pass `options` through unchanged. If an adapter creates its own `SessionRouter` and passes that router to `super()`, set `registerBridgeEvents: true` in `ChannelBaseOptions` so `ChannelBase` still receives `toolCall` and `sessionDied` events directly. Leave it unset for routers supplied by the channel gateway.
 
 ## The Envelope
 

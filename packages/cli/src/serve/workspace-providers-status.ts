@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ModelsConfig, tokenLimit } from '@qwen-code/qwen-code-core';
+import {
+  ModelsConfig,
+  resolveProviderProtocol,
+  tokenLimit,
+} from '@qwen-code/qwen-code-core';
 import type { AuthType } from '@qwen-code/qwen-code-core';
 import type {
   ServeWorkspaceProviderCurrent,
@@ -71,6 +75,7 @@ function buildWorkspaceProvidersStatus(
     const modelsConfig = new ModelsConfig({
       initialAuthType: selectedAuthType,
       modelProvidersConfig: settings.modelProviders,
+      providerProtocolConfig: settings.providerProtocol,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });
@@ -95,9 +100,12 @@ function buildWorkspaceProvidersStatus(
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
     const explicitModelBaseUrls = buildExplicitModelBaseUrls(
       settings.modelProviders,
+      settings.providerProtocol,
     );
 
-    for (const model of modelsConfig.getAllConfiguredModels()) {
+    for (const model of modelsConfig
+      .getAllConfiguredModels()
+      .filter(isMainSelectableModel)) {
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);
       let provider = providers.get(authType);
@@ -192,6 +200,13 @@ function buildWorkspaceProvidersStatus(
   }
 }
 
+function isMainSelectableModel(model: {
+  fastOnly?: boolean;
+  voiceOnly?: boolean;
+}): boolean {
+  return model.fastOnly !== true && model.voiceOnly !== true;
+}
+
 function matchesCurrentModel(
   currentModelId: string,
   baseModelId: string,
@@ -211,11 +226,14 @@ function matchesCurrentBaseUrl(
 
 function buildExplicitModelBaseUrls(
   modelProviders: Settings['modelProviders'],
+  providerProtocol: Settings['providerProtocol'],
 ): Set<string> {
   const baseUrls = new Set<string>();
   if (!modelProviders) return baseUrls;
 
-  for (const [authType, providerConfig] of Object.entries(modelProviders)) {
+  for (const [providerId, providerConfig] of Object.entries(modelProviders)) {
+    const authType = resolveProviderProtocol(providerId, providerProtocol);
+    if (!authType) continue;
     const models = readProviderModels(providerConfig);
     for (const model of models) {
       if (

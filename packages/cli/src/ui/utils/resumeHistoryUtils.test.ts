@@ -52,6 +52,7 @@ describe('resumeHistoryUtils', () => {
         },
         {
           type: 'assistant',
+          timestamp: '2026-01-15T14:30:00.000Z',
           message: {
             parts: [
               { text: 'Hi there' } as Part,
@@ -89,7 +90,12 @@ describe('resumeHistoryUtils', () => {
 
     expect(items).toEqual([
       { id: baseTimestamp + 1, type: 'user', text: 'Hello' },
-      { id: baseTimestamp + 2, type: 'gemini', text: 'Hi there' },
+      {
+        id: baseTimestamp + 2,
+        type: 'gemini',
+        text: 'Hi there',
+        timestamp: new Date('2026-01-15T14:30:00.000Z').getTime(),
+      },
       {
         id: baseTimestamp + 3,
         type: 'tool_group',
@@ -155,6 +161,7 @@ describe('resumeHistoryUtils', () => {
       messages: [
         {
           type: 'assistant',
+          timestamp: '2026-01-15T15:00:00.000Z',
           message: {
             parts: [
               {
@@ -190,7 +197,12 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}));
 
     expect(items).toEqual([
-      { id: expect.any(Number), type: 'gemini', text: 'visible text' },
+      {
+        id: expect.any(Number),
+        type: 'gemini',
+        text: 'visible text',
+        timestamp: new Date('2026-01-15T15:00:00.000Z').getTime(),
+      },
       {
         id: expect.any(Number),
         type: 'tool_group',
@@ -213,6 +225,7 @@ describe('resumeHistoryUtils', () => {
       messages: [
         {
           type: 'assistant',
+          timestamp: '2026-01-15T16:00:00.000Z',
           message: {
             parts: [
               {
@@ -238,7 +251,12 @@ describe('resumeHistoryUtils', () => {
         type: 'gemini_thought',
         text: 'preview thought',
       },
-      { id: expect.any(Number), type: 'gemini', text: 'visible text' },
+      {
+        id: expect.any(Number),
+        type: 'gemini',
+        text: 'visible text',
+        timestamp: new Date('2026-01-15T16:00:00.000Z').getTime(),
+      },
     ]);
   });
 
@@ -337,6 +355,7 @@ describe('resumeHistoryUtils', () => {
         },
         {
           type: 'assistant',
+          timestamp: '2026-01-15T17:00:00.000Z',
           message: { parts: [{ text: 'Follow-up' } as Part] },
         },
       ],
@@ -355,7 +374,12 @@ describe('resumeHistoryUtils', () => {
         type: 'about',
         systemInfo: expect.objectContaining({ cliVersion: '1.2.3' }),
       },
-      { id: 8, type: 'gemini', text: 'Follow-up' },
+      {
+        id: 8,
+        type: 'gemini',
+        text: 'Follow-up',
+        timestamp: new Date('2026-01-15T17:00:00.000Z').getTime(),
+      },
     ]);
   });
 
@@ -373,6 +397,7 @@ describe('resumeHistoryUtils', () => {
         },
         {
           type: 'assistant',
+          timestamp: '2026-01-15T18:00:00.000Z',
           message: { parts: [{ text: 'Follow-up' } as Part] },
         },
       ],
@@ -386,7 +411,12 @@ describe('resumeHistoryUtils', () => {
 
     expect(items).toEqual([
       { id: 21, type: 'user', text: '/filecmd', sentToModel: true },
-      { id: 22, type: 'gemini', text: 'Follow-up' },
+      {
+        id: 22,
+        type: 'gemini',
+        text: 'Follow-up',
+        timestamp: new Date('2026-01-15T18:00:00.000Z').getTime(),
+      },
     ]);
   });
 

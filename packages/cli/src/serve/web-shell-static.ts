@@ -4,14 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync } from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
-import { resolveBundleDir } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
+export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
  * Content-Security-Policy for the Web Shell HTML shell.
@@ -25,7 +23,7 @@ import { isServeDebugMode } from './debug-mode.js';
  * via a hash, externalise the inline patch) is a follow-up, not a blocker for
  * a loopback-default local tool.
  */
-export const WEB_SHELL_CSP = [
+const WEB_SHELL_CSP_DIRECTIVES = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
@@ -37,48 +35,27 @@ export const WEB_SHELL_CSP = [
   // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
   // attacker origin.
   "base-uri 'none'",
-  "frame-ancestors 'none'",
-].join('; ');
+];
 
 /**
- * Locate the built Web Shell assets directory (the one containing
- * `index.html` + `assets/`). Returns `undefined` when the assets are not
- * present — e.g. a `--cli-only` build, or running before `npm run build`
- * produced `packages/web-shell/dist` — so the caller can degrade to
- * API-only instead of crashing.
+ * Build the Web Shell CSP. `frame-ancestors` defaults to `'none'` (the caller
+ * also sets `X-Frame-Options: DENY`) to block clickjacking. When the daemon is
+ * started with `--allow-origin chrome-extension://<id>`, those extension
+ * origins are allowed to frame the shell so the extension can host the UI in a
+ * Chrome side panel (issue #5626); X-Frame-Options is dropped in that case
+ * since it can't express an allowlist.
  */
-export function resolveWebShellDir(): string | undefined {
-  const selfDir = path.dirname(fileURLToPath(import.meta.url));
-  // Require BOTH index.html and assets/: a partial build (index.html without
-  // its hashed chunks) would otherwise pass and serve a shell whose every
-  // script/style 404s. copy_bundle_assets.js applies the same two-part check.
-  const hasShell = (dir: string): boolean =>
-    existsSync(path.join(dir, 'index.html')) &&
-    existsSync(path.join(dir, 'assets'));
-
-  // esbuild bundle: this module is hoisted into dist/cli.js (or a
-  // dist/chunks/*.js shared chunk). `resolveBundleDir` strips the `chunks/`
-  // segment so we land on dist/, where copy_bundle_assets.js drops the UI as
-  // dist/web-shell/.
-  const bundled = path.join(resolveBundleDir(import.meta.url), 'web-shell');
-  if (hasShell(bundled)) return bundled;
-
-  // Non-bundled runs sit at different depths under the repo: tsx on source
-  // (packages/cli/src/serve/), per-package `tsc` output
-  // (packages/cli/dist/src/serve/), and the integration daemon harness
-  // (packages/cli/dist/index.js). Walk up from this module to find a sibling
-  // packages/web-shell/dist instead of hard-coding one `..` depth — which
-  // only matched the tsx case and left the transpiled layouts serving no UI.
-  let dir = selfDir;
-  for (let i = 0; i < 10; i++) {
-    const candidate = path.join(dir, 'packages', 'web-shell', 'dist');
-    if (hasShell(candidate)) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return undefined;
+export function buildWebShellCsp(
+  frameAncestors: readonly string[] = [],
+): string {
+  const fa = frameAncestors.length
+    ? `frame-ancestors ${frameAncestors.join(' ')}`
+    : "frame-ancestors 'none'";
+  return [...WEB_SHELL_CSP_DIRECTIVES, fa].join('; ');
 }
+
+/** Default (no-framing) Web Shell CSP. */
+export const WEB_SHELL_CSP = buildWebShellCsp();
 
 /**
  * True when the request is a top-level document navigation (address-bar
@@ -106,20 +83,33 @@ export function isDocumentNavigation(req: Request): boolean {
  * index.html references, so a stale shell would point at missing chunks; the
  * asset files themselves are immutable).
  */
-function createSendIndex(webShellDir: string): (res: Response) => void {
+function createSendIndex(
+  webShellDir: string,
+  frameAncestors: readonly string[] = [],
+): (res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
+  const csp = buildWebShellCsp(frameAncestors);
   return (res: Response): void => {
     res
       .status(200)
-      .set('Content-Security-Policy', WEB_SHELL_CSP)
-      .set('X-Frame-Options', 'DENY')
+      .set('Content-Security-Policy', csp)
       .set('X-Content-Type-Options', 'nosniff')
       .set('Referrer-Policy', 'no-referrer')
       .set(
+        // `microphone=(self)` lets the same-origin Web Shell document request
+        // the mic for voice dictation (the prompt won't even appear under an
+        // empty `microphone=()` allowlist). Still blocks cross-origin iframes;
+        // camera/geolocation/payment stay disabled (unused).
         'Permissions-Policy',
-        'camera=(), microphone=(), geolocation=(), payment=()',
+        'camera=(), microphone=(self), geolocation=(), payment=()',
       )
       .set('Cache-Control', 'no-cache');
+    // X-Frame-Options can't express an allowlist, so only send the hard DENY
+    // when no extension is permitted to frame the shell; otherwise CSP
+    // frame-ancestors (set above) governs framing.
+    if (frameAncestors.length === 0) {
+      res.set('X-Frame-Options', 'DENY');
+    }
     // `dotfiles: 'allow'` is required because the resolved path may pass
     // through a dotfile directory (e.g. ~/.nvm/.../web-shell/index.html).
     // The `send` library defaults to 'ignore' which returns a 404 for any
@@ -165,8 +155,9 @@ function createSendIndex(webShellDir: string): (res: Response) => void {
 export function mountWebShellAssets(
   app: Application,
   webShellDir: string,
+  frameAncestors: readonly string[] = [],
 ): void {
-  const sendIndex = createSendIndex(webShellDir);
+  const sendIndex = createSendIndex(webShellDir, frameAncestors);
   app.use(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {
@@ -213,8 +204,9 @@ export function mountWebShellAssets(
 export function mountWebShellSpaFallback(
   app: Application,
   webShellDir: string,
+  frameAncestors: readonly string[] = [],
 ): void {
-  const sendIndex = createSendIndex(webShellDir);
+  const sendIndex = createSendIndex(webShellDir, frameAncestors);
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (!isDocumentNavigation(req)) return next();
