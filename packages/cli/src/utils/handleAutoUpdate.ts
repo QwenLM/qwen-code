@@ -10,9 +10,8 @@ import { getInstallationInfo } from './installationInfo.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
 import type { HistoryItemWithoutId } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
-import { spawnWrapper } from './spawnWrapper.js';
+import { spawn } from 'node:child_process';
 import { performStandaloneUpdate } from './standalone-update.js';
-import type { spawn } from 'node:child_process';
 import os from 'node:os';
 
 const UPDATE_SUCCESS_MESSAGE =
@@ -25,7 +24,7 @@ export function handleAutoUpdate(
   info: UpdateObject | null,
   settings: LoadedSettings,
   projectRoot: string,
-  spawnFn: typeof spawn = spawnWrapper,
+  spawnFn: typeof spawn = spawn,
 ) {
   if (!info) {
     return;
