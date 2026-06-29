@@ -37,6 +37,7 @@ import {
   ApprovalMode,
   CompressionStatus,
   detectLoopSentinel,
+  detectAutonomousSentinel,
   LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
@@ -2730,6 +2731,11 @@ export class Session implements SessionContext {
               // changed fire, a short reminder when unchanged. Non-sentinel
               // prompts pass through untouched.
               const loopMode = detectLoopSentinel(prompt);
+              // A bare `/loop` arms an autonomous sentinel instead of a loop.md
+              // one; only one family can match a given prompt.
+              const autonomousMode = loopMode
+                ? null
+                : detectAutonomousSentinel(prompt);
               let loopTick: LoopTickResult | null = null;
               if (loopMode) {
                 const resolver = this.#getLoopTickResolver();
@@ -2798,36 +2804,47 @@ export class Session implements SessionContext {
                     );
                   }
                 }
+              } else if (autonomousMode) {
+                // A bare `/loop` arms an autonomous-loop sentinel (no prompt, no
+                // file). Resolve it to the autonomous preamble — full on the first
+                // fire, a short tick after. Synchronous: no fs read, so no
+                // folder-trust / transient handling.
+                loopTick =
+                  this.#getLoopTickResolver().resolveAutonomous(autonomousMode);
               }
               const modelText = loopTick ? loopTick.modelText : prompt;
               if (loopTick) {
                 debugLogger.debug(
-                  `loop tick: mode=${loopMode} delivery=${
+                  `loop tick: mode=${loopMode ?? autonomousMode} delivery=${
                     loopTick.full
                       ? 'full'
-                      : loopTick.sourceLabel
-                        ? 'reminder'
-                        : 'absent'
-                  } source=${loopTick.sourceLabel ?? 'none'} transient=${
-                    loopTick.transientError ?? false
-                  }`,
+                      : loopTick.autonomous
+                        ? 'autonomous-tick'
+                        : loopTick.sourceLabel
+                          ? 'reminder'
+                          : 'absent'
+                  } source=${loopTick.sourceLabel ?? 'none'} autonomous=${
+                    loopTick.autonomous ?? false
+                  } transient=${loopTick.transientError ?? false}`,
                 );
               }
               // For a loop tick echo a stable, relative label — never the bare
               // sentinel or the full task dump (and the resolver never hands back
               // the absolute path, which would leak the OS username / dir layout
               // into the ACP client UI); otherwise echo the prompt verbatim.
-              const echoText = loopTick
-                ? loopTick.sourceLabel
-                  ? `Loop tick — tasks from ${loopTick.sourceLabel}`
-                  : // A transient-error tick (buildTransientErrorTick) resolved a
-                    // file but couldn't read it this tick; it deliberately omits
-                    // sourceLabel, so don't conflate it with a genuinely-absent
-                    // loop.md. No errno/path here — those stay in the model text.
-                    loopTick.transientError
-                    ? 'Loop tick — loop.md temporarily unavailable'
-                    : 'Loop tick — loop.md not present'
-                : prompt;
+              const echoText = !loopTick
+                ? prompt
+                : // An autonomous tick (a bare-`/loop` sentinel, or a loop.md
+                  // sentinel whose file is gone and converged on the preamble).
+                  loopTick.autonomous
+                  ? 'Autonomous loop tick'
+                  : loopTick.sourceLabel
+                    ? `Loop tick — tasks from ${loopTick.sourceLabel}`
+                    : // The only remaining tick is a transient read failure
+                      // (buildTransientErrorTick): a loop.md exists but couldn't be
+                      // read this tick. A genuinely-absent loop.md converges on the
+                      // autonomous branch above, so there is no "not present" echo.
+                      'Loop tick — loop.md temporarily unavailable';
 
               // Echo the cron prompt as a user message so the client sees it
               await this.sendUpdate({

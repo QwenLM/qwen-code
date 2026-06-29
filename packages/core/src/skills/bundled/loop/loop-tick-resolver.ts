@@ -67,6 +67,10 @@ export interface LoopTickResult {
    * say "temporarily unavailable" instead of "not present". Carries no errno or
    * path — those stay in the modelText note and LOCAL debug logs only. */
   transientError?: boolean;
+  /** True when this tick is an autonomous-mode tick (a `<<autonomous-loop*>>`
+   * fire, or a loop.md sentinel whose file is gone and has converged on the
+   * autonomous preamble). Lets the caller's echo label it distinctly. */
+  autonomous?: boolean;
 }
 
 const TRUNCATION_WARNING = `> WARNING: loop.md was truncated to ${LOOP_TASK_FILE_MAX_BYTES} bytes. Keep the task list concise.`;
@@ -121,22 +125,14 @@ const SOURCE_LABELS: Record<LoopTaskFileSource, string> = {
   home: 'home loop.md',
 };
 
-// Per-mode tail of the absent reminder. The shared prefix (built in absentBody)
-// names the candidate location(s) actually checked; only this no-op/re-arm
-// guidance differs by mode.
+// Per-mode tail for a TRANSIENT-failure no-op tick (buildTransientErrorTick):
+// "treat this as a no-op" + the mode's re-arm. A genuinely-absent loop.md does
+// NOT use this — it converges on absentAutonomousTickText (run the autonomous
+// check, not a no-op).
 const ABSENT_TAIL: Record<LoopMode, string> = {
   cron: 'Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
   dynamic: `Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel \`${LOOP_SENTINEL_DYNAMIC}\` — otherwise the loop ends after this tick.`,
 };
-
-// Body of the absent reminder — the H1 is supplied by tickHeading() so the
-// absent tick shares the same heading style as the full block and reminder.
-// `locations` is LoopTickResolver.absentLocations(): the candidate path(s)
-// ACTUALLY checked this tick (the project candidate is omitted on an untrusted
-// folder), with a QWEN_HOME-aware home label that is never a raw absolute path.
-function absentBody(mode: LoopMode, locations: string): string {
-  return `loop.md is not currently present at ${locations}. ${ABSENT_TAIL[mode]}`;
-}
 
 /** Detect whether a scheduled prompt is a loop.md sentinel, and which mode. */
 export function detectLoopSentinel(prompt: string): LoopMode | null {
@@ -149,6 +145,86 @@ export function detectLoopSentinel(prompt: string): LoopMode | null {
   }
   return null;
 }
+
+// Autonomous-mode sentinels — the twins of the loop.md sentinels. A bare `/loop`
+// arms one of these instead of a prompt; at fire time they expand to the
+// autonomous preamble rather than file content.
+export const AUTONOMOUS_SENTINEL_CRON = '<<autonomous-loop>>';
+export const AUTONOMOUS_SENTINEL_DYNAMIC = '<<autonomous-loop-dynamic>>';
+
+// Stored in #lastContent once the autonomous preamble has been delivered, so a
+// later autonomous (or absent-loop.md) fire sends only the short tick. Real
+// loop.md content effectively never equals this dunder marker, so a recreated
+// loop.md re-delivers its full block; the sole adversarial collision — a file
+// whose entire content IS this string — merely fails safe (it suppresses a
+// preamble, never injects one).
+const AUTONOMOUS_PREAMBLE_MARKER = '__autonomous_preamble__';
+
+/** Detect whether a scheduled prompt is an autonomous-loop sentinel, and which
+ * pacing mode. Parallel to detectLoopSentinel. */
+export function detectAutonomousSentinel(prompt: string): LoopMode | null {
+  const trimmed = prompt.trim();
+  if (trimmed === AUTONOMOUS_SENTINEL_DYNAMIC) {
+    return 'dynamic';
+  }
+  if (trimmed === AUTONOMOUS_SENTINEL_CRON) {
+    return 'cron';
+  }
+  return null;
+}
+
+// Shared self-paced re-arm instruction; the loop.md and autonomous dynamic ticks
+// differ only in the sentinel the model re-arms with, so build both from one
+// template to keep them in lockstep.
+const keepAliveRearm = (sentinel: string): string =>
+  `You scheduled this tick via LoopWakeup (not a recurring cron). To keep the loop alive, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel \`${sentinel}\` — otherwise the loop ends after this tick.`;
+
+// Re-arm guidance for a pure autonomous tick (cron reuses the loop.md pacing;
+// dynamic re-arms with the autonomous sentinel).
+const AUTONOMOUS_REARM: Record<LoopMode, string> = {
+  cron: PACING_SUFFIX.cron,
+  dynamic: keepAliveRearm(AUTONOMOUS_SENTINEL_DYNAMIC),
+};
+
+// Re-arm guidance for an absent-loop.md tick that has converged on autonomous
+// mode: re-arm the LOOP.MD sentinel (not the autonomous one) so a recreated file
+// is picked up on the next fire.
+const ABSENT_AUTONOMOUS_REARM: Record<LoopMode, string> = {
+  cron: PACING_SUFFIX.cron,
+  dynamic: `To pick up loop.md if it is recreated, call LoopWakeup again with prompt set to the literal sentinel \`${LOOP_SENTINEL_DYNAMIC}\` — otherwise the loop ends after this tick.`,
+};
+
+/** The short tick text for a pure autonomous fire (no loop.md). The full
+ * preamble is prepended only on the first delivery (see #autonomousTick). */
+function autonomousTickText(mode: LoopMode): string {
+  const heading = `# Autonomous loop tick${mode === 'dynamic' ? ' (dynamic pacing)' : ''}`;
+  return `${heading}\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick. ${AUTONOMOUS_REARM[mode]}`;
+}
+
+/** The tick text for an absent loop.md that converges on autonomous mode — like
+ * a pure autonomous tick but headed "loop.md absent" and re-arming the loop.md
+ * sentinel so a recreated file is picked up. It says "run the autonomous check",
+ * NOT an unconditional no-op: the no-op wording would contradict the preamble
+ * prepended on the first fire (and the dedup tick that follows it). */
+function absentAutonomousTickText(mode: LoopMode, locations: string): string {
+  return `${tickHeading(mode, { absent: true })}\nloop.md is not currently present at ${locations}. Run the autonomous check using the loop instructions established earlier in this conversation. ${ABSENT_AUTONOMOUS_REARM[mode]}`;
+}
+
+// The autonomous-loop preamble (the upstream default "steward / stop-when-quiet"
+// variant, ported verbatim; pacing/re-arm lives in the per-mode tick text, not
+// here). Delivered once on the first autonomous fire, then deduped.
+const AUTONOMOUS_PREAMBLE = `# Autonomous loop check
+You're being invoked on a timer while the user is away or occupied. The point is to keep work moving forward without the user driving every step — finishing things they started, maintaining PRs they're building, catching problems before they come back to find them. You're a steward, not an initiator. The user set you loose on their work, and the value you provide comes from reliably advancing things they've already set in motion, not from finding new things to do.
+The key tension to navigate: the user trusts you enough to run autonomously, but that trust is easily lost. Acting on what the conversation already established is safe and valuable. Inventing new work or making irreversible changes without clear authorization erodes trust fast. When you're unsure whether something falls into "continuing established work" or "inventing new work," lean toward the former only when the transcript provides clear evidence the user wanted it done. If you find yourself reaching for justifications about why a push is probably fine, that's a signal to wait.
+## What to act on
+The current conversation is your highest-signal source — re-read the transcript above, since everything there is something the user was actively engaged with. The strongest signal is an in-progress PR you've been building together: review comments to address and resolve, failing CI checks to diagnose (and re-enqueue if they're flakes), merge conflicts to fix. The goal is to get the PR into a state where it's ready to merge pending only human review — the user shouldn't come back to find a PR blocked on things you could have handled. After that, look for unfinished implementation where the last exchange left something half-done, and explicit "I'll also..." or "next I'll..." commitments the conversation made and didn't honor. Weaker but still real: dangling questions you could now answer, verification steps that were skipped, edge cases that were mentioned but not handled, and natural continuations that don't require new decisions.
+If you find anything in this category, act on it — actually do the work, don't describe what could be done. Run the tests, don't say "you could run the tests." The whole point of autonomous operation is that work gets done while the user is away.
+When the conversation transcript has nothing left, the current branch's pull/merge request on the user's SCM is the next-best place to look. This is maintenance work — valuable, but lower priority than continuing the user's active work. Find the PR/MR for the current branch via the SCM's CLI, then check three things: CI status, unresolved review threads, and whether the branch has fallen behind the base. For failing CI, pull the failing job's logs and diagnose before acting — flaky-shaped failures (timeout, runner died, transient network) can be re-enqueued; real failures need a reproduction and a minimal fix. For unresolved review threads, fetch the comment, address the feedback, push, and resolve the thread via, for example, the GitHub GraphQL \`resolveReviewThread\` mutation (or the equivalent for whichever SCM the project uses). Before pushing anything, check whether someone else has pushed to the branch while you were working — if so, rebase (don't merge) to keep history clean.
+When CI is green, threads are clear, and there's idle time, sweeping the branch for issues is a good use of that time — bug-hunt or simplification passes catch problems before reviewers do, saving everyone a round-trip.
+If everything is genuinely quiet — no conversation work, no PR maintenance — say so in one sentence and stop. No summary of what you checked, no list of what you might do later. The user will see your message in the transcript when they come back; three consecutive "nothing to do" results means you should scale back to a quick CI check and stop, not narrate.
+## Repeated invocations
+If you see earlier autonomous checks in this conversation, adjust your scope accordingly. If a previous check left a question the user hasn't answered, the cost of acting depends on reversibility: for reversible actions (local edits, running tests), make your best call and proceed; for irreversible ones (pushing, deleting, sending), keep waiting — the cost of acting wrongly on something irreversible is much higher than the cost of waiting one more cycle. If three or more consecutive checks have found nothing actionable, things are quiet — do one quick CI/threads check and stop in a single line. Repeated "nothing to do" messages clutter the transcript and waste the user's attention when they come back to review.
+Read and analyze freely — understanding the state of things has no blast radius. Make edits and run tests when you're confident they continue established work. Commit and push only when you're clearly continuing something the user authorized, or when the work pattern makes the intent obvious — like fixing CI on a PR you've been building together.`;
 
 /** Trim a truncated body back to its last full line before the warning tail. */
 function cutToLastNewline(content: string): string {
@@ -193,6 +269,33 @@ export class LoopTickResolver {
     if (this.#pendingContent !== null) {
       this.#lastContent = this.#pendingContent;
     }
+  }
+
+  /** Expand an autonomous tick: the full preamble + tick text on the first
+   * delivery, then only the short tick text once the preamble was committed
+   * (markDelivered sets #lastContent to the shared marker). Shared by a pure
+   * autonomous fire and the absent-loop.md convergence in resolve(), so the
+   * preamble is delivered once across both. */
+  #autonomousTick(tickText: string): LoopTickResult {
+    // Set the marker in BOTH branches (like resolve() sets #pendingContent above
+    // its short/full split): the short branch must also refresh it, or a stale
+    // value left by a previously-aborted full tick would be committed by the next
+    // markDelivered() and poison a later fire into a dangling short reminder.
+    this.#pendingContent = AUTONOMOUS_PREAMBLE_MARKER;
+    if (this.#lastContent === AUTONOMOUS_PREAMBLE_MARKER) {
+      return { modelText: tickText, full: false, autonomous: true };
+    }
+    return {
+      modelText: `${AUTONOMOUS_PREAMBLE}\n${tickText}`,
+      full: true,
+      autonomous: true,
+    };
+  }
+
+  /** Resolve an autonomous-loop sentinel fire (a bare `/loop`, no loop.md).
+   * Synchronous — the preamble is static; only the dedup state is consulted. */
+  resolveAutonomous(mode: LoopMode): LoopTickResult {
+    return this.#autonomousTick(autonomousTickText(mode));
   }
 
   /** MODEL-FACING label for the home loop.md location. Mirrors
@@ -243,11 +346,11 @@ export class LoopTickResolver {
       : `${homeLabel} (home)`;
   }
 
-  /** A model-facing no-op tick (loop.md absent, or unreadable this tick). Clears
-   * the change-detection caches so a later successful tick re-delivers the FULL
-   * block instead of a dangling short reminder pointing at a block no longer
-   * guaranteed to be in context — absence (and a failed read) is itself a state
-   * change. */
+  /** A model-facing no-op tick for a loop.md that is unreadable THIS tick (a
+   * transient read failure — see buildTransientErrorTick). Clears the
+   * change-detection caches so a later successful tick re-delivers the FULL block
+   * instead of a dangling short reminder. A genuinely-absent loop.md no longer
+   * routes here — it converges on the autonomous preamble in resolve(). */
   #noOpTick(modelText: string, transientError = false): LoopTickResult {
     this.#pendingContent = null;
     this.#lastContent = null;
@@ -308,11 +411,15 @@ export class LoopTickResolver {
     });
 
     if (result.status === 'missing') {
-      // Absence is itself a state change: #noOpTick clears both caches so a
-      // later recreate — even with byte-identical content — re-expands the full
-      // block rather than sending a dangling short reminder.
-      return this.#noOpTick(
-        `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.absentLocations(allowProjectFile))}`,
+      // Absent loop.md converges on autonomous mode: prepend the autonomous
+      // preamble (once, deduped via the shared marker) so a file-less loop keeps
+      // working autonomously instead of no-op'ing forever. The tick text says
+      // "run the autonomous check" (NOT an unconditional no-op, which would
+      // contradict the prepended preamble) and keeps the loop.md-absent heading +
+      // a loop.md-sentinel re-arm so a recreated file is still picked up (its
+      // content can never equal the marker, so it re-delivers full).
+      return this.#autonomousTick(
+        absentAutonomousTickText(mode, this.absentLocations(allowProjectFile)),
       );
     }
 

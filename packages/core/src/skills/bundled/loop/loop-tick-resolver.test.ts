@@ -9,9 +9,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  AUTONOMOUS_SENTINEL_CRON,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
   LOOP_SENTINEL_DYNAMIC,
   LoopTickResolver,
+  detectAutonomousSentinel,
   detectLoopSentinel,
 } from './loop-tick-resolver.js';
 import { LOOP_TASK_FILE_MAX_BYTES } from './loop-task-file.js';
@@ -35,6 +38,24 @@ describe('detectLoopSentinel', () => {
     expect(detectLoopSentinel('/loop check the deploy')).toBeNull();
     expect(detectLoopSentinel('<<loop.md>> and more')).toBeNull();
     expect(detectLoopSentinel('')).toBeNull();
+  });
+});
+
+describe('detectAutonomousSentinel', () => {
+  it('recognizes the autonomous sentinels exactly (after trim)', () => {
+    expect(detectAutonomousSentinel(AUTONOMOUS_SENTINEL_CRON)).toBe('cron');
+    expect(detectAutonomousSentinel(AUTONOMOUS_SENTINEL_DYNAMIC)).toBe(
+      'dynamic',
+    );
+    expect(detectAutonomousSentinel(`  ${AUTONOMOUS_SENTINEL_DYNAMIC}\n`)).toBe(
+      'dynamic',
+    );
+  });
+
+  it('returns null for non-autonomous prompts (incl. loop.md sentinels)', () => {
+    expect(detectAutonomousSentinel(LOOP_SENTINEL_DYNAMIC)).toBeNull();
+    expect(detectAutonomousSentinel('<<autonomous-loop>> and more')).toBeNull();
+    expect(detectAutonomousSentinel('')).toBeNull();
   });
 });
 
@@ -103,12 +124,19 @@ describe('LoopTickResolver', () => {
 
     const tick = await untrusted.resolve('cron');
 
-    expect(tick.full).toBe(false);
+    // Untrusted → project file skipped, no home file → absent, which converges
+    // on the autonomous preamble: a full first delivery flagged autonomous.
+    expect(tick.full).toBe(true);
+    expect(tick.autonomous).toBe(true);
     expect(tick.sourceLabel).toBeUndefined();
-    // A genuinely-absent tick is NOT flagged transient, so the echo says "not
-    // present" rather than "temporarily unavailable".
-    expect(tick.transientError).toBe(false);
+    // Not a transient read failure (the Session echo labels this autonomous).
+    expect(tick.transientError).toBeFalsy();
+    expect(tick.modelText).toContain('# Autonomous loop check');
     expect(tick.modelText).toContain('loop.md is not currently present');
+    // The converged-absent tick says "run the autonomous check", NOT an
+    // unconditional no-op (which would contradict the prepended preamble).
+    expect(tick.modelText).toContain('Run the autonomous check');
+    expect(tick.modelText).not.toContain('Treat this as a no-op tick');
     // The project candidate was never read (untrusted), so the absent message
     // must not claim it was checked — only the home candidate is named, via a
     // leak-safe label (this fixture's homeDir is a temp dir outside the real
@@ -141,7 +169,10 @@ describe('LoopTickResolver', () => {
     // labelled no-op — the project file is no longer read by the SAME resolver.
     trusted = false;
     const untrustedTick = await flipping.resolve('cron');
-    expect(untrustedTick.full).toBe(false);
+    // Project file no longer read → absent → autonomous preamble (full first
+    // delivery, flagged autonomous), with the absent reminder still inside it.
+    expect(untrustedTick.full).toBe(true);
+    expect(untrustedTick.autonomous).toBe(true);
     expect(untrustedTick.sourceLabel).toBeUndefined();
     expect(untrustedTick.modelText).toContain(
       'loop.md is not currently present',
@@ -277,14 +308,22 @@ describe('LoopTickResolver', () => {
 
   it('emits the absent reminder without poisoning the cache, then re-expands on recreate', async () => {
     const absent = await resolver.resolve('dynamic');
-    expect(absent.full).toBe(false);
+    // Absent converges on autonomous: full preamble first, flagged autonomous,
+    // with the absent reminder still inside the tick text.
+    expect(absent.full).toBe(true);
+    expect(absent.autonomous).toBe(true);
     expect(absent.sourceLabel).toBeUndefined();
+    expect(absent.modelText).toContain('# Autonomous loop check');
     expect(absent.modelText).toContain('loop.md is not currently present');
+    resolver.markDelivered();
 
     await writeProject('- recreated tasks');
     const tick = await resolver.resolve('dynamic');
 
+    // Recreated loop.md re-delivers its full block (content can never equal the
+    // autonomous marker), not a dangling reminder.
     expect(tick.full).toBe(true);
+    expect(tick.autonomous).toBeFalsy();
     expect(tick.modelText).toContain('- recreated tasks');
   });
 
@@ -305,8 +344,10 @@ describe('LoopTickResolver', () => {
     // constant — asserting against LOOP_SENTINEL_DYNAMIC catches a future rename
     // drift between the constant and the user-facing instruction.
     expect(dynTick.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
-    // Exactly one H1 — the heading isn't duplicated by the body.
-    expect(dynTick.modelText.match(/^# /gm)).toHaveLength(1);
+    // Two H1s on the first absent delivery: the autonomous preamble's own
+    // `# Autonomous loop check`, then the `# /loop tick — loop.md absent` tick.
+    expect(dynTick.modelText.match(/^# /gm)).toHaveLength(2);
+    expect(dynTick.modelText).toContain('# Autonomous loop check');
   });
 
   it('resolve() honors an explicit allowProjectFile override over the getter', async () => {
@@ -323,7 +364,9 @@ describe('LoopTickResolver', () => {
 
     const tick = await threaded.resolve('cron', false); // ...override forbids
 
-    expect(tick.full).toBe(false);
+    // Project file skipped → absent → autonomous (full first delivery).
+    expect(tick.full).toBe(true);
+    expect(tick.autonomous).toBe(true);
     expect(tick.modelText).not.toContain('- repo-controlled tasks');
     expect(tick.modelText).not.toContain('(project)');
     expect(tick.modelText).toContain('(home)');
@@ -407,7 +450,8 @@ describe('LoopTickResolver', () => {
         allowProjectFile: () => true,
       }).resolve('cron');
 
-      expect(relocatedTick.full).toBe(false);
+      expect(relocatedTick.full).toBe(true);
+      expect(relocatedTick.autonomous).toBe(true);
       expect(relocatedTick.modelText).toContain(
         'loop.md is not currently present',
       );
@@ -564,14 +608,18 @@ describe('LoopTickResolver', () => {
     // Unchanged content → short reminder, as expected.
     expect((await resolver.resolve('dynamic')).full).toBe(false);
 
-    // Delete → the absent tick clears the delivered-content memory.
+    // Delete → the absent tick converges on the autonomous preamble (full,
+    // flagged autonomous) and commits the shared marker on delivery.
     await fs.rm(projectFile());
     const absent = await resolver.resolve('dynamic');
-    expect(absent.full).toBe(false);
+    expect(absent.full).toBe(true);
+    expect(absent.autonomous).toBe(true);
     expect(absent.modelText).toContain('loop.md is not currently present');
+    resolver.markDelivered();
 
-    // Recreate with byte-identical content. Absence was a state change, so the
-    // full block must re-expand rather than collapse to a dangling reminder.
+    // Recreate with byte-identical content. The committed marker can never equal
+    // file content, so the full block re-expands rather than collapsing to a
+    // dangling reminder.
     await writeProject('- same tasks');
     const tick = await resolver.resolve('dynamic');
     expect(tick.full).toBe(true);
@@ -661,5 +709,92 @@ describe('LoopTickResolver', () => {
     // The absolute home path must not leak into the model-facing text.
     expect(second.modelText).not.toContain(homeFile());
     expect(second.modelText).toContain('- home tasks');
+  });
+
+  it('delivers the full autonomous preamble on the first fire, then a short tick', () => {
+    const first = resolver.resolveAutonomous('dynamic');
+    expect(first.full).toBe(true);
+    expect(first.autonomous).toBe(true);
+    expect(first.modelText).toContain('# Autonomous loop check');
+    expect(first.modelText).toContain("You're a steward, not an initiator.");
+    expect(first.modelText).toContain(
+      '# Autonomous loop tick (dynamic pacing)',
+    );
+    resolver.markDelivered();
+
+    const second = resolver.resolveAutonomous('dynamic');
+    expect(second.full).toBe(false);
+    expect(second.autonomous).toBe(true);
+    expect(second.modelText).not.toContain('# Autonomous loop check');
+    expect(second.modelText).toContain(
+      '# Autonomous loop tick (dynamic pacing)',
+    );
+  });
+
+  it('re-delivers the autonomous preamble after resetCache (compaction)', () => {
+    resolver.resolveAutonomous('cron');
+    resolver.markDelivered();
+    expect(resolver.resolveAutonomous('cron').full).toBe(false);
+
+    resolver.resetCache();
+    const tick = resolver.resolveAutonomous('cron');
+    expect(tick.full).toBe(true);
+    expect(tick.modelText).toContain('# Autonomous loop check');
+  });
+
+  it('uses mode-specific autonomous re-arm; dynamic names the autonomous sentinel', () => {
+    const cron = resolver.resolveAutonomous('cron');
+    expect(cron.modelText).toContain('# Autonomous loop tick\n');
+    expect(cron.modelText).toContain('do not call LoopWakeup from this tick');
+    expect(cron.modelText).not.toContain('(dynamic pacing)');
+
+    const dyn = new LoopTickResolver({
+      projectRoot,
+      homeDir,
+      allowProjectFile: () => true,
+    });
+    const dynTick = dyn.resolveAutonomous('dynamic');
+    expect(dynTick.modelText).toContain(AUTONOMOUS_SENTINEL_DYNAMIC);
+    expect(dynTick.modelText).toContain('call LoopWakeup again');
+  });
+
+  it('shares the preamble dedup across an autonomous fire and a loop.md-absent fire', async () => {
+    // An autonomous fire delivers the preamble; a later absent-loop.md fire sees
+    // the shared marker and sends only the short tick — no second preamble.
+    expect(resolver.resolveAutonomous('dynamic').full).toBe(true);
+    resolver.markDelivered();
+
+    const absent = await resolver.resolve('dynamic'); // no loop.md → converges
+    expect(absent.full).toBe(false);
+    expect(absent.autonomous).toBe(true);
+    expect(absent.modelText).not.toContain('# Autonomous loop check');
+    expect(absent.modelText).toContain('loop.md is not currently present');
+    // Even the deduped short absent tick says "run the autonomous check" (not a
+    // no-op), and re-arms the LOOP.MD sentinel so a recreated file is picked up.
+    expect(absent.modelText).toContain('Run the autonomous check');
+    expect(absent.modelText).not.toContain('Treat this as a no-op tick');
+    expect(absent.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
+  });
+
+  it('leaves the committed content intact on an UNDELIVERED absent fire', async () => {
+    // Commit-after-delivery: an absent autonomous tick that is never delivered
+    // (aborted before the send) must not poison the cache. With no markDelivered,
+    // #lastContent stays the prior loop.md content — which is still the model's
+    // established context — so a recreate with identical content is correctly a
+    // short reminder, not a spurious full re-delivery.
+    await writeProject('- tasks');
+    expect((await resolver.resolve('dynamic')).full).toBe(true);
+    resolver.markDelivered();
+
+    await fs.rm(projectFile());
+    const absent = await resolver.resolve('dynamic'); // converged, NOT delivered
+    expect(absent.full).toBe(true);
+    expect(absent.autonomous).toBe(true);
+
+    // No markDelivered() for the absent tick → #lastContent is still '- tasks',
+    // so the recreate-identical fire is a short reminder (the model never lost
+    // the block). A DELIVERED absent fire (marker committed) would re-expand.
+    await writeProject('- tasks');
+    expect((await resolver.resolve('dynamic')).full).toBe(false);
   });
 });
