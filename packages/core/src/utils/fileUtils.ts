@@ -1222,7 +1222,7 @@ export async function processSingleFileContent(
             stats,
           };
         } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = getErrorMessage(e);
           return {
             llmContent: `Error parsing notebook ${relativePathForDisplay}: ${msg}`,
             returnDisplay: `Error reading notebook: ${relativePathForDisplay}`,

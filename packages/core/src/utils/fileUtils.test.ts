@@ -1078,6 +1078,27 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).not.toContain('[object Object]');
     });
 
+    it('should surface messages from plain object notebook read errors', async () => {
+      const notebookPath = path.join(tempRootDir, 'analysis.ipynb');
+      actualNodeFs.writeFileSync(notebookPath, '{}');
+      vi.spyOn(fs.promises, 'readFile').mockRejectedValueOnce({
+        code: -32603,
+        message: 'notebook is outside allowed roots',
+        data: {
+          errorKind: 'path_outside_workspace',
+          status: 400,
+        },
+      });
+
+      const result = await processSingleFileContent(notebookPath, mockConfig);
+
+      expect(result.error).toContain('notebook is outside allowed roots');
+      expect(result.returnDisplay).toContain('Error reading notebook');
+      expect(result.llmContent).toContain('notebook is outside allowed roots');
+      expect(result.error).not.toContain('[object Object]');
+      expect(result.llmContent).not.toContain('[object Object]');
+    });
+
     it('should handle read errors for image/pdf files', async () => {
       actualNodeFs.writeFileSync(testImageFilePath, 'content'); // File must exist
       mockMimeGetType.mockReturnValue('image/png');

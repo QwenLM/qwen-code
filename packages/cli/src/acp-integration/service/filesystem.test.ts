@@ -108,7 +108,7 @@ describe('AcpFileSystemService', () => {
       });
     });
 
-    it('preserves code and message for other read errors', async () => {
+    it('preserves message for other read errors', async () => {
       const otherError = {
         code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
@@ -127,12 +127,11 @@ describe('AcpFileSystemService', () => {
       await expect(
         svc.readTextFile({ path: '/some/file.txt' }),
       ).rejects.toMatchObject({
-        code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
       });
     });
 
-    it('normalizes plain object ACP errors to Error instances with the original message', async () => {
+    it('normalizes plain object ACP errors without exposing numeric codes as Node error codes', async () => {
       const otherError = {
         code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
@@ -154,9 +153,10 @@ describe('AcpFileSystemService', () => {
 
       expect(err).toBeInstanceOf(Error);
       expect(err).toMatchObject({
-        code: INTERNAL_ERROR_CODE,
+        cause: otherError,
         message: 'Internal error',
       });
+      expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
       expect(String(err)).toContain('Internal error');
       expect(String(err)).not.toContain('[object Object]');
     });
@@ -270,12 +270,16 @@ describe('AcpFileSystemService', () => {
           { localReadRoots: [localRoot] },
         );
 
-        await expect(
-          svc.readTextFile({ path: filePath }),
-        ).rejects.toMatchObject({
-          code: INTERNAL_ERROR_CODE,
+        const err = await svc
+          .readTextFile({ path: filePath })
+          .catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(Error);
+        expect(err).toMatchObject({
+          cause: topLevelErrorKindError,
           message: `top-level errorKind only: ${filePath}`,
         });
+        expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
         expect(fallback.readTextFile).not.toHaveBeenCalled();
       });
     });
@@ -309,12 +313,16 @@ describe('AcpFileSystemService', () => {
             { localReadRoots: [localRoot] },
           );
 
-          await expect(
-            svc.readTextFile({ path: symlinkPath }),
-          ).rejects.toMatchObject({
-            code: INTERNAL_ERROR_CODE,
+          const err = await svc
+            .readTextFile({ path: symlinkPath })
+            .catch((e: unknown) => e);
+
+          expect(err).toBeInstanceOf(Error);
+          expect(err).toMatchObject({
+            cause: pathOutsideWorkspaceError,
             message: `path escapes workspace: ${symlinkPath}`,
           });
+          expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
           expect(fallback.readTextFile).not.toHaveBeenCalled();
         });
       },
@@ -447,10 +455,16 @@ describe('AcpFileSystemService', () => {
         { localReadRoots: [localRoot] },
       );
 
-      await expect(svc.readTextFile({ path: filePath })).rejects.toMatchObject({
-        code: INTERNAL_ERROR_CODE,
+      const err = await svc
+        .readTextFile({ path: filePath })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect(err).toMatchObject({
+        cause: pathOutsideWorkspaceError,
         message: `path escapes workspace: ${filePath}`,
       });
+      expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
       expect(fallback.readTextFile).not.toHaveBeenCalled();
     });
 
@@ -470,10 +484,16 @@ describe('AcpFileSystemService', () => {
         { localReadRoots: [''] },
       );
 
-      await expect(svc.readTextFile({ path: filePath })).rejects.toMatchObject({
-        code: INTERNAL_ERROR_CODE,
+      const err = await svc
+        .readTextFile({ path: filePath })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect(err).toMatchObject({
+        cause: pathOutsideWorkspaceError,
         message: `path escapes workspace: ${filePath}`,
       });
+      expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
       expect(fallback.readTextFile).not.toHaveBeenCalled();
     });
 
@@ -617,7 +637,7 @@ describe('AcpFileSystemService', () => {
       expect(client.writeTextFile).not.toHaveBeenCalled();
     });
 
-    it('normalizes plain object ACP write errors to Error instances with the original message', async () => {
+    it('normalizes plain object ACP write errors without exposing numeric codes as Node error codes', async () => {
       const writeError = {
         code: INTERNAL_ERROR_CODE,
         message: 'Write failed',
@@ -642,9 +662,10 @@ describe('AcpFileSystemService', () => {
 
       expect(err).toBeInstanceOf(Error);
       expect(err).toMatchObject({
-        code: INTERNAL_ERROR_CODE,
+        cause: writeError,
         message: 'Write failed',
       });
+      expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
       expect(String(err)).toContain('Write failed');
       expect(String(err)).not.toContain('[object Object]');
     });
