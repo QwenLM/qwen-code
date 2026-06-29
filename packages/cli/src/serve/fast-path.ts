@@ -9,7 +9,7 @@ import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import type { ServeOptions } from './types.js';
-import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
+import { getHeadlessYoloSafetyWarning } from '../utils/headlessSafetyWarnings.js';
 
 type McpBudgetMode = NonNullable<ServeOptions['mcpBudgetMode']>;
 
@@ -412,14 +412,12 @@ function emitHeadlessYoloWarning(
   settings: ServeFastPathSettings | undefined,
 ): void {
   if (!settings) return;
-  const suppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
-  if (
-    settings.tools?.approvalMode === 'yolo' &&
-    !settings.tools?.sandbox &&
-    !process.env['SANDBOX'] &&
-    !isTruthyEnv(suppress)
-  ) {
-    writeStderrLine(HEADLESS_YOLO_NO_SANDBOX_WARNING);
+  const warning = getHeadlessYoloSafetyWarning({
+    getApprovalMode: () => settings.tools?.approvalMode,
+    getSandbox: () => settings.tools?.sandbox,
+  } as Parameters<typeof getHeadlessYoloSafetyWarning>[0]);
+  if (warning) {
+    writeStderrLine(warning);
   }
 }
 

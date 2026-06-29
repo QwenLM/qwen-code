@@ -383,6 +383,26 @@ describe('CLI entry import boundary', () => {
     expect(fastPathSource).toContain('deferRuntimeUntilFirstHealth: true');
   });
 
+  it('uses the shared headless yolo warning helper on the serve fast path', () => {
+    const fastPathSource = readFileSync('src/serve/fast-path.ts', 'utf8');
+
+    expect(fastPathSource).toContain('getHeadlessYoloSafetyWarning');
+    expect(fastPathSource).not.toContain(
+      "settings.tools?.approvalMode === 'yolo'",
+    );
+  });
+
+  it('keeps headless yolo warning helper free of runtime core imports', () => {
+    const helperSource = readFileSync(
+      'src/utils/headlessSafetyWarnings.ts',
+      'utf8',
+    );
+
+    expect(helperSource).not.toMatch(
+      /import\s+(?!type\b)[^;]*from ['"]@qwen-code\/qwen-code-core['"]/,
+    );
+  });
+
   it('keeps settings free of UI imports used before serve can listen', () => {
     const settingsSource = readFileSync('src/config/settings.ts', 'utf8');
 

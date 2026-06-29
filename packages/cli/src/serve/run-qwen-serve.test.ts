@@ -924,6 +924,7 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-')),
     );
+    const logBaseDir = path.join(tmpDir, 'debug');
     const bridge = makeRuntimeBridge();
     const createBridge = vi
       .spyOn(acpBridge, 'createAcpSessionBridge')
@@ -944,6 +945,7 @@ describe('runQwenServe runtime startup failures', () => {
         resolveOnListen: true,
         deferRuntimeUntilFirstHealth: true,
         runtimeStartupTimeoutMs: 0,
+        daemonLogBaseDir: logBaseDir,
       },
     );
 
@@ -953,6 +955,15 @@ describe('runQwenServe runtime startup failures', () => {
     expect(createBridge).not.toHaveBeenCalled();
     await expect(handle.runtimeReady).rejects.toThrow(
       RUNTIME_STARTUP_CANCELLED_MESSAGE,
+    );
+    const daemonDir = path.join(logBaseDir, 'daemon');
+    const [logFile] = fs
+      .readdirSync(daemonDir)
+      .filter((fileName) => fileName.endsWith('.log'));
+    expect(logFile).toBeDefined();
+    const logContent = fs.readFileSync(path.join(daemonDir, logFile!), 'utf8');
+    expect(logContent).toContain(
+      'deferred runtime: cancelled, server closed before startup',
     );
   });
 

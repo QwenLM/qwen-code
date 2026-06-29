@@ -2072,6 +2072,9 @@ export async function runQwenServe(
           runtimeStartupSettled
         )
           return;
+        daemonLog.info(
+          'deferred runtime: cancelled, server closed before startup',
+        );
         runtimeStartupSettled = true;
         const error = new Error(RUNTIME_STARTUP_CANCELLED_MESSAGE);
         runtimeStartupError = error.message;
