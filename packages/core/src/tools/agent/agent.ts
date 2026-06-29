@@ -18,7 +18,6 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
 } from '../tools.js';
-import type { Config } from '../../config/config.js';
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -89,7 +88,7 @@ import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../../hooks/stopHookCap.js';
-import { ApprovalMode } from '../../config/config.js';
+import { ApprovalMode, Config } from '../../config/config.js';
 import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import {
@@ -467,10 +466,11 @@ function capturePersistedCliFlags(
  *   - parent already in AUTO, override starts in AUTO: parent's
  *     `setApprovalMode` already stripped on its own entry, so this
  *     function does not strip again.
- *   - override enters/leaves AUTO later: inherited `setApprovalMode`
- *     performs the normal strip/restore transition against the shared
- *     PM. `cleanup` only restores if the child finishes still in AUTO
- *     while the parent is not in AUTO.
+ *   - override enters/leaves AUTO later: `setApprovalMode` reuses Config's
+ *     normal state transition, but suppresses AUTO strip/restore while the
+ *     parent is already in AUTO because the parent owns that strip lifecycle.
+ *     `cleanup` only restores if the child finishes still in AUTO while the
+ *     parent is not in AUTO.
  */
 export async function createApprovalModeOverride(
   base: Config,
@@ -497,6 +497,39 @@ export async function createApprovalModeOverride(
     : undefined;
   override.planGateEntryCounter = override.planGateState?.entryId ?? 0;
   override.autoModeDenialState = createDenialState();
+  override.setApprovalMode = (
+    nextMode: ApprovalMode,
+    setOptions?: Parameters<Config['setApprovalMode']>[1],
+  ): void => {
+    if (base.getApprovalMode() !== ApprovalMode.AUTO) {
+      Config.prototype.setApprovalMode.call(
+        override as Config,
+        nextMode,
+        setOptions,
+      );
+      return;
+    }
+
+    const hadOwnPermissionManager = Object.prototype.hasOwnProperty.call(
+      override,
+      'permissionManager',
+    );
+    const ownPermissionManager = override.permissionManager;
+    override.permissionManager = null;
+    try {
+      Config.prototype.setApprovalMode.call(
+        override as Config,
+        nextMode,
+        setOptions,
+      );
+    } finally {
+      if (hadOwnPermissionManager) {
+        override.permissionManager = ownPermissionManager;
+      } else {
+        delete override.permissionManager;
+      }
+    }
+  };
   applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
   await rebuildToolRegistryOnOverride(override as Config, base);
 

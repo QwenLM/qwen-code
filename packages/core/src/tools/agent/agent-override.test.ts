@@ -283,6 +283,45 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 
+  it('does not restore AUTO rules on cleanup when the parent is already in AUTO mode', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.AUTO);
+
+    const { cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    expect(restoreDangerousRules).not.toHaveBeenCalled();
+  });
+
+  it('does not restore AUTO rules when a child leaves AUTO while the parent stays in AUTO', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+    vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.AUTO);
+
+    const { config: child, cleanup } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    child.setApprovalMode(ApprovalMode.DEFAULT);
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+    expect(restoreDangerousRules).not.toHaveBeenCalled();
+
+    cleanup();
+    expect(restoreDangerousRules).not.toHaveBeenCalled();
+  });
+
   it('restores AUTO rules when a non-AUTO child enters AUTO and finishes there', async () => {
     const parent = await createParentWithRegistry();
     const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
