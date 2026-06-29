@@ -2014,6 +2014,12 @@ export async function runQwenServe(
         writeStderrLine(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
         );
+        if (opts.clientMcpOverWs === true) {
+          writeStderrLine(
+            `qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth. ` +
+              `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
+          );
+        }
       } else if (opts.requireAuth) {
         // The boot check above guarantees `token` is set whenever
         // `--require-auth` is on, so this branch only fires alongside

@@ -91,6 +91,7 @@ function sendRaw(ws: WebSocket, message: unknown): void {
 
 /** Parse and route an inbound WS frame. */
 function onWsMessage(ws: WebSocket, data: unknown): void {
+  if (socket !== ws) return;
   let msg: Record<string, unknown>;
   try {
     msg = JSON.parse(String(data)) as Record<string, unknown>;

@@ -555,12 +555,14 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
    *
    * pool path: a single shared pool entry produces one
    * `DiscoveredMCPTool` snapshot; each `SessionMcpView` clones with
-   * its own per-session trust before registering into its session's
-   * `ToolRegistry`. Without this clone, mutating `trust` on the shared
-   * instance would cross-contaminate sessions.
+   * its own per-session trust and alwaysLoad flags before registering
+   * into its session's `ToolRegistry`. Without this clone, mutating
+   * per-session fields on the shared instance would cross-contaminate
+   * sessions.
    *
-   * Trust is the only field that legitimately varies per session;
-   * everything else (transport, schema, name) is transport-level.
+   * Trust and alwaysLoad are the fields that legitimately vary per
+   * session; everything else (transport, schema, name) is
+   * transport-level.
    */
   withTrust(trust: boolean | undefined): DiscoveredMCPTool {
     if (trust === this.trust) return this;

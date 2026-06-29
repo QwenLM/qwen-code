@@ -193,8 +193,8 @@ export class SessionMcpView {
       if (!compiledFilterAccepts(filter, tool.serverToolName)) {
         continue;
       }
-      // Per-session trust copy. `withTrust` returns the same
-      // instance when value unchanged, so the common case (same trust)
+      // Per-session trust/alwaysLoad copy. The clone helpers return
+      // the same instance when values are unchanged, so the common case
       // pays zero allocation.
       const sessionTool = tool
         .withTrust(this.cfg.trust)
