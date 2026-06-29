@@ -268,6 +268,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_tasks',
       'session_stats',
       'session_lsp',
+      'session_status',
       'session_close',
       'session_metadata',
       'mcp_guardrails',
@@ -580,6 +581,30 @@ describe('qwen serve — PATCH /session/:id/metadata', () => {
       body: JSON.stringify({ displayName: 42 }),
     });
     expect(res.status).toBe(400);
+    await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — POST /session/:id/continue', () => {
+  // Real-daemon wiring check for the continuation lifecycle path
+  // (route → bridge.continueSession → control method → agent
+  // continueLastTurn). Model-free: a fresh session has no interrupted turn,
+  // so the pre-check rejects and no continuation turn is dispatched — the
+  // happy/reject path that exercises the full HTTP round-trip.
+  it('returns accepted:false on a session with no interrupted turn', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const res = await fetch(`${base}/session/${session.sessionId}/continue`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      accepted: false,
+      interruption: 'none',
+    });
     await client.closeSession(session.sessionId);
   });
 });

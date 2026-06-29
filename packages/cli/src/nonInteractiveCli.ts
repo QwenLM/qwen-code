@@ -7,6 +7,8 @@
 import type {
   BackgroundTaskStatus,
   Config,
+  CronJob,
+  CronScheduler,
   ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
@@ -25,12 +27,17 @@ import {
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
+  detectLoopSentinel,
   SendMessageType,
+  buildSyntheticToolResponseParts,
+  detectTurnInterruption,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
   restoreWorktreeContext,
   TeamEventType,
   ApprovalMode,
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
+  isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
 } from '@qwen-code/qwen-code-core';
@@ -89,6 +96,7 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
     ? SUPPRESSED_OUTPUT_SUCCESS
     : SUPPRESSED_OUTPUT_RETRY;
 }
+
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -96,6 +104,8 @@ import {
   createToolProgressHandler,
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
+  buildInitialSystemReminders,
+  insertAfterFunctionResponses,
 } from './utils/nonInteractiveHelpers.js';
 
 // Human-readable labels for the detectors that can fire mid-stream.
@@ -112,6 +122,8 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the model spent too many consecutive calls reading files without making progress',
   [LoopType.ACTION_STAGNATION]:
     'the model kept calling the same tool without making progress',
+  [LoopType.SHELL_COMMAND_STAGNATION]:
+    'the model repeated similar shell inspection commands without making progress',
   [LoopType.GLOBAL_TOOL_CALL_DUPLICATE]:
     'the model repeated the same tool call across the turn, even when not back-to-back',
   [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
@@ -129,11 +141,58 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
   const isAlwaysOn =
     loopType === LoopType.TURN_TOOL_CALL_CAP ||
     loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
+    loopType === LoopType.SHELL_COMMAND_STAGNATION ||
     loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
   const hint = isAlwaysOn
     ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
     : ' Set the `model.skipLoopDetection` setting to true to disable.';
   return `Loop detection halted the run${detail}.${hint}`;
+}
+
+/**
+ * Headless handling for a fired `.qwen/loop.md` cron sentinel. loop.md
+ * expansion is interactive-only for now, so a bare sentinel can't be turned
+ * into a real prompt here — the tick is skipped (no-op) rather than sent to the
+ * model as empty content. Returns true when `job` was a sentinel so the caller
+ * skips enqueuing it.
+ *
+ * A recurring SESSION (non-durable) loop.md job would otherwise stay in
+ * `scheduler.sessionSize` and re-fire every interval, pinning the headless run
+ * open forever (the hold-open resolves only when sessionSize hits zero); delete
+ * it so the run can terminate. Durable jobs are left untouched here — they
+ * persist for a future owning session and never count toward sessionSize — and
+ * a one-shot job is already removed before it fires.
+ *
+ * Note: a DURABLE loop.md sentinel never even reaches this callback in headless,
+ * because `setSkipDurableFire` filters it at the scheduler before any fire or
+ * lastFiredAt persist (otherwise the tick would be marked fired while the work
+ * is skipped — silent loss). This guard's durable branch is kept defensive.
+ */
+export function skipHeadlessLoopSentinel(
+  scheduler: CronScheduler,
+  job: CronJob,
+): boolean {
+  if (!detectLoopSentinel(job.prompt)) {
+    return false;
+  }
+  if (job.recurring && !job.durable) {
+    // A user created this recurring loop.md cron via /loop in interactive mode;
+    // deleting it here is otherwise silent, so leave a trace of why it vanished
+    // from `cron list` when the same workspace is later run headless.
+    debugLogger.debug(
+      'skipHeadlessLoopSentinel: cleaning up recurring session loop.md cron in headless mode',
+      { jobId: job.id },
+    );
+    // delete() removes the in-memory job synchronously before any await, so the
+    // sessionSize check that follows this call sees it gone; the returned promise
+    // has no on-disk work for a session job. Fire-and-forget, but swallow a
+    // rejection so a future async delete() can't surface as an unhandled
+    // rejection (fatal under Node's --unhandled-rejections=throw).
+    void scheduler.delete(job.id).catch(() => {
+      /* session job: nothing to clean up on a delete failure */
+    });
+  }
+  return true;
 }
 
 function emitLoopDetectedMessage(
@@ -209,6 +268,16 @@ export interface RunNonInteractiveOptions {
   notificationDisplayText?: string;
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
+  onResultEmitted?: () => void;
+  /**
+   * Continue the most recent unfinished turn from chat history instead of
+   * submitting `input` (which is ignored). No new user message enters the
+   * transcript: an orphaned trailing user entry is re-submitted with Retry
+   * semantics, and dangling tool calls are closed with synthesized error
+   * functionResponses sent as a ToolResult. When the last turn ended
+   * cleanly the run emits a no-op result and exits 0.
+   */
+  continueInterrupted?: boolean;
 }
 
 /**
@@ -236,6 +305,16 @@ export async function runNonInteractive(
     } else {
       adapter = new JsonOutputAdapter(config);
     }
+    const emitResult = (
+      result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
+    ) => {
+      // Fire the callback only after a successful emit. The continue caller
+      // (session.ts) uses it to mark the result as delivered and swallow any
+      // later error; if emitResult itself throws, the flag must stay unset so
+      // the error still surfaces instead of losing both result and error.
+      adapter.emitResult(result);
+      options.onResultEmitted?.();
+    };
 
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
@@ -452,6 +531,10 @@ export async function runNonInteractive(
       }
     };
 
+    // First-turn SendMessageType override for continuation turns; null means
+    // the regular options.sendMessageType / UserQuery selection applies.
+    let continueSendType: SendMessageType | null = null;
+
     try {
       process.stdout.on('error', stdoutErrorHandler);
 
@@ -479,6 +562,65 @@ export async function runNonInteractive(
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
+
+      if (options.continueInterrupted) {
+        // Read the full history, not a bounded tail: the Retry send path in
+        // client.ts strips the ENTIRE trailing user run, so detection must
+        // re-submit exactly that run or the oldest orphans get dropped. This
+        // runs once per (rare) continue request, so the full clone is fine.
+        const detection = detectTurnInterruption(
+          geminiClient.getChat().getHistory(),
+        );
+        debugLogger.info('[runNonInteractive] continueInterrupted detection', {
+          kind: detection.kind,
+          partsCount:
+            detection.kind === 'interrupted_prompt'
+              ? detection.parts.length
+              : 0,
+          danglingCallCount:
+            detection.kind === 'interrupted_turn'
+              ? detection.danglingCalls.length
+              : 0,
+        });
+        if (detection.kind === 'none') {
+          await emitNonInteractiveFinalMessage({
+            message: 'No interrupted turn to continue.',
+            isError: false,
+            adapter,
+            config,
+            startTimeMs: startTime,
+          });
+          return 0;
+        }
+        if (detection.kind === 'interrupted_prompt') {
+          // Re-submit the orphaned user content under Retry semantics. The
+          // Retry send path strips the orphaned original from history and
+          // restores it if the send never starts, so history is neither
+          // duplicated nor lost — no separate strip/restore needed here.
+          initialPartList = detection.parts;
+          continueSendType = SendMessageType.Retry;
+        } else {
+          initialPartList = buildSyntheticToolResponseParts(
+            detection.danglingCalls,
+            ORPHAN_TOOL_USE_REPAIR_REASON,
+          );
+          continueSendType = SendMessageType.ToolResult;
+        }
+
+        const reminderParts = buildInitialSystemReminders(config);
+        if (reminderParts.length > 0 && initialPartList) {
+          const continuationParts = normalizePartList(initialPartList);
+          const hasSystemReminderPart = continuationParts.some((part) =>
+            isSystemReminderContent({ role: 'user', parts: [part] }),
+          );
+          if (!hasSystemReminderPart) {
+            initialPartList = insertAfterFunctionResponses(
+              continuationParts,
+              reminderParts,
+            );
+          }
+        }
+      }
 
       if (!initialPartList) {
         let slashHandled = false;
@@ -573,13 +715,21 @@ export async function runNonInteractive(
           : [reminderPart, existing];
       };
 
-      const startupNotice = config.consumePendingStartupWorktreeNotice();
+      // Continuation turns must not prepend reminder text: a ToolResult
+      // payload's functionResponse parts have to stay at the HEAD of the
+      // user message or Anthropic-compatible backends reject the pairing.
+      const startupNotice = options.continueInterrupted
+        ? null
+        : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
         initialPartList = withReminder(initialPartList, startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (config.getResumedSessionData()) {
+      } else if (
+        !options.continueInterrupted &&
+        config.getResumedSessionData()
+      ) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -738,7 +888,7 @@ export async function runNonInteractive(
           outputFormat === OutputFormat.JSON
             ? uiTelemetryService.getMetrics()
             : undefined;
-        adapter.emitResult({
+        emitResult({
           isError: false,
           durationMs: Date.now() - startTime,
           apiDurationMs: totalApiDurationMs,
@@ -1132,7 +1282,10 @@ export async function runNonInteractive(
 
         let sendType: SendMessageType;
         if (isFirstTurn) {
-          sendType = options.sendMessageType ?? SendMessageType.UserQuery;
+          sendType =
+            continueSendType ??
+            options.sendMessageType ??
+            SendMessageType.UserQuery;
         } else if (isTeammateTurn) {
           sendType = SendMessageType.Teammate;
         } else {
@@ -1537,6 +1690,15 @@ export async function runNonInteractive(
             : config.getCronScheduler();
 
           if (scheduler) {
+            // A headless run can't expand a `<<loop.md>>` sentinel, so durable
+            // loop.md jobs must be skipped at the scheduler level — firing one
+            // here would stamp+persist its lastFiredAt while the work is skipped
+            // (see skipHeadlessLoopSentinel), silently consuming a tick the
+            // owning interactive session should run. Set BEFORE enableDurable so
+            // a buffered catch-up flush at start() honors it too.
+            scheduler.setSkipDurableFire(
+              (job) => detectLoopSentinel(job.prompt) !== null,
+            );
             // Durable tasks live under ~/.qwen (user-owned, not in the
             // working tree), so no folder-trust gate is needed here.
             await scheduler
@@ -1596,7 +1758,16 @@ export async function runNonInteractive(
                 reject(err);
               };
 
-              scheduler.start((job: { prompt: string; cronExpr?: string }) => {
+              scheduler.start((job: CronJob) => {
+                // A bare loop.md sentinel can't expand in a headless run, so the
+                // tick is skipped. skipHeadlessLoopSentinel also deletes a
+                // recurring session job so it stops re-firing and sessionSize
+                // can fall to zero — otherwise checkCronDone never resolves and
+                // the run hangs. Full headless loop.md support is a follow-up.
+                if (skipHeadlessLoopSentinel(scheduler, job)) {
+                  checkCronDone();
+                  return;
+                }
                 const label = job.prompt.slice(0, 40);
                 localQueue.push({
                   displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
@@ -1694,7 +1865,7 @@ export async function runNonInteractive(
             const errorMessage =
               `Model produced plain text instead of calling the structured_output tool as required by --json-schema after ${turnCount} turn(s).` +
               previewSuffix;
-            adapter.emitResult({
+            emitResult({
               isError: true,
               durationMs: Date.now() - startTime,
               apiDurationMs: totalApiDurationMs,
@@ -1706,7 +1877,7 @@ export async function runNonInteractive(
             return 1;
           }
 
-          adapter.emitResult({
+          emitResult({
             isError: false,
             durationMs: Date.now() - startTime,
             apiDurationMs: totalApiDurationMs,
@@ -1775,7 +1946,7 @@ export async function runNonInteractive(
         // contract — precisely when stdout is in trouble. Best-effort emit
         // and continue to the exit handler.
         try {
-          adapter.emitResult({
+          emitResult({
             isError: true,
             durationMs: Date.now() - startTime,
             apiDurationMs: totalApiDurationMs,

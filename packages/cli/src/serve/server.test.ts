@@ -82,7 +82,10 @@ import {
   type AcpSessionBridge,
   type SessionMetadataUpdate,
 } from './acp-session-bridge.js';
-import type { BridgeEvent, SubscribeOptions } from './event-bus.js';
+import type {
+  BridgeEvent,
+  SubscribeOptions,
+} from '@qwen-code/acp-bridge/eventBus';
 import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
@@ -96,14 +99,16 @@ import type {
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpStatus,
   ServeWorkspaceMcpToolsStatus,
+  ServeWorkspaceMcpResourcesStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
+import { getRateLimiter } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
@@ -202,6 +207,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_stats',
   'session_lsp',
+  'session_status',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
@@ -326,6 +332,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'client_mcp_over_ws',
+  'cdp_tunnel_over_ws',
   'voice_transcribe',
 ] as const;
 
@@ -381,10 +389,14 @@ interface FakeBridgeOpts {
     context?: BridgeClientRequestContext,
   ) => boolean;
   listImpl?: (workspaceCwd: string) => BridgeSessionSummary[];
+  summaryImpl?: (sessionId: string) => BridgeSessionSummary;
   workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
   workspaceMcpToolsImpl?: (
     serverName: string,
   ) => Promise<ServeWorkspaceMcpToolsStatus>;
+  workspaceMcpResourcesImpl?: (
+    serverName: string,
+  ) => Promise<ServeWorkspaceMcpResourcesStatus>;
   workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
   workspaceToolsImpl?: () => Promise<ServeWorkspaceToolsStatus>;
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
@@ -413,6 +425,10 @@ interface FakeBridgeOpts {
   clearSessionGoalImpl?: (
     sessionId: string,
   ) => Promise<{ cleared: boolean; condition?: string }>;
+  continueSessionImpl?: (sessionId: string) => Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  }>;
   sessionHooksImpl?: (sessionId: string) => Promise<ServeSessionHooksStatus>;
   setModelImpl?: (
     sessionId: string,
@@ -557,8 +573,10 @@ interface FakeBridge extends AcpSessionBridge {
     context?: BridgeClientRequestContext;
   }>;
   listCalls: string[];
+  summaryCalls: string[];
   workspaceMcpCalls: number;
   workspaceMcpToolsCalls: string[];
+  workspaceMcpResourcesCalls: string[];
   workspaceSkillsCalls: number;
   workspaceToolsCalls: number;
   workspaceProvidersCalls: number;
@@ -593,6 +611,8 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
   clearSessionGoalCalls: string[];
+  continueSessionCalls: string[];
+  continueSessionContexts: Array<BridgeClientRequestContext | undefined>;
   sessionHooksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
@@ -682,8 +702,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
+  const summaryCalls: string[] = [];
   let workspaceMcpCalls = 0;
   const workspaceMcpToolsCalls: string[] = [];
+  const workspaceMcpResourcesCalls: string[] = [];
   let workspaceSkillsCalls = 0;
   let workspaceToolsCalls = 0;
   let workspaceProvidersCalls = 0;
@@ -699,6 +721,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionLspCalls: string[] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
+  const continueSessionCalls: string[] = [];
+  const continueSessionContexts: Array<BridgeClientRequestContext | undefined> =
+    [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
@@ -740,6 +765,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const respondImpl = opts.respondImpl ?? (() => true);
   const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
   const listImpl = opts.listImpl ?? (() => []);
+  const summaryImpl =
+    opts.summaryImpl ??
+    ((sessionId: string): BridgeSessionSummary => {
+      throw new SessionNotFoundError(sessionId);
+    });
   const workspaceMcpImpl =
     opts.workspaceMcpImpl ??
     (async () => ({
@@ -775,6 +805,16 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       initialized: true,
       acpChannelLive: false,
       tools: [],
+    }));
+  const workspaceMcpResourcesImpl =
+    opts.workspaceMcpResourcesImpl ??
+    (async (serverName: string) => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      serverName,
+      initialized: true,
+      acpChannelLive: false,
+      resources: [],
     }));
   const workspaceProvidersImpl =
     opts.workspaceProvidersImpl ??
@@ -918,6 +958,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
     opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
+  const continueSessionImpl =
+    opts.continueSessionImpl ??
+    (async () => ({ accepted: false, interruption: 'none' as const }));
   const sessionHooksImpl =
     opts.sessionHooksImpl ??
     (async (sessionId: string) => ({
@@ -1076,7 +1119,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
+    summaryCalls,
     workspaceMcpToolsCalls,
+    workspaceMcpResourcesCalls,
     extensionEvents,
     sessionContextCalls,
     sessionContextUsageCalls,
@@ -1086,6 +1131,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionLspCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
+    continueSessionCalls,
+    continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
     setLanguageCalls,
@@ -1217,6 +1264,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       listCalls.push(workspaceCwd);
       return listImpl(workspaceCwd);
     },
+    getSessionSummary(sessionId) {
+      summaryCalls.push(sessionId);
+      return summaryImpl(sessionId);
+    },
     async getWorkspaceMcpStatus() {
       workspaceMcpCalls += 1;
       return workspaceMcpImpl();
@@ -1224,6 +1275,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getWorkspaceMcpToolsStatus(serverName) {
       workspaceMcpToolsCalls.push(serverName);
       return workspaceMcpToolsImpl(serverName);
+    },
+    async getWorkspaceMcpResourcesStatus(serverName) {
+      workspaceMcpResourcesCalls.push(serverName);
+      return workspaceMcpResourcesImpl(serverName);
     },
     async getWorkspaceSkillsStatus() {
       workspaceSkillsCalls += 1;
@@ -1291,6 +1346,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
       return clearSessionGoalImpl(sessionId);
+    },
+    async continueSession(sessionId, context) {
+      continueSessionCalls.push(sessionId);
+      continueSessionContexts.push(context);
+      return continueSessionImpl(sessionId);
     },
     async getSessionHooksStatus(sessionId) {
       sessionHooksCalls.push(sessionId);
@@ -1554,6 +1614,14 @@ function abortableBridgePromptImpl(): FakeBridgeOpts['promptImpl'] {
 }
 
 describe('createServeApp', () => {
+  it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
+    expect(() =>
+      createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/deps\.bridge requires deps\.clientMcpSenderRegistry/);
+  });
+
   describe('serve capability registry', () => {
     it('returns a fresh ordered registered feature list', () => {
       const features = getRegisteredServeFeatures();
@@ -1757,6 +1825,34 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'client_mcp_over_ws') {
+          expect(predicate({ clientMcpOverWsEnabled: true })).toBe(true);
+          expect(predicate({ clientMcpOverWsEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              clientMcpOverWsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'cdp_tunnel_over_ws') {
+          expect(predicate({ cdpTunnelOverWsEnabled: true })).toBe(true);
+          expect(predicate({ cdpTunnelOverWsEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              cdpTunnelOverWsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'voice_transcribe') {
           expect(predicate({ voiceWsAvailable: true })).toBe(true);
           expect(predicate({ voiceWsAvailable: false })).toBe(false);
@@ -1885,6 +1981,24 @@ describe('createServeApp', () => {
       expect(res.headers['x-frame-options']).toBe('DENY');
       expect(res.headers['referrer-policy']).toBe('no-referrer');
       expect(res.headers['cache-control']).toContain('no-cache');
+    });
+
+    it('allows configured extension origins to frame the shell without self-framing', async () => {
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          allowOrigins: ['chrome-extension://abcdefghijklmnop'],
+        },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app).get('/').set('Host', host);
+      const csp = String(res.headers['content-security-policy']);
+      expect(csp).toContain(
+        'frame-ancestors chrome-extension://abcdefghijklmnop',
+      );
+      expect(csp).not.toContain("frame-ancestors 'self'");
+      expect(res.headers['x-frame-options']).toBeUndefined();
     });
 
     it('serves hashed asset chunks from /assets', async () => {
@@ -4816,6 +4930,85 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({ cleared: false });
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
     });
+
+    it('continues a session through the bridge', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async () => ({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      expect(bridge.continueSessionCalls).toEqual(['s-1']);
+    });
+
+    it('forwards X-Qwen-Client-Id to continueSession', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async () => ({
+          accepted: true,
+          interruption: 'interrupted_prompt',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-xyz');
+
+      expect(res.status).toBe(200);
+      // The originator + a generated promptId must reach the bridge so the
+      // continuation turn is attributed and correlated like POST /prompt.
+      expect(bridge.continueSessionContexts).toHaveLength(1);
+      expect(bridge.continueSessionContexts[0]).toMatchObject({
+        clientId: 'client-xyz',
+      });
+      expect(typeof bridge.continueSessionContexts[0]?.promptId).toBe('string');
+    });
+
+    it('maps session continue bridge errors', async () => {
+      const bridge = fakeBridge({
+        continueSessionImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/missing/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
   });
 
   describe('POST /session/:id/mid-turn-message', () => {
@@ -6370,6 +6563,74 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('GET /session/:id/status', () => {
+    it('200 with the live session summary', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        displayName: 'demo',
+        clientCount: 2,
+        hasActivePrompt: true,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-1/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(summary);
+      expect(bridge.summaryCalls).toEqual(['s-1']);
+    });
+
+    it('200 omits displayName when the live session has none', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-2',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 0,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-2/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect('displayName' in res.body).toBe(false);
+    });
+
+    it('404 when the session id is unknown to the daemon', async () => {
+      // fakeBridge's default getSessionSummary throws SessionNotFoundError.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/ghost/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('ghost');
+      expect(bridge.summaryCalls).toEqual(['ghost']);
+    });
+  });
+
   describe('POST /session/:id/model', () => {
     it('200 with the agent response on success', async () => {
       const bridge = fakeBridge({
@@ -7275,6 +7536,141 @@ describe('createServeApp', () => {
       } finally {
         await fsp.rm(wsRoot, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('POST /workspace/reload', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('requires strict mutation auth before calling the workspace service', async () => {
+      const reload = vi.fn();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        workspace: {
+          reload,
+        } as unknown as DaemonWorkspaceService,
+      });
+
+      const res = await request(app)
+        .post('/workspace/reload')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(reload).not.toHaveBeenCalled();
+    });
+
+    it('passes validated client identity and refreshes cached serve features', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-reload-capabilities-'),
+      );
+      const reload = vi.fn(async () => {
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            modelProviders: {
+              openai: [
+                {
+                  id: 'qwen3-asr-flash',
+                  baseUrl: 'http://127.0.0.1:65535/v1',
+                },
+              ],
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+        return {
+          env: {
+            reloaded: true,
+            changedKeys: [],
+            providerRefresh: {
+              refreshed: 0,
+              failed: 0,
+            },
+          },
+          changedKeys: [],
+          childReloaded: true,
+        };
+      });
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        resetHomeEnvBootstrapForTesting();
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(tokenOpts, undefined, {
+          bridge,
+          boundWorkspace: WS_BOUND,
+          workspace: {
+            reload,
+          } as unknown as DaemonWorkspaceService,
+        });
+
+        const before = await auth(request(app).get('/capabilities'));
+        expect(before.status).toBe(200);
+        expect(before.body.features).not.toContain(
+          'workspace_voice_transcription',
+        );
+
+        const res = await auth(request(app).post('/workspace/reload'))
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+        expect(res.status).toBe(200);
+        expect(reload).toHaveBeenCalledWith(
+          expect.objectContaining({
+            route: 'POST /workspace/reload',
+            originatorClientId: 'client-1',
+            workspaceCwd: WS_BOUND,
+          }),
+        );
+
+        const after = await auth(request(app).get('/capabilities'));
+        expect(after.status).toBe(200);
+        expect(after.body.features).toContain('workspace_voice_transcription');
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('maps workspace service reload failures through sendBridgeError', async () => {
+      const daemonLog = fakeDaemonLog();
+      const reload = vi.fn(async () => {
+        throw new Error('reload failed');
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        daemonLog,
+        boundWorkspace: WS_BOUND,
+        workspace: {
+          reload,
+        } as unknown as DaemonWorkspaceService,
+      });
+
+      const res = await auth(request(app).post('/workspace/reload')).send({});
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'reload failed' });
+      expect(reload).toHaveBeenCalledWith(
+        expect.objectContaining({
+          route: 'POST /workspace/reload',
+          workspaceCwd: WS_BOUND,
+        }),
+      );
+      expect(daemonLog.error).toHaveBeenCalledWith(
+        'reload failed',
+        expect.any(Error),
+        expect.objectContaining({
+          route: 'POST /workspace/reload',
+        }),
+      );
     });
   });
 
@@ -9052,6 +9448,61 @@ describe('createServeApp', () => {
         .set('Authorization', 'Bearer secret');
       expect(withAuth.status).toBe(200);
       expect(withAuth.body).toEqual({ status: 'ok' });
+    });
+  });
+
+  describe('assembled middleware boundaries', () => {
+    it('mounts rate limiting after auth and exposes the limiter on app locals', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        token: 'secret',
+        rateLimit: true,
+        rateLimitRead: 1,
+        rateLimitWindowMs: 60_000,
+      });
+
+      expect(getRateLimiter(app)).toBeDefined();
+
+      const first = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(first.status).toBe(200);
+
+      const limited = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(limited.status).toBe(429);
+      expect(limited.headers['retry-after']).toBeDefined();
+      expect(limited.body).toMatchObject({ tier: 'read' });
+    });
+
+    it('logs auth rejections while keeping health probes excluded', async () => {
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        daemonLog,
+      });
+
+      const health = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(health.status).toBe(200);
+      expect(daemonLog.info).not.toHaveBeenCalled();
+      expect(daemonLog.warn).not.toHaveBeenCalled();
+
+      const rejected = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_BOUND });
+      expect(rejected.status).toBe(401);
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'request completed',
+        expect.objectContaining({
+          route: 'POST /session',
+          status: 401,
+        }),
+      );
     });
   });
 
@@ -12333,6 +12784,41 @@ describe('GET /workspace/mcp/:server/tools', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_server_name');
     expect(bridge.workspaceMcpToolsCalls).toHaveLength(0);
+  });
+});
+
+describe('GET /workspace/mcp/:server/resources', () => {
+  it('returns resources for a valid server name', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .get('/workspace/mcp/my-server/resources')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ serverName: 'my-server', resources: [] });
+    expect(bridge.workspaceMcpResourcesCalls).toEqual(['my-server']);
+  });
+
+  it('decodes URL-encoded server names', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .get('/workspace/mcp/my%20server/resources')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(bridge.workspaceMcpResourcesCalls).toEqual(['my server']);
+  });
+
+  it('400 when server name exceeds length limit', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const longName = 'a'.repeat(300);
+    const res = await request(app)
+      .get(`/workspace/mcp/${longName}/resources`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_server_name');
+    expect(bridge.workspaceMcpResourcesCalls).toHaveLength(0);
   });
 });
 

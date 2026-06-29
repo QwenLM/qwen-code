@@ -5,6 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
+import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
@@ -94,12 +95,18 @@ const createMockSettings = (): LoadedSettings =>
     },
   }) as LoadedSettings;
 
-const renderWithWidth = (width: number, uiState: UIState) => {
+const renderWithWidth = (
+  width: number,
+  uiState: UIState,
+  configOverrides = {},
+) => {
   useTerminalSizeMock.mockReturnValue({ columns: width, rows: 24 });
   const mockSettings = createMockSettings();
   return render(
     <SettingsContext.Provider value={mockSettings}>
-      <ConfigContext.Provider value={createMockConfig() as never}>
+      <ConfigContext.Provider
+        value={createMockConfig(configOverrides) as never}
+      >
         <KeypressProvider kittyProtocolEnabled={false}>
           <VimModeProvider settings={mockSettings}>
             <UIStateContext.Provider value={uiState}>
@@ -138,6 +145,49 @@ describe('<Footer />', () => {
   it('hides the "workflow active" indicator by default', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).not.toContain('workflow active');
+  });
+
+  it('shows the active scheduled task count', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState(), {
+      isCronEnabled: vi.fn(() => true),
+      getCronScheduler: vi.fn(() => ({ size: 2 })),
+    });
+    expect(lastFrame()).toContain('◎ 2 scheduled tasks');
+  });
+
+  it('refreshes the scheduled task count after mount', async () => {
+    vi.useFakeTimers();
+    let schedulerSize = 0;
+    let unmount: (() => void) | undefined;
+    const scheduler = {
+      get size() {
+        return schedulerSize;
+      },
+    };
+    try {
+      const renderResult = renderWithWidth(120, createMockUIState(), {
+        isCronEnabled: vi.fn(() => true),
+        getCronScheduler: vi.fn(() => scheduler),
+      });
+      unmount = renderResult.unmount;
+      const { lastFrame } = renderResult;
+      expect(lastFrame()).not.toContain('scheduled task');
+
+      schedulerSize = 1;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(lastFrame()).toContain('◎ 1 scheduled task');
+
+      schedulerSize = 0;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(lastFrame()).not.toContain('scheduled task');
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
   });
 
   it('does not display the working directory or branch name', () => {

@@ -17,6 +17,7 @@ import {
   AuthType,
   type AvailableModel,
   type Config,
+  isImageCapable,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -31,6 +32,9 @@ const MAIN_MODEL_CONFIGURATION_HINT =
 
 const FAST_MODEL_CONFIGURATION_HINT =
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.';
+
+const VISION_MODEL_CONFIGURATION_HINT =
+  'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.';
 
 function persistSetting(
   settings: LoadedSettings,
@@ -75,7 +79,7 @@ async function switchMainModel(
 }
 
 function formatUnavailableModelMessage(
-  kind: 'Model' | 'Fast model',
+  kind: 'Model' | 'Fast model' | 'Vision model',
   modelName: string,
   authType: AuthType,
   availableModels: AvailableModel[],
@@ -88,18 +92,27 @@ function formatUnavailableModelMessage(
       ? `No models are configured for auth type '${authType}'.`
       : `Available models for '${authType}': ${availableModelIds.join(', ')}.`;
 
+  const hint =
+    kind === 'Fast model'
+      ? FAST_MODEL_CONFIGURATION_HINT
+      : kind === 'Vision model'
+        ? VISION_MODEL_CONFIGURATION_HINT
+        : MAIN_MODEL_CONFIGURATION_HINT;
+
   return (
     `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
     `${availableModelsLine}\n` +
-    (kind === 'Fast model'
-      ? FAST_MODEL_CONFIGURATION_HINT
-      : MAIN_MODEL_CONFIGURATION_HINT)
+    hint
   );
 }
 
-function formatUnavailableFastModelMessage(
+// Fast and vision share the same "not configured for any auth type" message
+// shape, differing only in the label and the configuration hint.
+function formatUnavailableAuxModelMessage(
+  label: 'Fast model' | 'Vision model',
   modelName: string,
   availableModels: AvailableModel[],
+  hint: string,
 ): string {
   const availableModelIds = Array.from(
     new Set(availableModels.map((model) => model.id)),
@@ -110,9 +123,44 @@ function formatUnavailableFastModelMessage(
       : `Configured models: ${availableModelIds.join(', ')}.`;
 
   return (
-    `Fast model '${modelName}' is not configured for any auth type.\n` +
+    `${label} '${modelName}' is not configured for any auth type.\n` +
     `${availableModelsLine}\n` +
-    FAST_MODEL_CONFIGURATION_HINT
+    hint
+  );
+}
+
+function formatUnavailableFastModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  return formatUnavailableAuxModelMessage(
+    'Fast model',
+    modelName,
+    availableModels,
+    FAST_MODEL_CONFIGURATION_HINT,
+  );
+}
+
+function formatUnavailableVisionModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  return formatUnavailableAuxModelMessage(
+    'Vision model',
+    modelName,
+    availableModels,
+    VISION_MODEL_CONFIGURATION_HINT,
+  );
+}
+
+// Shown when a user pins a model that isn't known to accept images. The pin is
+// still honored, but the bridge will send images to it, so flag it. Reuses the
+// same translated key the model dialog emits (ModelDialog.tsx) so both paths
+// stay i18n-consistent.
+function formatNonVisionModelWarning(modelName: string): string {
+  return t(
+    "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.",
+    { model: modelName },
   );
 }
 
@@ -143,7 +191,7 @@ function formatUnavailableVoiceModelMessage(
 // Get an array of the available model IDs as strings, filtered by mode
 function getAvailableModelIds(
   context: CommandContext,
-  mode: 'main' | 'fast' | 'voice' = 'main',
+  mode: 'main' | 'fast' | 'voice' | 'vision' = 'main',
 ) {
   const { services } = context;
   const { config } = services;
@@ -153,6 +201,7 @@ function getAvailableModelIds(
   const availableModels = config.getAvailableModels().filter((m) => {
     if (mode === 'fast') return !m.voiceOnly;
     if (mode === 'voice') return !m.fastOnly;
+    // 'vision' and 'main' both exclude fast/voice-only models.
     return !m.fastOnly && !m.voiceOnly;
   });
   return availableModels.map((model) => model.id);
@@ -163,10 +212,10 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).',
     );
   },
-  argumentHint: '[--fast|--voice] [<model-id>]',
+  argumentHint: '[--fast|--voice|--vision] [<model-id>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -182,13 +231,19 @@ export const modelCommand: SlashCommand = {
           value: '--voice',
           description: t('Set the model for voice transcription'),
         },
+        {
+          value: '--vision',
+          description: t(
+            'Set the image-capable model used to transcribe images for a text-only main model',
+          ),
+        },
       ].filter((item) => item.value.startsWith(partialArg));
       if (flagCompletions.length > 0) {
         return flagCompletions;
       }
       const trimmed = partialArg.trim();
       if (trimmed) {
-        let mode: 'main' | 'fast' | 'voice' = 'main';
+        let mode: 'main' | 'fast' | 'voice' | 'vision' = 'main';
         let modelPrefix = trimmed;
         if (trimmed.startsWith('--fast ')) {
           mode = 'fast';
@@ -196,6 +251,9 @@ export const modelCommand: SlashCommand = {
         } else if (trimmed.startsWith('--voice ')) {
           mode = 'voice';
           modelPrefix = trimmed.slice('--voice '.length);
+        } else if (trimmed.startsWith('--vision ')) {
+          mode = 'vision';
+          modelPrefix = trimmed.slice('--vision '.length);
         }
         return getAvailableModelIds(context, mode).filter((id) =>
           id.startsWith(modelPrefix),
@@ -376,6 +434,106 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: t('Fast Model') + ': ' + modelName,
+      };
+    }
+
+    const isVisionModelCommand =
+      args === '--vision' || args.startsWith('--vision ');
+    if (isVisionModelCommand) {
+      const modelName = args.replace('--vision', '').trim();
+      if (!modelName) {
+        // Open the model picker in vision mode (interactive) or print the
+        // current vision model (non-interactive).
+        if (context.executionMode !== 'interactive') {
+          const visionModel =
+            context.services.settings?.merged?.visionModel?.trim() ||
+            t('not set');
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: t(
+              'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+              { visionModel },
+            ),
+          };
+        }
+        return {
+          type: 'dialog',
+          dialog: 'vision-model',
+        };
+      }
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
+      }
+
+      const selector = (() => {
+        try {
+          return resolveModelId(modelName);
+        } catch {
+          return undefined;
+        }
+      })();
+      if (!selector) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnavailableVisionModelMessage(modelName, []),
+        };
+      }
+
+      const availableModels = (
+        selector.authType
+          ? config.getAvailableModelsForAuthType(selector.authType)
+          : config.getAllConfiguredModels()
+      ).filter((m) => !m.fastOnly && !m.voiceOnly);
+      const matched = availableModels.find(
+        (model) => model.id === selector.modelId,
+      );
+      if (!matched) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: selector.authType
+            ? formatUnavailableModelMessage(
+                'Vision model',
+                selector.modelId,
+                selector.authType,
+                availableModels,
+              )
+            : formatUnavailableVisionModelMessage(modelName, availableModels),
+        };
+      }
+
+      // Pinning the primary itself is a no-op at runtime (the bridge guard skips
+      // it and falls back to auto-select), so reject it at set time instead of
+      // persisting a dead pin and reporting success.
+      if (config.isCurrentPrimaryModel(matched)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            "'{{model}}' is the current primary model and cannot be used as the vision bridge. Choose a different image-capable model.",
+            { model: modelName },
+          ),
+        };
+      }
+
+      persistSetting(settings, 'visionModel', modelName);
+      // Sync runtime Config so the vision bridge picks it up without a restart.
+      config.setVisionModel(modelName);
+      // The pin is honored even if the model isn't image-capable (the user may
+      // know better than our metadata), but warn — the bridge sends images to it.
+      const visionWarning = isImageCapable(matched)
+        ? ''
+        : `\n${formatNonVisionModelWarning(modelName)}`;
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Vision Model') + ': ' + modelName + visionWarning,
       };
     }
 

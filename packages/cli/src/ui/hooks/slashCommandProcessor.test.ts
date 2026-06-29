@@ -589,6 +589,25 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('should handle "dialog: vision-model" action', async () => {
+      const command = createTestCommand({
+        name: 'visionmodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'vision-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/visionmodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        visionModelMode: true,
+      });
+    });
+
     it('awaits direct resume session switching before returning handled', async () => {
       const actions = createMockActions();
       let resolveResume: (() => void) | undefined;
