@@ -316,22 +316,26 @@ export const InlineParallelAgentsDisplay: React.FC<
   return (
     <Box flexDirection="column" width={contentWidth} paddingX={1}>
       <Box>
-        <Text bold color={theme.text.accent}>
+        {/* truncate-end keeps the header to 1 line — the backstop budgets it as
+            one row; without it a narrow terminal would wrap it and overflow. */}
+        <Text bold color={theme.text.accent} wrap="truncate-end">
           {headerLabel}
         </Text>
       </Box>
       {overflowCount > 0 && (
         <Box>
-          <Text color={theme.text.secondary}>
+          {/* Likewise 1 line: the backstop reserves a single row for this. */}
+          <Text color={theme.text.secondary} wrap="truncate-end">
             … +{overflowCount} more {overflowCount === 1 ? 'agent' : 'agents'}
           </Text>
         </Box>
       )}
-      {/* INVARIANT: each AgentRow must render exactly 1 terminal line. The
-          height backstop above (rowsFit = budget - 2) counts one line per row;
-          if AgentRow ever grows to multiple lines the frame would exceed the
-          budget and re-trigger the shouldClearTerminalForFrame snap-back this
-          guards against. Enforced by the wrap="truncate-end" Texts in AgentRow. */}
+      {/* INVARIANT: header (1) + optional overflow indicator (1) + each AgentRow
+          (1) must each render exactly 1 terminal line. The height backstop above
+          (rowsFit = budget - 2) counts one line apiece; if any grows to multiple
+          lines the frame would exceed the budget and re-trigger the
+          shouldClearTerminalForFrame snap-back this guards against. Enforced by
+          wrap="truncate-end" on every Text here and in AgentRow. */}
       {visibleRows.map((row) => (
         <AgentRow key={row.agentId} row={row} now={now} />
       ))}
@@ -367,7 +371,9 @@ const AgentRow: React.FC<{ row: RowData; now: number }> = ({ row, now }) => {
   return (
     <Box flexDirection="row">
       <Box flexShrink={0} marginRight={1}>
-        <Text color={color}>{glyph}</Text>
+        <Text color={color} wrap="truncate-end">
+          {glyph}
+        </Text>
       </Box>
       <Box flexShrink={0} marginRight={1} width={NAME_COL_WIDTH}>
         <Text wrap="truncate-end">{displayName}</Text>
@@ -378,7 +384,9 @@ const AgentRow: React.FC<{ row: RowData; now: number }> = ({ row, now }) => {
         </Text>
       </Box>
       <Box flexShrink={0}>
-        <Text color={theme.text.secondary}>{trailing}</Text>
+        <Text color={theme.text.secondary} wrap="truncate-end">
+          {trailing}
+        </Text>
       </Box>
     </Box>
   );
