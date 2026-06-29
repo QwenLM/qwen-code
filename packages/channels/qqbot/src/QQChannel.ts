@@ -338,6 +338,14 @@ export class QQChannel extends ChannelBase {
         if (msgId) this.msgSeqMap.set(msgId, nextSeq - 1);
         return;
       }
+
+      // Update msgSeqMap to the actual sent seq after fallback.
+      // When markdown succeeds, sentSeq === nextSeq and the set() above
+      // is already correct. When the plain-text fallback fires,
+      // sentSeq === nextSeq + 1 and the map still holds nextSeq — fix it.
+      if (msgId && sentSeq !== nextSeq) {
+        this.msgSeqMap.set(msgId, sentSeq);
+      }
     } catch (e) {
       process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
     }
@@ -393,6 +401,10 @@ export class QQChannel extends ChannelBase {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.readyTimeout) {
+      clearTimeout(this.readyTimeout);
+      this.readyTimeout = null;
     }
     for (const [, state] of this.streamState) {
       if (state.timer) {
@@ -523,7 +535,7 @@ export class QQChannel extends ChannelBase {
   /**
    * Start periodic cleanup of expired replyMsgId entries.
    * Evicts entries older than 5 minutes every 60 seconds, and cascades
-   * to msgSeqMap / chatTypeMap / groupActiveMsgEnabled.
+   * to msgSeqMap.
    */
   private startReplyMsgIdCleanup(): void {
     this.stopReplyMsgIdCleanup();
@@ -867,6 +879,7 @@ export class QQChannel extends ChannelBase {
         reject(new Error('Timed out waiting for READY'));
       }
     }, 30_000);
+    this.readyTimeout.unref?.();
 
     this.ws.on('open', () => {
       process.stderr.write(`[QQ:${this.name}] WebSocket connected\n`);
@@ -1082,6 +1095,20 @@ export class QQChannel extends ChannelBase {
         // (chatTypeMap, replyMsgId, msgSeqMap) must be reloaded.
         this.coldStart = true;
         this.sendIdentify();
+        // Guard the re-IDENTIFY READY with a fresh timeout. The initial
+        // readyTimeout was cleared by the first READY handler; without this,
+        // an INVALID_SESSION re-IDENTIFY that never gets a response will
+        // hang forever with no timeout to trigger a reconnect.
+        this.readyTimeout = setTimeout(() => {
+          if (
+            this.ws &&
+            (this.ws.readyState === WebSocket.OPEN ||
+              this.ws.readyState === WebSocket.CONNECTING)
+          ) {
+            this.ws.close(4002);
+          }
+        }, 30_000);
+        this.readyTimeout.unref?.();
         break;
       default:
         break;
@@ -1415,8 +1442,9 @@ export class QQChannel extends ChannelBase {
       return;
     }
     const chatId = event.group_openid;
+    this.chatTypeMap.set(chatId, 'group');
 
-    // Deduplicate early — before any side effects (chatTypeMap.set, etc.)
+    // Deduplicate early — before any side effects beyond chatTypeMap.set
     // to avoid unnecessary state mutations on replayed messages.
     if (this.isDuplicate(event.id)) return;
 
@@ -1432,9 +1460,13 @@ export class QQChannel extends ChannelBase {
 
     // Guard: ignore messages from other bots (including our own) to
     // prevent infinite self-reply loops.
+    if (!event.author) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group all-message dropped: missing author\n`,
+      );
+      return;
+    }
     if (event.author.bot) return;
-
-    this.chatTypeMap.set(chatId, 'group');
 
     const content = event.content?.trim() ?? '';
     // Compute cleanText early so keyword matching and text construction
