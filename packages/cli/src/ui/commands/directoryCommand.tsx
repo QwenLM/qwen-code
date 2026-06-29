@@ -233,7 +233,13 @@ export const directoryCommand: SlashCommand = {
 
           if (added.length > 0) {
             try {
-              if (config.shouldLoadMemoryFromIncludeDirectories()) {
+              if (config.isSafeMode()) {
+                messages.push(
+                  t(
+                    'Safe mode active — skipping memory reload from include directories.',
+                  ),
+                );
+              } else if (config.shouldLoadMemoryFromIncludeDirectories()) {
                 const {
                   memoryContent,
                   fileCount,

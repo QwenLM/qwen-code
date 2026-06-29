@@ -406,6 +406,9 @@ function applyPersistedCliFlagOverrides(
   if (flags.bare !== undefined) {
     ov.getBareMode = () => flags.bare;
   }
+  if (flags.safeMode !== undefined) {
+    ov.isSafeMode = () => flags.safeMode;
+  }
   if (hasOwn(flags, 'sandbox')) {
     const sandbox = flags.sandbox ?? undefined;
     ov.getSandbox = () => sandbox;
@@ -431,6 +434,7 @@ function capturePersistedCliFlags(
   return {
     approvalMode: resolvedApprovalMode,
     bare: config.getBareMode(),
+    safeMode: config.isSafeMode(),
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
     model: config.getModel(),
