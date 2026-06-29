@@ -58,7 +58,7 @@ interface ChatEditorProps {
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
-  onPopQueuedMessages?: () => string | null;
+  onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   currentModel?: string;
@@ -1214,6 +1214,7 @@ export const ChatEditor = memo(
 
     // Model display label
     const modelLabel = getModelDisplayName(currentModel);
+    const showCancelButton = isRunning && !core.hasContent;
 
     return (
       <div className={styles.editorShell}>
@@ -1549,24 +1550,28 @@ export const ChatEditor = memo(
                 )}
                 <button
                   className={
-                    isRunning
+                    showCancelButton
                       ? `${styles.sendBtn} ${styles.sendBtnRunning}`
                       : styles.sendBtn
                   }
                   disabled={
-                    isRunning ? !onCancel : core.disabled || !core.hasContent
+                    showCancelButton
+                      ? !onCancel
+                      : core.disabled || !core.hasContent
                   }
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (isRunning) {
+                    if (showCancelButton) {
                       onCancel?.();
                       return;
                     }
                     core.submitText();
                   }}
-                  aria-label={isRunning ? t('stream.cancel') : t('editor.send')}
+                  aria-label={
+                    showCancelButton ? t('stream.cancel') : t('editor.send')
+                  }
                 >
-                  {isRunning ? <StopIcon /> : <SendIcon />}
+                  {showCancelButton ? <StopIcon /> : <SendIcon />}
                 </button>
               </div>
             </div>

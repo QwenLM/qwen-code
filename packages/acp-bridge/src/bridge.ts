@@ -81,6 +81,7 @@ import type {
   CloseSessionOpts,
   AcpSessionBridge,
   MidTurnQueueEntry,
+  PendingPromptEntry,
   BridgeDaemonStatusSnapshot,
   ChangeSessionCwdRequest,
   ChangeSessionCwdResult,
@@ -235,6 +236,15 @@ interface SessionEntry {
   promptQueue: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
+  /**
+   * Detailed list of prompts accepted into the FIFO queue. Each entry
+   * carries its `promptId`, summary, and an `abortController` so the
+   * `removePendingPrompt` API can cancel specific items. The currently
+   * running prompt has `state: 'running'`; waiting prompts have
+   * `state: 'queued'`. Entries are removed in the `result.finally()`
+   * tail of `sendPrompt`.
+   */
+  pendingPromptList: PendingPromptEntry[];
   /**
    * Mid-turn user messages pushed by the browser (`POST
    * /session/:id/mid-turn-message`) while a turn is running. The ACP child
@@ -649,6 +659,31 @@ function hasControlCharacter(value: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Extract the full text content from prompt content blocks for the pending
+ * prompt queue. Takes the first `text` block and falls back to an image
+ * placeholder for image-only prompts.
+ */
+function extractPromptText(
+  prompt: ReadonlyArray<Record<string, unknown>>,
+): string {
+  if (!Array.isArray(prompt)) return '';
+  let hasImage = false;
+  for (const block of prompt) {
+    if (block['type'] === 'image') {
+      hasImage = true;
+    }
+    if (
+      block['type'] === 'text' &&
+      typeof block['text'] === 'string' &&
+      block['text'].length > 0
+    ) {
+      return block['text'];
+    }
+  }
+  return hasImage ? '[image]' : '';
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
@@ -2087,6 +2122,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       events,
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
+      pendingPromptList: [],
       midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
@@ -2873,6 +2909,47 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         promptSlotReleased = true;
         entry.pendingPromptCount = Math.max(0, entry.pendingPromptCount - 1);
       };
+      // Track this prompt in the pending queue for observability. Only
+      // publish an SSE `pending_prompt_added` event when the prompt is
+      // genuinely queued (another prompt is already running/queued) —
+      // the first prompt on an idle session starts immediately and
+      // doesn't need a queue event.
+      const promptId = context?.promptId ?? randomUUID();
+      const isQueued = entry.pendingPromptCount > 1;
+      const pendingAbort = new AbortController();
+      if (signal) {
+        if (signal.aborted) {
+          pendingAbort.abort(signal.reason);
+        } else {
+          signal.addEventListener(
+            'abort',
+            () => pendingAbort.abort(signal.reason),
+            { once: true },
+          );
+        }
+      }
+      const pendingEntry: PendingPromptEntry = {
+        promptId,
+        queuedAt,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+        text: extractPromptText(req.prompt),
+        abortController: pendingAbort,
+        state: isQueued ? 'queued' : 'running',
+        releaseSlot: releasePromptSlot,
+      };
+      entry.pendingPromptList.push(pendingEntry);
+      if (isQueued) {
+        entry.events.publish({
+          type: 'pending_prompt_added',
+          data: {
+            sessionId,
+            promptId: pendingEntry.promptId,
+            text: pendingEntry.text,
+            queuedAt: pendingEntry.queuedAt,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
@@ -2880,6 +2957,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         telemetry.runWithContext(capturedContext, async () => {
           const queueWaitMs = Date.now() - queuedAt;
           telemetry.metrics?.promptQueueWait(queueWaitMs);
+          // Check abort BEFORE promoting state — if `removePendingPrompt`
+          // already aborted this entry, skip the running transition and
+          // the `pending_prompt_started` event entirely.
+          if (pendingAbort.signal.aborted) {
+            throw new DOMException('Prompt aborted', 'AbortError');
+          }
+          // If this prompt was queued behind another, promote it to
+          // 'running' and publish a started event now that it has
+          // reached the head of the FIFO.
+          if (pendingEntry.state === 'queued') {
+            pendingEntry.state = 'running';
+            entry.events.publish({
+              type: 'pending_prompt_started',
+              data: {
+                sessionId,
+                promptId: pendingEntry.promptId,
+                text: pendingEntry.text,
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          }
           const dispatchStartMs = Date.now();
           try {
             return await telemetry.withSpan(
@@ -2899,11 +2997,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     sessionId,
                   },
                 );
-                // If the caller aborted while we were queued behind earlier
-                // prompts, don't even start this one.
-                if (signal?.aborted) {
-                  throw new DOMException('Prompt aborted', 'AbortError');
-                }
                 assertLivePromptEntry(sessionId, entry);
                 const requestedRetry =
                   (req as unknown as { retry?: unknown }).retry === true;
@@ -3068,7 +3161,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   )
                   .catch(() => {});
 
-                if (!signal) return racedPromise;
+                // Always wire `pendingAbort.signal` (not the caller's
+                // `signal` directly) so that `removePendingPrompt` can
+                // trigger the cancel path on running prompts too.
+                const abortSignal = pendingAbort.signal;
                 const onAbort = () => {
                   broadcastPromptCancelledOnce(
                     entry,
@@ -3078,13 +3174,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   cancelPendingForSession(sessionId);
                   entry.connection.cancel({ sessionId }).catch(() => {});
                 };
-                if (signal.aborted) {
+                if (abortSignal.aborted) {
                   onAbort();
                 } else {
-                  signal.addEventListener('abort', onAbort, { once: true });
-                  if (signal.aborted) onAbort();
+                  abortSignal.addEventListener('abort', onAbort, {
+                    once: true,
+                  });
+                  if (abortSignal.aborted) onAbort();
                   racedPromise
-                    .finally(() => signal.removeEventListener('abort', onAbort))
+                    .finally(() =>
+                      abortSignal.removeEventListener('abort', onAbort),
+                    )
                     .catch(() => {});
                 }
                 return racedPromise;
@@ -3095,14 +3195,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
         }),
       );
-      const promptId = context?.promptId;
       result.then(
         (promptResult) => {
           broadcastTurnComplete(
             entry,
             sessionId,
             promptResult,
-            promptId,
+            pendingEntry.promptId,
             originatorClientId,
           );
         },
@@ -3112,7 +3211,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             entry,
             sessionId,
             err,
-            promptId,
+            pendingEntry.promptId,
             originatorClientId,
           );
         },
@@ -3125,6 +3224,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       result
         .finally(() => {
+          // Remove this prompt from the pending list and publish a
+          // completed event so SSE subscribers can update their queue view.
+          // If `removePendingPrompt` already spliced this entry and
+          // published its own terminal event, skip to avoid a duplicate.
+          const listIdx = entry.pendingPromptList.indexOf(pendingEntry);
+          if (listIdx !== -1) {
+            entry.pendingPromptList.splice(listIdx, 1);
+            // Only publish `completed` when the prompt was genuinely queued
+            // (and thus had an `added` event). The first prompt on an idle
+            // session starts immediately without `added`, so publishing
+            // `completed` would produce an unpaired event.
+            if (isQueued) {
+              entry.events.publish({
+                type: 'pending_prompt_completed',
+                data: {
+                  sessionId,
+                  promptId: pendingEntry.promptId,
+                  state: 'completed',
+                },
+                ...(originatorClientId ? { originatorClientId } : {}),
+              });
+            }
+          }
           releasePromptSlot();
           // Mid-turn messages are scoped to the turn the user typed them
           // during. Once the session goes fully idle with some still
@@ -4507,6 +4629,60 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId: entry.sessionId,
         recap: response.recap ?? null,
       };
+    },
+
+    getPendingPrompts(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller against this session — mirrors /prompt.
+      resolveTrustedClientId(entry, context?.clientId);
+      return entry.pendingPromptList.map((p) => ({
+        promptId: p.promptId,
+        text: p.text,
+        queuedAt: p.queuedAt,
+        state: p.state,
+        ...(p.originatorClientId !== undefined
+          ? { originatorClientId: p.originatorClientId }
+          : {}),
+      }));
+    },
+
+    removePendingPrompt(sessionId, promptId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller BEFORE performing any mutation.
+      resolveTrustedClientId(entry, context?.clientId);
+      const idx = entry.pendingPromptList.findIndex(
+        (p) => p.promptId === promptId,
+      );
+      if (idx === -1) return { removed: false };
+      const target = entry.pendingPromptList[idx];
+      writeStderrLine(
+        `[pending-prompt] session=${sessionId} removing promptId=${promptId} state=${target.state}`,
+      );
+      // Abort the prompt: for 'queued' prompts the FIFO will skip
+      // dispatch on the `signal.aborted` check; for 'running' prompts
+      // this triggers the cancel path.
+      target.abortController.abort(
+        new DOMException('Prompt removed by user', 'AbortError'),
+      );
+      // Remove from the list immediately so the API reflects the change.
+      entry.pendingPromptList.splice(idx, 1);
+      // Queued prompts have not reached the FIFO head, so removing one can
+      // free its admission slot immediately. Running prompts still occupy
+      // the FIFO head until the agent settles the turn after cancel, so their
+      // slot is released by the original `result.finally()` path.
+      if (target.state === 'queued') {
+        target.releaseSlot();
+      }
+      entry.events.publish({
+        type: 'pending_prompt_completed',
+        data: { sessionId, promptId, state: 'removed' },
+        ...(target.originatorClientId
+          ? { originatorClientId: target.originatorClientId }
+          : {}),
+      });
+      return { removed: true };
     },
 
     enqueueMidTurnMessage(sessionId, message, context) {

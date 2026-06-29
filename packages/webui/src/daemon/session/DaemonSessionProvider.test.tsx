@@ -996,6 +996,64 @@ describe('DaemonSessionProvider', () => {
     ).toBe(false);
   });
 
+  it('shows waiting state when a queued prompt starts before assistant output', async () => {
+    const turnComplete = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* queuedPromptEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          v: 1,
+          id: 11,
+          type: 'pending_prompt_started',
+          timestamp: '2025-01-01T00:00:00.000Z',
+          sessionId: 'session-1',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'prompt-queued',
+            text: 'queued hello',
+          },
+        };
+        await Promise.race([
+          turnComplete.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 12,
+          type: 'turn_complete',
+          timestamp: '2025-01-01T00:00:01.000Z',
+          sessionId: 'session-1',
+          data: { promptId: 'prompt-queued', stopReason: 'end_turn' },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+    function Harness() {
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(streamingState).toBe('waiting');
+
+    await act(async () => {
+      turnComplete.resolve();
+      await flushPromises();
+    });
+    expect(streamingState).toBe('idle');
+  });
+
   it('settles non-blocking prompts when turn completion arrives before acceptance returns', async () => {
     const accepted = createDeferred<NonBlockingPromptAccepted>();
     const turnComplete = createDeferred<void>();

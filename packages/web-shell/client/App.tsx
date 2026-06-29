@@ -13,7 +13,6 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
-  useDaemonMidTurnInjected,
   useSettings,
   useSessionNotices,
   useStreamingState,
@@ -30,7 +29,6 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
@@ -80,10 +78,6 @@ import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
-import deleteIconUrl from './assets/icons/delete.svg';
-import editIconUrl from './assets/icons/edit.svg';
-import insertIconUrl from './assets/icons/insert.svg';
-import queueIconUrl from './assets/icons/queue.svg';
 import {
   I18nProvider,
   getTranslator,
@@ -96,15 +90,13 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
-import { cssUrlVar } from './utils/cssUrlVar';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
-import {
-  appendOrDeferLocalUserMessage,
-  isCommandPrompt,
-} from './utils/localCommandQueue';
+import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
+import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
+import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
@@ -211,7 +203,6 @@ function TodoContextsProvider({
 }
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
-const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 const MAX_TOASTS = 4;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
@@ -241,14 +232,6 @@ function isGoalClearCommand(text: string): boolean {
     .trim()
     .toLowerCase();
   return GOAL_CLEAR_KEYWORDS.has(goalArg);
-}
-
-interface QueuedPrompt {
-  id: number;
-  sessionId?: string;
-  text: string;
-  images?: PromptImage[];
-  onComplete?: () => void;
 }
 
 interface ActiveGoalStatus {
@@ -757,102 +740,6 @@ function translateCopyMessage(
   return message;
 }
 
-function QueuedPromptDisplay({
-  prompts,
-  t,
-  onDelete,
-  onInsert,
-  onEdit,
-}: {
-  prompts: readonly QueuedPrompt[];
-  t: ReturnType<typeof getTranslator>;
-  onDelete: (id: number) => void;
-  onInsert: (id: number) => void;
-  onEdit: (id: number) => void;
-}) {
-  if (prompts.length === 0) return null;
-
-  return (
-    <div className={styles.queuedPrompts}>
-      {prompts.map((prompt) => {
-        const normalizedPreview = prompt.text.replace(/\s+/g, ' ').trim();
-        const preview =
-          normalizedPreview.length > MAX_QUEUED_PROMPT_PREVIEW_CHARS
-            ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
-            : normalizedPreview;
-        const imageCount = prompt.images?.length ?? 0;
-        // A command (/… or !…) can't be inserted into the running turn — insert
-        // injects raw text the model would see literally, never running the
-        // command. Show the action disabled so it stays visible but inert.
-        const isCommand = isCommandPrompt(prompt.text);
-        return (
-          <div key={prompt.id} className={styles.queuedPrompt}>
-            <span className={styles.queuedPromptIcon} aria-hidden="true">
-              <span
-                className={styles.queuedPromptMaskIcon}
-                style={cssUrlVar('--queued-icon-url', queueIconUrl)}
-              />
-            </span>
-            <span className={styles.queuedPromptText}>
-              {preview}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
-                : ''}
-            </span>
-            <span className={styles.queuedPromptActions}>
-              {imageCount === 0 && (
-                <button
-                  type="button"
-                  className={styles.queuedPromptAction}
-                  onClick={() => onInsert(prompt.id)}
-                  disabled={isCommand}
-                  title={
-                    isCommand ? t('queue.insertCommandDisabled') : undefined
-                  }
-                >
-                  <span
-                    className={styles.queuedPromptActionIcon}
-                    style={cssUrlVar('--queued-icon-url', insertIconUrl)}
-                    aria-hidden="true"
-                  />
-                  {t('queue.insert')}
-                </button>
-              )}
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onDelete(prompt.id)}
-                aria-label={t('queue.delete')}
-                title={t('queue.delete')}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', deleteIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onEdit(prompt.id)}
-                aria-label={t('queue.edit')}
-                title={t('queue.edit')}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', editIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-            </span>
-          </div>
-        );
-      })}
-      <div className={styles.queuedHint}>{t('queue.footer')}</div>
-    </div>
-  );
-}
-
 export function App({
   onSessionIdChange,
   theme: providedTheme,
@@ -979,10 +866,6 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
-  // Scopes explicit "insert queued message" POST(s) to the current turn.
-  // Aborted when the turn settles so a slow/late insert can't arrive during a
-  // subsequent turn and get injected in the wrong place.
-  const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -1328,11 +1211,6 @@ export function App({
   connectionRef.current = connection;
   const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
-  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
-  const queuedTexts = useMemo(
-    () => queuedPrompts.map((prompt) => prompt.text),
-    [queuedPrompts],
-  );
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
@@ -1341,9 +1219,6 @@ export function App({
       })),
     [connection.models],
   );
-  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const nextQueuedPromptIdRef = useRef(1);
-  const drainingQueueRef = useRef(false);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -1381,6 +1256,28 @@ export function App({
     [pushToast],
   );
 
+  const {
+    queuedPrompts,
+    queuedTexts,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  } = useQueuedPrompts({
+    connected,
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    streamingState,
+    sessionActions,
+    store,
+    editorRef,
+    reportError,
+    notifySuccess: (message) => pushToast('success', message),
+    t,
+  });
+
   useEffect(() => {
     logSessionNoticesHook(notices);
     for (const notice of notices) {
@@ -1400,11 +1297,6 @@ export function App({
 
   useEffect(() => {
     activeSessionIdRef.current = connection.sessionId;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    drainingQueueRef.current = false;
-    midTurnEnqueueAbortRef.current?.abort();
-    midTurnEnqueueAbortRef.current = null;
     btwAbortControllerRef.current?.abort();
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
@@ -1555,28 +1447,6 @@ export function App({
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
   }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
 
-  useEffect(() => {
-    queuedPromptsRef.current = queuedPrompts;
-  }, [queuedPrompts]);
-
-  const enqueuePrompt = useCallback(
-    (text: string, images?: PromptImage[], onComplete?: () => void) => {
-      const trimmed = text.trim();
-      if (!trimmed) return true;
-      const nextPrompt: QueuedPrompt = {
-        id: nextQueuedPromptIdRef.current++,
-        sessionId: activeSessionIdRef.current,
-        text: trimmed,
-        images: images ? [...images] : undefined,
-        onComplete,
-      };
-      queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
-      setQueuedPrompts(queuedPromptsRef.current);
-      return true;
-    },
-    [],
-  );
-
   // Echo a local command into the transcript, or defer it to the queue when a
   // turn is streaming so the injected user row can't split the active turn (see
   // appendOrDeferLocalUserMessage). Returns true when deferred — callers must
@@ -1594,171 +1464,6 @@ export function App({
       ),
     [enqueuePrompt, store],
   );
-
-  // When the turn settles, abort any still-in-flight explicit insert so it can't
-  // arrive during the next turn (see midTurnEnqueueAbortRef). If aborted, the
-  // message remains in queuedPrompts.
-  useEffect(() => {
-    if (streamingState !== 'idle') return;
-    const ctrl = midTurnEnqueueAbortRef.current;
-    if (!ctrl) return;
-    // A controller exists ⇒ at least one mid-turn push was issued this turn.
-    // Cancel it so a still-in-flight push can't land in the next turn (a
-    // completed one makes this a no-op). Debug-only, mirrors the server-side
-    // mid-turn observability.
-    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
-    ctrl.abort();
-    midTurnEnqueueAbortRef.current = null;
-  }, [streamingState]);
-
-  const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
-    const [nextPrompt, ...rest] = queuedPromptsRef.current;
-    if (!nextPrompt) return null;
-    queuedPromptsRef.current = rest;
-    setQueuedPrompts(rest);
-    return nextPrompt;
-  }, []);
-
-  const peekNextQueuedPrompt = useCallback(
-    (): QueuedPrompt | null => queuedPromptsRef.current[0] ?? null,
-    [],
-  );
-
-  const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
-    const current = queuedPromptsRef.current;
-    if (current.length === 0) return null;
-    const index =
-      id === undefined
-        ? current.length - 1
-        : current.findIndex((prompt) => prompt.id === id);
-    if (index < 0) return null;
-    const prompt = current[index];
-    const next = current.filter((_, i) => i !== index);
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-    return prompt?.text ?? null;
-  }, []);
-
-  const removeQueuedPrompt = useCallback((id: number) => {
-    const next = queuedPromptsRef.current.filter((prompt) => prompt.id !== id);
-    if (next.length === queuedPromptsRef.current.length) return;
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-  }, []);
-
-  const insertQueuedPrompt = useCallback(
-    async (id: number) => {
-      const prompt = queuedPromptsRef.current.find((item) => item.id === id);
-      if (!prompt || (prompt.images?.length ?? 0) > 0) return;
-      // Commands can't be inserted into the running turn (the model would see
-      // the raw text and never run them); they re-dispatch on drain instead.
-      if (isCommandPrompt(prompt.text)) return;
-      let abort = midTurnEnqueueAbortRef.current;
-      if (!abort) {
-        abort = new AbortController();
-        midTurnEnqueueAbortRef.current = abort;
-      }
-      let result: Awaited<
-        ReturnType<typeof sessionActions.enqueueMidTurnMessage>
-      >;
-      try {
-        result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
-          signal: abort.signal,
-        });
-      } catch (error) {
-        reportError(error, t('queue.insertFailed'));
-        return;
-      }
-      if (!result.accepted) return;
-      const next = queuedPromptsRef.current.filter((item) => item.id !== id);
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    },
-    [reportError, sessionActions, t],
-  );
-
-  const editQueuedPrompt = useCallback(
-    (id: number) => {
-      const queuedText = popQueuedPromptForEdit(id);
-      if (!queuedText) return;
-      const current = editorRef.current?.getText() ?? '';
-      const next = current.trim() ? `${queuedText}\n${current}` : queuedText;
-      editorRef.current?.setText(next);
-      editorRef.current?.focus();
-    },
-    [popQueuedPromptForEdit],
-  );
-
-  const popLastQueuedPromptText = useCallback(
-    () => popQueuedPromptForEdit(),
-    [popQueuedPromptForEdit],
-  );
-
-  const clearQueuedPrompts = useCallback((): boolean => {
-    if (queuedPromptsRef.current.length === 0) return false;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
-    return true;
-  }, [store, t]);
-
-  // When the daemon drains queued messages into the running turn it emits
-  // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
-  // (text-only) entries from the local queue so the idle-time drain doesn't ALSO
-  // resend them as the next turn. Reconcile EVERY accumulated batch, not just the
-  // newest — a multi-batch turn can publish several frames back-to-back, and the
-  // first must not be lost before this runs. The frames arrive in-order ahead of
-  // the turn-complete frame that flips streamingState to idle, so this runs
-  // before that resend fires; `consume()` then clears the reconciled batches.
-  const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
-    useDaemonMidTurnInjected();
-  useEffect(() => {
-    const sessionId = connection.sessionId;
-    if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    // Pass OUR client id so only batches the daemon stamped with it (or
-    // anonymous ones) are deduped. The daemon stamps every drained frame with
-    // the originator's client id, and the web-shell always sends one, so
-    // omitting this would skip every batch — leaving our own messages in the
-    // queue to be resent next turn (double delivery). A peer on the same
-    // session keeps its own coincidentally-equal entry.
-    if (
-      connection.clientId === undefined &&
-      midTurnInjectedBatches.some(
-        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
-      )
-    ) {
-      // Edge: stamped batches but no client id yet (older daemon / reconnect
-      // timing). Dedupe skips them, so they may be resent next turn — make it
-      // diagnosable rather than a silent double-delivery.
-      console.debug(
-        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
-      );
-    }
-    const next = removeInjectedFromQueue(
-      queuedPromptsRef.current,
-      midTurnInjectedBatches,
-      sessionId,
-      connection.clientId,
-    );
-    if (next) {
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    }
-    // Consume ONLY this session's batches. The reconcile above is session-
-    // scoped, so a batch for another session (a late frame after an in-place
-    // session switch) must NOT be cleared here — it was never reconciled and
-    // would otherwise be lost on switch-back (resent next turn = double
-    // delivery). Identity-removal also leaves any frame that arrived after this
-    // render's snapshot for the next effect run.
-    consumeMidTurnInjected(
-      midTurnInjectedBatches.filter((b) => b.sessionId === sessionId),
-    );
-  }, [
-    midTurnInjectedBatches,
-    connection.sessionId,
-    connection.clientId,
-    consumeMidTurnInjected,
-  ]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -3076,7 +2781,10 @@ export function App({
         );
         return true;
       } else if (text.startsWith('!')) {
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          pushToast('error', t('queue.shellBlocked'));
+          return false;
+        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
         sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
@@ -3128,59 +2836,6 @@ export function App({
     },
     [handleSubmit, resumeChatBottomFollow],
   );
-
-  useEffect(() => {
-    if (drainingQueueRef.current) return;
-    if (!connected) return;
-    if (streamingState !== 'idle') return;
-    if (interactionBlocked) return;
-    if (pendingApproval) return;
-    if (queuedPrompts.length === 0) return;
-
-    const nextPrompt = peekNextQueuedPrompt();
-    if (!nextPrompt) return;
-    if (
-      nextPrompt.sessionId !== undefined &&
-      nextPrompt.sessionId !== connection.sessionId
-    ) {
-      return;
-    }
-    popNextQueuedPrompt();
-
-    drainingQueueRef.current = true;
-    let sent = false;
-    const timer = window.setTimeout(() => {
-      sent = true;
-      try {
-        handleSubmit(nextPrompt.text, nextPrompt.images);
-        nextPrompt.onComplete?.();
-      } finally {
-        drainingQueueRef.current = false;
-      }
-    }, 0);
-    return () => {
-      if (!sent) {
-        // Cleanup ran before timeout fired — put the prompt back at the
-        // front of the queue so it's not lost. This can happen when any
-        // dependency (e.g. handleSubmit, streamingState) changes between
-        // popNextQueuedPrompt() and the setTimeout firing.
-        queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
-        setQueuedPrompts(queuedPromptsRef.current);
-      }
-      window.clearTimeout(timer);
-      drainingQueueRef.current = false;
-    };
-  }, [
-    connected,
-    connection.sessionId,
-    interactionBlocked,
-    handleSubmit,
-    pendingApproval,
-    peekNextQueuedPrompt,
-    popNextQueuedPrompt,
-    queuedPrompts,
-    streamingState,
-  ]);
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
@@ -3931,7 +3586,7 @@ export function App({
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
                       queuedMessages={queuedTexts}
                       onFocusFooter={handleFocusTaskPill}
-                      onPopQueuedMessages={popLastQueuedPromptText}
+                      onPopQueuedMessages={editLastQueuedPrompt}
                       onClearQueuedMessages={clearQueuedPrompts}
                       currentMode={currentMode}
                       currentModel={currentModel}
