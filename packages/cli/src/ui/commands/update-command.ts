@@ -99,15 +99,16 @@ export const updateCommand: SlashCommand = {
         return {
           type: 'message' as const,
           messageType: 'info' as const,
-          content: `${info.message}\n${message}`,
+          content: `${info.message}\n${t('Downloading update...')}\n${message}`,
         };
       } catch (err) {
+        const message = t('Update failed: {{error}}', {
+          error: err instanceof Error ? err.message : String(err),
+        });
         return {
           type: 'message' as const,
           messageType: 'error' as const,
-          content: t('Update failed: {{error}}', {
-            error: err instanceof Error ? err.message : String(err),
-          }),
+          content: `${info.message}\n${t('Downloading update...')}\n${message}`,
         };
       }
     }

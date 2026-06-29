@@ -133,6 +133,20 @@ describe('updateCommand', () => {
     expect(getInstallationInfo).not.toHaveBeenCalled();
   });
 
+  it('restores enableAutoUpdate even when handleAutoUpdate throws', async () => {
+    const commandContext = context('interactive', false);
+    handleAutoUpdate.mockImplementation(() => {
+      throw new Error('spawn failed');
+    });
+
+    await expect(updateCommand.action!(commandContext, '')).rejects.toThrow(
+      'spawn failed',
+    );
+    expect(
+      commandContext.services.settings.merged.general?.enableAutoUpdate,
+    ).toBe(false);
+  });
+
   it('returns the manual update command in ACP mode', async () => {
     const result = await updateCommand.action!(context('acp'), '');
 
@@ -177,7 +191,24 @@ describe('updateCommand', () => {
       type: 'message',
       messageType: 'info',
       content:
-        'Update available: 1.2.3\nUpdate successful! The new version will be used on your next run.',
+        'Update available: 1.2.3\nDownloading update...\nUpdate successful! The new version will be used on your next run.',
+    });
+  });
+
+  it('returns deferred message when standalone update is not yet active', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+    performStandaloneUpdate.mockResolvedValue('deferred');
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nDownloading update...\nUpdate downloaded. It will be applied after you exit this session.',
     });
   });
 
@@ -193,7 +224,8 @@ describe('updateCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: 'Update failed: boom',
+      content:
+        'Update available: 1.2.3\nDownloading update...\nUpdate failed: boom',
     });
   });
 
