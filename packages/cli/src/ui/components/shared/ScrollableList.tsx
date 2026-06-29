@@ -151,6 +151,19 @@ function ScrollableList<T>(
     flushTimer.current = setTimeout(applyPendingScroll, SCROLL_FRAME_MS);
   }, [applyPendingScroll]);
 
+  // Discard any queued wheel/drag intent and cancel an in-flight flush. Used
+  // when a scrollbar press takes over: without it, a wheel burst scheduled
+  // moments earlier would still fire its timer and `scrollBy` the view away
+  // from the row the user just clicked.
+  const cancelPendingScroll = useCallback(() => {
+    pendingWheelDelta.current = 0;
+    pendingDragRow.current = null;
+    if (flushTimer.current !== null) {
+      clearTimeout(flushTimer.current);
+      flushTimer.current = null;
+    }
+  }, []);
+
   useEffect(
     () => () => {
       if (flushTimer.current !== null) clearTimeout(flushTimer.current);
@@ -169,9 +182,10 @@ function ScrollableList<T>(
         isDraggingScrollbar.current =
           virtualizedListRef.current.hitTestScrollbar(event);
         if (isDraggingScrollbar.current) {
-          // A press should feel instant — apply now and drop any stale
-          // pending drag row from a previous gesture.
-          pendingDragRow.current = null;
+          // A press should feel instant — apply now and drop any queued
+          // wheel/drag intent (and its timer) so a flush scheduled moments
+          // earlier can't yank the view off the clicked row.
+          cancelPendingScroll();
           virtualizedListRef.current.scrollToScrollbarRow(event.row);
         }
         return;
@@ -189,7 +203,7 @@ function ScrollableList<T>(
         scheduleScrollFlush();
       }
     },
-    [scheduleScrollFlush],
+    [scheduleScrollFlush, cancelPendingScroll],
   );
 
   useMouseEvents(handleMouseEvent, { isActive: hasFocus });
