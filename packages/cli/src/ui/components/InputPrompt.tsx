@@ -1880,6 +1880,58 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ? activeCompletion.showSuggestions
       : false);
 
+  // Mouse hover/select must target the SAME completion source that builds
+  // suggestionDisplayProps. For reverse/command search, selecting also resets
+  // that controller and exits search mode, mirroring keyboard acceptance.
+  // Export completion has no index-based handler, so mouse selection is left
+  // disabled for it (handlers are undefined when its suggestions are shown).
+  const suggestionsFromExport =
+    shouldUseExportSuggestions && !!exportCompletion.suggestionDisplayProps;
+  const handleSuggestionHover = useCallback(
+    (index: number) => {
+      if (commandSearchActive) {
+        commandSearchCompletion.setActiveSuggestionIndex(index);
+      } else if (reverseSearchActive) {
+        reverseSearchCompletion.setActiveSuggestionIndex(index);
+      } else {
+        completion.setActiveSuggestionIndex(index);
+      }
+    },
+    [
+      commandSearchActive,
+      reverseSearchActive,
+      commandSearchCompletion,
+      reverseSearchCompletion,
+      completion,
+    ],
+  );
+  const handleSuggestionSelect = useCallback(
+    (index: number) => {
+      if (commandSearchActive || reverseSearchActive) {
+        const isCommandSearch = commandSearchActive;
+        const sc = isCommandSearch
+          ? commandSearchCompletion
+          : reverseSearchCompletion;
+        sc.handleAutocomplete(index);
+        sc.resetCompletionState();
+        (isCommandSearch ? setCommandSearchActive : setReverseSearchActive)(
+          false,
+        );
+      } else {
+        completion.handleAutocomplete(index);
+      }
+    },
+    [
+      commandSearchActive,
+      reverseSearchActive,
+      commandSearchCompletion,
+      reverseSearchCompletion,
+      completion,
+      setCommandSearchActive,
+      setReverseSearchActive,
+    ],
+  );
+
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
   // Windows-only "bare Tab cycles approval mode" fallback doesn't double-fire
@@ -2048,8 +2100,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
             expandedIndex={expandedSuggestionIndex}
             mouseEnabled={mouseInteractionsEnabled}
-            onHoverIndex={completion.setActiveSuggestionIndex}
-            onSelectIndex={completion.handleAutocomplete}
+            onHoverIndex={
+              suggestionsFromExport ? undefined : handleSuggestionHover
+            }
+            onSelectIndex={
+              suggestionsFromExport ? undefined : handleSuggestionSelect
+            }
           />
         </Box>
       )}

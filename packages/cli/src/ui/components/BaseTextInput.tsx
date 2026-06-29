@@ -351,7 +351,7 @@ export const BaseTextInput = ({
 
   return (
     <Box ref={boxRef} flexDirection="column">
-      {mouseEnabled && isActive && buffer.text.length > 0 && (
+      {mouseEnabled && isActive && (
         <TextInputMouseController
           linesRef={linesRef}
           buffer={buffer}

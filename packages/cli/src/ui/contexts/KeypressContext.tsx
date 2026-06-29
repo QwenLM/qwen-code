@@ -714,7 +714,22 @@ export function KeypressProvider({
       // \x1b[< followed by individual character events. We buffer the
       // fragments, reconstruct the full sequence, parse it, and forward
       // to registered mouse handlers.
-      if (swallowingSgrMouse) {
+      //
+      // While a bracketed paste is in progress, never reconstruct or dispatch
+      // SGR mouse events: pasted content can embed `\x1b[<0;col;rowM`, and
+      // delivering that as a real click would let a paste choose dialog
+      // options or move the cursor. Let those bytes fall through to the paste
+      // buffer instead, and discard any half-built mouse fragment.
+      if (isPaste) {
+        if (swallowingSgrMouse) {
+          swallowingSgrMouse = false;
+          sgrMouseBuffer = '';
+          if (sgrMouseTimeout) {
+            clearTimeout(sgrMouseTimeout);
+            sgrMouseTimeout = null;
+          }
+        }
+      } else if (swallowingSgrMouse) {
         if (key.ctrl && key.name === 'c') {
           swallowingSgrMouse = false;
           sgrMouseBuffer = '';
@@ -741,7 +756,7 @@ export function KeypressProvider({
           return;
         }
       }
-      if (key.sequence === `${ESC}[<`) {
+      if (!isPaste && key.sequence === `${ESC}[<`) {
         swallowingSgrMouse = true;
         sgrMouseBuffer = `${ESC}[<`;
         if (sgrMouseTimeout) {

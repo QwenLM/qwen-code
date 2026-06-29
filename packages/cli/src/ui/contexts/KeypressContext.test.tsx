@@ -642,6 +642,43 @@ describe('KeypressContext - Kitty Protocol', () => {
         );
       });
 
+      it('should not dispatch SGR mouse events embedded in pasted content', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // An SGR left-press (\x1b[<0;5;5M) hidden inside bracketed paste must
+        // be treated as paste content, never reconstructed into a real click —
+        // otherwise a pasted payload could select a dialog option or move the
+        // cursor without the user pressing anything.
+        const mouseSequence = '\x1b[<0;5;5M';
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          stdin.emit('data', Buffer.from(`\x1b[200~${mouseSequence}\x1b[201~`));
+        });
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalledTimes(1);
+        });
+
+        // No mouse event should ever be dispatched from pasted bytes.
+        expect(mouseHandler).not.toHaveBeenCalled();
+        // The bytes are delivered as a single paste event instead, carrying
+        // the SGR payload as literal content.
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ paste: true }),
+        );
+        expect(keyHandler.mock.calls[0][0].sequence).toContain('0;5;5');
+      });
+
       it('should handle empty paste sequence', async () => {
         const keyHandler = vi.fn();
 
