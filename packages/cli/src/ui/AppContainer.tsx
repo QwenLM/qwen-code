@@ -3090,7 +3090,7 @@ export const AppContainer = (props: AppContainerProps) => {
           historyManager.addItem(
             {
               type: MessageType.ERROR,
-              text: `❌ Migration failed: ${getErrorMessage(error)}`,
+              text: `✗ Migration failed: ${getErrorMessage(error)}`,
             },
             Date.now(),
           );

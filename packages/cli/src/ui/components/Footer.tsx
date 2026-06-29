@@ -108,7 +108,7 @@ export const Footer: React.FC = () => {
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
-      node: <Text color={theme.status.success}>🔒 {sandboxInfo}</Text>,
+      node: <Text color={theme.status.success}>{sandboxInfo}</Text>,
     });
   }
   if (config.isSafeMode()) {
