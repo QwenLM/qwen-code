@@ -196,14 +196,24 @@ export class AcpHttpTransport implements DaemonTransport {
 
     // For notifications, send via POST /acp and return 204.
     if (mapping.notification) {
-      const params = mapping.extractParams(segments, body, httpMethod);
+      const params = mapping.extractParams(
+        segments,
+        body,
+        httpMethod,
+        parsedUrl.searchParams,
+      );
       await this.sendNotification(mapping.method, params, init.headers);
       return synthesizeResponse(204, null);
     }
 
     // Normal request: POST /acp with the JSON-RPC request body.
     // The POST returns 202 (ack); the real response rides the SSE stream.
-    const params = mapping.extractParams(segments, body, httpMethod);
+    const params = mapping.extractParams(
+      segments,
+      body,
+      httpMethod,
+      parsedUrl.searchParams,
+    );
     const response = await this.sendRequest(
       mapping.method,
       params,

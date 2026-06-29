@@ -16,17 +16,58 @@ import { isRecord } from './acpTransportUtils.js';
 
 export interface RouteMapping {
   method: string;
-  /** Extract JSON-RPC params from URL path segments + request body. */
+  /**
+   * Extract JSON-RPC params from URL path segments, request body, and — for the
+   * REST-style query-backed helpers (`/file?path=…&maxBytes=…`, `/stat`,
+   * `/list`, `/glob`, `context-usage?detail=…`) — the URL query string. The
+   * daemon's ACP handlers are strictly typed (e.g. `maxBytes` must be a
+   * `number`, `detail` must be the boolean `true`), so query values — which
+   * arrive as strings — are coerced to the expected type here via
+   * `strParam`/`numParam`/`boolParam`.
+   */
   extractParams: (
     segments: string[],
     body: unknown,
     httpMethod: string,
+    query?: URLSearchParams,
   ) => Record<string, unknown>;
   /**
    * True for notifications (no response expected). The transport will
    * NOT wait for a JSON-RPC response from the server.
    */
   notification?: boolean;
+}
+
+/** A string query param, omitted when absent. */
+function strParam(
+  q: URLSearchParams | undefined,
+  name: string,
+): Record<string, string> {
+  const v = q?.get(name);
+  return v == null ? {} : { [name]: v };
+}
+
+/**
+ * A numeric query param coerced to a `number`, omitted when absent. The daemon's
+ * ACP handlers require a real number (a query string's `"123"` would be
+ * rejected). An unparseable value forwards as `NaN`, which the daemon rejects
+ * the same way it would a malformed REST query.
+ */
+function numParam(
+  q: URLSearchParams | undefined,
+  name: string,
+): Record<string, number> {
+  const v = q?.get(name);
+  return v == null ? {} : { [name]: Number(v) };
+}
+
+/** A boolean query param (`?detail=true`), omitted when absent. */
+function boolParam(
+  q: URLSearchParams | undefined,
+  name: string,
+): Record<string, boolean> {
+  const v = q?.get(name);
+  return v == null ? {} : { [name]: v === 'true' };
 }
 
 export interface RouteEntry {
@@ -269,13 +310,16 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ sessionId: segs[0] }),
     },
   },
-  // GET /session/:id/context-usage → _qwen/session/context_usage
+  // GET /session/:id/context-usage?detail=true → _qwen/session/context_usage
   {
     httpMethod: 'GET',
     pattern: /^\/session\/([^/]+)\/context-usage$/,
     mapping: {
       method: '_qwen/session/context_usage',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
+      extractParams: (segs, _b, _m, q) => ({
+        sessionId: segs[0],
+        ...boolParam(q, 'detail'),
+      }),
     },
   },
   // GET /session/:id/supported-commands → _qwen/session/supported_commands
@@ -614,49 +658,58 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   // These map the DaemonClient's file-system helpers to _qwen/file/* RPC
   // methods on the ACP daemon.
 
-  // GET /file → _qwen/file/read (query params forwarded as RPC params)
+  // GET /file?path=…&maxBytes=…&line=…&limit=… → _qwen/file/read
   {
     httpMethod: 'GET',
     pattern: /^\/file\/?$/,
     mapping: {
       method: '_qwen/file/read',
-      extractParams: () => ({}),
+      extractParams: (_s, _b, _m, q) => ({
+        ...strParam(q, 'path'),
+        ...numParam(q, 'maxBytes'),
+        ...numParam(q, 'line'),
+        ...numParam(q, 'limit'),
+      }),
     },
   },
-  // GET /file/bytes → _qwen/file/read_bytes
+  // GET /file/bytes?path=…&offset=…&maxBytes=… → _qwen/file/read_bytes
   {
     httpMethod: 'GET',
     pattern: /^\/file\/bytes\/?$/,
     mapping: {
       method: '_qwen/file/read_bytes',
-      extractParams: () => ({}),
+      extractParams: (_s, _b, _m, q) => ({
+        ...strParam(q, 'path'),
+        ...numParam(q, 'offset'),
+        ...numParam(q, 'maxBytes'),
+      }),
     },
   },
-  // GET /stat → _qwen/file/stat
+  // GET /stat?path=… → _qwen/file/stat
   {
     httpMethod: 'GET',
     pattern: /^\/stat\/?$/,
     mapping: {
       method: '_qwen/file/stat',
-      extractParams: () => ({}),
+      extractParams: (_s, _b, _m, q) => ({ ...strParam(q, 'path') }),
     },
   },
-  // GET /list → _qwen/file/list
+  // GET /list?path=… → _qwen/file/list
   {
     httpMethod: 'GET',
     pattern: /^\/list\/?$/,
     mapping: {
       method: '_qwen/file/list',
-      extractParams: () => ({}),
+      extractParams: (_s, _b, _m, q) => ({ ...strParam(q, 'path') }),
     },
   },
-  // GET /glob → _qwen/file/glob
+  // GET /glob?pattern=… → _qwen/file/glob
   {
     httpMethod: 'GET',
     pattern: /^\/glob\/?$/,
     mapping: {
       method: '_qwen/file/glob',
-      extractParams: () => ({}),
+      extractParams: (_s, _b, _m, q) => ({ ...strParam(q, 'pattern') }),
     },
   },
   // POST /file/write → _qwen/file/write
