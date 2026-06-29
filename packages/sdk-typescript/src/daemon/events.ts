@@ -2501,13 +2501,12 @@ function isMemoryChangedData(value: unknown): value is DaemonMemoryChangedData {
   if (!isRecord(value)) return false;
   const scope = value['scope'];
   if (scope === 'managed') {
+    const touchedScopes = value['touchedScopes'];
     return (
       isNonEmptyString(value['source']) &&
       isNonEmptyString(value['taskId']) &&
-      Array.isArray(value['touchedScopes']) &&
-      value['touchedScopes'].every(
-        (touchedScope) => touchedScope === 'user' || touchedScope === 'project',
-      )
+      Array.isArray(touchedScopes) &&
+      touchedScopes.every((s) => s === 'user' || s === 'project')
     );
   }
   const mode = value['mode'];

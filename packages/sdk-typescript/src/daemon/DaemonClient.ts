@@ -112,6 +112,8 @@ import type {
   DaemonWorkspaceTrustStatus,
 } from './types.js';
 
+const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
+
 /**
  * SDK-side HTTP client for the `qwen serve` daemon. Sibling to
  * `ProcessTransport`: ProcessTransport drives a stdio child running
@@ -1037,25 +1039,16 @@ export class DaemonClient {
     content: string,
     opts: DaemonWorkspaceMemoryRememberOptions = {},
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
-    const body = {
-      content,
-      contextMode: opts.contextMode ?? 'workspace',
-    };
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/memory/remember`,
+    return await this.jsonRequest<DaemonWorkspaceMemoryRememberTask>(
+      WORKSPACE_MEMORY_REMEMBER_PATH,
+      `POST ${WORKSPACE_MEMORY_REMEMBER_PATH}`,
       {
         method: 'POST',
-        headers: this.headers(
-          { 'Content-Type': 'application/json' },
-          opts.clientId,
-        ),
-        body: JSON.stringify(body),
-      },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'POST /workspace/memory/remember');
-        }
-        return (await res.json()) as DaemonWorkspaceMemoryRememberTask;
+        body: {
+          content,
+          contextMode: opts.contextMode ?? 'workspace',
+        },
+        clientId: opts.clientId,
       },
     );
   }
@@ -1065,8 +1058,8 @@ export class DaemonClient {
     opts?: { clientId?: string },
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
     return await this.jsonRequest(
-      `/workspace/memory/remember/${encodeURIComponent(taskId)}`,
-      'GET /workspace/memory/remember/:taskId',
+      `${WORKSPACE_MEMORY_REMEMBER_PATH}/${encodeURIComponent(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_REMEMBER_PATH}/:taskId`,
       { clientId: opts?.clientId },
     );
   }
