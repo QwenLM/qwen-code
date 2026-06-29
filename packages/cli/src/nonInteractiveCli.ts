@@ -562,6 +562,10 @@ export async function runNonInteractive(
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
+      // Per-turn model override captured from an inline `/model <id> <prompt>`
+      // slash command; seeds the loop-scoped `modelOverride` below so the
+      // submitted prompt runs on the chosen model without a session switch.
+      let inlineModelOverride: string | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -635,6 +639,7 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
+              inlineModelOverride = slashCommandResult.modelOverride;
               slashHandled = true;
               break;
             case 'message': {
@@ -838,7 +843,7 @@ export async function runNonInteractive(
 
       let isFirstTurn = true;
       let hasUnsentToolResponse = false;
-      let modelOverride: string | undefined;
+      let modelOverride: string | undefined = inlineModelOverride;
       // Session-scoped because the synthetic `structured_output` tool can
       // be invoked from EITHER the main assistant-turn loop or from a
       // drain-turn (queued notification / cron prompt); whichever fires
