@@ -213,6 +213,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const uiState = useUIState();
   const uiActions = useUIActions();
   const settings = useSettings();
+  // Mouse interactions (suggestion list + click-to-position cursor) are enabled
+  // in alternate-screen mode (see RowMouseController's coordinate assumptions).
+  const mouseInteractionsEnabled = !!settings.merged.ui?.useTerminalBuffer;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -2025,6 +2028,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
+        mouseEnabled={mouseInteractionsEnabled}
       />
       {shouldShowSuggestions && (
         <Box marginLeft={2} marginRight={2}>
@@ -2043,6 +2047,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 : 'reverse'
             }
             expandedIndex={expandedSuggestionIndex}
+            mouseEnabled={mouseInteractionsEnabled}
+            onHoverIndex={completion.setActiveSuggestionIndex}
+            onSelectIndex={completion.handleAutocomplete}
           />
         </Box>
       )}

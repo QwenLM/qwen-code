@@ -60,3 +60,26 @@ export function measureElementPosition(node: DOMElement): ElementMetrics {
     height: yogaNode.getComputedHeight(),
   };
 }
+
+/**
+ * Height (in rows) of the Ink live frame — the computed height of the root of
+ * the yoga tree that `node` belongs to.
+ *
+ * In alternate-screen mode the frame is bottom-anchored to the terminal, so the
+ * frame top sits at `terminalHeight - frameHeight` (see utils/list-mouse.ts
+ * `frameAnchor`). When the frame is TALLER than the terminal that value is
+ * negative — the top rows are scrolled off the top edge — which is exactly the
+ * correction needed to map mouse rows back onto layout rows.
+ *
+ * Like {@link measureElementPosition}, must be called from post-render code and
+ * returns 0 during render.
+ */
+export function measureFrameHeight(node: DOMElement): number {
+  let root: DOMElement = node;
+  let current: DOMElement | undefined = node;
+  while (current) {
+    root = current;
+    current = current.parentNode;
+  }
+  return root.yogaNode?.getComputedHeight() ?? 0;
+}
