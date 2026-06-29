@@ -160,7 +160,8 @@ const TranscriptViewImpl = ({
         </Box>
         <Box justifyContent="center">
           <Text dimColor italic>
-            Esc/q {t('to close')} {'  '}↑↓ {t('to scroll')} {'  '}PgUp/PgDn
+            Esc/q {t('to close')} {'  '}Shift+↑↓ {t('to scroll')} {'  '}
+            PgUp/PgDn
             {'  '}
             Ctrl+Home/End
           </Text>

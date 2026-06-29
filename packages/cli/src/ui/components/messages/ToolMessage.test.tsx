@@ -293,8 +293,29 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       const output = lastFrame();
-      expect(output).toContain('MockMarkdown:full file contents here');
-      expect(output).not.toContain('MockMarkdown:Read 1 file');
+      // detailedDisplay is raw tool output → rendered as PLAIN TEXT, not Markdown
+      expect(output).toContain('full file contents here');
+      expect(output).not.toContain('MockMarkdown:full file contents here');
+      expect(output).not.toContain('Read 1 file');
+    });
+
+    it('renders detailedDisplay as plain text, not Markdown', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="config.yaml"
+          resultDisplay="Read 1 file"
+          detailedDisplay="# heading from file\n- list item"
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame();
+      // The raw file content must NOT be Markdown-formatted (no MockMarkdown wrap).
+      expect(output).not.toContain('MockMarkdown:');
+      expect(output).toContain('heading from file');
     });
 
     it('keeps the summary when forced but NOT in fullDetail mode (main-view force)', () => {

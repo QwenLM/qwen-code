@@ -26,12 +26,14 @@ export function getResponseTextFromParts(parts: Part[]): string | undefined {
 }
 
 /**
- * Default `output` string `convertToFunctionResponse` writes when a tool
- * returned no text (e.g. media-only / empty results). Treated as
- * non-informative for display extraction so we fall back to media placeholders
- * or to the summary `resultDisplay` instead of surfacing this literal.
+ * Default `output` string `convertToFunctionResponse` (in `coreToolScheduler`)
+ * writes when a tool returned no text (e.g. media-only / empty results).
+ * Exported as the single source of truth so the producer (coreToolScheduler)
+ * and this consumer cannot drift: `getToolResponseDisplayText` treats it as
+ * non-informative and falls back to media placeholders / the summary
+ * `resultDisplay` instead of surfacing the literal.
  */
-const TOOL_SUCCEEDED_PLACEHOLDER = 'Tool execution succeeded.';
+export const TOOL_SUCCEEDED_OUTPUT = 'Tool execution succeeded.';
 
 /**
  * Extract the FULL tool-result text for display (Ctrl+O transcript full detail),
@@ -80,7 +82,7 @@ export function getToolResponseDisplayText(
     if (
       typeof output === 'string' &&
       output.length > 0 &&
-      output !== TOOL_SUCCEEDED_PLACEHOLDER
+      output !== TOOL_SUCCEEDED_OUTPUT
     ) {
       segments.push(output);
     }

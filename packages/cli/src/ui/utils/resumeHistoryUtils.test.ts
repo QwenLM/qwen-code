@@ -580,6 +580,28 @@ describe('resumeHistoryUtils', () => {
       const tool = firstTool(items);
       expect(tool?.detailedDisplay).toBeUndefined();
     });
+
+    it('does NOT populate detailedDisplay for errored tools (matches live path)', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Tool failed',
+          status: 'error',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'raw error output that must not surface' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Error);
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
   });
 });
 

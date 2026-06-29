@@ -419,14 +419,6 @@ function convertToHistoryItems(
             // Preserve the resultDisplay as-is - it can be a string or structured object
             const rawDisplay = record.toolCallResult.resultDisplay;
             toolCall.resultDisplay = rawDisplay;
-            // Full detail for the Ctrl+O transcript (§4.9): the complete
-            // functionResponse parts are persisted on the tool_result record
-            // (only resultDisplay is sanitized), so resume yields full detail
-            // too. Fall back to message.parts for older records.
-            toolCall.detailedDisplay = getToolResponseDisplayText(
-              (record.toolCallResult.responseParts as Part[] | undefined) ??
-                (record.message?.parts as Part[] | undefined),
-            );
             // Check if status exists and use it
             const rawStatus = (
               record.toolCallResult as Record<string, unknown>
@@ -435,6 +427,19 @@ function convertToHistoryItems(
               rawStatus === 'error'
                 ? ToolCallStatus.Error
                 : ToolCallStatus.Success;
+            // Full detail for the Ctrl+O transcript (§4.9): the complete
+            // functionResponse parts are persisted on the tool_result record
+            // (only resultDisplay is sanitized), so resume yields full detail
+            // too. Fall back to message.parts for older records. Only derive it
+            // for SUCCESS, matching the live path (useReactToolScheduler only
+            // sets detailedDisplay in its 'success' branch) so errored/cancelled
+            // tools don't surface raw output in the transcript.
+            if (toolCall.status === ToolCallStatus.Success) {
+              toolCall.detailedDisplay = getToolResponseDisplayText(
+                (record.toolCallResult.responseParts as Part[] | undefined) ??
+                  (record.message?.parts as Part[] | undefined),
+              );
+            }
           }
           pendingToolCalls.delete(callId || '');
         }

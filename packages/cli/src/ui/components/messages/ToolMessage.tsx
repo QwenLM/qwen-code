@@ -683,13 +683,23 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   // swap the summary `resultDisplay` for the complete `detailedDisplay` derived
   // from the persisted functionResponse. Only a non-empty string detail
   // qualifies; everything else (and all main-view rendering) keeps the summary.
-  const effectiveResultDisplay =
+  const usingDetailedDisplay =
     fullDetail &&
     isCollapsibleTool(name) &&
     typeof detailedDisplay === 'string' &&
-    detailedDisplay.length > 0
-      ? detailedDisplay
-      : resultDisplay;
+    detailedDisplay.length > 0;
+  const effectiveResultDisplay = usingDetailedDisplay
+    ? detailedDisplay
+    : resultDisplay;
+
+  // detailedDisplay is RAW tool output (file content, grep hits, directory
+  // listings). Render it as plain text — Markdown formatting would turn the
+  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
+  // `if (availableHeight)` guard above doesn't catch this because fullDetail
+  // lifts the height cap (availableTerminalHeight is undefined in transcript).
+  if (usingDetailedDisplay) {
+    renderOutputAsMarkdown = false;
+  }
 
   const effectiveDisplayRenderer =
     useResultDisplayRenderer(effectiveResultDisplay);
