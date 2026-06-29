@@ -208,19 +208,26 @@ export function findServeFastPathBundleOffenders(metafile) {
     const inputs = Object.keys(output?.inputs ?? {});
 
     for (const input of inputs) {
-      const normalizedInput = normalizeMetafilePath(input);
       const sourceMatch = FORBIDDEN_SOURCE_INPUTS.find(({ suffixes }) =>
-        inputMatchesAnySuffix(normalizedInput, suffixes),
+        inputMatchesAnySuffix(input, suffixes),
       );
       if (sourceMatch) {
-        addOffender(sourceMatch.label, normalizedInput, outputPath);
+        addOffender(
+          sourceMatch.label,
+          normalizeMetafilePath(input),
+          outputPath,
+        );
       }
 
       const vendorMatch = FORBIDDEN_VENDOR_PACKAGES.find(({ packageName }) =>
-        inputMatchesPackage(normalizedInput, packageName),
+        inputMatchesPackage(input, packageName),
       );
       if (vendorMatch) {
-        addOffender(vendorMatch.label, normalizedInput, outputPath);
+        addOffender(
+          vendorMatch.label,
+          normalizeMetafilePath(input),
+          outputPath,
+        );
       }
     }
   }
