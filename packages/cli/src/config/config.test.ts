@@ -971,17 +971,19 @@ describe('loadCliConfig', () => {
 
   describe('--insecure flag', () => {
     const savedEnv: Record<string, string | undefined> = {};
+    let errorSpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
       for (const key of ['QWEN_TLS_INSECURE', 'NODE_TLS_REJECT_UNAUTHORIZED']) {
         savedEnv[key] = process.env[key];
         delete process.env[key];
       }
-      // Silence the intentional MITM warning loadCliConfig emits.
-      vi.spyOn(console, 'error').mockImplementation(() => {});
+      // Silence (and capture) the intentional MITM warning loadCliConfig emits.
+      errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     });
 
     afterEach(() => {
+      errorSpy.mockRestore();
       for (const [key, value] of Object.entries(savedEnv)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
@@ -994,6 +996,7 @@ describe('loadCliConfig', () => {
       await loadCliConfig({}, argv);
       expect(process.env['QWEN_TLS_INSECURE']).toBe('1');
       expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe('0');
+      expect(errorSpy).toHaveBeenCalled();
     });
 
     it('leaves TLS env vars unset without --insecure', async () => {
@@ -1002,6 +1005,25 @@ describe('loadCliConfig', () => {
       await loadCliConfig({}, argv);
       expect(process.env['QWEN_TLS_INSECURE']).toBeUndefined();
       expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBeUndefined();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('propagates a pre-set QWEN_TLS_INSECURE to NODE_TLS_REJECT_UNAUTHORIZED=0', async () => {
+      process.env['QWEN_TLS_INSECURE'] = '1';
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe('0');
+      expect(errorSpy).toHaveBeenCalled();
+    });
+
+    it('skips re-assignment and warning when NODE_TLS_REJECT_UNAUTHORIZED is already 0', async () => {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+      process.argv = ['node', 'script.js', '--insecure'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe('0');
+      expect(errorSpy).not.toHaveBeenCalled();
     });
   });
 
