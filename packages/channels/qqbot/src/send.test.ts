@@ -81,6 +81,7 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected config: Record<string, unknown> = {};
     protected bridge: Record<string, unknown> = {};
     protected router: Record<string, unknown> = {};
+    protected baseOptions: Record<string, unknown> = {};
     protected name: string = '';
     constructor(
       name: string,
@@ -92,6 +93,7 @@ vi.mock('@qwen-code/channel-base', () => ({
       this.config = config;
       this.bridge = bridge;
       this.router = options?.router ?? {};
+      this.baseOptions = options ?? {};
     }
     protected handleInbound(_env: unknown): Promise<void> {
       return Promise.resolve();
@@ -287,6 +289,11 @@ describe('session persistence paths', () => {
     return (ch as unknown as { globalSessionsPath: string }).globalSessionsPath;
   }
 
+  function getBaseOptions(ch: QQChannel): Record<string, unknown> {
+    return (ch as unknown as { baseOptions: Record<string, unknown> })
+      .baseOptions;
+  }
+
   it('uses per-channel sessions files when QQChannel owns the router', () => {
     expect(getGlobalSessionsPath(makeChannel('bot one'))).toBe(
       '/tmp/test-qwen/channels/bot_one-sessions.json',
@@ -304,6 +311,24 @@ describe('session persistence paths', () => {
     expect(
       getGlobalSessionsPath(makeChannel('bot-one', { router: externalRouter })),
     ).toBe('/tmp/test-qwen/channels/sessions.json');
+  });
+
+  it('asks ChannelBase to register bridge events when QQ owns the router', () => {
+    expect(getBaseOptions(makeChannel('bot-one'))['registerBridgeEvents']).toBe(
+      true,
+    );
+  });
+
+  it('leaves bridge events gateway-managed when a router is supplied', () => {
+    const externalRouter = {
+      restoreSessions: vi.fn(),
+    } as unknown as QQChannelRouter;
+
+    expect(
+      getBaseOptions(makeChannel('bot-one', { router: externalRouter }))[
+        'registerBridgeEvents'
+      ],
+    ).toBe(false);
   });
 });
 

@@ -14,6 +14,8 @@ ChannelBase  →  calls your sendMessage() with the agent's response
 
 `ChannelAgentBridge` is the adapter-facing bridge contract. The current standalone `qwen channel start` path provides an `AcpBridge`, but plugin code should type constructor parameters as `ChannelAgentBridge` so the same adapter can run behind other bridge implementations later.
 
+Migration note for existing TypeScript plugins: if your adapter constructor or factory explicitly types `bridge` as `AcpBridge`, change that annotation to `ChannelAgentBridge` and keep using only the methods exposed by that contract. JavaScript plugins are unaffected at runtime, and standalone `qwen channel start` still passes the current `AcpBridge` implementation.
+
 ## The Plugin Object
 
 Your extension entry point exports a `plugin` conforming to `ChannelPlugin`:
@@ -79,6 +81,8 @@ export class MyChannel extends ChannelBase {
   }
 }
 ```
+
+Most adapters should pass `options` through unchanged. If an adapter creates its own `SessionRouter` and passes that router to `super()`, set `registerBridgeEvents: true` in `ChannelBaseOptions` so `ChannelBase` still receives `toolCall` and `sessionDied` events directly. Leave it unset for routers supplied by the channel gateway.
 
 ## The Envelope
 

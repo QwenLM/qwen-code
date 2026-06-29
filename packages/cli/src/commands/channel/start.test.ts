@@ -283,6 +283,54 @@ describe('startCommand.handler', () => {
     expect(mockRouterRemoveSessionId).toHaveBeenCalledWith('dead-session');
   });
 
+  it('registers session cleanup on the replacement bridge before restoring sessions', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const restart = disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await restart;
+
+      const restartedBridge = mockAcpBridge.mock.results[1]!.value;
+      expect(mockRouterSetBridge).toHaveBeenCalledWith(restartedBridge);
+      expect(mockChannelSetBridge).toHaveBeenCalledWith(restartedBridge);
+
+      const sessionDiedCalls = mockBridgeOn.mock.calls.filter(
+        ([eventName]) => eventName === 'sessionDied',
+      );
+      expect(sessionDiedCalls).toHaveLength(2);
+      const restartedSessionDiedListener = sessionDiedCalls[1]![1] as (event: {
+        sessionId: string;
+      }) => void;
+      expect(mockBridgeOn.mock.invocationCallOrder.at(-2)).toBeLessThan(
+        mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
+      );
+
+      restartedSessionDiedListener({ sessionId: 'dead-after-restart' });
+
+      expect(mockRouterRemoveSessionId).toHaveBeenCalledWith(
+        'dead-after-restart',
+      );
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('starts all channels with one shared bridge and router', async () => {
     const channels = {
       first: { type: 'telegram' },

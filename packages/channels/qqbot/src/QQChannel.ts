@@ -164,7 +164,11 @@ export class QQChannel extends ChannelBase {
       options?.router ??
       new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
 
-    super(name, config, bridge, { ...options, router });
+    super(name, config, bridge, {
+      ...options,
+      router,
+      registerBridgeEvents: options?.registerBridgeEvents ?? !hasExternalRouter,
+    });
     this.qqConfig = config as unknown as QQChannelConfig;
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     this.globalSessionsPath = hasExternalRouter

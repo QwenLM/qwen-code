@@ -8,11 +8,19 @@ interface PersistedEntry {
   cwd: string;
 }
 
+interface SessionReservation {
+  promise: Promise<string>;
+  resolve: (sessionId: string) => void;
+  reject: (error: unknown) => void;
+}
+
 export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
   private creatingSessions: Map<string, Promise<string>> = new Map();
+  private pendingDeadSessionIds: Set<string> = new Set();
+  private loadingSessions = 0;
 
   private bridge: ChannelAgentBridge;
   private defaultCwd: string;
@@ -68,30 +76,53 @@ export class SessionRouter {
     cwd?: string,
   ): Promise<string> {
     const key = this.routingKey(channelName, senderId, chatId, threadId);
-    const existing = this.toSession.get(key);
-    if (existing) {
-      return existing;
-    }
+    for (;;) {
+      const existing = this.toSession.get(key);
+      if (existing) {
+        return existing;
+      }
 
-    const creating = this.creatingSessions.get(key);
-    if (creating) {
-      return creating;
-    }
+      const creating = this.creatingSessions.get(key);
+      if (creating) {
+        try {
+          return await creating;
+        } catch {
+          if (this.creatingSessions.get(key) === creating) {
+            this.creatingSessions.delete(key);
+          }
+          continue;
+        }
+      }
 
-    const created = (async () => {
-      const sessionCwd = cwd || this.defaultCwd;
-      const sessionId = await this.bridge.newSession(sessionCwd);
-      this.toSession.set(key, sessionId);
-      this.toTarget.set(sessionId, { channelName, senderId, chatId, threadId });
-      this.toCwd.set(sessionId, sessionCwd);
-      this.persist();
-      return sessionId;
-    })();
-    this.creatingSessions.set(key, created);
-    try {
-      return await created;
-    } finally {
-      this.creatingSessions.delete(key);
+      // Register the in-flight route before starting newSession(), because a
+      // bridge can emit sessionDied synchronously while creating the session.
+      const created = Promise.resolve().then(async () => {
+        const sessionCwd = cwd || this.defaultCwd;
+        this.beginSessionLoad();
+        try {
+          const sessionId = await this.createLiveSession(sessionCwd);
+          this.toSession.set(key, sessionId);
+          this.toTarget.set(sessionId, {
+            channelName,
+            senderId,
+            chatId,
+            threadId,
+          });
+          this.toCwd.set(sessionId, sessionCwd);
+          this.persist();
+          return sessionId;
+        } finally {
+          this.endSessionLoad();
+        }
+      });
+      this.creatingSessions.set(key, created);
+      try {
+        return await created;
+      } finally {
+        if (this.creatingSessions.get(key) === created) {
+          this.creatingSessions.delete(key);
+        }
+      }
     }
   }
 
@@ -177,6 +208,9 @@ export class SessionRouter {
     if (this.toCwd.delete(sessionId)) {
       removed = true;
     }
+    if (!removed && this.loadingSessions > 0) {
+      this.pendingDeadSessionIds.add(sessionId);
+    }
     if (removed) {
       this.persist();
     }
@@ -231,30 +265,54 @@ export class SessionRouter {
     let restored = 0;
     let failed = 0;
     let changed = false;
+    const reservations = new Map<string, SessionReservation>();
+
+    // Reserve every persisted key up front so inbound messages during restart
+    // wait for restore instead of returning stale IDs or creating duplicates.
+    for (const key of Object.keys(entries)) {
+      this.deleteByKey(key);
+      const reservation = this.createSessionReservation();
+      reservation.promise.catch(() => undefined);
+      this.creatingSessions.set(key, reservation.promise);
+      reservations.set(key, reservation);
+    }
 
     for (const [key, entry] of Object.entries(entries)) {
-      this.deleteByKey(key);
+      const reservation = reservations.get(key);
+      if (!reservation) continue;
       try {
-        const sessionId = await this.bridge.loadSession(
-          entry.sessionId,
-          entry.cwd,
-        );
-        if (typeof sessionId !== 'string' || sessionId.length === 0) {
-          failed++;
-          changed = true;
-          continue;
+        this.beginSessionLoad();
+        try {
+          const sessionId = await this.bridge.loadSession(
+            entry.sessionId,
+            entry.cwd,
+          );
+          if (typeof sessionId !== 'string' || sessionId.length === 0) {
+            throw new Error('Invalid restored session ID');
+          }
+          if (this.pendingDeadSessionIds.delete(sessionId)) {
+            throw new Error('Restored session died before routing completed');
+          }
+          this.toSession.set(key, sessionId);
+          this.toTarget.set(sessionId, entry.target);
+          this.toCwd.set(sessionId, entry.cwd);
+          reservation.resolve(sessionId);
+          if (sessionId !== entry.sessionId) {
+            changed = true;
+          }
+          restored++;
+        } finally {
+          this.endSessionLoad();
         }
-        this.toSession.set(key, sessionId);
-        this.toTarget.set(sessionId, entry.target);
-        this.toCwd.set(sessionId, entry.cwd);
-        if (sessionId !== entry.sessionId) {
-          changed = true;
-        }
-        restored++;
       } catch {
+        reservation.reject(new Error('Session restore failed'));
         // Session can't be loaded — will create fresh on next message
         failed++;
         changed = true;
+      } finally {
+        if (this.creatingSessions.get(key) === reservation.promise) {
+          this.creatingSessions.delete(key);
+        }
       }
     }
 
@@ -272,6 +330,8 @@ export class SessionRouter {
     this.toTarget.clear();
     this.toCwd.clear();
     this.creatingSessions.clear();
+    this.pendingDeadSessionIds.clear();
+    this.loadingSessions = 0;
     if (this.persistPath && existsSync(this.persistPath)) {
       try {
         unlinkSync(this.persistPath);
@@ -300,6 +360,44 @@ export class SessionRouter {
       writeFileSync(this.persistPath, JSON.stringify(data, null, 2), 'utf-8');
     } catch {
       // best-effort — don't break message flow for persistence failure
+    }
+  }
+
+  private async createLiveSession(cwd: string): Promise<string> {
+    const maxAttempts = 2;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const sessionId = await this.bridge.newSession(cwd);
+      if (!this.pendingDeadSessionIds.delete(sessionId)) {
+        return sessionId;
+      }
+    }
+    throw new Error('Session died before routing completed');
+  }
+
+  private beginSessionLoad(): void {
+    this.loadingSessions++;
+  }
+
+  private createSessionReservation(): SessionReservation {
+    let resolveReservation!: (sessionId: string) => void;
+    let rejectReservation!: (error: unknown) => void;
+    const promise = new Promise<string>((resolve, reject) => {
+      resolveReservation = resolve;
+      rejectReservation = reject;
+    });
+    return {
+      promise,
+      resolve: resolveReservation,
+      reject: rejectReservation,
+    };
+  }
+
+  private endSessionLoad(): void {
+    if (this.loadingSessions > 0) {
+      this.loadingSessions--;
+    }
+    if (this.loadingSessions === 0) {
+      this.pendingDeadSessionIds.clear();
     }
   }
 }

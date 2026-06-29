@@ -65,6 +65,8 @@ export const plugin: ChannelPlugin = {
 
 For a complete working example, see [`@qwen-code/channel-plugin-example`](../plugin-example/).
 
+Migration note for existing TypeScript plugins: if your adapter constructor or factory explicitly types `bridge` as `AcpBridge`, change that annotation to `ChannelAgentBridge` and keep using only the methods exposed by that contract. JavaScript plugins are unaffected at runtime, and standalone `qwen channel start` still passes the current `AcpBridge` implementation.
+
 ## Architecture
 
 ```
@@ -145,6 +147,14 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 **Block streaming:** When `blockStreaming: "on"` is set in the channel config, the base class automatically splits the agent's streaming response into multiple messages at paragraph boundaries. See [Block Streaming](#block-streaming) below.
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
+
+**ChannelBaseOptions:**
+
+| Option                 | Description                                                                                                                                                |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `router`               | Optional `SessionRouter`. Omit for the default standalone router.                                                                                          |
+| `proxy`                | Optional proxy URL made available to adapters.                                                                                                             |
+| `registerBridgeEvents` | Set only when the adapter owns a supplied router and `ChannelBase` should consume bridge events directly. Leave unset for routers supplied by the gateway. |
 
 ### ChannelAgentBridge
 

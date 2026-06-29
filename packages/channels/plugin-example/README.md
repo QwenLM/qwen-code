@@ -97,6 +97,8 @@ See `src/MockPluginChannel.ts` for a working example. The key points:
 
 `AcpBridge` is still the current standalone `qwen channel start` implementation. Plugin adapters should depend on the `ChannelAgentBridge` abstraction provided by `@qwen-code/channel-base`.
 
+Existing TypeScript plugins that explicitly type the adapter constructor or factory `bridge` parameter as `AcpBridge` should change that annotation to `ChannelAgentBridge`. JavaScript plugins are unaffected at runtime.
+
 ### Features you get for free
 
 - **Block streaming** — enable `blockStreaming: "on"` in config and the agent's response is automatically split into multiple messages at paragraph boundaries

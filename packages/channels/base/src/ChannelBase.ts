@@ -6,12 +6,18 @@ import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
 import type {
   ChannelAgentBridge,
+  SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  /**
+   * Set when a channel owns a supplied router and should consume bridge
+   * events directly.
+   */
+  registerBridgeEvents?: boolean;
 }
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
@@ -37,6 +43,7 @@ export abstract class ChannelBase {
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
+  private readonly registerBridgeEvents: boolean;
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
@@ -45,6 +52,17 @@ export abstract class ChannelBase {
     string,
     Array<{ text: string; envelope: Envelope }>
   > = new Map();
+  private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
+    const target = this.router.getTarget(event.sessionId);
+    if (target) {
+      this.onToolCall(target.chatId, event);
+    }
+  };
+  private readonly bridgeSessionDiedListener = (
+    event: SessionDiedEvent,
+  ): void => {
+    this.router.removeSessionId(event.sessionId);
+  };
 
   constructor(
     name: string,
@@ -72,18 +90,12 @@ export abstract class ChannelBase {
 
     this.registerSharedCommands();
 
-    // When running standalone (no gateway), register toolCall listener directly.
+    // When running standalone, register bridge listeners directly.
     // In gateway mode, the ChannelManager dispatches events instead.
-    if (!options?.router) {
-      bridge.on('toolCall', (event: ToolCallEvent) => {
-        const target = this.router.getTarget(event.sessionId);
-        if (target) {
-          this.onToolCall(target.chatId, event);
-        }
-      });
-      bridge.on('sessionDied', ({ sessionId }) => {
-        this.router.removeSessionId(sessionId);
-      });
+    this.registerBridgeEvents =
+      options?.registerBridgeEvents ?? !options?.router;
+    if (this.registerBridgeEvents) {
+      this.attachBridgeEvents(bridge);
     }
   }
 
@@ -93,10 +105,27 @@ export abstract class ChannelBase {
 
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
+    if (this.registerBridgeEvents) {
+      this.detachBridgeEvents(this.bridge);
+      this.router.setBridge(bridge);
+    }
     this.bridge = bridge;
+    if (this.registerBridgeEvents) {
+      this.attachBridgeEvents(bridge);
+    }
   }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
+
+  private attachBridgeEvents(bridge: ChannelAgentBridge): void {
+    bridge.on('toolCall', this.bridgeToolCallListener);
+    bridge.on('sessionDied', this.bridgeSessionDiedListener);
+  }
+
+  private detachBridgeEvents(bridge: ChannelAgentBridge): void {
+    bridge.off('toolCall', this.bridgeToolCallListener);
+    bridge.off('sessionDied', this.bridgeSessionDiedListener);
+  }
 
   /**
    * Called when a prompt actually begins processing (inside the session queue).
@@ -492,10 +521,11 @@ export abstract class ChannelBase {
           streamer?.push(chunk);
         }
       };
-      this.bridge.on('textChunk', onChunk);
+      const promptBridge = this.bridge;
+      promptBridge.on('textChunk', onChunk);
 
       try {
-        const response = await this.bridge.prompt(sessionId, promptText, {
+        const response = await promptBridge.prompt(sessionId, promptText, {
           imageBase64,
           imageMimeType,
         });
@@ -513,7 +543,7 @@ export abstract class ChannelBase {
           }
         }
       } finally {
-        this.bridge.off('textChunk', onChunk);
+        promptBridge.off('textChunk', onChunk);
         streamer?.stop();
         this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
         this.activePrompts.delete(sessionId);

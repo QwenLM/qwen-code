@@ -9,12 +9,15 @@ import type { ChannelBaseOptions } from './ChannelBase.js';
 class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
   connected = false;
+  toolCalls: Array<{ chatId: string; event: unknown }> = [];
   promptStarts: Array<{
     chatId: string;
     sessionId: string;
     messageId?: string;
   }> = [];
   promptEnds: Array<{ chatId: string; sessionId: string; messageId?: string }> =
+    [];
+  responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
     [];
 
   async connect() {
@@ -25,6 +28,10 @@ class TestChannel extends ChannelBase {
   }
   disconnect() {
     this.connected = false;
+  }
+
+  override onToolCall(chatId: string, event: unknown): void {
+    this.toolCalls.push({ chatId, event });
   }
 
   enableCancelCommand(): void {
@@ -45,6 +52,14 @@ class TestChannel extends ChannelBase {
     messageId?: string,
   ): void {
     this.promptEnds.push({ chatId, sessionId, messageId });
+  }
+
+  protected override onResponseChunk(
+    chatId: string,
+    chunk: string,
+    sessionId: string,
+  ): void {
+    this.responseChunks.push({ chatId, chunk, sessionId });
   }
 }
 
@@ -249,6 +264,121 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '/status' }));
 
       expect(ch.sent[0]!.text).toContain('Session: none');
+    });
+
+    it('can register bridge events when a supplied router is channel-owned', () => {
+      const router = {
+        getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
+        removeSessionId: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as ChannelBaseOptions & { registerBridgeEvents: true });
+      const toolCall = {
+        sessionId: 's-1',
+        toolCallId: 'tool-1',
+        kind: 'exec',
+        title: 'Run',
+        status: 'pending',
+      };
+
+      (bridge as unknown as EventEmitter).emit('toolCall', toolCall);
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId: 's-1',
+      });
+
+      expect(ch.toolCalls).toEqual([{ chatId: 'chat1', event: toolCall }]);
+      expect(router.removeSessionId).toHaveBeenCalledWith('s-1');
+    });
+
+    it('leaves supplied router bridge events to the gateway by default', () => {
+      const router = {
+        getTarget: vi.fn(),
+        removeSessionId: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
+
+      (bridge as unknown as EventEmitter).emit('toolCall', {
+        sessionId: 's-1',
+        toolCallId: 'tool-1',
+        kind: 'exec',
+        title: 'Run',
+        status: 'pending',
+      });
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId: 's-1',
+      });
+
+      expect(ch.toolCalls).toEqual([]);
+      expect(router.removeSessionId).not.toHaveBeenCalled();
+    });
+
+    it('moves direct bridge events and router bridge on setBridge', () => {
+      const oldBridge = bridge;
+      const newBridge = createBridge();
+      const router = {
+        getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
+        removeSessionId: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      ch.setBridge(newBridge);
+
+      (oldBridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId: 'old-session',
+      });
+      (newBridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId: 'new-session',
+      });
+      const toolCall = {
+        sessionId: 'new-session',
+        toolCallId: 'tool-1',
+        kind: 'exec',
+        title: 'Run',
+        status: 'pending',
+      };
+      (oldBridge as unknown as EventEmitter).emit('toolCall', {
+        ...toolCall,
+        toolCallId: 'old-tool',
+      });
+      (newBridge as unknown as EventEmitter).emit('toolCall', toolCall);
+
+      expect(router.setBridge).toHaveBeenCalledWith(newBridge);
+      expect(router.removeSessionId).toHaveBeenCalledTimes(1);
+      expect(router.removeSessionId).toHaveBeenCalledWith('new-session');
+      expect(ch.toolCalls).toEqual([{ chatId: 'chat1', event: toolCall }]);
+    });
+
+    it('removes in-flight prompt chunk listener from the original bridge after setBridge', async () => {
+      const oldBridge = bridge;
+      const newBridge = createBridge();
+      let resolvePrompt!: (value: string) => void;
+      (oldBridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const ch = createChannel();
+
+      const inbound = ch.handleInbound(envelope({ text: 'long task' }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      ch.setBridge(newBridge);
+      resolvePrompt('done');
+      await inbound;
+
+      (oldBridge as unknown as EventEmitter).emit(
+        'textChunk',
+        's-1',
+        'late chunk',
+      );
+
+      expect(ch.responseChunks).toEqual([]);
     });
 
     it('/cancel reports when no request is running', async () => {
