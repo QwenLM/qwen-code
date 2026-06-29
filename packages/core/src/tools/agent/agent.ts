@@ -480,6 +480,8 @@ export async function createApprovalModeOverride(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   const baseApprovalMode = base.getApprovalMode();
+  // These own properties intentionally mirror Config's TS-private field names.
+  // Config prototype methods read/write them at runtime on this override object.
   override.approvalMode = mode;
   override.getApprovalMode = Config.prototype.getApprovalMode;
   override.prePlanMode =

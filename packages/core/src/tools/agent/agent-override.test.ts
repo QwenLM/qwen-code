@@ -18,6 +18,7 @@ import { ToolNames } from '../tool-names.js';
 import { EditTool } from '../edit.js';
 import { WriteFileTool } from '../write-file.js';
 import { ReadFileTool } from '../read-file.js';
+import { recordBlock } from '../../permissions/denialTracking.js';
 
 /**
  * Regression: Object.create(parent) is not enough to isolate a subagent's
@@ -204,6 +205,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     const execDetails = {
       type: 'exec',
     } as unknown as ToolCallConfirmationDetails;
+    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
     const isPlanMode = child.getApprovalMode() === ApprovalMode.PLAN;
 
     expect(isPlanModeBlocked(isPlanMode, false, false, execDetails)).toBe(
@@ -227,12 +229,40 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
 
     expect(child.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    const childGateState = child.getPlanGateState();
+    expect(childGateState).not.toBe(parentGateState);
+    expect(childGateState?.lastFindings).not.toBe(
+      parentGateState?.lastFindings,
+    );
 
     child.setApprovalMode(ApprovalMode.DEFAULT);
+    child.setApprovalMode(ApprovalMode.PLAN);
 
-    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    expect(child.getApprovalMode()).toBe(ApprovalMode.PLAN);
+    expect(child.getPlanGateState()?.entryId).toBe(
+      (parentGateState?.entryId ?? 0) + 1,
+    );
     expect(parent.getApprovalMode()).toBe(ApprovalMode.PLAN);
     expect(parent.getPlanGateState()).toBe(parentGateState);
+  });
+
+  it('starts child AUTO denial state independent from the parent', async () => {
+    const parent = await createParentWithRegistry();
+    parent.setAutoModeDenialState(recordBlock(parent.getAutoModeDenialState()));
+    const parentDenialState = parent.getAutoModeDenialState();
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.DEFAULT,
+    );
+
+    expect(child.getAutoModeDenialState()).toEqual({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    });
+    expect(child.getAutoModeDenialState()).not.toBe(parentDenialState);
   });
 
   it('uses the parent current mode as pre-plan mode when a non-plan parent creates a plan child', async () => {
@@ -320,6 +350,29 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
 
     cleanup();
     expect(restoreDangerousRules).not.toHaveBeenCalled();
+  });
+
+  it('restores the inherited permission manager when AUTO-parent mode changes throw', async () => {
+    const parent = await createParentWithRegistry();
+    attachFakePermissionManager(parent);
+    const parentPermissionManager = parent.getPermissionManager();
+    const trustSpy = vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+    parent.setApprovalMode(ApprovalMode.AUTO);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO,
+    );
+
+    trustSpy.mockReturnValue(false);
+
+    expect(() => child.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
+      'Cannot enable privileged approval modes in an untrusted folder.',
+    );
+    expect(child.getPermissionManager()).toBe(parentPermissionManager);
+    expect(
+      Object.prototype.hasOwnProperty.call(child, 'permissionManager'),
+    ).toBe(false);
   });
 
   it('restores AUTO rules when a non-AUTO child enters AUTO and finishes there', async () => {
