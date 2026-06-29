@@ -909,6 +909,32 @@ export function App({
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
+
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 760px)');
+    const handler = (e: MediaQueryListEvent) => {
+      if (!e.matches) setMobileDrawerOpen(false);
+    };
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        closeMobileDrawer();
+      }
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [mobileDrawerOpen, closeMobileDrawer]);
   const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
     setSidebarCollapsed(collapsed);
     writeSidebarCollapsed(collapsed);
@@ -2919,6 +2945,7 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
+              closeMobileDrawer();
               sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
@@ -3102,6 +3129,7 @@ export function App({
       enqueuePrompt,
       echoOrDeferLocalCommand,
       branchCurrentSession,
+      closeMobileDrawer,
       createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
@@ -3525,6 +3553,7 @@ export function App({
             >
               <ResumeDialog
                 onSelect={(sessionId) => {
+                  closeMobileDrawer();
                   sessionActions
                     .loadSession(sessionId)
                     .catch((error: unknown) => {
@@ -3798,6 +3827,9 @@ export function App({
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
               <div
+                role="dialog"
+                aria-modal="true"
+                aria-label={t('sidebar.label')}
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
@@ -3811,9 +3843,12 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
-                  collapsed={sidebarCollapsed}
+                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
                   onCollapsedChange={handleSidebarCollapsedChange}
-                  onOpenSettings={() => setShowSettingsDialog(true)}
+                  onOpenSettings={() => {
+                    closeMobileDrawer();
+                    setShowSettingsDialog(true);
+                  }}
                   onNewSession={createNewSession}
                   onLoadSession={loadSidebarSession}
                   onError={reportError}
@@ -3828,6 +3863,7 @@ export function App({
                   className={styles.hamburgerButton}
                   onClick={() => setMobileDrawerOpen((open) => !open)}
                   aria-label={t('sidebar.toggleMenu')}
+                  aria-expanded={mobileDrawerOpen}
                 >
                   <svg
                     viewBox="0 0 24 24"

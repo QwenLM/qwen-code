@@ -50,7 +50,7 @@
 }
 
 .mobileDrawer {
-  display: none;
+  display: contents;
 }
 
 .mobileBackdrop {
@@ -112,6 +112,11 @@
   .mobileDrawerOpen .mobileBackdrop {
     opacity: 1;
     pointer-events: auto;
+  }
+
+  .mobileDrawer :global(.sidebar) {
+    position: relative;
+    z-index: 1;
   }
 
   .hamburgerButton {

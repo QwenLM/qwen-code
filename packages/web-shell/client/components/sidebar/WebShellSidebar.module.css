@@ -636,4 +636,8 @@
   .sidebar.mobileOpen {
     display: flex;
   }
+
+  .resizeHandle {
+    display: none;
+  }
 }
