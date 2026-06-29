@@ -26,6 +26,7 @@ package-lock.json
 .qoder
 .claude
 .codex
+.worktrees/
 
 # Qwen Code Configs
 .qwen/*
