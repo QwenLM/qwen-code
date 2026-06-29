@@ -133,15 +133,12 @@ export function buildRuntimeFetchOptions(
 
   switch (runtime) {
     case 'bun': {
-      const insecure = isTlsVerificationDisabled();
       if (sdkType === 'openai') {
         // Bun: Disable built-in 300s timeout to let OpenAI SDK timeout control
         // This ensures user-configured timeout works as expected without interference
         return {
           fetchOptions: {
             timeout: false,
-            // Bun's fetch honors a `tls` option for per-request TLS settings.
-            ...(insecure ? { tls: { rejectUnauthorized: false } } : {}),
           },
         };
       } else {
@@ -157,8 +154,6 @@ export function buildRuntimeFetchOptions(
             ...init,
             // @ts-expect-error - Bun-specific timeout option
             timeout: false,
-            // Bun-specific TLS option; spread so the type stays RequestInit.
-            ...(insecure ? { tls: { rejectUnauthorized: false } } : {}),
           };
           return fetch(input, bunFetchOptions);
         };

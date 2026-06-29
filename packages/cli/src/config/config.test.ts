@@ -969,6 +969,34 @@ describe('loadCliConfig', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(true);
   });
 
+  describe('--insecure flag', () => {
+    let savedInsecure: string | undefined;
+
+    beforeEach(() => {
+      savedInsecure = process.env['QWEN_TLS_INSECURE'];
+      delete process.env['QWEN_TLS_INSECURE'];
+    });
+
+    afterEach(() => {
+      if (savedInsecure === undefined) delete process.env['QWEN_TLS_INSECURE'];
+      else process.env['QWEN_TLS_INSECURE'] = savedInsecure;
+    });
+
+    it('sets QWEN_TLS_INSECURE=1 when --insecure is passed', async () => {
+      process.argv = ['node', 'script.js', '--insecure'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(process.env['QWEN_TLS_INSECURE']).toBe('1');
+    });
+
+    it('leaves QWEN_TLS_INSECURE unset without --insecure', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(process.env['QWEN_TLS_INSECURE']).toBeUndefined();
+    });
+  });
+
   it('should propagate runtime sleep prevention setting', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

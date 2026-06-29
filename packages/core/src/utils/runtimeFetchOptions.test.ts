@@ -59,6 +59,7 @@ import {
   buildRuntimeFetchOptions,
   extractHostnameFromProxyUrl,
   getOrCreateSharedDispatcher,
+  isTlsVerificationDisabled,
   redactProxyCredentials,
   redactProxyError,
   resetDispatcherCache,
@@ -365,6 +366,38 @@ describe('TLS verification opt-out (insecure)', () => {
     process.env['QWEN_TLS_INSECURE'] = '1';
     const insecure = getOrCreateSharedDispatcher('http://proxy.local');
     expect(secure).not.toBe(insecure);
+  });
+
+  describe('isTlsVerificationDisabled', () => {
+    it.each(['1', 'true', 'TRUE', 'Yes', 'on', '  1  '])(
+      'treats QWEN_TLS_INSECURE=%j as enabled',
+      (value) => {
+        process.env['QWEN_TLS_INSECURE'] = value;
+        expect(isTlsVerificationDisabled()).toBe(true);
+      },
+    );
+
+    it.each(['0', 'false', 'no', 'off', '', 'enabled'])(
+      'treats QWEN_TLS_INSECURE=%j as disabled',
+      (value) => {
+        process.env['QWEN_TLS_INSECURE'] = value;
+        expect(isTlsVerificationDisabled()).toBe(false);
+      },
+    );
+
+    it('honors NODE_TLS_REJECT_UNAUTHORIZED=0', () => {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+      expect(isTlsVerificationDisabled()).toBe(true);
+    });
+
+    it('ignores NODE_TLS_REJECT_UNAUTHORIZED values other than "0"', () => {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '1';
+      expect(isTlsVerificationDisabled()).toBe(false);
+    });
+
+    it('returns false when neither variable is set', () => {
+      expect(isTlsVerificationDisabled()).toBe(false);
+    });
   });
 });
 
