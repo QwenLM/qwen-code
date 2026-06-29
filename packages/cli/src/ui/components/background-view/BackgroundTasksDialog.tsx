@@ -594,10 +594,10 @@ const AgentDetailBody: React.FC<{
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
-  if (entry.stats?.totalTokens) {
+  if (entry.stats?.outputTokens) {
     dimSubtitleParts.push(
       t('{{count}} tokens', {
-        count: formatTokenCount(entry.stats.totalTokens),
+        count: formatTokenCount(entry.stats.outputTokens),
       }),
     );
   }

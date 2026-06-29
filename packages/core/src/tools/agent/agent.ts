@@ -2426,6 +2426,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const summary = bgSubagent.getExecutionSummary();
           entry.stats = {
             totalTokens: summary.totalTokens,
+            outputTokens: summary.outputTokens,
             toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
@@ -2477,6 +2478,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const summary = bgSubagent.getExecutionSummary();
           return {
             totalTokens: summary.totalTokens,
+            outputTokens: summary.outputTokens,
             toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
@@ -2883,6 +2885,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const summary = subagent.getExecutionSummary();
         entry.stats = {
           totalTokens: summary.totalTokens,
+          outputTokens: summary.outputTokens,
           toolUses: fgLiveToolCallCount,
           durationMs: summary.totalDurationMs,
         };

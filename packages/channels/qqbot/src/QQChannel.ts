@@ -16,11 +16,14 @@ import {
   ChannelBase,
   SessionRouter,
   getGlobalQwenDir,
+  sanitizeSenderName,
+  sanitizePromptText,
+  sanitizeLogText,
 } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
-  AcpBridge,
+  ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -151,7 +154,7 @@ export class QQChannel extends ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig & Record<string, unknown>,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     const safeName = name.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -164,7 +167,11 @@ export class QQChannel extends ChannelBase {
       options?.router ??
       new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
 
-    super(name, config, bridge, { ...options, router });
+    super(name, config, bridge, {
+      ...options,
+      router,
+      registerBridgeEvents: options?.registerBridgeEvents ?? !hasExternalRouter,
+    });
     this.qqConfig = config as unknown as QQChannelConfig;
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     this.globalSessionsPath = hasExternalRouter
@@ -449,15 +456,16 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Workaround for SessionRouter.restoreSessions() storing undefined sessionIds
-   * when ACP bridge.loadSession() fails to return a session_id.
+   * Compatibility repair for legacy restored session state where older router
+   * code could keep an empty session id after bridge.loadSession() failed to
+   * return a session_id.
    *
    * **Fragile**: accesses SessionRouter's private `toSession`/`toTarget`/`toCwd`
    * maps via type coercion. If SessionRouter internals change, this breaks
    * silently. The only signal will be cross-server conversations failing to
    * restore after daemon restart — no crash, no log.
    *
-   * If upstream SessionRouter adds a public fix for this, remove this method.
+   * Keep this while old persisted files may still exist.
    */
   private fixRestoredSessions(): void {
     try {
@@ -966,14 +974,31 @@ export class QQChannel extends ChannelBase {
     // (pure @mention, image, or sticker messages).
     if (!cleanText) return;
     const isSlash = cleanText.startsWith('/');
-    // Log slash commands with senderName for audit trail
+    // We self-prefix and set alreadyPrefixed below, which skips ChannelBase's
+    // [..]/newline/length sanitization — so neutralize the nick here too (same
+    // shared helper), or a crafted QQ nickname could inject brackets/newlines.
+    // Hoisted above the audit log so the log uses the sanitized name too:
+    // event.author.username is attacker-controlled, and a crafted nick bearing
+    // CR/LF/ANSI escapes could otherwise forge or corrupt the operator audit log.
+    const safeName = sanitizeSenderName(senderName);
+    // Log slash commands for an audit trail. cleanText is attacker-controlled, so
+    // neutralize it with the shared log sanitizer (same helper as ChannelBase's
+    // dropped-turn log): it renders newlines visibly and strips the C0/DEL controls
+    // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line break
+    // that could forge an extra log line), the Unicode line/paragraph separators
+    // U+2028/U+2029, and the bidi overrides — any of which would otherwise inject,
+    // overwrite, or reorder an operator's audit line.
     if (isSlash) {
+      const loggedCmd = sanitizeLogText(cleanText, 80);
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText}\n`,
+        `[QQ:${this.name}] Slash cmd from ${safeName} (${chatId}): ${loggedCmd}\n`,
       );
     }
-    // Don't prefix slash commands, keep [senderName] for normal messages
-    const text = isSlash ? cleanText : `[${senderName}]: ${cleanText}`;
+    // Don't prefix slash commands; for normal messages, sanitize the body here
+    // because alreadyPrefixed tells ChannelBase not to rewrite the prefix.
+    const text = isSlash
+      ? cleanText
+      : `[${safeName}]: ${sanitizePromptText(cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId: event.author.user_openid || event.author.id,
@@ -986,6 +1011,7 @@ export class QQChannel extends ChannelBase {
       // QQ Bot only receives group messages when explicitly @mentioned, so
       // every group message is semantically a reply to the bot.
       isReplyToBot: true,
+      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
     );

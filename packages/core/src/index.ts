@@ -450,6 +450,7 @@ export * from './utils/ripgrepUtils.js';
 export {
   detectRuntime,
   getOrCreateSharedDispatcher,
+  isTlsVerificationDisabled,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';

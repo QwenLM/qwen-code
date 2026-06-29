@@ -229,11 +229,7 @@ describe('package asset scripts', () => {
 
     const realDistDir = realpathSync(distDir);
     expect(JSON.parse(readFileSync(markerPath, 'utf8'))).toEqual({
-      argv: [
-        '--patch-dir',
-        path.join(realDistDir, 'patches'),
-        '--error-on-fail',
-      ],
+      argv: ['--patch-dir', 'patches', '--error-on-fail'],
       cwd: realDistDir,
     });
   });

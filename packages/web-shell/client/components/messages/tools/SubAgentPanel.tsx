@@ -291,7 +291,7 @@ export function SubAgentPanel({
   const tokenCount =
     taskExec?.tokenCount && taskExec.tokenCount > 0
       ? taskExec.tokenCount
-      : taskExec?.executionSummary?.totalTokens;
+      : taskExec?.executionSummary?.outputTokens;
   const tokens = tokenCount ? formatTokenCount(tokenCount) : '';
   const resultText = isComplete ? getAgentResultText(tool) : '';
 

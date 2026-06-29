@@ -2037,6 +2037,62 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('provider status filters fastOnly and voiceOnly models', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-plus',
+          label: 'Qwen Plus',
+          authType: 'qwen',
+        },
+        {
+          id: 'qwen-flash',
+          label: 'Qwen Flash',
+          authType: 'qwen',
+          fastOnly: true,
+        },
+        {
+          id: 'qwen-asr',
+          label: 'Qwen ASR',
+          authType: 'qwen',
+          voiceOnly: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const status = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceProviders,
+      {},
+    );
+
+    expect(
+      (status['providers'] as Array<{ models: Array<{ modelId: string }> }>)
+        .flatMap((provider) => provider.models)
+        .map((model) => model.modelId),
+    ).toEqual(['qwen-plus(qwen)']);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('provider status uses runtime model ids for base id and token limit', async () => {
     mockConfig = {
       ...mockConfig,
@@ -2092,6 +2148,79 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(vi.mocked(tokenLimit)).toHaveBeenCalledWith('runtime-qwen-plus');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('session model selectors filter fastOnly and voiceOnly models', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getModel: vi.fn().mockReturnValue('main-model'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'main-model',
+          label: 'Main Model',
+          authType: 'api-key',
+        },
+        {
+          id: 'fast-model',
+          label: 'Fast Model',
+          authType: 'api-key',
+          fastOnly: true,
+        },
+        {
+          id: 'voice-model',
+          label: 'Voice Model',
+          authType: 'api-key',
+          voiceOnly: true,
+        },
+      ]),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const session = (await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+    })) as {
+      models: { availableModels: Array<{ modelId: string }> };
+      configOptions: Array<{
+        id: string;
+        options: Array<{ value: string }>;
+      }>;
+    };
+    const context = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionContext,
+      { sessionId },
+    )) as {
+      state: { models: { availableModels: Array<{ modelId: string }> } };
+    };
+
+    expect(
+      session.models.availableModels.map((model) => model.modelId),
+    ).toEqual(['main-model(api-key)']);
+    expect(
+      session.configOptions
+        .find((option) => option.id === 'model')
+        ?.options.map((option) => option.value),
+    ).toEqual(['main-model(api-key)']);
+    expect(
+      context.state.models.availableModels.map((model) => model.modelId),
+    ).toEqual(['main-model(api-key)']);
 
     mockConnectionState.resolve();
     await agentPromise;

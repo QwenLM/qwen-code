@@ -20,6 +20,12 @@ This guide provides solutions to common issues and debugging tips, including top
   - **Solution:** Set the `NODE_EXTRA_CA_CERTS` environment variable to the absolute path of your corporate root CA certificate file.
     - Example: `export NODE_EXTRA_CA_CERTS=/path/to/your/corporate-ca.crt`
 
+- **Error: `Connection error. (cause: fetch failed)` against a self-signed endpoint**
+  - **Cause:** You are pointing Qwen Code at a self-hosted server (for example a local model behind `https://`) whose TLS certificate is self-signed, so Node.js rejects it.
+  - **Solution:** Prefer trusting the certificate via `NODE_EXTRA_CA_CERTS` (above). If that is not practical in a trusted lab/private network, skip verification with the `--insecure` flag (or `QWEN_TLS_INSECURE=1`):
+    - Example: `qwen --insecure --openaiBaseUrl https://192.168.1.10:8080 ...`
+    - **Warning:** Disabling verification removes protection against man-in-the-middle attacks. Only use it for endpoints you fully trust.
+
 - **Error: `Device authorization flow failed: fetch failed`**
   - **Cause:** Node.js could not reach Qwen OAuth endpoints (often a proxy or SSL/TLS trust issue). When available, Qwen Code will also print the underlying error cause (for example: `UNABLE_TO_VERIFY_LEAF_SIGNATURE`). Note: this error is specific to the legacy Qwen OAuth flow.
   - **Solution:**
