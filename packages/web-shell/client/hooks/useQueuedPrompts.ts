@@ -180,6 +180,9 @@ export function useQueuedPrompts({
           };
           continue;
         }
+        if (serverPrompt.state === 'running') {
+          continue;
+        }
         next.push({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
