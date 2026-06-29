@@ -143,6 +143,7 @@ vi.mock('../core/client.js', () => {
 vi.mock('../telemetry/index.js', () => ({
   DEFAULT_TELEMETRY_TARGET: 'local',
   DEFAULT_OTLP_ENDPOINT: 'http://localhost:4317',
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
   isTelemetrySdkInitialized: vi.fn().mockReturnValue(false),
   initializeTelemetry: vi.fn(),
   shutdownTelemetry: vi.fn(),
