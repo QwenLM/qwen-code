@@ -127,10 +127,20 @@ export class DingtalkChannel extends ChannelBase {
     const decoded = this.decodeDownStream(raw);
     let msg: DWClientDownStream;
     try {
-      msg = JSON.parse(decoded.text) as DWClientDownStream;
+      const parsed = JSON.parse(decoded.text) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] downstream parsed to non-object, ignoring.\n`,
+        );
+        return;
+      }
+      msg = parsed as DWClientDownStream;
     } catch (err) {
       process.stderr.write(
-        `[DingTalk:${this.name}] Failed to parse downstream: ${err}\n`,
+        `[DingTalk:${this.name}] Failed to parse downstream: ${sanitizeLogText(
+          String(err),
+          200,
+        )}\n`,
       );
       return;
     }
@@ -150,13 +160,13 @@ export class DingtalkChannel extends ChannelBase {
 
     switch (msg.type) {
       case 'SYSTEM':
-        client.onSystem(msg);
+        this.callDownStreamHandler(client, 'onSystem', msg);
         break;
       case 'EVENT':
-        client.onEvent(msg);
+        this.callDownStreamHandler(client, 'onEvent', msg);
         break;
       case 'CALLBACK':
-        client.onCallback(msg);
+        this.callDownStreamHandler(client, 'onCallback', msg);
         break;
       default:
         process.stderr.write(
@@ -165,6 +175,23 @@ export class DingtalkChannel extends ChannelBase {
             40,
           )}.\n`,
         );
+    }
+  }
+
+  private callDownStreamHandler(
+    client: DingTalkClientInternals,
+    method: 'onSystem' | 'onEvent' | 'onCallback',
+    msg: DWClientDownStream,
+  ): void {
+    try {
+      client[method](msg);
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] ${method} failed: ${sanitizeLogText(
+          String(err),
+          200,
+        )}\n`,
+      );
     }
   }
 

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 
 const dingtalkSdkMock = vi.hoisted(() => ({
-  instances: [] as Array<Record<string, unknown>>,
+  instances: [] as unknown[],
   rawLog: vi.fn(),
 }));
 
@@ -85,7 +85,9 @@ function createChannel(): DingtalkChannelInstance {
 }
 
 function latestMockClient(): Record<string, unknown> {
-  const client = dingtalkSdkMock.instances.at(-1);
+  const client = dingtalkSdkMock.instances.at(-1) as
+    | Record<string, unknown>
+    | undefined;
   if (!client) throw new Error('No mock DingTalk client created');
   return client;
 }
@@ -275,6 +277,91 @@ describe('DingtalkChannel downstream logging', () => {
       }),
     );
     expect(channel).toBeInstanceOf(DingtalkChannel);
+  });
+
+  it('sanitizes malformed downstream parse errors and skips dispatch', () => {
+    createChannel();
+    const client = latestMockClient() as {
+      onDownStream(data: Buffer): void;
+      onSystem: ReturnType<typeof vi.fn>;
+      onEvent: ReturnType<typeof vi.fn>;
+      onCallback: ReturnType<typeof vi.fn>;
+    };
+    const raw = Buffer.from('not json\n[DingTalk:fake]');
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    client.onDownStream(raw);
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    writeSpy.mockRestore();
+
+    expect(logged).toContain(
+      '[DingTalk:test-dingtalk] Failed to parse downstream:',
+    );
+    expect(logged).not.toContain('not json\n');
+    expect(logged).not.toContain('\n[DingTalk:fake]');
+    expect(logged).not.toContain('[DingTalk:fake]');
+    expect(client.onSystem).not.toHaveBeenCalled();
+    expect(client.onEvent).not.toHaveBeenCalled();
+    expect(client.onCallback).not.toHaveBeenCalled();
+  });
+
+  it('ignores downstream JSON that is not an object', () => {
+    createChannel();
+    const client = latestMockClient() as {
+      onDownStream(data: Buffer): void;
+      onSystem: ReturnType<typeof vi.fn>;
+      onEvent: ReturnType<typeof vi.fn>;
+      onCallback: ReturnType<typeof vi.fn>;
+    };
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    expect(() => client.onDownStream(Buffer.from('null'))).not.toThrow();
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    writeSpy.mockRestore();
+
+    expect(logged).toContain(
+      '[DingTalk:test-dingtalk] downstream parsed to non-object, ignoring.',
+    );
+    expect(client.onSystem).not.toHaveBeenCalled();
+    expect(client.onEvent).not.toHaveBeenCalled();
+    expect(client.onCallback).not.toHaveBeenCalled();
+  });
+
+  it('logs SDK dispatch failures without propagating them', () => {
+    createChannel();
+    const client = latestMockClient() as {
+      onDownStream(data: Buffer): void;
+      onCallback: ReturnType<typeof vi.fn>;
+    };
+    client.onCallback.mockImplementationOnce(() => {
+      throw new Error('callback failed\n[DingTalk:fake]');
+    });
+    const raw = Buffer.from(
+      JSON.stringify({
+        specVersion: '1.0',
+        type: 'CALLBACK',
+        headers: {
+          messageId: 'message-1',
+          topic: 'robot',
+        },
+        data: '{"msgId":"m1"}',
+      }),
+    );
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    expect(() => client.onDownStream(raw)).not.toThrow();
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    writeSpy.mockRestore();
+
+    expect(logged).toContain('[DingTalk:test-dingtalk] onCallback failed:');
+    expect(logged).not.toContain('callback failed\n');
+    expect(logged).not.toContain('\n[DingTalk:fake]');
   });
 });
 
