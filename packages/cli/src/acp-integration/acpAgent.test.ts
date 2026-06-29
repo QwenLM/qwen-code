@@ -5593,16 +5593,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       process.env['QWEN_SERVE_CDP_TUNNEL_PORT'] = '4170';
 
       await setupSessionMocks('session-cdp-tunnel');
-      const settings = makeSessionSettings() as unknown as LoadedSettings & {
-        merged: { mcpServers: Record<string, unknown> };
-      };
-      settings.merged.mcpServers = {
-        'chrome-devtools': {
-          command: 'npx',
-          args: ['-y', 'chrome-devtools-mcp@latest', '--autoConnect'],
-        },
-      };
-      vi.mocked(loadSettings).mockReturnValue(settings);
+      vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
 
       agentPromise = runAcpAgent(mockConfig, makeSessionSettings(), mockArgv);
       await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -5627,6 +5618,57 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           'ws://127.0.0.1:4170/cdp',
         ]),
       );
+    } finally {
+      if (previousTunnelFlag === undefined) {
+        delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = previousTunnelFlag;
+      }
+      if (previousTunnelPort === undefined) {
+        delete process.env['QWEN_SERVE_CDP_TUNNEL_PORT'];
+      } else {
+        process.env['QWEN_SERVE_CDP_TUNNEL_PORT'] = previousTunnelPort;
+      }
+      mockConnectionState.resolve();
+      if (agentPromise) await agentPromise;
+    }
+  });
+
+  it('newSession leaves a settings chrome-devtools MCP server untouched', async () => {
+    const previousTunnelFlag = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    const previousTunnelPort = process.env['QWEN_SERVE_CDP_TUNNEL_PORT'];
+    let agentPromise: Promise<void> | undefined;
+
+    try {
+      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = '1';
+      process.env['QWEN_SERVE_CDP_TUNNEL_PORT'] = '4170';
+
+      await setupSessionMocks('session-cdp-tunnel-settings');
+      const settings = makeSessionSettings() as unknown as LoadedSettings & {
+        merged: { mcpServers: Record<string, unknown> };
+      };
+      settings.merged.mcpServers = {
+        'chrome-devtools': {
+          command: 'npx',
+          args: ['-y', 'chrome-devtools-mcp@latest', '--autoConnect'],
+        },
+      };
+      vi.mocked(loadSettings).mockReturnValue(settings);
+
+      agentPromise = runAcpAgent(mockConfig, makeSessionSettings(), mockArgv);
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      const sessionMcpServers = vi.mocked(loadCliConfig).mock.calls[0]?.[6] as
+        | Record<string, unknown>
+        | undefined;
+      expect(sessionMcpServers?.['chrome-devtools']).toBeUndefined();
     } finally {
       if (previousTunnelFlag === undefined) {
         delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];

@@ -84,7 +84,7 @@ import {
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 // Default-on browser MCP channel; `=0` / `false` disables it for rollback.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
-// Default-on CDP tunnel; `=0` / `false` disables it for rollback.
+// CDP tunnel; default-on for Chrome-extension origins or explicit env opt-in.
 const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
@@ -1432,6 +1432,11 @@ export async function runQwenServe(
   if (opts.mcpPoolActive === undefined && inheritedNoPool) {
     opts.mcpPoolActive = false;
   }
+  const cdpTunnelMcpAutoRegisterable =
+    opts.cdpTunnelOverWs === true &&
+    opts.port > 0 &&
+    !token &&
+    !opts.requireAuth;
   const childEnvOverrides: Record<string, string | undefined> = {
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined
@@ -1440,19 +1445,17 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     // CDP tunnel (Plan C, #5626): forward the flag + bound port so the spawned
     // ACP child can auto-register chrome-devtools-mcp against this `/cdp`
-    // endpoint. Only meaningful with a fixed `--port`: the override map is frozen
-    // at bridge construction, so an ephemeral `--port 0` (resolved only after
-    // `listen`) can't be threaded here. Leave the port unset in that case so the
-    // child surfaces a clear diagnostic instead of a bogus port "0".
-    QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
-    QWEN_SERVE_CDP_TUNNEL_PORT:
-      opts.cdpTunnelOverWs && opts.port > 0 ? String(opts.port) : undefined,
-    // Tell the child whether `/cdp` requires bearer auth. The ACP child can't
-    // inherit QWEN_SERVER_TOKEN (the spawn path scrubs it) and chrome-devtools-
-    // mcp is launched with `--wsEndpoint` only, so it can't authenticate against
-    // an auth-gated `/cdp`. The child uses this flag to skip auto-registering the
-    // browser tools (with a diagnostic) instead of registering tools that can't
-    // connect. See buildCdpTunnelMcpServer in acpAgent.ts.
+    // endpoint. Only forward it when the child can actually register working
+    // tools; otherwise keep computer-use enabled instead of disabling both paths.
+    QWEN_SERVE_CDP_TUNNEL_OVER_WS: cdpTunnelMcpAutoRegisterable
+      ? '1'
+      : undefined,
+    QWEN_SERVE_CDP_TUNNEL_PORT: cdpTunnelMcpAutoRegisterable
+      ? String(opts.port)
+      : undefined,
+    // Scrub/mark auth-gated tunnel state for the child. When auth is required,
+    // the auto-wire flag above stays unset, so the child keeps computer-use
+    // enabled instead of registering browser tools that cannot authenticate.
     QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED:
       opts.cdpTunnelOverWs && (token || opts.requireAuth) ? '1' : undefined,
   };
