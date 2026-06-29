@@ -650,10 +650,12 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     expect(events[0].id).toBe(42); // real bus cursor, not the synthetic id
   });
 
-  it('consumes a JSON-RPC response frame (routes to pending) WITHOUT yielding it as an event — the W2 no-hang dispatch', async () => {
-    // A response frame (id, no method) is dispatched to pending-resolution
-    // (same path as the connection stream), not surfaced as a DaemonEvent.
-    // The following notification proves the stream keeps flowing past it.
+  it('RESOLVES the matching pending request from a JSON-RPC response frame WITHOUT yielding it as an event — the W2 no-hang dispatch', async () => {
+    // A response frame (id, no method) must dispatch to pending-RESOLUTION (the
+    // core W2 fix — a `session/prompt` reply routed onto the session stream by
+    // the daemon's `replySession` settles its promise instead of hanging), not
+    // merely be swallowed. The following notification proves the stream keeps
+    // flowing past it.
     const { fetch } = sessionStreamFetch([
       frame(undefined, {
         jsonrpc: '2.0',
@@ -670,10 +672,56 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
       }),
     ]);
     const t = new AcpHttpTransport('http://d', undefined, fetch);
+
+    // Register a pending request with the response's id so we can assert the
+    // frame RESOLVES it (and clears the entry), not just that it isn't yielded.
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          { resolve: (r: unknown) => void; reject: (e: Error) => void }
+        >;
+      }
+    ).pending;
+    let resolved: unknown;
+    pending.set(999, {
+      resolve: (r) => {
+        resolved = r;
+      },
+      reject: () => {},
+    });
+
+    const events = await collect(t, 'sess-1');
+
+    expect(resolved).toMatchObject({
+      id: 999,
+      result: { stopReason: 'end_turn' },
+    });
+    expect(pending.has(999)).toBe(false); // deleted on resolve
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('agent_thought_chunk');
+  });
+
+  it('resets the bus cursor when a later id: line in the same frame is invalid, rather than keeping the stale earlier one (MselW)', async () => {
+    // A proxy-mangled trailing `id:` must not let a wrong cursor ride the event.
+    const raw =
+      `id: 5\n` +
+      `id: notanumber\n` +
+      `data: ${JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk', text: 'x' },
+        },
+      })}\n\n`;
+    const { fetch } = sessionStreamFetch([raw]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
     const events = await collect(t, 'sess-1');
 
     expect(events).toHaveLength(1);
-    expect(events[0].type).toBe('agent_thought_chunk');
+    // The valid `5` was overridden+reset by the invalid second `id:` line.
+    expect(events[0].id).toBeUndefined();
   });
 
   it('surfaces a session/request_permission request as a permission_request event', async () => {
@@ -835,6 +883,55 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ stopReason: 'end_turn' });
+    t.dispose();
+  });
+
+  it('a connection-stream failure rejects only CONNECTION-scoped pendings, never a session-scoped reply the session stream will deliver (MselM)', async () => {
+    // The two stream pumps share one `pending` map. A connection-stream error
+    // must sweep only its own scope — rejecting a session-scoped `session/prompt`
+    // here would spuriously fail a request the session stream is about to
+    // resolve (the non-deterministic cross-stream race MselM reports).
+    const fetchImpl = vi.fn(async () => {
+      // Any GET /acp (the conn stream pump) fails → triggers the catch sweep.
+      throw new Error('conn stream boom');
+    }) as unknown as typeof globalThis.fetch;
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+
+    const pending = (
+      t as unknown as {
+        pending: Map<
+          number,
+          {
+            resolve: (r: unknown) => void;
+            reject: (e: Error) => void;
+            sessionId?: string;
+          }
+        >;
+      }
+    ).pending;
+    const sessionReject = vi.fn();
+    const connReject = vi.fn();
+    pending.set(1, {
+      resolve: () => {},
+      reject: sessionReject,
+      sessionId: 'sess-1',
+    });
+    pending.set(2, {
+      resolve: () => {},
+      reject: connReject,
+      sessionId: undefined,
+    });
+
+    // Open the connection stream; its pump rejects → the catch runs the sweep.
+    (t as unknown as { openConnStream: () => void }).openConnStream();
+    // Let the rejected pump's microtasks settle.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Connection-scoped pending swept; session-scoped one preserved.
+    expect(connReject).toHaveBeenCalledTimes(1);
+    expect(pending.has(2)).toBe(false);
+    expect(sessionReject).not.toHaveBeenCalled();
+    expect(pending.has(1)).toBe(true);
     t.dispose();
   });
 });

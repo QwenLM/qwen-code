@@ -75,6 +75,15 @@ interface JsonRpcResponse {
 interface PendingRequest {
   resolve: (response: JsonRpcResponse) => void;
   reject: (error: Error) => void;
+  /**
+   * Routing scope. `undefined` ⇒ the reply rides the CONNECTION stream;
+   * a sessionId ⇒ it rides that SESSION stream (the daemon routes a handful of
+   * `session/*` method replies there — see `SESSION_STREAM_REPLY_METHODS`). The
+   * two stream pumps share this one map but must only sweep THEIR OWN scope on
+   * failure: a connection-stream error must not reject a session-scoped pending
+   * the session stream is about to resolve, and vice-versa.
+   */
+  sessionId?: string;
 }
 
 /**
@@ -472,10 +481,18 @@ export class AcpHttpTransport implements DaemonTransport {
               // cursor the daemon would later reject — `Number()` would wave
               // through hex / `1e5` / `''`→0.
               const raw = line.slice(3).trim();
+              // A later `id:` line in the same frame overrides an earlier one;
+              // an INVALID one resets the cursor to undefined rather than
+              // leaving a stale value from a prior line (so a proxy-mangled
+              // trailing `id:` can't carry a wrong cursor into the event).
               if (/^\d+$/.test(raw)) {
                 const n = Number.parseInt(raw, 10);
-                if (Number.isFinite(n) && n <= Number.MAX_SAFE_INTEGER)
-                  busId = n;
+                busId =
+                  Number.isFinite(n) && n <= Number.MAX_SAFE_INTEGER
+                    ? n
+                    : undefined;
+              } else {
+                busId = undefined;
               }
             } else if (line.startsWith('data:')) {
               // Per the SSE spec, multiple `data:` lines in one event join with
@@ -681,9 +698,13 @@ export class AcpHttpTransport implements DaemonTransport {
 
     // Fire-and-forget: pump the SSE stream in the background.
     void this.pumpConnStream(headers, abort.signal).catch(() => {
-      // Stream ended or errored — reject any remaining pending requests.
+      // Stream ended or errored — reject remaining CONNECTION-scoped pendings
+      // only. Session-scoped replies ride the session stream / its reply pump,
+      // which owns their lifecycle; sweeping them here would reject a
+      // `session/prompt` the session stream is about to resolve (§W2 race).
       if (!this._disposed) {
         for (const [id, entry] of this.pending) {
+          if (entry.sessionId !== undefined) continue;
           entry.reject(new Error('Connection SSE stream closed unexpectedly'));
           this.pending.delete(id);
         }
@@ -887,15 +908,26 @@ export class AcpHttpTransport implements DaemonTransport {
       typeof params['sessionId'] === 'string'
         ? (params['sessionId'] as string)
         : undefined;
+    // This reply rides the SESSION stream iff it's one of the session-routed
+    // methods (regardless of whether the reply pump or an active subscription
+    // ultimately delivers it). Tag the pending entry with that scope so a
+    // connection-stream failure can't sweep it (§W2 cross-stream race).
+    const replyScopeSessionId =
+      sessionId && SESSION_STREAM_REPLY_METHODS.has(method)
+        ? sessionId
+        : undefined;
     const releaseSessionPump =
-      sessionId &&
-      SESSION_STREAM_REPLY_METHODS.has(method) &&
-      !this.activeSessionSubscriptions.has(sessionId)
-        ? this.ensureSessionReplyPump(sessionId)
+      replyScopeSessionId &&
+      !this.activeSessionSubscriptions.has(replyScopeSessionId)
+        ? this.ensureSessionReplyPump(replyScopeSessionId)
         : undefined;
 
     const responsePromise = new Promise<JsonRpcResponse>((resolve, reject) => {
-      this.pending.set(req.id, { resolve, reject });
+      this.pending.set(req.id, {
+        resolve,
+        reject,
+        sessionId: replyScopeSessionId,
+      });
     });
 
     // Handle abort signal: if the caller aborts, reject the pending
@@ -941,6 +973,20 @@ export class AcpHttpTransport implements DaemonTransport {
         .finally(() => {
           if (this.sessionReplyPumps.get(sessionId) === created) {
             this.sessionReplyPumps.delete(sessionId);
+          }
+          // If the pump ended on its own (stream error) rather than via a clean
+          // release (`abort` fires only when the last ref drops, after each
+          // request already settled), reject this session's still-live pendings
+          // so they don't hang. Scoped to THIS sessionId — the mirror of the
+          // connection-stream sweep (§W2 race).
+          if (!this._disposed && !abort.signal.aborted) {
+            for (const [id, entry] of this.pending) {
+              if (entry.sessionId !== sessionId) continue;
+              entry.reject(
+                new Error('Session SSE reply stream closed unexpectedly'),
+              );
+              this.pending.delete(id);
+            }
           }
         });
     }
