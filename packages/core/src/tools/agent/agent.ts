@@ -89,6 +89,7 @@ import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../../hooks/stopHookCap.js';
+import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
 import { ApprovalMode } from '../../config/config.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import {
@@ -1593,7 +1594,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Get the results
       const subagentRawText = subagent.getFinalText();
       const finalText = appendStopHookBlockingCapWarning(
-        subagentRawText,
+        toModelVisibleSubagentResult(subagentRawText),
         stopHookWarning,
       );
       const terminateMode = subagent.getTerminateMode();
@@ -2532,7 +2533,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             );
             const finalText =
               appendStopHookBlockingCapWarning(
-                subagentRawText,
+                toModelVisibleSubagentResult(subagentRawText),
                 stopHookWarning,
               ) + wtSuffix;
             const completionStats = getCompletionStats();
@@ -2964,7 +2965,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const stopHookWarning = await runFramed();
         const finalText = appendStopHookBlockingCapWarning(
-          subagent.getFinalText(),
+          toModelVisibleSubagentResult(subagent.getFinalText()),
           stopHookWarning,
         );
         const terminateMode = subagent.getTerminateMode();

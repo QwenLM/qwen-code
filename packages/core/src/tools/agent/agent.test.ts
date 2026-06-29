@@ -778,6 +778,40 @@ describe('AgentTool', () => {
       expect(display.subagentName).toBe('file-search');
     });
 
+    it('strips internal analysis and summary tags from subagent result', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        [
+          '<analysis>',
+          'Scratchpad details should stay out of the parent context.',
+          '</analysis>',
+          '',
+          '<summary>',
+          'Task completed successfully',
+          '',
+          '- Found the target file',
+          '</summary>',
+        ].join('\n'),
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe(
+        'Task completed successfully\n\n- Found the target file',
+      );
+      expect(llmText).not.toContain('<analysis>');
+      expect(llmText).not.toContain('<summary>');
+    });
+
     it('passes custom ignore files into worktree isolation file service', async () => {
       vi.useRealTimers();
       const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-'));

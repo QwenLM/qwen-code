@@ -31,6 +31,7 @@ import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../hooks/stopHookCap.js';
+import { toModelVisibleSubagentResult } from './subagent-result.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -935,7 +936,7 @@ export class BackgroundAgentResumeService {
 
           const terminateMode = subagent.getTerminateMode();
           const finalText = appendStopHookBlockingCapWarning(
-            subagent.getFinalText(),
+            toModelVisibleSubagentResult(subagent.getFinalText()),
             stopHookWarning,
           );
           const stats = getCompletionStats(subagent, liveToolCallCount);
