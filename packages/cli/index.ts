@@ -7,6 +7,7 @@
  */
 
 import { initStartupProfiler } from './src/utils/startupProfiler.js';
+import { startCapturingEarlyInput } from './src/utils/earlyInput.js';
 import { isServeFastPathArgv } from './src/serve/fast-path-argv.js';
 
 // Must run before any other imports to capture the earliest possible T0.
@@ -17,7 +18,13 @@ import { initCpuProfiler } from './src/utils/cpuProfiler.js';
 // QWEN_CODE_CPU_PROFILE=1, capturing as much of the startup as possible.
 initCpuProfiler();
 
+
 // --- Global Entry Point ---
+//
+// Start capturing interactive input before loading the heavy CLI module graph.
+// This covers the real startup window where users can type before `gemini.tsx`
+// has finished evaluating and before `main()` starts.
+startCapturingEarlyInput();
 
 function writeStderrLine(line: string): void {
   process.stderr.write(line.endsWith('\n') ? line : `${line}\n`);
@@ -148,3 +155,4 @@ runCliEntry().catch((error: unknown) => {
     process.exit(1);
   });
 });
+

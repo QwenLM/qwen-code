@@ -179,7 +179,12 @@ export async function start_sandbox(
   nodeArgs: string[] = [],
   cliConfig?: Config,
   cliArgs: string[] = [],
+  envAdditions: Record<string, string | undefined> = {},
 ): Promise<number> {
+  const forwardedEnvEntries = Object.entries(envAdditions).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string',
+  );
+
   if (config.command === 'sandbox-exec') {
     // disallow BUILD_SANDBOX
     if (process.env['BUILD_SANDBOX']) {
@@ -275,6 +280,9 @@ export async function start_sandbox(
       [
         `SANDBOX=sandbox-exec`,
         `NODE_OPTIONS="${nodeOptions}"`,
+        ...forwardedEnvEntries.map(
+          ([key, value]) => `${key}=${quote([value])}`,
+        ),
         ...finalArgv.map((arg) => quote([arg])),
       ].join(' '),
     );
@@ -752,6 +760,10 @@ export async function start_sandbox(
         }
       }
     }
+  }
+
+  for (const [key, value] of forwardedEnvEntries) {
+    args.push('--env', `${key}=${value}`);
   }
 
   // copy NODE_OPTIONS

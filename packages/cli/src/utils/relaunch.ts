@@ -28,6 +28,7 @@ export async function relaunchOnExitCode(runner: () => Promise<number>) {
 export async function relaunchAppInChildProcess(
   additionalNodeArgs: string[],
   additionalScriptArgs: string[],
+  envAdditions: Record<string, string | undefined> = {},
   options?: { afterSpawn?: () => void },
 ) {
   if (process.env['QWEN_CODE_NO_RELAUNCH']) {
@@ -47,7 +48,15 @@ export async function relaunchAppInChildProcess(
       ...additionalScriptArgs,
       ...scriptArgs,
     ];
-    const newEnv = { ...process.env, QWEN_CODE_NO_RELAUNCH: 'true' };
+    const newEnv = {
+      ...process.env,
+      ...Object.fromEntries(
+        Object.entries(envAdditions).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string',
+        ),
+      ),
+      QWEN_CODE_NO_RELAUNCH: 'true',
+    };
 
     // The parent process should not be reading from stdin while the child is running.
     process.stdin.pause();
