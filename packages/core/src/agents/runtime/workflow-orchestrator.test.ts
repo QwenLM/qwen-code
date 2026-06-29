@@ -33,6 +33,7 @@ const { created, nextTerminateMode, nextOutputTokens, nextExecuteThrow } =
       prompt: string;
       signal?: AbortSignal;
       promptConfigSystemPrompt?: string;
+      promptConfigInitialMessages?: unknown[];
       runConfig?: { max_turns?: number; max_time_minutes?: number };
       toolConfig?: { tools?: string[]; disallowedTools?: string[] };
     }>,
@@ -111,7 +112,7 @@ vi.mock('./agent-headless.js', () => ({
     create: async (
       name: string,
       _runtimeContext: unknown,
-      promptConfig: { systemPrompt?: string },
+      promptConfig: { systemPrompt?: string; initialMessages?: unknown[] },
       _modelConfig: unknown,
       runConfig: { max_turns?: number; max_time_minutes?: number },
       toolConfig?: { tools?: string[]; disallowedTools?: string[] },
@@ -132,6 +133,7 @@ vi.mock('./agent-headless.js', () => ({
           prompt: ctx.get('task_prompt') as string,
           signal,
           promptConfigSystemPrompt: promptConfig.systemPrompt,
+          promptConfigInitialMessages: promptConfig.initialMessages,
           runConfig,
           toolConfig,
         });
@@ -1085,6 +1087,12 @@ describe('createProductionDispatch', () => {
     expect(created.length).toBe(1);
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
+  });
+
+  it('does not suppress env bootstrap with an empty initial history', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    expect(created[0]!.promptConfigInitialMessages).toBeUndefined();
   });
 
   // FIX-C4 (TST-2-C2): the previous test only asserted no-crash. This one

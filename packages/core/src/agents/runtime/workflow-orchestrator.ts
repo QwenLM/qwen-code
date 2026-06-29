@@ -422,7 +422,6 @@ async function runSingleDispatch(
       config,
       {
         systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
-        initialMessages: [],
       },
       {},
       // T11 (PR #4732 R1): bound resource ceiling so a single agent() call
