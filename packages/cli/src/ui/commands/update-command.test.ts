@@ -33,12 +33,6 @@ const formatUpdateInstructions = vi.fn(
         `  ${resolveUpdateCommand(installationInfo.updateCommand, latestVersion)}`,
       ];
     }
-    if (installationInfo.isStandalone) {
-      return [
-        'Unable to auto-update this standalone installation. Please reinstall from:',
-        '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh',
-      ];
-    }
     return ['Manual update required. Please reinstall Qwen Code.'];
   },
 );
@@ -104,6 +98,7 @@ describe('updateCommand', () => {
     expect(
       commandContext.services.settings.merged.general?.enableAutoUpdate,
     ).toBeUndefined();
+    expect(getInstallationInfo).not.toHaveBeenCalled();
   });
 
   it('returns the manual update command in non-interactive mode', async () => {
@@ -135,6 +130,7 @@ describe('updateCommand', () => {
     expect(
       commandContext.services.settings.merged.general?.enableAutoUpdate,
     ).toBe(false);
+    expect(getInstallationInfo).not.toHaveBeenCalled();
   });
 
   it('returns the manual update command in ACP mode', async () => {
@@ -161,21 +157,6 @@ describe('updateCommand', () => {
       messageType: 'info',
       content:
         'Update available: 1.2.3\nRunning via npx, update not applicable.',
-    });
-  });
-
-  it('returns standalone reinstall guidance when no update command is available', async () => {
-    getInstallationInfo.mockReturnValue({
-      isStandalone: true,
-    });
-
-    const result = await updateCommand.action!(context('non_interactive'), '');
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content:
-        'Update available: 1.2.3\nUnable to auto-update this standalone installation. Please reinstall from:\n  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh',
     });
   });
 

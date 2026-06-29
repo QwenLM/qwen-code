@@ -32,12 +32,6 @@ const formatUpdateInstructions = vi.fn(
         `  ${resolveUpdateCommand(installationInfo.updateCommand, latestVersion)}`,
       ];
     }
-    if (installationInfo.isStandalone) {
-      return [
-        'Unable to auto-update this standalone installation. Please reinstall from:',
-        '  https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh',
-      ];
-    }
     return ['Manual update required. Please reinstall Qwen Code.'];
   },
 );

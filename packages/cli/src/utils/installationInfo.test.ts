@@ -710,22 +710,6 @@ describe('formatUpdateInstructions', () => {
     ]);
   });
 
-  it('formats standalone reinstall fallback using the standalone installer URL', () => {
-    expect(
-      formatUpdateInstructions(
-        {
-          packageManager: PackageManager.STANDALONE,
-          isGlobal: true,
-          isStandalone: true,
-        },
-        '1.2.3',
-      ),
-    ).toEqual([
-      'Unable to auto-update this standalone installation. Please reinstall from:',
-      expect.stringContaining('install-qwen-standalone.'),
-    ]);
-  });
-
   it('resolves @latest in updateMessage-only guidance for nightly versions', () => {
     expect(
       formatUpdateInstructions(
@@ -743,21 +727,16 @@ describe('formatUpdateInstructions', () => {
     ]);
   });
 
-  it('formats standalone updateMessage-only guidance as a localized prompt plus command', () => {
+  it('keeps updateMessage-only guidance as-is when no formatter applies', () => {
     expect(
       formatUpdateInstructions(
         {
-          packageManager: PackageManager.STANDALONE,
+          packageManager: PackageManager.NPX,
           isGlobal: true,
-          isStandalone: true,
-          updateMessage:
-            'Standalone install detected. Please rerun the standalone installer to update: curl -fsSL https://example.test/install.sh | bash',
+          updateMessage: 'Running via npx, update not applicable.',
         },
         '1.2.3',
       ),
-    ).toEqual([
-      'Standalone install detected. Please rerun the standalone installer to update:',
-      '  curl -fsSL https://example.test/install.sh | bash',
-    ]);
+    ).toEqual(['Running via npx, update not applicable.']);
   });
 });

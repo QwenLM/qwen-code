@@ -64,14 +64,7 @@ export function formatUpdateInstructions(
     );
     lines.push('Run the following to update:', `  ${updateCmd}`);
   } else if (!installationInfo.updateMessage) {
-    if (installationInfo.isStandalone) {
-      lines.push(
-        'Unable to auto-update this standalone installation. Please reinstall from:',
-        `  ${getStandaloneInstallerUrl()}`,
-      );
-    } else {
-      lines.push('Manual update required. Please reinstall Qwen Code.');
-    }
+    lines.push('Manual update required. Please reinstall Qwen Code.');
   }
 
   return lines;
@@ -88,27 +81,6 @@ function formatUpdateMessage(
     return [
       'Update requires sudo. Please run:',
       `  ${message.slice(sudoPrefix.length)}`,
-    ];
-  }
-
-  const standalonePrefix =
-    'Standalone install detected. Please rerun the standalone installer to update: ';
-  if (message.startsWith(standalonePrefix)) {
-    return [
-      'Standalone install detected. Please rerun the standalone installer to update:',
-      `  ${message.slice(standalonePrefix.length)}`,
-    ];
-  }
-
-  const pleaseRunPrefix = 'Please run ';
-  const pleaseRunSuffix = ' to update';
-  if (
-    message.startsWith(pleaseRunPrefix) &&
-    message.endsWith(pleaseRunSuffix)
-  ) {
-    return [
-      'Run the following to update:',
-      `  ${message.slice(pleaseRunPrefix.length, -pleaseRunSuffix.length)}`,
     ];
   }
 

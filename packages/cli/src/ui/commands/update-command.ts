@@ -67,8 +67,6 @@ export const updateCommand: SlashCommand = {
 
     const info = updateCheck.info;
 
-    const installInfo = getInstallationInfo(projectRoot || process.cwd(), true);
-
     if (context.executionMode === 'interactive' && projectRoot) {
       const previousEnableAutoUpdate =
         settings.merged.general?.enableAutoUpdate;
@@ -81,6 +79,8 @@ export const updateCommand: SlashCommand = {
       }
       return;
     }
+
+    const installInfo = getInstallationInfo(projectRoot || process.cwd(), true);
 
     if (installInfo.isStandalone && installInfo.standaloneDir) {
       try {
