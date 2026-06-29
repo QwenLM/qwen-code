@@ -235,6 +235,36 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('never evicts an irreplaceable id-less reply even when the buffer is ENTIRELY id-less replies (no id-bearing frame to drop)', () => {
+    // Degenerate case wenshao flagged: if the gap buffer fills with only id-less
+    // deferred replies, there is no replayable frame to evict — dropping one
+    // would silently hang its caller. So pushCapped must NOT drop; it lets the
+    // irreplaceable replies exceed the soft cap (they're bounded by real
+    // in-flight RPC count, not a content flood). Every reply must survive.
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      // Far past the 256 cap, ALL id-less replies (no id-bearing frames).
+      const N = 300;
+      for (let i = 0; i < N; i++) conn.sendSessionReply('sess-1', { reply: i });
+
+      // Fresh reconnect flushes everything — not one reply was evicted.
+      const s = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', s, new AbortController());
+      const replyIds = s.sent
+        .map((x) => (x.message as { reply?: number }).reply)
+        .filter((v) => typeof v === 'number');
+      expect(replyIds).toHaveLength(N);
+      expect(new Set(replyIds).size).toBe(N); // all distinct, none lost
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('detachSessionStream is a no-op for a stale stream after reclaim (identity guard)', () => {
     // The CONTRACT at the attach site marks this guard load-bearing: once a
     // reclaim installs s2, the OLD stream s1 closing must NOT tear down or

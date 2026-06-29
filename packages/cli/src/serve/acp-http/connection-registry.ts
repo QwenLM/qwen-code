@@ -777,20 +777,30 @@ function pushCapped<T>(
     // deferred JSON-RPC replies (`sendSessionReply`) the ring does NOT track —
     // dropping one would hang the `session/prompt` caller forever. So under a
     // content flood during a detach gap, evict the oldest id-bearing frame and
-    // keep the reply. Only when every entry is id-less (or no accessor is
-    // given, e.g. the connection buffer) do we fall back to dropping the oldest
-    // — the cap must still hold.
-    let dropIndex = 0;
-    if (getId) {
-      const replayable = buf.findIndex((e) => getId(e) !== undefined);
-      if (replayable !== -1) dropIndex = replayable;
+    // keep the reply.
+    const replayable = getId ? buf.findIndex((e) => getId(e) !== undefined) : 0;
+    if (replayable === -1) {
+      // Degenerate case: the buffer is ENTIRELY id-less deferred replies, so
+      // there is nothing replaceable to evict. Dropping one here would silently
+      // hang its caller (the exact failure this guard exists to prevent), so we
+      // do NOT drop — we let the id-less replies exceed the soft cap and append.
+      // The cap is a memory bound against a CONTENT flood (id-bearing frames);
+      // id-less replies are naturally bounded by the number of in-flight
+      // session RPCs the client actually issued (tiny, client-controlled), not
+      // by an unbounded stream, so this can't run away in practice. Log once so
+      // an operator can see the buffer is over the soft cap on replies.
+      writeStderrLine(
+        `qwen serve: /acp pre-attach buffer over soft cap (${label}) with ` +
+          `${buf.length + 1} id-less replies — not dropping (irreplaceable)`,
+      );
+    } else {
+      const [dropped] = buf.splice(replayable, 1);
+      const droppedId = getId?.(dropped);
+      writeStderrLine(
+        `qwen serve: /acp pre-attach buffer full (${label}), dropped frame` +
+          (droppedId !== undefined ? ` id ${droppedId}` : ''),
+      );
     }
-    const [dropped] = buf.splice(dropIndex, 1);
-    const droppedId = getId?.(dropped);
-    writeStderrLine(
-      `qwen serve: /acp pre-attach buffer full (${label}), dropped frame` +
-        (droppedId !== undefined ? ` id ${droppedId}` : ' (id-less)'),
-    );
   }
   buf.push(frame);
 }
