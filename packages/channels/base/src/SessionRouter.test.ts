@@ -1,26 +1,61 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionRouter } from './SessionRouter.js';
-import type { AcpBridge } from './AcpBridge.js';
+import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 
 let sessionCounter = 0;
 
-function mockBridge(): AcpBridge {
+function mockBridge(): ChannelAgentBridge {
   return {
     newSession: vi.fn().mockImplementation(() => `session-${++sessionCounter}`),
     loadSession: vi.fn().mockImplementation((id: string) => id),
     on: vi.fn(),
     off: vi.fn(),
-    emit: vi.fn(),
     availableCommands: [],
-  } as unknown as AcpBridge;
+    prompt: vi.fn().mockResolvedValue(''),
+    cancelSession: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+function writePersistedSession(persistPath: string, key = 'key1'): void {
+  writeFileSync(
+    persistPath,
+    JSON.stringify({
+      [key]: {
+        sessionId: 'old-session',
+        target: {
+          channelName: 'ch',
+          senderId: 'alice',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+      },
+    }),
+  );
 }
 
 describe('SessionRouter', () => {
-  let bridge: AcpBridge;
+  let bridge: ChannelAgentBridge;
+  let tempDirs: string[] = [];
 
   beforeEach(() => {
     sessionCounter = 0;
     bridge = mockBridge();
+    tempDirs = [];
+  });
+
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   describe('routing key scopes', () => {
@@ -118,6 +153,103 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1');
       expect(bridge.newSession).toHaveBeenCalledWith('/default');
     });
+
+    it('deduplicates concurrent session creation for the same route', async () => {
+      let resolveNewSession!: (sessionId: string) => void;
+      const newSession = vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveNewSession = resolve;
+          }),
+      );
+      bridge = {
+        ...mockBridge(),
+        newSession,
+      };
+      const router = new SessionRouter(bridge, '/default');
+
+      const first = router.resolve('ch', 'alice', 'chat1');
+      const second = router.resolve('ch', 'alice', 'chat1');
+      await Promise.resolve();
+      resolveNewSession('session-1');
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        'session-1',
+        'session-1',
+      ]);
+      expect(newSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries if a new session dies before the route is stored', async () => {
+      let calls = 0;
+      const router = new SessionRouter(mockBridge(), '/default');
+      const newSession = vi.fn(async () => {
+        calls++;
+        const sessionId = calls === 1 ? 'dead-session' : 'live-session';
+        if (sessionId === 'dead-session') {
+          router.removeSessionId(sessionId);
+        }
+        return sessionId;
+      });
+      router.setBridge({
+        ...mockBridge(),
+        newSession,
+      });
+
+      await expect(router.resolve('ch', 'alice', 'chat1')).resolves.toBe(
+        'live-session',
+      );
+
+      expect(newSession).toHaveBeenCalledTimes(2);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('live-session');
+      expect(router.getTarget('dead-session')).toBeUndefined();
+      expect(router.getTarget('live-session')).toEqual({
+        channelName: 'ch',
+        senderId: 'alice',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+    });
+
+    it('does not store a route if session creation keeps dying', async () => {
+      const router = new SessionRouter(mockBridge(), '/default');
+      const newSession = vi.fn(async () => {
+        router.removeSessionId('dead-session');
+        return 'dead-session';
+      });
+      router.setBridge({
+        ...mockBridge(),
+        newSession,
+      });
+
+      await expect(router.resolve('ch', 'alice', 'chat1')).rejects.toThrow(
+        'Session dead-session died before routing completed (2/2 attempts, key ch:alice:chat1)',
+      );
+
+      expect(newSession).toHaveBeenCalledTimes(2);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(router.getTarget('dead-session')).toBeUndefined();
+      expect(router.getAll()).toEqual([]);
+    });
+
+    it.each([
+      ['empty string', ''],
+      ['non-string value', 42],
+    ])('rejects a %s returned by newSession', async (_label, sessionId) => {
+      const router = new SessionRouter(mockBridge(), '/default');
+      const newSession = vi.fn(async (): Promise<string> => sessionId as string);
+      router.setBridge({
+        ...mockBridge(),
+        newSession,
+      });
+
+      await expect(router.resolve('ch', 'alice', 'chat1')).rejects.toThrow(
+        'Invalid session ID from bridge',
+      );
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(router.getAll()).toEqual([]);
+    });
   });
 
   describe('getTarget', () => {
@@ -201,6 +333,14 @@ describe('SessionRouter', () => {
       expect(router.hasSession('ch', 'bob')).toBe(false);
       expect(router.hasSession('ch', 'bobby')).toBe(true);
     });
+
+    it('finds sender sessions outside user-scope routing keys', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.hasSession('ch', 'alice')).toBe(true);
+      expect(router.hasSession('ch', 'bob')).toBe(false);
+    });
   });
 
   describe('removeSession', () => {
@@ -253,11 +393,332 @@ describe('SessionRouter', () => {
       expect(router.getTarget(bobby)).toBeDefined();
     });
 
+    it('removes sender sessions outside user-scope routing keys', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sid = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.removeSession('ch', 'alice')).toEqual([sid]);
+      expect(router.hasSession('ch', 'alice')).toBe(false);
+      expect(router.getTarget(sid)).toBeUndefined();
+    });
+
     it('cleans up target mapping after removal', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       const sid = await router.resolve('ch', 'alice', 'chat1');
       router.removeSession('ch', 'alice', 'chat1');
       expect(router.getTarget(sid)).toBeUndefined();
+    });
+
+    it('removes a thread-scoped session using threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sid = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.removeSession('ch', 'alice', 'chat1', 'thread1')).toEqual([
+        sid,
+      ]);
+      expect(router.getTarget(sid)).toBeUndefined();
+    });
+
+    it('reports thread-scoped sessions using threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      expect(router.hasSession('ch', 'bob', 'chat1', 'thread1')).toBe(true);
+      expect(router.hasSession('ch', 'bob', 'chat1', 'thread2')).toBe(false);
+    });
+  });
+
+  describe('removeSessionId', () => {
+    it('removes mappings by daemon session id', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+
+      expect(router.removeSessionId(sid)).toBe(true);
+      expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
+      expect(router.getTarget(sid)).toBeUndefined();
+      expect(router.removeSessionId('missing')).toBe(false);
+    });
+
+    it('persists after removing by daemon session id', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+
+      expect(existsSync(persistPath)).toBe(true);
+      expect(router.removeSessionId(sid)).toBe(true);
+
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+  });
+
+  describe('restoreSessions', () => {
+    it('treats falsy restored session ids as failed restores', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      bridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockResolvedValue(''),
+      } as unknown as ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+      expect(router.getAll()).toEqual([]);
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('treats non-string restored session ids as failed restores', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      bridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+      expect(router.getAll()).toEqual([]);
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('drops existing in-memory mappings when restore fails after restart', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+      const restartedBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockResolvedValue(''),
+      } as unknown as ChannelAgentBridge;
+
+      router.setBridge(restartedBridge);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+      expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
+      expect(router.getTarget(sid)).toBeUndefined();
+      expect(router.getAll()).toEqual([]);
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('persists replacement ids returned by loadSession', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      await router.resolve('ch', 'alice', 'chat1');
+      const restartedBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockResolvedValue('replacement-session'),
+      } as unknown as ChannelAgentBridge;
+
+      router.setBridge(restartedBridge);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'replacement-session',
+      );
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({
+          sessionId: 'replacement-session',
+        }),
+      });
+    });
+
+    it('does not restore a session that dies before the route is stored', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      const state: { router?: SessionRouter } = {};
+      bridge = {
+        ...mockBridge(),
+        loadSession: vi.fn(async () => {
+          state.router?.removeSessionId('dead-restored-session');
+          return 'dead-restored-session';
+        }),
+      };
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      state.router = router;
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 0,
+        failed: 1,
+      });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      expect(router.getTarget('dead-restored-session')).toBeUndefined();
+      expect(router.getAll()).toEqual([]);
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('shares an in-flight restore with concurrent resolve for the same route', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      let resolveLoadSession!: (sessionId: string) => void;
+      const loadSession = vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveLoadSession = resolve;
+          }),
+      );
+      bridge = {
+        ...mockBridge(),
+        loadSession,
+      };
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      const restore = router.restoreSessions();
+      await Promise.resolve();
+      const resolved = router.resolve('ch', 'alice', 'chat1');
+      resolveLoadSession('restored-session');
+
+      await expect(resolved).resolves.toBe('restored-session');
+      await expect(restore).resolves.toEqual({ restored: 1, failed: 0 });
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'restored-session',
+      );
+      expect(router.getAll()).toHaveLength(1);
+    });
+
+    it('creates a fresh session for concurrent resolve when restore fails', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+      let resolveLoadSession!: (sessionId: string) => void;
+      const loadSession = vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveLoadSession = resolve;
+          }),
+      );
+      bridge = {
+        ...mockBridge(),
+        loadSession,
+      };
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+
+      const restore = router.restoreSessions();
+      await Promise.resolve();
+      const resolved = router.resolve('ch', 'alice', 'chat1');
+      resolveLoadSession('');
+
+      await expect(resolved).resolves.toBe('session-1');
+      await expect(restore).resolves.toEqual({ restored: 0, failed: 1 });
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('session-1');
+      expect(router.getAll()).toHaveLength(1);
+    });
+
+    it('reserves all persisted routes before restoring them', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      await router.resolve('ch', 'alice', 'chat1');
+      await router.resolve('ch', 'bob', 'chat2');
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      const restartedBridge = {
+        ...mockBridge(),
+        loadSession: vi.fn(
+          () =>
+            new Promise<string>((resolve) => {
+              loadResolvers.push(resolve);
+            }),
+        ),
+      };
+      router.setBridge(restartedBridge);
+
+      const restore = router.restoreSessions();
+      await Promise.resolve();
+      const bobResolved = router.resolve('ch', 'bob', 'chat2');
+      loadResolvers[0]!('restored-alice');
+      await Promise.resolve();
+      loadResolvers[1]!('restored-bob');
+
+      await expect(bobResolved).resolves.toBe('restored-bob');
+      await expect(restore).resolves.toEqual({ restored: 2, failed: 0 });
+      expect(restartedBridge.newSession).not.toHaveBeenCalled();
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('restored-alice');
+      expect(router.getSession('ch', 'bob', 'chat2')).toBe('restored-bob');
+      expect(router.getTarget('session-2')).toBeUndefined();
+    });
+
+    it('keeps dead session ids within the active restore window', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const state: { router?: SessionRouter } = {};
+      bridge = {
+        ...mockBridge(),
+        loadSession: vi.fn(async (sessionId: string) => {
+          if (sessionId === 'old-alice') {
+            state.router?.removeSessionId('restored-bob');
+            return 'restored-alice';
+          }
+          return 'restored-bob';
+        }),
+      };
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      state.router = router;
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 1,
+      });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('restored-alice');
+      expect(router.getSession('ch', 'bob', 'chat2')).toBeUndefined();
+      expect(router.getTarget('restored-bob')).toBeUndefined();
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:alice:chat1': expect.objectContaining({
+          sessionId: 'restored-alice',
+        }),
+      });
     });
   });
 

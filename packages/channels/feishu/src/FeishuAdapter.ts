@@ -12,7 +12,7 @@ import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
-  AcpBridge,
+  ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 
 /** Feishu message event data shape. */
@@ -108,7 +108,7 @@ export class FeishuChannel extends ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);

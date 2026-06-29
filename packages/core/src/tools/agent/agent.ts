@@ -1277,7 +1277,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
-          string | Content,
+          | string
+          | Content,
         initialMessages,
       };
       toolConfig = {
@@ -2224,7 +2225,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // already requires confirmation — this only flips deny → surface.)
         const shouldBubble = Boolean(
           subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
-          this.config.isInteractive(),
+            this.config.isInteractive(),
         );
         // Use Object.create so the resolved approval mode override (e.g.
         // subagent-level `approvalMode: auto-edit`) is preserved.
