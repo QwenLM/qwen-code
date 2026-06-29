@@ -737,6 +737,21 @@ export function KeypressProvider({
             clearTimeout(sgrMouseTimeout);
             sgrMouseTimeout = null;
           }
+        } else if (key.name === 'paste-start') {
+          // Bracketed paste takes priority over a half-built SGR mouse
+          // fragment. If a paste begins mid-reassembly (e.g. a mouse-move
+          // `\x1b[<…` arrived without its terminating `M`, then paste-start),
+          // we must NOT swallow paste-start into sgrMouseBuffer — doing so
+          // would skip the paste-start handler below, leave `isPaste` false,
+          // and let an SGR sequence embedded in the pasted content be
+          // reconstructed into a real click. Discard the fragment and fall
+          // through so the paste-start handler sets `isPaste = true`.
+          swallowingSgrMouse = false;
+          sgrMouseBuffer = '';
+          if (sgrMouseTimeout) {
+            clearTimeout(sgrMouseTimeout);
+            sgrMouseTimeout = null;
+          }
         } else {
           sgrMouseBuffer += key.sequence;
           if (key.name === 'm' || key.sequence === 'M') {

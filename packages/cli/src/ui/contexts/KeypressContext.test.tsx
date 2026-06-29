@@ -679,6 +679,46 @@ describe('KeypressContext - Kitty Protocol', () => {
         expect(keyHandler.mock.calls[0][0].sequence).toContain('0;5;5');
       });
 
+      it('should not dispatch SGR mouse events when a paste begins mid-reassembly', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // Race: a real mouse-move starts an SGR fragment (`\x1b[<…` with no
+        // terminating `M` yet), then a bracketed paste begins. paste-start must
+        // not be swallowed into the SGR buffer — otherwise `isPaste` stays false
+        // and an SGR left-press embedded in the pasted content gets
+        // reconstructed into a real click (e.g. auto-selecting a dialog option).
+        const partialMouseMove = '\x1b[<35;10;5';
+        const embeddedClick = '\x1b[<0;5;5M';
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          // Partial mouse-move fragment arrives first (no terminating M).
+          stdin.emit('data', Buffer.from(partialMouseMove));
+          // Then a paste carrying an embedded SGR left-press.
+          stdin.emit('data', Buffer.from(`\x1b[200~${embeddedClick}\x1b[201~`));
+        });
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalled();
+        });
+
+        // No mouse event should ever be dispatched from the pasted bytes.
+        expect(mouseHandler).not.toHaveBeenCalled();
+        // The embedded SGR payload arrives as literal paste content.
+        const pasteCall = keyHandler.mock.calls.find((c) => c[0]?.paste);
+        expect(pasteCall).toBeDefined();
+        expect(pasteCall?.[0].sequence).toContain('0;5;5');
+      });
+
       it('should handle empty paste sequence', async () => {
         const keyHandler = vi.fn();
 
