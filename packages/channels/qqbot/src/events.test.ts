@@ -60,6 +60,29 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  sanitizeLogText: (text: string, maxLen: number): string => {
+    // Minimal sanitization for tests: escape control characters
+    const sanitized = Array.from(text, (c) => {
+      const cp = c.codePointAt(0)!;
+      if (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d)
+        return `\\x${cp.toString(16).padStart(2, '0')}`;
+      if (cp === 0x7f || (cp >= 0x80 && cp <= 0x9f))
+        return `\\x${cp.toString(16).padStart(2, '0')}`;
+      if (cp === 0x1b) return '\\x1B';
+      return c;
+    }).join('');
+    return sanitized.slice(0, maxLen);
+  },
+  sanitizeSenderName: (name: string): string => {
+    // Minimal sanitization for tests: strip brackets, CR/LF, control chars
+    const cleaned = Array.from(name, (c) => {
+      const cp = c.codePointAt(0)!;
+      if (cp < 0x20 || cp === 0x7f) return ' ';
+      if (c === '[' || c === ']') return ' ';
+      return c;
+    }).join('');
+    return cleaned.trim().slice(0, 64) || 'unknown';
+  },
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -282,7 +305,7 @@ describe('handleC2C', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.text).toBe('[atMention=true] [GM Eve]: hello');
+    expect(env.text).toBe('[atMention=true] [GM  Eve]: hello');
   });
 });
 
@@ -304,7 +327,17 @@ describe('handleGroup', () => {
     const before = Date.now();
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(makeGroupEvent());
+    pvt.handleGroup(
+      makeGroupEvent({
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
     ] as Map<string, { msgId: string; timestamp: number }>;
@@ -317,7 +350,17 @@ describe('handleGroup', () => {
   it('触发 handleInbound 带正确参数：isGroup=true, isMentioned=true', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(makeGroupEvent());
+    pvt.handleGroup(
+      makeGroupEvent({
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
@@ -331,7 +374,18 @@ describe('handleGroup', () => {
   it('清理 <@OPENID> 标签', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(makeGroupEvent({ content: '<@OPENID_BOT> 帮我翻译这段' }));
+    pvt.handleGroup(
+      makeGroupEvent({
+        content: '<@OPENID_BOT> 帮我翻译这段',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env.text).toBe('[atMention=true] [Bob]: 帮我翻译这段');
@@ -348,7 +402,18 @@ describe('handleGroup', () => {
   it('斜杠命令不包装 atMention', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(makeGroupEvent({ content: '/status' }));
+    pvt.handleGroup(
+      makeGroupEvent({
+        content: '/status',
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env.text).toBe('/status');

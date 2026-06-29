@@ -17,6 +17,8 @@ import {
   ChannelBase,
   SessionRouter,
   getGlobalQwenDir,
+  sanitizeLogText,
+  sanitizeSenderName,
 } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
@@ -1312,9 +1314,7 @@ export class QQChannel extends ChannelBase {
     this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
     this.saveQQState();
     const senderName = event.author.username || event.author.id || 'QQ User';
-    // Sanitize: strip Unicode brackets so a crafted display name cannot
-    // spoof the [atMention=...] protocol marker.
-    const safeName = senderName.replace(/[\p{Ps}\p{Pe}]/gu, '').slice(0, 64);
+    const safeName = sanitizeSenderName(senderName);
     const cleanText = event.content.trim();
     const isSlash = cleanText.startsWith('/');
     const text = isSlash
@@ -1330,6 +1330,7 @@ export class QQChannel extends ChannelBase {
       isGroup: false,
       isMentioned: true,
       isReplyToBot: false,
+      alreadyPrefixed: !isSlash || undefined,
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] C2C handler error: ${e}\n`),
     );
@@ -1362,27 +1363,37 @@ export class QQChannel extends ChannelBase {
       event.author.id ||
       event.author.member_openid ||
       'QQ User';
-    // Sanitize: strip Unicode brackets so a crafted display name cannot
-    // spoof the [atMention=...] protocol marker.
-    const safeName = senderName.replace(/[\p{Ps}\p{Pe}]/gu, '').slice(0, 64);
+    const safeName = sanitizeSenderName(senderName);
     const cleanText = (event.content || '')
       .replace(/<@[^>]{1,64}>/g, '')
       .trim();
     // Ignore messages that have no meaningful text after @mention stripping
     // (pure @mention, image, or sticker messages).
     if (!cleanText) return;
-    this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
-    this.saveQQState();
-    const isSlash = cleanText.startsWith('/');
-    // Log slash commands with senderName for audit trail
+
+    // GROUP_AT_MESSAGE_CREATE may fire for @all mentions (not just
+    // specifically @bot). Only treat as a slash command when the bot
+    // itself is the direct target.
+    const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
+    const isSlash = isAtBot && cleanText.startsWith('/');
+
+    // Log slash commands with safeName for audit trail
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText.split(/\s/)[0]}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${cleanText.split(/\s/)[0]}\n`,
       );
     }
+
+    // Only track replyMsgId for at-bot messages — non-bot @all mentions
+    // should not clobber a preceding @mention's replyMsgId.
+    if (isAtBot) {
+      this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
+      this.saveQQState();
+    }
+
     const text = isSlash
       ? cleanText
-      : `[atMention=true] [${safeName}]: ${cleanText}`;
+      : `[atMention=${isAtBot}] [${safeName}]: ${cleanText}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1395,10 +1406,9 @@ export class QQChannel extends ChannelBase {
       text,
       messageId: event.id,
       isGroup: true,
-      isMentioned: true,
-      // QQ Bot only receives group messages when explicitly @mentioned, so
-      // every group message is semantically a reply to the bot.
-      isReplyToBot: true,
+      isMentioned: isAtBot,
+      isReplyToBot: isAtBot,
+      alreadyPrefixed: !isSlash || undefined,
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
     );
@@ -1519,18 +1529,16 @@ export class QQChannel extends ChannelBase {
       event.author.id ||
       event.author.member_openid ||
       'QQ User';
-    // Sanitize: strip Unicode brackets so a crafted display name cannot
-    // spoof the [atMention=...] protocol marker.
-    const safeName = senderName.replace(/[\p{Ps}\p{Pe}]/gu, '').slice(0, 64);
+    const safeName = sanitizeSenderName(senderName);
 
     // 只有 @机器人本人 + 斜杠 才是 slash command
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
     const isSlash = isAtBot && cleanText.startsWith('/');
 
-    // Log slash commands with senderName for audit trail
+    // Log slash commands with safeName for audit trail
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${senderName} (${chatId}): ${cleanText.split(/\s/)[0]}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${cleanText.split(/\s/)[0]}\n`,
       );
     }
 
@@ -1564,6 +1572,7 @@ export class QQChannel extends ChannelBase {
       isGroup: true,
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
+      alreadyPrefixed: !isSlash || undefined,
     }).catch((err: unknown) => {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupAll error: ${err instanceof Error ? err.message : String(err)}\n`,
