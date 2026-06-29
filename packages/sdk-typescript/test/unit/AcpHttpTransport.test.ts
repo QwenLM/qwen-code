@@ -724,6 +724,28 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     expect(events[0].id).toBeUndefined();
   });
 
+  it('yields a _qwen/notify envelope tagged with `kind` (as the daemon sends it) as a DaemonEvent, not silently dropped (M2bvl)', async () => {
+    // The daemon's translateEvent stamps session-stream notifies under `kind`
+    // (state_resync_required / replay_complete / stream_error). Reading only
+    // `type` would drop them — starving the SDK of the resume signals.
+    const { fetch } = sessionStreamFetch([
+      frame(11, {
+        jsonrpc: '2.0',
+        method: '_qwen/notify',
+        params: {
+          kind: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        },
+      }),
+    ]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const events = await collect(t, 'sess-1');
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('state_resync_required');
+    expect(events[0].id).toBe(11);
+  });
+
   it('surfaces a session/request_permission request as a permission_request event', async () => {
     const { fetch } = sessionStreamFetch([
       frame(9, {

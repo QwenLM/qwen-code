@@ -115,9 +115,15 @@ export function denormalizeAcpNotification(
     };
   }
 
-  // Extension path: _qwen/notify is a generic notification envelope.
+  // Extension path: _qwen/notify is a generic notification envelope. The
+  // daemon's session-stream `translateEvent` stamps the event name under
+  // `kind` (e.g. `state_resync_required`, `replay_complete`, `stream_error`),
+  // while other producers use `type`. Accept either — preferring `type` — so a
+  // `kind`-tagged notify isn't silently dropped (which would, e.g., starve the
+  // SDK of the ring-overflow `state_resync_required` signal during a resume).
   if (notification.method === '_qwen/notify') {
-    const type = params['type'];
+    const type =
+      typeof params['type'] === 'string' ? params['type'] : params['kind'];
     if (typeof type !== 'string' || type.length === 0) return undefined;
     return {
       id: nextSyntheticId++,
