@@ -1,12 +1,14 @@
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Storage } from '@qwen-code/qwen-code-core';
-import type { SessionRouter ,
+import type {
+  SessionRouter,
   ChannelAgentBridge,
   ChannelBase,
   ChannelPlugin,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from '../extensions/utils.js';
@@ -143,8 +145,10 @@ export function registerSessionCleanup(
   channels: Map<string, ChannelBase>,
 ): void {
   bridge.on('sessionDied', (event: { sessionId: string; reason?: string }) => {
+    const safeId = sanitizeLogText(event.sessionId, 128);
+    const safeReason = event.reason ? sanitizeLogText(event.reason, 512) : '';
     writeStderrLine(
-      `[Channel] Session ${event.sessionId} died${event.reason ? ` (${event.reason})` : ''}, removing routing state`,
+      `[Channel] Session ${safeId} died${safeReason ? ` (${safeReason})` : ''}, removing routing state`,
     );
     const target = router.getTarget(event.sessionId);
     const channel = target ? channels.get(target.channelName) : undefined;

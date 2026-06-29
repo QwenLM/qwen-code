@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import process from 'node:process';
 import type { SessionScope, SessionTarget } from './types.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import { sanitizeLogText } from './sanitize.js';
 
 interface PersistedEntry {
   sessionId: string;
@@ -158,12 +159,17 @@ export class SessionRouter {
     chatId?: string,
     threadId?: string,
   ): boolean {
-    // If chatId is provided, do an exact lookup; otherwise scan for any
-    // session belonging to this sender on this channel.
+    const scope = this.channelScopes.get(channelName) || this.defaultScope;
+    // If chatId is provided, do an exact scoped lookup; otherwise scan for any
+    // sender-owned session on this channel. Single scope has no sender-owned
+    // no-chat lookup, preserving the old prefix-scan behavior.
     if (chatId) {
       return this.toSession.has(
         this.routingKey(channelName, senderId, chatId, threadId),
       );
+    }
+    if (scope === 'single') {
+      return false;
     }
     for (const target of this.toTarget.values()) {
       if (target.channelName === channelName && target.senderId === senderId) {
@@ -183,10 +189,13 @@ export class SessionRouter {
     threadId?: string,
   ): string[] {
     const removedIds: string[] = [];
+    const scope = this.channelScopes.get(channelName) || this.defaultScope;
     if (chatId) {
       const key = this.routingKey(channelName, senderId, chatId, threadId);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
+    } else if (scope === 'single') {
+      return removedIds;
     } else {
       // No chatId: remove all sessions for this sender on this channel.
       for (const [k, mappedSessionId] of [...this.toSession.entries()]) {
@@ -264,14 +273,19 @@ export class SessionRouter {
     restored: number;
     failed: number;
   }> {
-    if (!this.persistPath || !existsSync(this.persistPath)) {
+    const persistPath = this.persistPath;
+    if (!persistPath || !existsSync(persistPath)) {
       return { restored: 0, failed: 0 };
     }
 
     let entries: Record<string, PersistedEntry>;
     try {
-      entries = JSON.parse(readFileSync(this.persistPath, 'utf-8'));
-    } catch {
+      entries = JSON.parse(readFileSync(persistPath, 'utf-8'));
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[SessionRouter] Corrupted persist file at ${sanitizeLogText(persistPath, 1024)}: ${sanitizeLogText(reason, 512)}\n`,
+      );
       return { restored: 0, failed: 0 };
     }
 
@@ -317,7 +331,7 @@ export class SessionRouter {
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           process.stderr.write(
-            `[SessionRouter] Failed to restore session ${entry.sessionId} for key ${key}: ${reason}\n`,
+            `[SessionRouter] Failed to restore session ${sanitizeLogText(entry.sessionId, 128)} for key ${sanitizeLogText(key, 256)}: ${sanitizeLogText(reason, 512)}\n`,
           );
           reservation.reject(
             new Error('Session restore failed', { cause: err }),
