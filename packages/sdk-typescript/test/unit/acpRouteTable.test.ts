@@ -712,6 +712,14 @@ describe('acpRouteTable – query param coercion', () => {
     expect(params).toEqual({ path: 'a.ts' });
   });
 
+  it('GET /file treats an EMPTY numeric param as absent, not 0 (M3BYd)', () => {
+    // `?maxBytes=` is present-but-empty; `Number('')` is 0 — must be omitted so
+    // the daemon doesn't honor an unintended 0.
+    const { params } = extract('/file?path=a.ts&maxBytes=', 'GET');
+    expect(params).toEqual({ path: 'a.ts' });
+    expect('maxBytes' in params).toBe(false);
+  });
+
   it('GET /file/bytes forwards path + offset/maxBytes as numbers', () => {
     const { method, params } = extract(
       '/file/bytes?path=a.bin&offset=8&maxBytes=64',

@@ -52,13 +52,16 @@ function strParam(
  * ACP handlers require a real number (a query string's `"123"` would be
  * rejected). An unparseable value forwards as `NaN`, which the daemon rejects
  * the same way it would a malformed REST query.
+ *
+ * An empty value (`?maxBytes=`) is treated as ABSENT, not `0`: `Number('')` is
+ * `0`, a plausible-but-unintended value the handler would otherwise honor.
  */
 function numParam(
   q: URLSearchParams | undefined,
   name: string,
 ): Record<string, number> {
   const v = q?.get(name);
-  return v == null ? {} : { [name]: Number(v) };
+  return v == null || v === '' ? {} : { [name]: Number(v) };
 }
 
 /** A boolean query param (`?detail=true`), omitted when absent. */

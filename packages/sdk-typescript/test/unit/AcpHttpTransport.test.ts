@@ -786,6 +786,44 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     t.dispose();
   });
 
+  it('aborts an existing background reply pump when a consumer subscription starts, without rejecting its in-flight pending (M3BYa)', async () => {
+    // The session stream is single-reader: a consumer GET makes the daemon
+    // detach an earlier no-iter reply pump. Aborting that pump up front means
+    // its teardown sweep is skipped, so it can't spuriously reject the prompt
+    // the consumer is taking over delivery of.
+    const { fetch } = sessionStreamFetch([]); // consumer stream opens then closes
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const internals = t as unknown as {
+      sessionReplyPumps: Map<string, { abort: AbortController; refs: number }>;
+      pending: Map<
+        number,
+        {
+          resolve: (r: unknown) => void;
+          reject: (e: Error) => void;
+          sessionId?: string;
+        }
+      >;
+    };
+    // Simulate a reply pump started earlier by a no-iter session/prompt, plus its
+    // in-flight session-scoped pending.
+    const pumpAbort = new AbortController();
+    internals.sessionReplyPumps.set('sess-1', { abort: pumpAbort, refs: 1 });
+    const reject = vi.fn();
+    internals.pending.set(7, {
+      resolve: () => {},
+      reject,
+      sessionId: 'sess-1',
+    });
+
+    // A consumer subscribes to the same session (and drains the empty stream).
+    await collect(t, 'sess-1');
+
+    expect(pumpAbort.signal.aborted).toBe(true); // pump torn down up front
+    expect(reject).not.toHaveBeenCalled(); // its pending NOT spuriously rejected
+    expect(internals.pending.has(7)).toBe(true);
+    t.dispose();
+  });
+
   it('surfaces a session/request_permission request as a permission_request event', async () => {
     const { fetch } = sessionStreamFetch([
       frame(9, {

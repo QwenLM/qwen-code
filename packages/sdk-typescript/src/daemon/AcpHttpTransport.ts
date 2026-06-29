@@ -297,6 +297,13 @@ export class AcpHttpTransport implements DaemonTransport {
       sessionId,
       (this.activeSessionSubscriptions.get(sessionId) ?? 0) + 1,
     );
+    // The session `/acp` stream is single-reader: this consumer's GET will make
+    // the daemon detach any background reply pump started earlier by a no-iter
+    // `sendRequest`. Abort that pump NOW so it tears down cleanly (its sweep is
+    // skipped on abort) — otherwise its dying `.finally` would re-scan `pending`
+    // and spuriously reject the very `session/prompt` this consumer is taking
+    // over delivery of. The consumer now owns reply routing for this session.
+    this.sessionReplyPumps.get(sessionId)?.abort.abort();
     try {
       yield* this.subscribeEventsInner(sessionId, opts);
     } finally {
@@ -765,6 +772,9 @@ export class AcpHttpTransport implements DaemonTransport {
         { once: true },
       );
     });
+    // No-op catch so a synchronous reject (signal already aborted) can't surface
+    // as an unhandledrejection if the read loop throws before the race sees it.
+    abortPromise.catch(() => {});
 
     try {
       while (!signal.aborted) {
@@ -774,6 +784,15 @@ export class AcpHttpTransport implements DaemonTransport {
         ]);
         if (done) break;
         buf += decoder.decode(value, { stream: true });
+        // Bound the unread buffer — the same OOM guard the session readers have.
+        // A server/proxy that never emits a `\n\n` frame boundary would
+        // otherwise grow this without limit on the connection-scoped stream.
+        if (buf.length > MAX_SSE_BUF_CHARS) {
+          throw new Error(
+            `AcpHttpTransport: unread SSE buffer exceeded ${MAX_SSE_BUF_CHARS} ` +
+              `bytes without a frame boundary`,
+          );
+        }
 
         let idx: number;
         while ((idx = buf.indexOf('\n\n')) !== -1) {
@@ -1044,23 +1063,35 @@ export class AcpHttpTransport implements DaemonTransport {
     headers['Acp-Session-Id'] = sessionId;
 
     const res = await this._fetch(`${this.baseUrl}/acp`, { headers, signal });
-    if (!res.ok || !res.body) return;
+    // Surface the HTTP status (401 stale token / 404 gone session / 5xx) in the
+    // thrown error so the caller's sweep + any log can tell them apart. Caught
+    // by `ensureSessionReplyPump`'s `.catch(() => {})`; the pending rejection
+    // still happens in its `.finally`.
+    if (!res.ok || !res.body) {
+      throw new Error(
+        `session reply pump: HTTP ${res.status} ${res.statusText}`,
+      );
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
+    // Mirror `subscribeEventsInner`: keep the abort listener in a named ref so
+    // `finally` can remove it (it's `once`, so a clean drain that never aborts
+    // would otherwise leak it on a reused parent signal), and attach a no-op
+    // `.catch` so a synchronous reject (signal already aborted) can't surface as
+    // an unhandledrejection if the read loop throws before the race observes it.
+    let onAbort: (() => void) | undefined;
     const abortPromise = new Promise<never>((_, reject) => {
       if (signal.aborted) {
         reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
         return;
       }
-      signal.addEventListener(
-        'abort',
-        () =>
-          reject(signal.reason ?? new DOMException('Aborted', 'AbortError')),
-        { once: true },
-      );
+      onAbort = () =>
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      signal.addEventListener('abort', onAbort, { once: true });
     });
+    abortPromise.catch(() => {});
 
     try {
       while (!signal.aborted) {
@@ -1106,6 +1137,7 @@ export class AcpHttpTransport implements DaemonTransport {
         }
       }
     } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
       try {
         reader.cancel().catch(() => {});
       } catch {
