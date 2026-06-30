@@ -918,8 +918,7 @@ export class ConnectionRegistry {
   /**
    * Locate a pending permission entry matching `requestId` (a bridge
    * `bridgeRequestId`, i.e. a per-request `randomUUID()`) and optionally
-   * `sessionId`, returning the first match. {@link deletePendingPermission}
-   * delegates here so the matching predicate lives in one place.
+   * `sessionId`, returning the first match.
    *
    * NOTE: `requestId` is unique per *request*, not per *pending entry*. The
    * per-entry unique id is the `conn.pending` map key
@@ -927,9 +926,11 @@ export class ConnectionRegistry {
    * `permission_request` is delivered to every live subscriber of its session,
    * so when connections co-own a session (multi-client attach) each mints its
    * own entry sharing the same `bridgeRequestId`. More than one entry can
-   * therefore match; callers that must act on a *specific* entry (e.g. the
-   * resolve site) should delete by the `conn`/map-key they already hold rather
-   * than re-matching here.
+   * therefore match, so this is a *read-only locator* for deriving a session /
+   * ownership from a wire `requestId`. To DELETE a resolved entry, act on the
+   * specific `conn`/map-key the caller already holds (see
+   * `AcpDispatcher.dropOwnPendingPermission`) — never delete by re-matching
+   * here, which could hit a sibling co-owner's entry.
    */
   findPendingPermission(
     requestId: string,
@@ -947,16 +948,6 @@ export class ConnectionRegistry {
       }
     }
     return undefined;
-  }
-
-  // Argument order matches `findPendingPermission` (requestId first) so the two
-  // can never be called with swapped string args — a swap would silently match
-  // nothing and leak the entry until teardown, with no type error to catch it.
-  deletePendingPermission(requestId: string, sessionId: string): void {
-    const match = this.findPendingPermission(requestId, sessionId);
-    if (match) {
-      match.conn.pending.delete(match.id);
-    }
   }
 
   delete(connectionId: string): boolean {

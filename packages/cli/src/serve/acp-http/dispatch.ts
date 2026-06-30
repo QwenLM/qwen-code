@@ -329,11 +329,20 @@ function parsePermissionResponse(
   // an object map of string values — so dropping it doesn't silently leave the
   // agent with no submitted answers.
   const answers = params['answers'];
-  if (
-    isObject(answers) &&
-    Object.values(answers).every((value) => typeof value === 'string')
-  ) {
-    response['answers'] = answers;
+  if (answers !== undefined) {
+    if (
+      isObject(answers) &&
+      Object.values(answers).every((value) => typeof value === 'string')
+    ) {
+      response['answers'] = answers;
+    } else {
+      // Present but malformed: the bridge would reject it anyway, so it is
+      // dropped — but log it, otherwise a client whose answers silently
+      // vanished (agent sees none) has no server-side signal to chase.
+      writeStderrLine(
+        'qwen serve: /acp session/permission dropping invalid `answers` (expected an object map of string values)',
+      );
+    }
   }
   if (isObject(params['_meta'])) {
     response['_meta'] = params['_meta'];
@@ -757,6 +766,25 @@ export class AcpDispatcher {
     // `bridgeRequestId` could delete a sibling's entry and orphan the one we
     // just resolved. The siblings' now-moot entries are reaped at teardown.
     conn.pending.delete(id);
+  }
+
+  /**
+   * Drop ONLY the calling connection's own pending permission entry for
+   * `requestId`, never a sibling co-owner's. Under the consensus policy a vote
+   * (or an unexpected vote error) from connection B must not delete connection
+   * A's still-needed entry, which would stall the quorum. A connection that
+   * never streamed the request holds no entry, so this is a no-op for it.
+   */
+  private dropOwnPendingPermission(
+    conn: AcpConnection,
+    requestId: string,
+  ): void {
+    for (const [pid, preq] of conn.pending) {
+      if (preq.kind === 'permission' && preq.bridgeRequestId === requestId) {
+        conn.pending.delete(pid);
+        return;
+      }
+    }
   }
 
   /**
@@ -1283,8 +1311,13 @@ export class AcpDispatcher {
               { sessionId, bridgeRequestId: requestId },
               pendingRef?.conn.sessions.get(sessionId)?.clientId,
             );
-            if (cancelled && pendingRef) {
-              this.dropResolvedPermission(pendingRef.conn, pendingRef.id);
+            // Drop only the VOTING connection's own entry (consistent with the
+            // success path) — never `pendingRef`, which may be a sibling/the
+            // originator. Deleting the originator's entry would stall a quorum
+            // still waiting on its vote. If the voter has no own entry, leave
+            // everything for teardown.
+            if (cancelled) {
+              this.dropOwnPendingPermission(conn, requestId);
             }
             throw err;
           }
@@ -1324,15 +1357,7 @@ export class AcpDispatcher {
           // co-owner's still-needed outbound request and could stall the quorum
           // until timeout/teardown. A cross-connection voter that never streamed
           // the request has no own entry — leave the originator's for teardown.
-          for (const [pid, preq] of conn.pending) {
-            if (
-              preq.kind === 'permission' &&
-              preq.bridgeRequestId === requestId
-            ) {
-              this.dropResolvedPermission(conn, pid);
-              break;
-            }
-          }
+          this.dropOwnPendingPermission(conn, requestId);
           this.replyConn(conn, id, {});
           return;
         }
@@ -3375,18 +3400,23 @@ export class AcpDispatcher {
     // entry survives so a later session/connection teardown
     // (`abandonPendingForSession`) can still release the mediator.
 
-    // A client error response is a cancellation; otherwise pass the result
-    // through. The cast defers shape validation to the bridge, so a
-    // MALFORMED result (e.g. `{}` with no `outcome`) makes the mediator
-    // throw — caught below, where we fall back to an explicit cancel so the
-    // mediator is always released. The pending entry is dropped only after a
-    // successful vote/cancel (see the NOTE above), so a double-failure leaves
-    // it for teardown to retry.
-    const vote =
-      'error' in msg
-        ? { outcome: { outcome: 'cancelled' } }
-        : (msg as { result: unknown }).result;
     try {
+      // A client error response is a cancellation; otherwise validate +
+      // whitelist the result through the SAME `parsePermissionResponse` the
+      // `session/permission` handler uses. This PR widened this path to any
+      // co-owning connection (via `findPendingClientRequest`), so without the
+      // shared validator a co-owner could inject arbitrary top-level args and
+      // extra `outcome` sub-fields straight to the bridge. A malformed result
+      // throws here (as the old direct cast made the bridge throw) and is
+      // caught below, where the cancel fallback always releases the mediator.
+      const vote =
+        'error' in msg
+          ? { outcome: { outcome: 'cancelled' } }
+          : parsePermissionResponse(
+              isObject((msg as { result: unknown }).result)
+                ? (msg as { result: Record<string, unknown> }).result
+                : {},
+            );
       this.bridge.respondToSessionPermission(
         pending.sessionId,
         pending.bridgeRequestId,

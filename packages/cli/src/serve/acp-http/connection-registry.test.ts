@@ -860,7 +860,7 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
-  it('finds and deletes pending permissions across connections', () => {
+  it('finds pending permissions across connections', () => {
     const registry = new ConnectionRegistry();
     try {
       const connA = registry.create(false);
@@ -896,8 +896,9 @@ describe('ConnectionRegistry.getSnapshot', () => {
         registry.findPendingPermission('perm-1', 'wrong-session'),
       ).toBeUndefined();
 
-      registry.deletePendingPermission('perm-1', 'sess-1');
-
+      // findPendingPermission is a read-only locator; deletion is done by the
+      // owning connection on its own map key (AcpDispatcher.dropOwnPendingPermission).
+      connA.pending.delete(idA);
       expect(registry.findPendingClientRequest(idA)).toBeUndefined();
     } finally {
       registry.dispose();

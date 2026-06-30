@@ -1602,6 +1602,170 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('session/permission forwards an object _meta and drops a non-object _meta', async () => {
+    const seen: unknown[] = [];
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      _requestId: string,
+      resp: unknown,
+    ) => {
+      seen.push(resp);
+      return true;
+    }) as never;
+    let nextReq = 0;
+    bridge.promptBehavior = async (_s, q) => {
+      nextReq += 1;
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: `perm-meta-${nextReq}`,
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      // Round 1: object _meta is preserved verbatim (nested shape survives).
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 45,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'a' }] },
+      });
+      await sessReader.next();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 46,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-meta-1',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+          _meta: { qwen: { trace: 't1' } },
+        },
+      });
+      expect((await connReader.next()) as unknown).toMatchObject({ id: 46 });
+      expect(seen.at(-1)).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+        _meta: { qwen: { trace: 't1' } },
+      });
+      // Round 2: a non-object _meta (string) is dropped, not forwarded.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 47,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'b' }] },
+      });
+      await sessReader.next();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 48,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-meta-2',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+          _meta: 'not-an-object',
+        },
+      });
+      expect((await connReader.next()) as unknown).toMatchObject({ id: 48 });
+      expect(seen.at(-1)).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission runs the cancel fallback and rethrows on an unexpected bridge error', async () => {
+    const calls: Array<{ requestId: string; resp: unknown }> = [];
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      calls.push({ requestId, resp });
+      // First call (the vote) throws an unmapped error; the cancel fallback's
+      // call (cancelled outcome) is allowed through.
+      if (
+        (resp as { outcome?: { outcome?: string } })?.outcome?.outcome !==
+        'cancelled'
+      ) {
+        throw new Error('unexpected bridge failure');
+      }
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-boom',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 49,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 50,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-boom',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: { code: number };
+      };
+      // Unmapped error → generic INTERNAL_ERROR from the outer dispatcher catch.
+      expect(frame.id).toBe(50);
+      expect(frame.error.code).toBe(-32603);
+      // The cancel fallback ran: the bridge saw a second call carrying the
+      // cancelled outcome.
+      expect(
+        calls.some(
+          (c) =>
+            (c.resp as { outcome?: { outcome?: string } })?.outcome?.outcome ===
+            'cancelled',
+        ),
+      ).toBe(true);
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
   it('ignores cross-connection permission responses for unowned sessions', async () => {
     const votes: unknown[] = [];
     bridge.respondToSessionPermission = ((
