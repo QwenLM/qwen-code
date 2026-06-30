@@ -1676,9 +1676,12 @@ describe('modelCommand', () => {
         model: 'test-model',
         authType: AuthType.USE_OPENAI,
       });
-      const cfg = mockConfig as Record<string, unknown>;
-      cfg.getAvailableModelsForAuthType = vi.fn().mockReturnValue([]);
-      cfg.getAllConfiguredModels = vi.fn().mockReturnValue([]);
+      (
+        mockConfig as Partial<Config> & { [key: string]: unknown }
+      ).getAvailableModelsForAuthType = vi.fn().mockReturnValue([]);
+      (
+        mockConfig as Partial<Config> & { [key: string]: unknown }
+      ).getAllConfiguredModels = vi.fn().mockReturnValue([]);
       mockContext.services.config = mockConfig as Config;
       return mockContext;
     }
@@ -1752,7 +1755,9 @@ describe('modelCommand', () => {
       } as unknown as LoadedSettings;
       const ctx = setupContext();
       ctx.services.settings = settings;
-      const cfg = ctx.services.config as unknown as Record<string, unknown>;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
       cfg.getAllConfiguredModels = vi
         .fn()
         .mockReturnValue([
@@ -1782,7 +1787,9 @@ describe('modelCommand', () => {
       };
       const ctx = setupContext();
       ctx.services.settings = settings;
-      const cfg = ctx.services.config as unknown as Record<string, unknown>;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
       cfg.getAvailableModelsForAuthType = vi
         .fn()
         .mockReturnValue([
