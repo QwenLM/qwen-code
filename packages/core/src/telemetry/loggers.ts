@@ -128,6 +128,7 @@ import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
 import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
+import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -136,6 +137,11 @@ function getCommonAttributes(config: Config): LogAttributes {
   return {
     'session.id': config.getSessionId(),
   };
+}
+
+function recordUiTelemetryEventToChat(config: Config, uiEvent: UiEvent): void {
+  if (isChatRecordingSuppressed()) return;
+  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
 }
 
 export { getCommonAttributes };
@@ -234,7 +240,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+    recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logToolCallEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -406,7 +412,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+    recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiErrorEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -478,7 +484,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     if (config.getUsageStatisticsEnabled()) {
       recordTokenUsageFromApiResponseBestEffort(config, event);
     }
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+    recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -1041,7 +1047,7 @@ export function logUserFeedback(
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
-  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  recordUiTelemetryEventToChat(config, uiEvent);
   QwenLogger.getInstance(config)?.logUserFeedbackEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 

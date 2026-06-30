@@ -1009,7 +1009,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   async function reapPendingEmptyChannel(ci: ChannelInfo): Promise<void> {
-    if (!ci.emptyReapPending || ci.isDying || !hasNoChannelWork(ci)) return;
+    if (!ci.emptyReapPending || !hasNoChannelWork(ci)) return;
     ci.emptyReapPending = false;
     ci.isDying = true;
     await ci.channel.kill().catch(() => {
@@ -1613,6 +1613,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           });
         } else {
           ci.emptyReapPending = true;
+          ci.isDying = true;
         }
         throw err;
       }
@@ -2466,6 +2467,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw new SessionNotFoundError(req.sessionId);
         }
         ci.emptyReapPending = true;
+        ci.isDying = true;
         throw err;
       }
 
@@ -2663,7 +2665,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       /* no active prompt or session already torn down */
     }
     if (ci && hasNoChannelWork(ci)) {
-      await startIdleTimer(ci, `closeSession "${sessionId}"`);
+      await reapPendingEmptyChannel(ci);
+      if (!ci.isDying) {
+        await startIdleTimer(ci, `closeSession "${sessionId}"`);
+      }
     }
   }
 
@@ -5294,7 +5299,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // SIGTERM the restore mid-flight and 500 the caller for a
       // failure orthogonal to their request.
       if (ci && hasNoChannelWork(ci)) {
-        await startIdleTimer(ci, `killSession "${sessionId}"`);
+        await reapPendingEmptyChannel(ci);
+        if (!ci.isDying) {
+          await startIdleTimer(ci, `killSession "${sessionId}"`);
+        }
       }
     },
 

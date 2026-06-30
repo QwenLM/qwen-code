@@ -191,6 +191,7 @@ export async function runManagedRememberByAgent(params: {
       ToolNames.EDIT,
     ],
     abortSignal: params.abortSignal,
+    suppressChatRecording: true,
   });
 
   const filesWritten = result.filesWritten ?? [];

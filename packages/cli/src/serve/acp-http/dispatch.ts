@@ -1844,25 +1844,25 @@ export class AcpDispatcher {
             }
             return;
           }
-          const available =
-            await this.bridge.isWorkspaceMemoryRememberAvailable();
-          if (!available) {
-            if (id !== undefined) {
-              conn.sendConn(
-                error(
-                  id,
-                  -32009,
-                  'Managed memory is unavailable for this daemon workspace',
-                  {
-                    errorKind: 'managed_memory_unavailable',
-                    httpStatus: 409,
-                  },
-                ),
-              );
-            }
-            return;
-          }
           try {
+            const available =
+              await this.bridge.isWorkspaceMemoryRememberAvailable();
+            if (!available) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    -32009,
+                    'Managed memory is unavailable for this daemon workspace',
+                    {
+                      errorKind: 'managed_memory_unavailable',
+                      httpStatus: 409,
+                    },
+                  ),
+                );
+              }
+              return;
+            }
             const task = this.workspaceRememberLane.enqueue({
               content: content.trim(),
               contextMode: rawContextMode,
@@ -1876,19 +1876,21 @@ export class AcpDispatcher {
               typeof (err as Record<string, unknown>)['code'] === 'string'
                 ? ((err as Record<string, unknown>)['code'] as string)
                 : 'remember_failed';
-            conn.sendConn(
-              error(
-                id ?? null,
-                -32099,
-                code === 'remember_queue_full'
-                  ? 'Workspace memory remember queue is full.'
-                  : 'Workspace memory remember failed.',
-                {
-                  errorKind: code,
-                  httpStatus: code === 'remember_queue_full' ? 429 : 500,
-                },
-              ),
-            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  -32099,
+                  code === 'remember_queue_full'
+                    ? 'Workspace memory remember queue is full.'
+                    : 'Workspace memory remember failed.',
+                  {
+                    errorKind: code,
+                    httpStatus: code === 'remember_queue_full' ? 429 : 500,
+                  },
+                ),
+              );
+            }
           }
           return;
         }

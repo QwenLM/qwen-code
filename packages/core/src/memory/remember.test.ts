@@ -219,9 +219,11 @@ describe('remember memory helper', () => {
 
     const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
       config: Config;
+      suppressChatRecording?: boolean;
     };
     expect(params.config.getChatRecordingService()).toBeUndefined();
     expect(params.config.getTranscriptPath()).toBe('');
+    expect(params.suppressChatRecording).toBe(true);
   });
 
   it('rebuilds touched project indexes and best-effort user indexes', async () => {

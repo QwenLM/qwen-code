@@ -55,6 +55,7 @@ import {
   type ResolvedModelId,
 } from './modelId.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
 
 // ---------------------------------------------------------------------------
 // CacheSafeParams — shared prompt-cache slot
@@ -343,6 +344,8 @@ export interface AgentPathParams {
   preserveEmptyExtraHistory?: boolean;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
+  /** Suppress chat-recording UI telemetry for hidden internal agents. */
+  suppressChatRecording?: boolean;
 }
 
 export interface ForkedAgentResult {
@@ -564,9 +567,16 @@ export async function runForkedAgent(
 
     const context = new ContextState();
     context.set('task_prompt', params.taskPrompt);
-    await runWithForkedModelRuntime(modelRuntime, async () => {
-      await headless.execute(context, params.abortSignal);
-    });
+    const execute = () =>
+      runWithForkedModelRuntime(modelRuntime, async () => {
+        await headless.execute(context, params.abortSignal);
+      });
+
+    if (params.suppressChatRecording) {
+      await runWithChatRecordingSuppressed(execute);
+    } else {
+      await execute();
+    }
 
     const terminateReason = headless.getTerminateMode();
     const finalText =
