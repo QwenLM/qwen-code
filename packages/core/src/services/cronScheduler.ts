@@ -200,6 +200,14 @@ export class CronScheduler {
   private _disabled = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private onFire: ((job: CronJob) => void) | null = null;
+  // Guard a consumer installs when it cannot execute certain durable jobs. A
+  // headless run can't expand a `.qwen/loop.md` sentinel, so it marks such
+  // durable jobs skippable here: they are then neither fired NOR have their
+  // persisted fired-state advanced (lastFiredAt stamp / one-shot removal),
+  // leaving the tick for the owning interactive session instead of silently
+  // consuming it for work the consumer never ran. Session-only jobs and durable
+  // jobs in a consumer that can run them are unaffected (predicate unset/false).
+  private skipDurableFire: ((job: CronJob) => boolean) | null = null;
 
   // --- Durable (file-backed) support ---
   private durableEnabled = false;
@@ -742,12 +750,40 @@ export class CronScheduler {
         // load (claw-code parity) — one model turn and one confirmation
         // flow instead of N separate prompts. The carrier job exists to
         // satisfy the onFire shape; consumers only read prompt/missed.
-        onFire({
-          ...durableTaskToJob(pending.tasks[0]!),
-          prompt: buildMissedCronNotification(pending.tasks),
-          missed: true,
+        // Same skip as catch-up/final: partition out durable one-shots
+        // this consumer can't run (e.g. a loop.md sentinel in a headless
+        // run). They are not notified and, critically, left on disk (not
+        // in removeMissedFromDisk) so the owning interactive session still
+        // surfaces and runs them instead of losing the task permanently.
+        const skipped: string[] = [];
+        const runnable = pending.tasks.filter((t) => {
+          const job = durableTaskToJob(t);
+          // `job.durable &&` mirrors catch-up/final/tick — durableTaskToJob always
+          // sets durable, so it's a no-op today, but keeps the four skip sites
+          // identical so a future non-durable carrier can't be silently dropped.
+          if (job.durable && this.skipDurableFire?.(job)) {
+            debugLogger.debug(
+              `Skipping durable job ${t.id} (missed): consumer cannot run it`,
+            );
+            skipped.push(t.id);
+            return false;
+          }
+          return true;
         });
-        this.removeMissedFromDisk(pending.tasks.map((t) => t.id));
+        // A skipped sentinel stays on disk (not in removeMissedFromDisk) for its
+        // interactive owner — so drop its pendingRemoval guard too. Left set, it
+        // would sit out of BOTH the job map and disk reconciliation forever;
+        // cleared, the next loadFileTasks re-installs it (the intended
+        // "defer to the owning session" path).
+        for (const id of skipped) this.pendingRemoval.delete(id);
+        if (runnable.length > 0) {
+          onFire({
+            ...durableTaskToJob(runnable[0]!),
+            prompt: buildMissedCronNotification(runnable),
+            missed: true,
+          });
+          this.removeMissedFromDisk(runnable.map((t) => t.id));
+        }
         break;
       }
       case 'catch-up': {
@@ -755,6 +791,16 @@ export class CronScheduler {
         for (const id of pending.ids) {
           const job = this.jobs.get(id);
           if (!job) continue; // deleted while buffered
+          // Same skip as the tick loop (job.durable && …): a durable job this
+          // consumer can't run is not fired and not stamped (left out of
+          // persistCatchUpStamps), so its overdue schedule survives for the
+          // owning session.
+          if (job.durable && this.skipDurableFire?.(job)) {
+            debugLogger.debug(
+              `Skipping durable job ${job.id} (catch-up): consumer cannot run it`,
+            );
+            continue;
+          }
           onFire(job);
           fired.push(id);
         }
@@ -762,10 +808,24 @@ export class CronScheduler {
         break;
       }
       case 'final': {
+        const fired: string[] = [];
         for (const job of pending.jobs) {
+          // Same skip as the tick loop (job.durable && …): a skipped durable
+          // job is left on disk (not in removeMissedFromDisk) so the owning
+          // session still gets its one final fire + delete.
+          if (job.durable && this.skipDurableFire?.(job)) {
+            debugLogger.debug(
+              `Skipping durable job ${job.id} (final): consumer cannot run it`,
+            );
+            // Same limbo as the missed branch: a skipped final task stays on
+            // disk, so clear its pendingRemoval guard rather than strand it.
+            this.pendingRemoval.delete(job.id);
+            continue;
+          }
           onFire(job);
+          fired.push(job.id);
         }
-        this.removeMissedFromDisk(pending.jobs.map((j) => j.id));
+        this.removeMissedFromDisk(fired);
         break;
       }
       default: {
@@ -858,6 +918,17 @@ export class CronScheduler {
     } catch {
       // Directory doesn't exist or can't be watched — fine
     }
+  }
+
+  /**
+   * Installs a predicate marking durable jobs the active consumer cannot run
+   * (see the `skipDurableFire` field). Such jobs are skipped before any fire or
+   * persist, so their durable schedule is left intact for an owning session that
+   * can run them. Set before `start()` so a buffered catch-up flush also honors
+   * it. A no-op for session-only jobs.
+   */
+  setSkipDurableFire(predicate: (job: CronJob) => boolean): void {
+    this.skipDurableFire = predicate;
   }
 
   /**
@@ -1005,6 +1076,16 @@ export class CronScheduler {
       // in non-owner sessions, where a persisted job would otherwise fire
       // uncoordinated alongside the real owner's copy.
       if (job.durable && !this.isOwner) continue;
+      // A durable job this consumer can't run (e.g. a loop.md sentinel in a
+      // headless run) is skipped BEFORE processJob stamps lastFiredAt — firing
+      // it here would persist the stamp while the work is skipped downstream,
+      // silently consuming the tick. Leave it for the owning session.
+      if (job.durable && this.skipDurableFire?.(job)) {
+        debugLogger.debug(
+          `Skipping durable job ${job.id} (tick): consumer cannot run it`,
+        );
+        continue;
+      }
 
       const result = this.processJob(job, currentDate, currentMs);
       if (!job.durable || result === 'none') continue;

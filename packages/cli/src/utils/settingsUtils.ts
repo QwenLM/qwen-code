@@ -309,6 +309,41 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'privacy.usageStatisticsEnabled',
 ] as const;
 
+export const MAX_SETTING_STRING_VALUE_LENGTH = 1024;
+
+export function validateSettingValue(
+  def: SettingDefinition,
+  value: unknown,
+): string | undefined {
+  switch (def.type) {
+    case 'boolean':
+      if (typeof value !== 'boolean') return 'Value must be a boolean';
+      break;
+    case 'number':
+      if (typeof value !== 'number' || !Number.isFinite(value))
+        return 'Value must be a finite number';
+      if (def.minimum !== undefined && value < def.minimum)
+        return `Value must be >= ${def.minimum}`;
+      if (def.maximum !== undefined && value > def.maximum)
+        return `Value must be <= ${def.maximum}`;
+      break;
+    case 'string':
+      if (typeof value !== 'string') return 'Value must be a string';
+      if (value.length > MAX_SETTING_STRING_VALUE_LENGTH)
+        return `Value exceeds ${MAX_SETTING_STRING_VALUE_LENGTH}-character limit`;
+      break;
+    case 'enum':
+      if (!def.options?.some((opt) => opt.value === value)) {
+        const allowed = def.options?.map((o) => o.value).join(', ') ?? '';
+        return `Value must be one of: ${allowed}`;
+      }
+      break;
+    default:
+      return `Settings of type '${def.type}' cannot be modified via this API`;
+  }
+  return undefined;
+}
+
 /**
  * Get all setting keys that should be shown in the dialog, sorted by display order
  */

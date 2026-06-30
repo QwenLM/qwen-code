@@ -129,6 +129,7 @@ export interface AgentPersistedCliFlags {
   /** Mirrors resolvedApprovalMode; kept here so the restored flag set is explicit. */
   approvalMode?: string;
   bare?: boolean;
+  safeMode?: boolean;
   sandbox?: SandboxConfig | null;
   screenReader?: boolean;
   model?: string;

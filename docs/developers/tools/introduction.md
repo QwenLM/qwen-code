@@ -35,7 +35,7 @@ You will typically see messages in the CLI indicating when a tool is being calle
 Many tools, especially those that can modify your file system or execute commands (`write_file`, `edit`, `run_shell_command`), are designed with safety in mind. Qwen Code will typically:
 
 - **Require confirmation:** Prompt you before executing potentially sensitive operations, showing you what action is about to be taken.
-- **Utilize sandboxing:** All tools are subject to restrictions enforced by sandboxing (see [Sandboxing in Qwen Code](../sandbox.md)). This means that when operating in a sandbox, any tools (including MCP servers) you wish to use must be available _inside_ the sandbox environment. For example, to run an MCP server through `npx`, the `npx` executable must be installed within the sandbox's Docker image or be available in the `sandbox-exec` environment.
+- **Utilize sandboxing:** All tools are subject to restrictions enforced by sandboxing (see [Sandboxing in Qwen Code](./sandbox.md)). This means that when operating in a sandbox, any tools (including MCP servers) you wish to use must be available _inside_ the sandbox environment. For example, to run an MCP server through `npx`, the `npx` executable must be installed within the sandbox's Docker image or be available in the `sandbox-exec` environment.
 
 It's important to always review confirmation prompts carefully before allowing a tool to proceed.
 
@@ -54,8 +54,6 @@ Qwen Code's built-in tools can be broadly categorized as follows:
 Additionally, these tools incorporate:
 
 - **[MCP servers](./mcp-server.md)**: MCP servers act as a bridge between the model and your local environment or other services like APIs.
-  - **[MCP Quick Start Guide](../mcp-quick-start.md)**: Get started with MCP in 5 minutes with practical examples
-  - **[MCP Example Configurations](../mcp-example-configs.md)**: Ready-to-use configurations for common scenarios
+  - **[MCP User Guide](../../users/features/mcp.md)**: Configure MCP servers and manage them from Qwen Code
   - **[Web Search via MCP](./web-search.md)**: Connect to web search services (Bailian, Tavily, GLM) through MCP
-  - **[MCP Testing & Validation](../mcp-testing-validation.md)**: Test and validate your MCP server setups
-- **[Sandboxing](../sandbox.md)**: Sandboxing isolates the model and its changes from your environment to reduce potential risk.
+- **[Sandboxing](./sandbox.md)**: Sandboxing isolates the model and its changes from your environment to reduce potential risk.

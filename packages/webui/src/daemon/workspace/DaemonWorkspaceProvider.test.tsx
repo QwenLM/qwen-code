@@ -21,6 +21,7 @@ const sdkMocks = vi.hoisted(() => {
   const capabilities = vi.fn();
   const workspaceMcp = vi.fn();
   const workspaceMcpTools = vi.fn();
+  const workspaceMcpResources = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
   const workspaceTools = vi.fn();
@@ -42,6 +43,7 @@ const sdkMocks = vi.hoisted(() => {
     capabilities = capabilities;
     workspaceMcp = workspaceMcp;
     workspaceMcpTools = workspaceMcpTools;
+    workspaceMcpResources = workspaceMcpResources;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
     workspaceTools = workspaceTools;
@@ -64,6 +66,7 @@ const sdkMocks = vi.hoisted(() => {
     capabilities,
     workspaceMcp,
     workspaceMcpTools,
+    workspaceMcpResources,
     restartMcpServer,
     workspaceSkills,
     workspaceTools,
@@ -96,6 +99,12 @@ const sdkMocks = vi.hoisted(() => {
         v: 1,
         serverName: 'mock',
         tools: [],
+      });
+      workspaceMcpResources.mockReset();
+      workspaceMcpResources.mockResolvedValue({
+        v: 1,
+        serverName: 'mock',
+        resources: [],
       });
       restartMcpServer.mockReset();
       restartMcpServer.mockResolvedValue({ restarted: true });
@@ -326,6 +335,83 @@ describe('DaemonWorkspaceProvider', () => {
             kind: 'mcp_tools',
             status: 'error',
             error: 'The connected daemon does not expose MCP tool details.',
+          },
+        ],
+      });
+    });
+  });
+
+  it('loads MCP resources for a server', async () => {
+    sdkMocks.workspaceMcpResources.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      serverName: 'docs',
+      initialized: true,
+      acpChannelLive: true,
+      resources: [{ uri: 'file:///docs/intro.md', name: 'Intro' }],
+    });
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+    const workspaceActions = actions;
+
+    await act(async () => {
+      await expect(
+        workspaceActions.loadMcpResources('docs'),
+      ).resolves.toMatchObject({
+        serverName: 'docs',
+        resources: [{ uri: 'file:///docs/intro.md', name: 'Intro' }],
+      });
+    });
+    expect(sdkMocks.workspaceMcpResources).toHaveBeenCalledWith('docs');
+  });
+
+  it('returns MCP resources fallback for older daemons', async () => {
+    sdkMocks.workspaceMcpResources.mockRejectedValueOnce(
+      new Error('missing route'),
+    );
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+    const workspaceActions = actions;
+
+    await act(async () => {
+      await expect(
+        workspaceActions.loadMcpResources('server-a'),
+      ).resolves.toEqual({
+        v: 1,
+        workspaceCwd: '',
+        serverName: 'server-a',
+        initialized: false,
+        acpChannelLive: false,
+        resources: [],
+        errors: [
+          {
+            kind: 'mcp_resources',
+            status: 'error',
+            error: 'The connected daemon does not expose MCP resource details.',
           },
         ],
       });

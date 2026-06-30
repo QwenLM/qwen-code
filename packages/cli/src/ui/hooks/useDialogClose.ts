@@ -57,6 +57,10 @@ export interface DialogCloseOptions {
   isHelpDialogOpen?: boolean;
   closeHelpDialog?: () => void;
 
+  // Skill review dialog
+  isSkillReviewDialogOpen: boolean;
+  dismissSkillReviewDialog: () => void;
+
   // Background tasks dialog
   isBackgroundTasksDialogOpen: boolean;
   closeBackgroundTasksDialog: () => void;
@@ -157,6 +161,14 @@ export function useDialogClose(options: DialogCloseOptions) {
       // Ctrl+C should dismiss the dialog rather than fall through to the
       // exit-prompt path or cancel the (non-existent) request.
       options.closeDiffDialog();
+      return true;
+    }
+
+    if (options.isSkillReviewDialogOpen) {
+      // Skill-review dialog: Ctrl+C defers it (same as Esc "decide later").
+      // Must call dismiss (not close) so the batch is recorded in the dismissed
+      // set — otherwise the idle effect immediately reopens it.
+      options.dismissSkillReviewDialog();
       return true;
     }
 

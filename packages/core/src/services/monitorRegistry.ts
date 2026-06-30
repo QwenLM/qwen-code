@@ -562,6 +562,7 @@ export class MonitorRegistry {
       `<status>${escapeXml(entry.status)}</status>`,
       `<event-count>${entry.eventCount}</event-count>`,
       `<summary>Monitor "${escapeXml(desc)}" ${statusText}. Total events: ${entry.eventCount}.${entry.droppedLines > 0 ? ` ${entry.droppedLines} lines dropped due to throttling.` : ''}</summary>`,
+      `<command>${escapeXml(stripDisplayControlChars(entry.command))}</command>`,
     );
     if (detail) {
       xmlParts.push(

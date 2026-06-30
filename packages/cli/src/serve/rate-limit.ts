@@ -6,6 +6,10 @@
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { isLoopbackBind } from './loopback-binds.js';
+import {
+  CLIENT_ID_RE,
+  MAX_CLIENT_ID_LENGTH,
+} from './server/request-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,10 +95,6 @@ function resolveTier(method: string, path: string): RateLimitTier | null {
 // ---------------------------------------------------------------------------
 // Key Extraction
 // ---------------------------------------------------------------------------
-
-// Keep in sync with server.ts CLIENT_ID_RE / MAX_CLIENT_ID_LENGTH.
-const MAX_CLIENT_ID_LENGTH = 128;
-const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 
 function normalizeIp(raw: string): string {
   // Normalize IPv6-mapped IPv4 (::ffff:127.0.0.1 -> 127.0.0.1)

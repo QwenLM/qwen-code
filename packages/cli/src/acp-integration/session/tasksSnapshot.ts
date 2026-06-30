@@ -18,7 +18,7 @@ import {
   type ServeSessionShellTaskStatus,
   type ServeSessionTaskStatus,
   type ServeSessionTasksStatus,
-} from '../../serve/status.js';
+} from '@qwen-code/acp-bridge/status';
 
 function runtimeMs(
   entry: { startTime: number; endTime?: number },

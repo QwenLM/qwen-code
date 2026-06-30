@@ -1552,6 +1552,31 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('refreshes model-derived modalities when hot-switching to the default qwen-oauth model', async () => {
+    // Start on qwen-oauth with a text-only model so modalities are empty.
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_OAUTH,
+      generationConfig: {
+        model: 'qwen3-coder-flash',
+        modalities: {},
+      },
+      generationConfigSources: {
+        modalities: { kind: 'computed', detail: 'auto-detected from model' },
+      },
+    });
+
+    // Hot-update to coder-model (DEFAULT_QWEN_MODEL), which accepts images.
+    // Without refreshing model-derived defaults the previous model's empty
+    // modalities would linger and the vision-bridge gate would misfire.
+    await modelsConfig.setModel('coder-model');
+
+    expect(modelsConfig.getModel()).toBe('coder-model');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+  });
+
   it('rolls back raw model state when owner refresh fails', async () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
@@ -2686,6 +2711,54 @@ describe('ModelsConfig', () => {
       expect(modelsConfig.getModelDisplayName('coder-model')).toBe(
         'coder-model',
       );
+    });
+  });
+
+  describe('providerProtocolConfig wiring', () => {
+    it('threads providerProtocolConfig into the registry so custom ids resolve', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+        providerProtocolConfig: { idealab: 'openai' },
+      });
+
+      // A wire-name typo anywhere in the options->registry chain would make this
+      // empty, so this guards the end-to-end plumbing the unit registry tests miss.
+      expect(
+        modelsConfig
+          .getAvailableModelsForAuthType(AuthType.USE_OPENAI)
+          .map((m) => m.id),
+      ).toContain('qwen3.7-max');
+    });
+
+    it('skips a custom id when no providerProtocolConfig is supplied', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+      });
+
+      expect(
+        modelsConfig.getAvailableModelsForAuthType(AuthType.USE_OPENAI),
+      ).toEqual([]);
+    });
+
+    it('threads providerProtocolConfig through reloadModelProvidersConfig', () => {
+      const modelsConfig = new ModelsConfig();
+
+      modelsConfig.reloadModelProvidersConfig(
+        {
+          idealab: [{ id: 'qwen3.7-max' }],
+        } as unknown as ModelProvidersConfig,
+        { idealab: 'openai' },
+      );
+
+      expect(
+        modelsConfig
+          .getAvailableModelsForAuthType(AuthType.USE_OPENAI)
+          .map((m) => m.id),
+      ).toContain('qwen3.7-max');
     });
   });
 });

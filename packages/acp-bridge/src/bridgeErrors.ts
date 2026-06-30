@@ -501,3 +501,14 @@ export class BranchWhilePromptActiveError extends Error {
     this.sessionId = sessionId;
   }
 }
+
+export class CdWhilePromptActiveError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Cannot change directory for session ${sessionId}: a prompt is currently active`,
+    );
+    this.name = 'CdWhilePromptActiveError';
+    this.sessionId = sessionId;
+  }
+}

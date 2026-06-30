@@ -362,6 +362,7 @@ function getCompletionStats(
   const summary = subagent.getExecutionSummary();
   return {
     totalTokens: summary.totalTokens,
+    outputTokens: summary.outputTokens,
     toolUses: liveToolCallCount,
     durationMs: summary.totalDurationMs,
   };

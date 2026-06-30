@@ -99,7 +99,22 @@ export interface SideQueryTextOptions {
    * new user-visible side queries honor the preference automatically.
    */
   skipOutputLanguagePreference?: boolean;
+  /**
+   * Opt in to stream the response so a slow inference keeps its HTTP connection
+   * alive against gateways that would time out the non-streaming request (e.g.
+   * chat compression behind a BFF); see {@link GenerateTextOptions.stream} for
+   * the full rationale. Defaults to `false`.
+   */
+  stream?: boolean;
   validate?: (text: string) => string | null;
+  /**
+   * Fail (throw) instead of silently falling back to the main generator when a
+   * distinct generator for `model` can't be created. See
+   * {@link GenerateTextOptions.failClosed} — the vision bridge sets this so a
+   * missing cross-provider credential never sends image payloads to the
+   * text-only primary.
+   */
+  failClosed?: boolean;
 }
 
 export interface SideQueryTextResult {
@@ -248,6 +263,8 @@ export async function runSideQuery<TResponse>(
     ...(options.maxAttempts !== undefined && {
       maxAttempts: options.maxAttempts,
     }),
+    ...(options.stream !== undefined && { stream: options.stream }),
+    ...(options.failClosed !== undefined && { failClosed: options.failClosed }),
   });
 
   const customError = options.validate?.(result.text);

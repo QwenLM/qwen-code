@@ -27,7 +27,7 @@ import {
   type Ignore,
   type WriteTextFileOptions,
 } from '@qwen-code/qwen-code-core';
-import type { BridgeEvent } from '../event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   type AuditContext,
   type AuditPublisher,
@@ -247,6 +247,7 @@ export interface WorkspaceFileSystem {
  */
 export interface WorkspaceFileSystemFactory {
   forRequest(ctx: RequestContext): WorkspaceFileSystem;
+  assertCanWrite(): void;
 }
 
 export interface CreateWorkspaceFileSystemFactoryDeps {
@@ -311,6 +312,9 @@ export function createWorkspaceFileSystemFactory(
   const pathLocks = new PathMutexRegistry();
 
   return {
+    assertCanWrite() {
+      assertTrustedForIntent(deps.trusted, 'write');
+    },
     forRequest(ctx) {
       return new WorkspaceFileSystemImpl({
         boundWorkspace,

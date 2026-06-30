@@ -36,9 +36,9 @@ import {
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
+import { createChildAbortController } from '../../utils/abortController.js';
 import {
   tokenLimit,
-  CAPPED_DEFAULT_MAX_TOKENS,
   hasExplicitOutputLimit,
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
@@ -226,16 +226,26 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
     let response: Message;
+    // Wrap the caller's signal in a per-request child for the same reason as
+    // generateContentStream: the Anthropic SDK leaks an abort listener onto
+    // whatever signal it is handed, so keep that on a short-lived signal rather
+    // than the caller's long-lived round signal.
+    const parentSignal = request.config?.abortSignal;
+    const perRequestAc = parentSignal
+      ? createChildAbortController(parentSignal)
+      : undefined;
     try {
       const anthropicRequest = await this.buildRequest(request);
       runtimeDiagnostics.recordAnthropicWireRequest(anthropicRequest);
       const headers = this.buildPerRequestHeaders(anthropicRequest);
       response = (await this.client.messages.create(anthropicRequest, {
-        signal: request.config?.abortSignal,
+        signal: perRequestAc?.signal,
         ...(headers ? { headers } : {}),
       })) as Message;
     } catch (error) {
       throw redactProxyError(error);
+    } finally {
+      perRequestAc?.abort();
     }
 
     return this.converter.convertAnthropicResponseToGemini(response);
@@ -254,25 +264,46 @@ export class AnthropicContentGenerator implements ContentGenerator {
     };
     runtimeDiagnostics.recordAnthropicWireRequest(streamingRequest);
 
+    // Wrap the caller's signal in a per-request child so the Anthropic SDK's
+    // leaked abort listener (core.mjs fetchWithTimeout registers one with no
+    // { once: true } and never removes it) lands on a short-lived signal
+    // instead of piling up on the caller's long-lived round signal. The
+    // OpenAI pipeline wraps its stream the same way for the identical leak.
+    const perRequestAc = createChildAbortController(
+      request.config?.abortSignal,
+    );
+
     let stream: AsyncIterable<RawMessageStreamEvent>;
     try {
       stream = (await this.client.messages.create(
         streamingRequest as MessageCreateParamsStreaming,
         {
-          signal: request.config?.abortSignal,
+          signal: perRequestAc.signal,
           ...(headers ? { headers } : {}),
         },
       )) as AsyncIterable<RawMessageStreamEvent>;
     } catch (error) {
+      perRequestAc.abort();
       throw redactProxyError(error);
     }
 
-    return this.processStreamWithEmptyFallback(
+    const inner = this.processStreamWithEmptyFallback(
       this.redactStreamErrors(stream),
       anthropicRequest,
-      request.config?.abortSignal,
+      perRequestAc.signal,
       headers,
     );
+    // Abort the child once the stream is fully drained or abandoned; this
+    // releases the SDK request and detaches the child's listener from the
+    // caller's signal.
+    async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
+      try {
+        yield* inner;
+      } finally {
+        perRequestAc.abort();
+      }
+    }
+    return drainThenCleanup();
   }
 
   async countTokens(
@@ -594,7 +625,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ? Math.min(userMaxTokens, modelLimit)
         : userMaxTokens;
     } else {
-      // No explicit user config — check env var, then use capped default.
+      // No explicit user config — check env var, then use the model limit.
       const envMaxTokens = parsePositiveIntegerEnvValue(
         process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
       );
@@ -603,7 +634,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        maxTokens = Math.min(modelLimit, CAPPED_DEFAULT_MAX_TOKENS);
+        maxTokens = modelLimit;
       }
     }
 

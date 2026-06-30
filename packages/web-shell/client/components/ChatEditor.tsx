@@ -31,6 +31,8 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { ModeIcon } from './ModeIcon';
+import { getModelDisplayName } from '../utils/modelDisplay';
+import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
@@ -38,7 +40,8 @@ export type ComposerToolbarAction =
   | 'model'
   | 'commands'
   | 'files'
-  | 'widthMode';
+  | 'widthMode'
+  | 'voice';
 
 interface ChatEditorProps {
   onSubmit: (
@@ -49,6 +52,8 @@ interface ChatEditorProps {
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
   isRunning?: boolean;
+  /** First Esc armed a cancel — the send button shows an "Esc to stop" hint. */
+  cancelArmed?: boolean;
   disabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
@@ -56,7 +61,6 @@ interface ChatEditorProps {
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
-  onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   currentModel?: string;
   chatWidthMode?: '1000' | 'wide';
@@ -94,8 +98,8 @@ const CHAT_EDITOR_THEME = {
   '.cm-content': {
     padding: '0',
     fontFamily: 'var(--font-sans, system-ui, sans-serif)',
-    color: 'var(--text-primary, #e0e0e0)',
-    caretColor: 'var(--accent-color, #4a9eff)',
+    color: 'var(--chat-editor-text-primary, #e0e0e0)',
+    caretColor: 'var(--chat-editor-accent-color, #4a9eff)',
     fontSize: '14px',
     lineHeight: '1.6',
   },
@@ -103,10 +107,10 @@ const CHAT_EDITOR_THEME = {
     padding: '0',
   },
   '.cm-placeholder': {
-    color: 'var(--text-dimmed, #666)',
+    color: 'var(--chat-editor-text-dimmed, #666)',
   },
   '.cm-followup-ghost': {
-    color: 'var(--text-dimmed, #666)',
+    color: 'var(--chat-editor-text-dimmed, #666)',
     opacity: '0.72',
     pointerEvents: 'none',
     userSelect: 'none',
@@ -126,31 +130,41 @@ const CHAT_EDITOR_THEME = {
     color: 'var(--chat-editor-selection-color)',
   },
   '.cm-cursor': {
-    borderLeftColor: 'var(--accent-color, #4a9eff)',
+    borderLeftColor: 'var(--chat-editor-accent-color, #4a9eff)',
     borderLeftWidth: '2px',
   },
 };
 
 const SLASH_PANEL_THEME_VARS = [
-  '--accent-color',
-  '--bg-primary',
-  '--bg-tertiary',
-  '--border-color',
+  '--chat-editor-accent-color',
+  '--accent',
+  '--background',
+  '--chat-editor-bg-tertiary',
+  '--chat-editor-border-color',
+  '--foreground',
   '--font-mono',
   '--font-sans',
-  '--text-primary',
-  '--text-secondary',
+  '--muted-foreground',
+  '--chat-editor-text-primary',
+  '--chat-editor-text-secondary',
 ] as const;
 
 function SendIcon() {
   return (
     <svg
       className={styles.sendIcon}
-      viewBox="0 0 16 16"
+      viewBox="0 0 20 20"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
     >
-      <path d="M1 1L15 8L1 15V9.5L10 8L1 6.5V1Z" fill="currentColor" />
+      <path
+        d="M10 15.5v-11M5.5 9 10 4.5 14.5 9"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -427,6 +441,17 @@ function getModeLabel(modeId: string, t: (key: string) => string): string {
   return labels[modeId] ?? modeId;
 }
 
+function getModeListLabel(modeId: string, t: (key: string) => string): string {
+  const labels: Record<string, string> = {
+    plan: t('mode.listLabel.plan'),
+    default: t('mode.listLabel.default'),
+    'auto-edit': t('mode.listLabel.auto-edit'),
+    auto: t('mode.listLabel.auto'),
+    yolo: t('mode.listLabel.yolo'),
+  };
+  return labels[modeId] ?? getModeLabel(modeId, t);
+}
+
 function ToolbarDropdown({
   open,
   items,
@@ -435,6 +460,7 @@ function ToolbarDropdown({
   onSelect,
   anchorRef,
   showCheck = false,
+  maxHeight,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -443,6 +469,7 @@ function ToolbarDropdown({
   onSelect: (id: string) => void;
   anchorRef: React.RefObject<HTMLButtonElement | null>;
   showCheck?: boolean;
+  maxHeight?: number;
 }) {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -496,6 +523,7 @@ function ToolbarDropdown({
             ? styles.dropdownCheck
             : ''
       }`}
+      style={maxHeight ? { maxHeight, overflowY: 'auto' } : undefined}
     >
       {items.map((item) => (
         <button
@@ -642,11 +670,7 @@ function SlashCommandPanel({
   } as CSSProperties;
 
   return createPortal(
-    <div
-      ref={panelRef}
-      className={styles.slashPortalLayer}
-      style={themeVars}
-    >
+    <div ref={panelRef} className={styles.slashPortalLayer} style={themeVars}>
       <div
         className={styles.slashPanel}
         style={positionedPanelStyle}
@@ -723,8 +747,7 @@ function SlashCommandPanel({
                         ...(showBelow
                           ? { top: rowRect.bottom + gap }
                           : {
-                              bottom:
-                                window.innerHeight - rowRect.top + gap,
+                              bottom: window.innerHeight - rowRect.top + gap,
                             }),
                         maxHeight,
                       });
@@ -827,6 +850,7 @@ export const ChatEditor = memo(
       onToggleShortcuts,
       onCancel,
       isRunning = false,
+      cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
       commands,
@@ -834,7 +858,6 @@ export const ChatEditor = memo(
       slashCommandCategoryOrder,
       queuedMessages = [],
       onPopQueuedMessages,
-      onClearQueuedMessages,
       currentMode = 'default',
       currentModel = '',
       chatWidthMode = '1000',
@@ -866,7 +889,6 @@ export const ChatEditor = memo(
       slashCommandCategoryOrder,
       queuedMessages,
       onPopQueuedMessages,
-      onClearQueuedMessages,
       currentMode,
       onFocusFooter,
       dialogOpen,
@@ -952,7 +974,7 @@ export const ChatEditor = memo(
       () =>
         DAEMON_APPROVAL_MODES.map((id) => ({
           id,
-          label: getModeLabel(id, t),
+          label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
@@ -967,7 +989,8 @@ export const ChatEditor = memo(
       return visibleActionSet.has(action);
     };
     const commandNames = useMemo(
-      () => new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
+      () =>
+        new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
       [commands],
     );
     const hasCommand = useCallback(
@@ -1062,11 +1085,6 @@ export const ChatEditor = memo(
               action: { type: 'run', command: '/memory' },
             },
             {
-              id: 'extensions',
-              label: t('quickActions.extensions'),
-              action: { type: 'run', command: '/extensions manage' },
-            },
-            {
               id: 'theme',
               label: t('quickActions.theme'),
               action: { type: 'run', command: '/theme' },
@@ -1095,7 +1113,7 @@ export const ChatEditor = memo(
       () =>
         availableModels.map((m) => ({
           id: m.id,
-          label: m.label || m.id,
+          label: getModelDisplayName(m.label || m.id),
         })),
       [availableModels],
     );
@@ -1195,7 +1213,7 @@ export const ChatEditor = memo(
     const modeLabel = getModeLabel(currentMode, t);
 
     // Model display label
-    const modelLabel = currentModel;
+    const modelLabel = getModelDisplayName(currentModel);
 
     return (
       <div className={styles.editorShell}>
@@ -1397,6 +1415,7 @@ export const ChatEditor = memo(
                         onSelect={handleModelSelect}
                         anchorRef={modelBtnRef}
                         showCheck
+                        maxHeight={300}
                       />
                       <button
                         ref={modelBtnRef}
@@ -1517,10 +1536,23 @@ export const ChatEditor = memo(
                       </span>
                     </button>
                   )}
+                {showToolbarAction('voice') && (
+                  <VoiceButton
+                    disabled={disabled}
+                    onInsert={(text) => {
+                      const existing = core.getText();
+                      const sep = existing && !/\s$/.test(existing) ? ' ' : '';
+                      core.insertText(`${sep}${text} `);
+                      core.focus();
+                    }}
+                  />
+                )}
                 <button
                   className={
                     isRunning
-                      ? `${styles.sendBtn} ${styles.sendBtnRunning}`
+                      ? `${styles.sendBtn} ${styles.sendBtnRunning}${
+                          cancelArmed ? ` ${styles.sendBtnArmed}` : ''
+                        }`
                       : styles.sendBtn
                   }
                   disabled={
@@ -1534,10 +1566,38 @@ export const ChatEditor = memo(
                     }
                     core.submitText();
                   }}
-                  aria-label={isRunning ? t('stream.cancel') : t('editor.send')}
+                  aria-label={
+                    isRunning
+                      ? cancelArmed
+                        ? t('stream.cancelArmed')
+                        : t('stream.cancel')
+                      : t('editor.send')
+                  }
+                  title={
+                    isRunning && cancelArmed
+                      ? t('stream.cancelArmed')
+                      : undefined
+                  }
                 >
-                  {isRunning ? <StopIcon /> : <SendIcon />}
+                  {isRunning ? (
+                    cancelArmed ? (
+                      <span className={styles.escLabel} aria-hidden="true">
+                        Esc
+                      </span>
+                    ) : (
+                      <StopIcon />
+                    )
+                  ) : (
+                    <SendIcon />
+                  )}
                 </button>
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className={styles.srOnly}
+                >
+                  {isRunning && cancelArmed ? t('stream.cancelArmed') : ''}
+                </span>
               </div>
             </div>
           </div>

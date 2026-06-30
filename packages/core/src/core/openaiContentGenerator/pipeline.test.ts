@@ -5,18 +5,27 @@
  */
 
 import type { Mock } from 'vitest';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { ErrorHandler, PipelineConfig } from './types.js';
-import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
+import {
+  ContentGenerationPipeline,
+  StreamContentError,
+  StreamInactivityTimeoutError,
+} from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+} from './constants.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -1443,7 +1452,7 @@ describe('ContentGenerationPipeline', () => {
           stream_options: { include_usage: true },
         }),
         expect.objectContaining({
-          signal: undefined,
+          signal: expect.any(AbortSignal),
         }),
       );
     });
@@ -2948,6 +2957,737 @@ describe('ContentGenerationPipeline', () => {
       const bExtra = (b as unknown as { extra_body: { call_index: number } })
         .extra_body;
       expect(aExtra).not.toEqual(bExtra);
+    });
+  });
+
+  describe('stream inactivity timeout', () => {
+    // A stream whose `next()` is gated by the test: it stays pending until
+    // `push()` / `end()` is called, letting us simulate a silent (stalled)
+    // stream under fake timers.
+    function gatedStream() {
+      let resolveNext:
+        | ((r: IteratorResult<OpenAI.Chat.ChatCompletionChunk>) => void)
+        | null = null;
+      let rejectNext: ((err: unknown) => void) | null = null;
+      const buffered: OpenAI.Chat.ChatCompletionChunk[] = [];
+      let ended = false;
+      let failure: { error: unknown } | null = null;
+      let returned = false;
+      const deliver = (r: IteratorResult<OpenAI.Chat.ChatCompletionChunk>) => {
+        const r2 = resolveNext;
+        resolveNext = null;
+        rejectNext = null;
+        r2?.(r);
+      };
+      return {
+        push(chunk: OpenAI.Chat.ChatCompletionChunk) {
+          if (resolveNext) deliver({ done: false, value: chunk });
+          else buffered.push(chunk);
+        },
+        error(error: unknown) {
+          failure = { error };
+          const reject = rejectNext;
+          resolveNext = null;
+          rejectNext = null;
+          reject?.(error);
+        },
+        end() {
+          ended = true;
+          if (resolveNext) deliver({ done: true, value: undefined as never });
+        },
+        wasReturned() {
+          return returned;
+        },
+        stream: {
+          [Symbol.asyncIterator]() {
+            return {
+              next(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+                if (buffered.length) {
+                  return Promise.resolve({
+                    done: false,
+                    value: buffered.shift()!,
+                  });
+                }
+                if (failure) {
+                  return Promise.reject(failure.error);
+                }
+                if (ended) {
+                  return Promise.resolve({
+                    done: true,
+                    value: undefined as never,
+                  });
+                }
+                return new Promise((res, rej) => {
+                  resolveNext = res;
+                  rejectNext = rej;
+                });
+              },
+              return(): Promise<
+                IteratorResult<OpenAI.Chat.ChatCompletionChunk>
+              > {
+                returned = true;
+                ended = true;
+                if (resolveNext) {
+                  deliver({ done: true, value: undefined as never });
+                }
+                return Promise.resolve({
+                  done: true,
+                  value: undefined as never,
+                });
+              },
+            };
+          },
+        },
+      };
+    }
+
+    function chunk(text: string): OpenAI.Chat.ChatCompletionChunk {
+      return {
+        id: 'c',
+        choices: [{ delta: { content: text } }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+    }
+
+    function streamingRequest(signal?: AbortSignal): GenerateContentParameters {
+      return {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
+        ...(signal ? { config: { abortSignal: signal } } : {}),
+      } as GenerateContentParameters;
+    }
+
+    function buildPipeline(streamIdleTimeoutMs?: number) {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      return new ContentGenerationPipeline(mockConfig);
+    }
+
+    beforeEach(() => {
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        () => {
+          const r = new GenerateContentResponse();
+          r.candidates = [
+            { content: { parts: [{ text: 'x' }], role: 'model' } },
+          ];
+          return r;
+        },
+      );
+      // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS from the
+      // dev/CI shell so the default-timeout tests aren't silently overridden.
+      // Env-specific tests re-stub it; afterEach unstubs everything.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
+
+    it('aborts and throws ETIMEDOUT when the stream is silent past the idle timeout', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect((err as Error).message).toBe(
+        'No stream activity for 1000ms after 0 chunks (stream lifetime: 1000ms)',
+      );
+      expect(err).toMatchObject({ code: 'ETIMEDOUT' });
+      expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
+      expect((err as StreamInactivityTimeoutError).streamLifetimeMs).toBe(1000);
+      expect(gated.wasReturned()).toBe(true);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('uses the default stream idle timeout when no override is configured', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline();
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect(err).toMatchObject({
+        code: 'ETIMEDOUT',
+        idleMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+        chunksReceived: 0,
+        streamLifetimeMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+      });
+      expect(gated.wasReturned()).toBe(true);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('swallows the orphaned SDK next() rejection after an idle timeout', async () => {
+      const pendingSdkNext: {
+        reject?: (err: unknown) => void;
+      } = {};
+      const stream = {
+        [Symbol.asyncIterator]() {
+          return {
+            next(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+              return new Promise((_res, rej) => {
+                pendingSdkNext.reject = rej;
+              });
+            },
+            return(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+              return Promise.resolve({
+                done: true,
+                value: undefined as never,
+              });
+            },
+          };
+        },
+      };
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(stream);
+      const unhandled: unknown[] = [];
+      const handler = (err: unknown) => unhandled.push(err);
+      process.on('unhandledRejection', handler);
+
+      try {
+        const p = buildPipeline(1000);
+        const gen = await p.executeStream(streamingRequest(), 'id');
+        const captured = (async () => {
+          for await (const _ of gen) {
+            /* drain */
+          }
+        })().catch((e: unknown) => e);
+
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(await captured).toMatchObject({
+          code: 'ETIMEDOUT',
+          chunksReceived: 0,
+        });
+
+        const sdkAbort = new Error('aborted by SDK');
+        sdkAbort.name = 'AbortError';
+        expect(pendingSdkNext.reject).toBeDefined();
+        pendingSdkNext.reject!(sdkAbort);
+        pendingSdkNext.reject = undefined;
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
+    });
+
+    it('aborts the SDK signal on idle timeout without a parent abort signal', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      let sdkSignal: AbortSignal | undefined;
+      (mockClient.chat.completions.create as Mock).mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          sdkSignal = opts.signal;
+          return Promise.resolve(gated.stream);
+        },
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      expect(sdkSignal).toBeInstanceOf(AbortSignal);
+      expect(sdkSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await captured).toMatchObject({ code: 'ETIMEDOUT' });
+      expect(sdkSignal?.aborted).toBe(true);
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('delivers chunks then throws ETIMEDOUT when the stream stalls after some output', async () => {
+      const gated = gatedStream();
+      gated.push(chunk('hello')); // one chunk, then silence
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const results: GenerateContentResponse[] = [];
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await captured).toMatchObject({
+        code: 'ETIMEDOUT',
+        chunksReceived: 1,
+      });
+      expect(results).toHaveLength(1);
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('resets the timer on each chunk and completes a slow-but-active stream', async () => {
+      const gated = gatedStream();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const results: GenerateContentResponse[] = [];
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      // Three chunks, each 800ms apart (< 1000ms idle) → total 2400ms but
+      // never idle for a full second, so the watchdog must not trip.
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(chunk('a'));
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(chunk('b'));
+      await vi.advanceTimersByTimeAsync(800);
+      gated.end();
+      await consume;
+      expect(results).toHaveLength(2);
+      // Late advance after completion must not produce a delayed throw.
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    it('closes the guarded SDK iterator when the consumer breaks early', async () => {
+      const gated = gatedStream();
+      gated.push(chunk('hello'));
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const call = (mockClient.chat.completions.create as Mock).mock.calls[0];
+      const sdkSignal = call[1]?.signal;
+
+      for await (const _ of gen) {
+        break;
+      }
+
+      expect(gated.wasReturned()).toBe(true);
+      expect(sdkSignal?.aborted).toBe(true);
+    });
+
+    it('propagates mid-stream errors without converting them to ETIMEDOUT', async () => {
+      const gated = gatedStream();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const results: GenerateContentResponse[] = [];
+      gated.push(chunk('hello'));
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      const networkError = new Error('network down');
+      gated.error(networkError);
+      const err = await captured;
+      expect(err).toBe(networkError);
+      expect(results).toHaveLength(1);
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        networkError,
+        expect.anything(),
+        expect.anything(),
+      );
+
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    it('propagates a user AbortError (not ETIMEDOUT) when the parent signal is aborted', async () => {
+      const ac = new AbortController();
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(ac.signal), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = (await captured) as { name?: string; code?: string };
+      expect(err.name).toBe('AbortError');
+      expect(err.code).not.toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('is disabled when streamIdleTimeoutMs <= 0 (no timeout fires)', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(0);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(600000);
+      expect(settled).toBe(false);
+      gated.end(); // unblock so the test doesn't leak a pending stream
+      await consume;
+    });
+
+    it('honors a custom streamIdleTimeoutMs value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(5000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // Not yet at 5000ms → must not have tripped.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(settled).toBe(false);
+      // Cross 5000ms → trips.
+      await vi.advanceTimersByTimeAsync(1000);
+      await consume;
+      expect(settled).toBe(true);
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('bypasses the OpenAI error handler so the ETIMEDOUT code survives to the caller', async () => {
+      // Faithfully replicate EnhancedErrorHandler.handle's relevant behavior:
+      // it detects code 'ETIMEDOUT' as a timeout and re-throws a generic Error
+      // WITHOUT the code. If the inactivity timeout were routed through it, the
+      // retryable-transport classification (which reads err.code) would be lost.
+      (mockErrorHandler.handle as unknown as Mock).mockImplementation(
+        (error: unknown) => {
+          if ((error as { code?: string })?.code === 'ETIMEDOUT') {
+            throw new Error('stripped'); // the production failure mode
+          }
+          throw error;
+        },
+      );
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const captured = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect((err as { code?: string }).code).toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
+      // Proves the bypass: the handler (which would strip the code) is skipped.
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('honors QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '3000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no explicit streamIdleTimeoutMs → env applies
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(settled).toBe(false); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // tripped at 3000ms from the env
+    });
+
+    it('lets an explicit streamIdleTimeoutMs config take precedence over the env', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '1000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(5000); // config 5000 wins over env 1000
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(1000); // env value — must NOT trip
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(4000); // reach the config value (5000)
+      await consume;
+      expect(settled).toBe(true);
+    });
+
+    it('ignores a malformed QWEN_STREAM_IDLE_TIMEOUT_MS and falls back to the default', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, 'not-a-number');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; invalid env → default (120000ms)
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // The effective timeout must be the default: not tripped just before it
+      // (so a malformed value did not become 0/NaN and fire immediately), and
+      // tripped exactly at it (so the default — not some other value — is used).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true);
+    });
+
+    it('ignores an oversized QWEN_STREAM_IDLE_TIMEOUT_MS (beyond the timer ceiling)', async () => {
+      // A value above the JS timer ceiling must be rejected (fall back to the
+      // default), not used verbatim. If it were used, the watchdog would be
+      // scheduled ~24.8 days out, so advancing only to the default would never
+      // trip it — asserting it trips AT the default proves the value was
+      // rejected. (In real Node such a delay is silently compressed to 1ms,
+      // which would make the watchdog fire almost immediately.)
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '9999999999');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; oversized env → default (120000ms)
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false); // not before the default → not used verbatim
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default
+    });
+
+    it('rejects a non-decimal QWEN_STREAM_IDLE_TIMEOUT_MS (hex/scientific) and uses the default', async () => {
+      // Number('0x10') === 16; a strict decimal-integer check must reject it so
+      // a typo can't silently become a 16ms timeout.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0x10');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; non-decimal env → default
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false); // would have tripped at 16ms if '0x10' parsed
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default
+    });
+
+    it('rejects an out-of-range config streamIdleTimeoutMs and falls back', async () => {
+      // A config value above the timer ceiling would overflow setTimeout; it
+      // must be rejected (fall back to env/default), not used verbatim.
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1); // oversized config
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default (config rejected)
+    });
+
+    it('accepts the exact MAX_STREAM_IDLE_TIMEOUT_MS boundary value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      // The exact ceiling must be accepted (not rejected as out-of-range).
+      // Guards against an off-by-one changing `<=` to `<`.
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // Must NOT trip at the default (which would mean the ceiling was rejected).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('falls back from an invalid config to the env value (config→env cascade)', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '4000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      // Config is oversized → rejected; env = 4000 → used (not default 120000).
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(settled).toBe(false); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at 4000ms from the env (not 120000 default)
+    });
+
+    it('disables the watchdog when QWEN_STREAM_IDLE_TIMEOUT_MS=0', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; env=0 → disabled
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      // Well past the default — must NOT trip (watchdog disabled).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('disables the watchdog with a negative config value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(-1); // negative → disabled (idleMs > 0 guard)
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
     });
   });
 });
