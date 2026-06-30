@@ -1041,7 +1041,7 @@ describe('ChannelBase', () => {
       const ch = createChannel({}, {
         router,
         registerBridgeEvents: true,
-      } as ChannelBaseOptions & { registerBridgeEvents: true });
+      } as unknown as ChannelBaseOptions & { registerBridgeEvents: true });
       const toolCall = {
         sessionId: 's-1',
         toolCallId: 'tool-1',
@@ -3660,7 +3660,11 @@ describe('ChannelBase', () => {
 
       // The abandoned turn emits a late chunk keyed by sessionId. A is cancelled, so
       // A's onChunk suppresses it; B has not attached one yet — it must not be seen.
-      bridge.emit('textChunk', sid, 'STALE chunk from abandoned turn');
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sid,
+        'STALE chunk from abandoned turn',
+      );
       expect(chunks).not.toContain('STALE chunk from abandoned turn');
 
       // A finishes → B dequeues and becomes the active turn.
@@ -3683,7 +3687,11 @@ describe('ChannelBase', () => {
 
       // B's OWN chunk is delivered — it attached its onChunk only now (after A's
       // finally detached A's). Proves the new turn streams cleanly once it starts.
-      bridge.emit('textChunk', sid, 'fresh chunk for B');
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sid,
+        'fresh chunk for B',
+      );
       expect(chunks).toContain('fresh chunk for B');
 
       resolveB('steered response');

@@ -841,12 +841,13 @@ export abstract class ChannelBase {
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
     }
-    if (!this.gate.isAllowed(envelope.senderId)) {
+    const senderId = truncateGroupHistoryField(envelope.senderId);
+    if (!this.gate.isAllowed(senderId)) {
       return;
     }
 
     const entry: GroupHistoryEntry = {
-      senderId: truncateGroupHistoryField(envelope.senderId),
+      senderId,
       senderName: truncateGroupHistoryField(envelope.senderName),
       text: envelope.text.slice(0, GROUP_HISTORY_ENTRY_TEXT_LIMIT),
       messageId:

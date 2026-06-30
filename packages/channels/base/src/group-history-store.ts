@@ -83,7 +83,7 @@ export class GroupHistoryStore {
     state.delete(key);
     state.set(key, current);
     limits.set(key, normalizedLimit);
-    evictOldKeys(state, this.maxKeys, limits);
+    const evicted = evictOldKeys(state, this.maxKeys, limits);
 
     this.append({
       type: 'message',
@@ -94,6 +94,7 @@ export class GroupHistoryStore {
     });
 
     if (
+      evicted ||
       loaded.hadInvalidRecords ||
       loaded.recordCount + 1 >= this.compactAfterRecords
     ) {
@@ -275,15 +276,18 @@ function evictOldKeys(
   state: Map<string, GroupHistoryEntry[]>,
   maxKeys: number,
   limits?: Map<string, number>,
-): void {
+): boolean {
+  let evicted = false;
   while (state.size > maxKeys) {
     const oldest = state.keys().next().value as string | undefined;
     if (oldest === undefined) {
-      return;
+      return evicted;
     }
     state.delete(oldest);
     limits?.delete(oldest);
+    evicted = true;
   }
+  return evicted;
 }
 
 function isGroupHistoryRecord(value: unknown): value is GroupHistoryRecord {
