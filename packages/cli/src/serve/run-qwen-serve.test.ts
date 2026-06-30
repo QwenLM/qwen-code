@@ -1465,6 +1465,14 @@ describe('runQwenServe channel worker supervisor', () => {
       channels: ['telegram'],
     };
     const worker = makeWorker(snapshot);
+    let onExit: CreateChannelWorkerSupervisorOptions['onExit'];
+    const channelWorkerSupervisorFactory = vi.fn(
+      (opts: CreateChannelWorkerSupervisorOptions) => {
+        onExit = opts.onExit;
+        return worker;
+      },
+    );
+    const pidfile = makePidfileDeps();
     const handle = await runQwenServe(
       {
         port: 0,
@@ -1476,8 +1484,8 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge: makeFakeBridge(),
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
-        channelServicePidfile: makePidfileDeps(),
+        channelWorkerSupervisorFactory,
+        channelServicePidfile: pidfile,
       },
     );
 
@@ -1487,9 +1495,11 @@ describe('runQwenServe channel worker supervisor', () => {
         exitCode: 1,
         signal: null,
       });
+      onExit?.(snapshot);
       const res = await fetch(`${handle.url}/daemon/status`);
       const body = await res.json();
 
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
       expect(body).toMatchObject({
         status: 'warning',
         issues: expect.arrayContaining([

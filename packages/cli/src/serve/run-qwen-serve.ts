@@ -2193,6 +2193,7 @@ export async function runQwenServe(
                 `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
                   `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'})`,
               );
+              removeCurrentServePidfile();
             },
           });
         }
