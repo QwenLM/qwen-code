@@ -13,7 +13,6 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
-  useDaemonMidTurnInjected,
   useSettings,
   useSessionNotices,
   useStreamingState,
@@ -30,9 +29,7 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
-import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -96,13 +93,11 @@ import {
 import { getModelDisplayName } from './utils/modelDisplay';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
-import { canDrainQueue } from './utils/queueDrain';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
-import {
-  appendOrDeferLocalUserMessage,
-  isCommandPrompt,
-} from './utils/localCommandQueue';
+import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
+import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
+import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
@@ -238,14 +233,6 @@ function isGoalClearCommand(text: string): boolean {
     .trim()
     .toLowerCase();
   return GOAL_CLEAR_KEYWORDS.has(goalArg);
-}
-
-interface QueuedPrompt {
-  id: number;
-  sessionId?: string;
-  text: string;
-  images?: PromptImage[];
-  onComplete?: () => void;
 }
 
 interface ActiveGoalStatus {
@@ -880,10 +867,6 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
-  // Scopes explicit "insert queued message" POST(s) to the current turn.
-  // Aborted when the turn settles so a slow/late insert can't arrive during a
-  // subsequent turn and get injected in the wrong place.
-  const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -1233,11 +1216,6 @@ export function App({
   connectionRef.current = connection;
   const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
-  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
-  const queuedTexts = useMemo(
-    () => queuedPrompts.map((prompt) => prompt.text),
-    [queuedPrompts],
-  );
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
@@ -1245,24 +1223,6 @@ export function App({
         label: getModelDisplayName(m.label || m.id),
       })),
     [connection.models],
-  );
-  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const nextQueuedPromptIdRef = useRef(1);
-  const drainingQueueRef = useRef(false);
-  // After a drained prompt is submitted, block the next drain until its turn has
-  // actually started. `streamingState` flips asynchronously (daemon round-trip),
-  // so without this gate a second queued prompt fires in the window before the
-  // first registers as streaming — both land back-to-back and the first is lost.
-  const awaitingTurnStartRef = useRef(false);
-  const awaitingTurnStartTimerRef = useRef<ReturnType<
-    typeof setTimeout
-  > | null>(null);
-  // The pending setTimeout(0) submit of a drained prompt. Tracked so a session
-  // switch or unmount can cancel it — the drain cleanup deliberately leaves it
-  // running while the gate is armed (for the benign re-render storm), which
-  // would otherwise dispatch a stale prompt into the wrong/torn-down session.
-  const drainSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
   );
   const dialogOpen =
     showResumeDialog ||
@@ -1300,6 +1260,32 @@ export function App({
     },
     [pushToast],
   );
+  const notifySuccess = useCallback(
+    (message: string) => pushToast('success', message),
+    [pushToast],
+  );
+
+  const {
+    queuedPrompts,
+    queuedTexts,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  } = useQueuedPrompts({
+    connected,
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    streamingState,
+    sessionActions,
+    store,
+    editorRef,
+    reportError,
+    notifySuccess,
+    t,
+  });
 
   useEffect(() => {
     logSessionNoticesHook(notices);
@@ -1320,22 +1306,6 @@ export function App({
 
   useEffect(() => {
     activeSessionIdRef.current = connection.sessionId;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    drainingQueueRef.current = false;
-    awaitingTurnStartRef.current = false;
-    if (awaitingTurnStartTimerRef.current) {
-      clearTimeout(awaitingTurnStartTimerRef.current);
-      awaitingTurnStartTimerRef.current = null;
-    }
-    // Cancel a still-pending drained submit so it can't fire into the new
-    // session (the drain cleanup leaves it running while the gate is armed).
-    if (drainSubmitTimerRef.current) {
-      clearTimeout(drainSubmitTimerRef.current);
-      drainSubmitTimerRef.current = null;
-    }
-    midTurnEnqueueAbortRef.current?.abort();
-    midTurnEnqueueAbortRef.current = null;
     btwAbortControllerRef.current?.abort();
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
@@ -1486,31 +1456,9 @@ export function App({
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
   }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
 
-  useEffect(() => {
-    queuedPromptsRef.current = queuedPrompts;
-  }, [queuedPrompts]);
-
-  const enqueuePrompt = useCallback(
-    (text: string, images?: PromptImage[], onComplete?: () => void) => {
-      const trimmed = text.trim();
-      if (!trimmed) return true;
-      const nextPrompt: QueuedPrompt = {
-        id: nextQueuedPromptIdRef.current++,
-        sessionId: activeSessionIdRef.current,
-        text: trimmed,
-        images: images ? [...images] : undefined,
-        onComplete,
-      };
-      queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
-      setQueuedPrompts(queuedPromptsRef.current);
-      return true;
-    },
-    [],
-  );
-
-  // Echo a local command into the transcript, or defer it to the queue when a
-  // turn is streaming so the injected user row can't split the active turn (see
-  // appendOrDeferLocalUserMessage). Returns true when deferred — callers must
+  // Echo a local command into the transcript, or suppress it while a turn is
+  // streaming so the injected user row can't split the active turn (see
+  // appendOrDeferLocalUserMessage). Returns true when suppressed — callers must
   // then stop and not run the command's inline side effects.
   const echoOrDeferLocalCommand = useCallback(
     (text: string, images?: PromptImage[]): boolean =>
@@ -1520,168 +1468,15 @@ export function App({
         images,
         {
           append: (value: string) => store.appendLocalUserMessage(value),
-          enqueue: enqueuePrompt,
         },
       ),
-    [enqueuePrompt, store],
+    [store],
   );
 
-  // When the turn settles, abort any still-in-flight explicit insert so it can't
-  // arrive during the next turn (see midTurnEnqueueAbortRef). If aborted, the
-  // message remains in queuedPrompts.
-  useEffect(() => {
-    if (streamingState !== 'idle') return;
-    const ctrl = midTurnEnqueueAbortRef.current;
-    if (!ctrl) return;
-    // A controller exists ⇒ at least one mid-turn push was issued this turn.
-    // Cancel it so a still-in-flight push can't land in the next turn (a
-    // completed one makes this a no-op). Debug-only, mirrors the server-side
-    // mid-turn observability.
-    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
-    ctrl.abort();
-    midTurnEnqueueAbortRef.current = null;
-  }, [streamingState]);
-
-  const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
-    const [nextPrompt, ...rest] = queuedPromptsRef.current;
-    if (!nextPrompt) return null;
-    queuedPromptsRef.current = rest;
-    setQueuedPrompts(rest);
-    return nextPrompt;
-  }, []);
-
-  const peekNextQueuedPrompt = useCallback(
-    (): QueuedPrompt | null => queuedPromptsRef.current[0] ?? null,
-    [],
-  );
-
-  const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
-    const current = queuedPromptsRef.current;
-    if (current.length === 0) return null;
-    const index =
-      id === undefined
-        ? current.length - 1
-        : current.findIndex((prompt) => prompt.id === id);
-    if (index < 0) return null;
-    const prompt = current[index];
-    const next = current.filter((_, i) => i !== index);
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-    return prompt?.text ?? null;
-  }, []);
-
-  const removeQueuedPrompt = useCallback((id: number) => {
-    const next = queuedPromptsRef.current.filter((prompt) => prompt.id !== id);
-    if (next.length === queuedPromptsRef.current.length) return;
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-  }, []);
-
-  const insertQueuedPrompt = useCallback(
-    async (id: number) => {
-      const prompt = queuedPromptsRef.current.find((item) => item.id === id);
-      if (!prompt || (prompt.images?.length ?? 0) > 0) return;
-      // Commands can't be inserted into the running turn (the model would see
-      // the raw text and never run them); they re-dispatch on drain instead.
-      if (isCommandPrompt(prompt.text)) return;
-      let abort = midTurnEnqueueAbortRef.current;
-      if (!abort) {
-        abort = new AbortController();
-        midTurnEnqueueAbortRef.current = abort;
-      }
-      let result: Awaited<
-        ReturnType<typeof sessionActions.enqueueMidTurnMessage>
-      >;
-      try {
-        result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
-          signal: abort.signal,
-        });
-      } catch (error) {
-        reportError(error, t('queue.insertFailed'));
-        return;
-      }
-      if (!result.accepted) return;
-      const next = queuedPromptsRef.current.filter((item) => item.id !== id);
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    },
-    [reportError, sessionActions, t],
-  );
-
-  const editQueuedPrompt = useCallback(
-    (id: number) => {
-      const queuedText = popQueuedPromptForEdit(id);
-      if (!queuedText) return;
-      const current = editorRef.current?.getText() ?? '';
-      const next = current.trim() ? `${queuedText}\n${current}` : queuedText;
-      editorRef.current?.setText(next);
-      editorRef.current?.focus();
-    },
-    [popQueuedPromptForEdit],
-  );
-
-  const popLastQueuedPromptText = useCallback(
-    () => popQueuedPromptForEdit(),
-    [popQueuedPromptForEdit],
-  );
-
-  // When the daemon drains queued messages into the running turn it emits
-  // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
-  // (text-only) entries from the local queue so the idle-time drain doesn't ALSO
-  // resend them as the next turn. Reconcile EVERY accumulated batch, not just the
-  // newest — a multi-batch turn can publish several frames back-to-back, and the
-  // first must not be lost before this runs. The frames arrive in-order ahead of
-  // the turn-complete frame that flips streamingState to idle, so this runs
-  // before that resend fires; `consume()` then clears the reconciled batches.
-  const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
-    useDaemonMidTurnInjected();
-  useEffect(() => {
-    const sessionId = connection.sessionId;
-    if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    // Pass OUR client id so only batches the daemon stamped with it (or
-    // anonymous ones) are deduped. The daemon stamps every drained frame with
-    // the originator's client id, and the web-shell always sends one, so
-    // omitting this would skip every batch — leaving our own messages in the
-    // queue to be resent next turn (double delivery). A peer on the same
-    // session keeps its own coincidentally-equal entry.
-    if (
-      connection.clientId === undefined &&
-      midTurnInjectedBatches.some(
-        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
-      )
-    ) {
-      // Edge: stamped batches but no client id yet (older daemon / reconnect
-      // timing). Dedupe skips them, so they may be resent next turn — make it
-      // diagnosable rather than a silent double-delivery.
-      console.debug(
-        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
-      );
-    }
-    const next = removeInjectedFromQueue(
-      queuedPromptsRef.current,
-      midTurnInjectedBatches,
-      sessionId,
-      connection.clientId,
-    );
-    if (next) {
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    }
-    // Consume ONLY this session's batches. The reconcile above is session-
-    // scoped, so a batch for another session (a late frame after an in-place
-    // session switch) must NOT be cleared here — it was never reconciled and
-    // would otherwise be lost on switch-back (resent next turn = double
-    // delivery). Identity-removal also leaves any frame that arrived after this
-    // render's snapshot for the next effect run.
-    consumeMidTurnInjected(
-      midTurnInjectedBatches.filter((b) => b.sessionId === sessionId),
-    );
-  }, [
-    midTurnInjectedBatches,
-    connection.sessionId,
-    connection.clientId,
-    consumeMidTurnInjected,
-  ]);
+  const blockLocalCommandDuringTurn = useCallback((): false => {
+    pushToast('error', t('queue.commandBlocked'));
+    return false;
+  }, [pushToast, t]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -1769,7 +1564,8 @@ export function App({
         ]);
       };
       if (streamingStateRef.current !== 'idle') {
-        enqueuePrompt(command, undefined, refreshSettings);
+        handleLanguageChange(previousLanguage);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(command)
@@ -1780,7 +1576,7 @@ export function App({
         });
     },
     [
-      enqueuePrompt,
+      blockLocalCommandDuringTurn,
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
@@ -2267,7 +2063,7 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             sendPrompt(text, images).catch((error: unknown) =>
               reportError(error, 'Failed to send hidden slash command'),
             );
@@ -2286,7 +2082,7 @@ export function App({
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
               }
-              return enqueuePrompt(text, images);
+              return blockLocalCommandDuringTurn();
             }
             return handleGoalSlashCommand(text, images);
           }
@@ -2388,13 +2184,13 @@ export function App({
             return true;
           }
           if (cmd === 'branch') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const branchName = text.slice(match[0].length).trim();
             branchCurrentSession(branchName || undefined);
             return true;
           }
           if (cmd === 'fork') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
               pushToast('error', t('fork.empty'));
@@ -2431,7 +2227,7 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --fast'),
               );
@@ -2451,7 +2247,7 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--voice ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --voice'),
               );
@@ -2472,7 +2268,7 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const prompt = text.slice(match[0].length).trim();
             sessionActions
               .setApprovalMode('plan')
@@ -2558,7 +2354,7 @@ export function App({
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /skills command'),
               );
@@ -2690,9 +2486,8 @@ export function App({
             }
             if (subCommand === 'install') {
               // Install echoes into the transcript (and its error/usage replies
-              // do too); defer the whole command mid-turn so it can't split the
-              // active turn. It re-dispatches here once the turn settles.
-              if (promptBlocked) return enqueuePrompt(text, images);
+              // do too); block it mid-turn so it can't split the active turn.
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -2809,7 +2604,7 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /rename command'),
               );
@@ -2999,7 +2794,10 @@ export function App({
         );
         return true;
       } else if (text.startsWith('!')) {
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          pushToast('error', t('queue.shellBlocked'));
+          return false;
+        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
         sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
@@ -3027,6 +2825,7 @@ export function App({
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
+      blockLocalCommandDuringTurn,
       openTasksPanel,
       hiddenCommands,
       pushToast,
@@ -3050,121 +2849,6 @@ export function App({
       return accepted;
     },
     [handleSubmit, resumeChatBottomFollow],
-  );
-
-  useEffect(() => {
-    if (
-      !canDrainQueue({
-        draining: drainingQueueRef.current,
-        awaitingTurnStart: awaitingTurnStartRef.current,
-        connected,
-        streaming: streamingState !== 'idle',
-        interactionBlocked,
-        pendingApproval: !!pendingApproval,
-        queueLength: queuedPrompts.length,
-      })
-    ) {
-      return;
-    }
-
-    const nextPrompt = peekNextQueuedPrompt();
-    if (!nextPrompt) return;
-    if (
-      nextPrompt.sessionId !== undefined &&
-      nextPrompt.sessionId !== connection.sessionId
-    ) {
-      return;
-    }
-    popNextQueuedPrompt();
-
-    // Arm the gate SYNCHRONOUSLY, before the setState in popNextQueuedPrompt
-    // triggers a re-render: the daemon flips `streamingState` asynchronously, so
-    // without this the effect re-runs in the same tick and pops a second prompt
-    // before the first registers as streaming — both fire back-to-back and the
-    // first is lost. Cleared once this prompt's turn starts (streamingState
-    // effect), with a safety-net timer for a prompt that never streams (e.g. a
-    // queued slash command).
-    awaitingTurnStartRef.current = true;
-    if (awaitingTurnStartTimerRef.current) {
-      clearTimeout(awaitingTurnStartTimerRef.current);
-    }
-    const TURN_START_GATE_SAFETY_MS = 2500;
-    awaitingTurnStartTimerRef.current = setTimeout(() => {
-      awaitingTurnStartRef.current = false;
-      awaitingTurnStartTimerRef.current = null;
-      // Opening the gate touched only a ref. Nudge a re-render (same queue
-      // contents) so the drain effect re-evaluates and picks up anything still
-      // queued behind a prompt that never streamed (e.g. a local command).
-      setQueuedPrompts((prev) => [...prev]);
-    }, TURN_START_GATE_SAFETY_MS);
-
-    drainingQueueRef.current = true;
-    let sent = false;
-    const timer = setTimeout(() => {
-      drainSubmitTimerRef.current = null;
-      sent = true;
-      try {
-        handleSubmit(nextPrompt.text, nextPrompt.images);
-        nextPrompt.onComplete?.();
-      } finally {
-        drainingQueueRef.current = false;
-      }
-    }, 0);
-    drainSubmitTimerRef.current = timer;
-    return () => {
-      // While the gate is armed the re-run is already blocked, so let the
-      // pending submit fire — don't cancel it or re-queue. Only when unarmed
-      // (a genuine dependency change before submit) restore the prompt.
-      if (!awaitingTurnStartRef.current) {
-        if (!sent) {
-          queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
-          setQueuedPrompts(queuedPromptsRef.current);
-        }
-        clearTimeout(timer);
-        drainSubmitTimerRef.current = null;
-      }
-      drainingQueueRef.current = false;
-    };
-  }, [
-    connected,
-    connection.sessionId,
-    interactionBlocked,
-    handleSubmit,
-    pendingApproval,
-    peekNextQueuedPrompt,
-    popNextQueuedPrompt,
-    queuedPrompts,
-    streamingState,
-  ]);
-
-  // The drained prompt's turn has started — release the drain gate. From here
-  // the `streamingState !== 'idle'` guard holds the next prompt until this turn
-  // settles, so the queue advances one turn at a time.
-  useEffect(() => {
-    if (streamingState !== 'idle') {
-      awaitingTurnStartRef.current = false;
-      if (awaitingTurnStartTimerRef.current) {
-        clearTimeout(awaitingTurnStartTimerRef.current);
-        awaitingTurnStartTimerRef.current = null;
-      }
-    }
-  }, [streamingState]);
-
-  // On unmount, cancel both pending drain timers so neither the safety-net
-  // re-render (up to 2.5s) nor a still-pending submit fires on a torn-down
-  // component / dispatches into a dead session.
-  useEffect(
-    () => () => {
-      if (awaitingTurnStartTimerRef.current) {
-        clearTimeout(awaitingTurnStartTimerRef.current);
-        awaitingTurnStartTimerRef.current = null;
-      }
-      if (drainSubmitTimerRef.current) {
-        clearTimeout(drainSubmitTimerRef.current);
-        drainSubmitTimerRef.current = null;
-      }
-    },
-    [],
   );
 
   const handleConfirm = useCallback(
@@ -3385,14 +3069,14 @@ export function App({
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --fast ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError],
+    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError],
   );
 
   // Persist via the prompt channel (like `/model --fast`): the daemon's command
@@ -3402,14 +3086,14 @@ export function App({
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --voice ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
         reportError(error, t('model.setVoice'));
       });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError, t],
+    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError, t],
   );
 
   const commands = useMemo(() => {
@@ -3948,7 +3632,8 @@ export function App({
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
                       queuedMessages={queuedTexts}
                       onFocusFooter={handleFocusTaskPill}
-                      onPopQueuedMessages={popLastQueuedPromptText}
+                      onPopQueuedMessages={editLastQueuedPrompt}
+                      onClearQueuedMessages={clearQueuedPrompts}
                       currentMode={currentMode}
                       currentModel={currentModel}
                       chatWidthMode={chatWidthMode}
