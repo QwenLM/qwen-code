@@ -3960,6 +3960,7 @@ export class Session implements SessionContext {
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
       onStopAfterPermissionCancel?: () => void,
+      onStopAfterLoopDetected?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
       const configuredMaxConcurrency = parsePositiveIntegerEnv(
@@ -4050,6 +4051,7 @@ export class Session implements SessionContext {
         if (executing.size >= maxConcurrency) {
           await Promise.race(executing);
           if (results.some((result) => result?.loopDetected)) {
+            onStopAfterLoopDetected?.();
             await Promise.all(executing);
             await fillLoopSkippedFrom(idx + 1);
             return results;
@@ -4061,6 +4063,7 @@ export class Session implements SessionContext {
           ) {
             await Promise.all(executing);
             if (results.some((result) => result?.loopDetected)) {
+              onStopAfterLoopDetected?.();
               await fillLoopSkippedFrom(idx + 1);
               return results;
             }
@@ -4101,6 +4104,7 @@ export class Session implements SessionContext {
             batch.calls,
             batchAbortController.signal,
             stopBatchAfterPermissionCancel,
+            () => batchAbortController.abort('loop_detected'),
             () => batchStopAfterPermissionCancel,
           );
         } finally {

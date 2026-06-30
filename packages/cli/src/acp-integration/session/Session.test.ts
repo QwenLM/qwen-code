@@ -9299,9 +9299,15 @@ describe('Session', () => {
         abortSignal: AbortSignal,
         promptId: string,
         functionCalls: FunctionCall[],
+        toolLoopState?: {
+          totalToolCalls: number;
+          invalidToolParamErrors: Map<string, number>;
+          loopDetected: boolean;
+        },
       ) => Promise<{
         parts: Part[];
         stopAfterPermissionCancel: boolean;
+        loopDetected?: boolean;
         repeatedDuplicateProviderToolCall?: boolean;
       }>;
     };
@@ -10115,6 +10121,91 @@ describe('Session', () => {
       expect(questionExecute).toHaveBeenCalledOnce();
       expect(siblingExecute).toHaveBeenCalledOnce();
       expect(siblingSignal?.aborted).toBe(true);
+    });
+
+    it('aborts sibling Agent calls in the same batch after loop detection', async () => {
+      let firstSiblingSignal: AbortSignal | undefined;
+      let secondSiblingSignal: AbortSignal | undefined;
+      const firstSiblingExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          firstSiblingSignal = signal;
+          await waitForAbortOrTick(signal);
+          return {
+            llmContent: 'first sibling stopped',
+            returnDisplay: 'first sibling stopped',
+          };
+        });
+      const secondSiblingExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          secondSiblingSignal = signal;
+          await waitForAbortOrTick(signal);
+          return {
+            llmContent: 'second sibling stopped',
+            returnDisplay: 'second sibling stopped',
+          };
+        });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+          if (args['_test_id'] === 'invalid') {
+            throw new Error('Invalid subagent_type: bad');
+          }
+          const isFirstSibling = args['_test_id'] === 'sibling_1';
+          return {
+            params: { subagent_type: 'explore', ...args },
+            eventEmitter: new EventEmitter(),
+            execute: isFirstSibling
+              ? firstSiblingExecute
+              : secondSiblingExecute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Agent'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          };
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
+        loopDetected: false,
+      };
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-agent-loop-abort',
+        [
+          {
+            id: 'agent_invalid',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'invalid', subagent_type: 'bad' },
+          },
+          {
+            id: 'agent_sibling_1',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'sibling_1', subagent_type: 'explore' },
+          },
+          {
+            id: 'agent_sibling_2',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'sibling_2', subagent_type: 'explore' },
+          },
+        ],
+        toolLoopState,
+      );
+
+      expect(result.loopDetected).toBe(true);
+      expect(firstSiblingExecute).toHaveBeenCalledOnce();
+      expect(secondSiblingExecute).toHaveBeenCalledOnce();
+      expect(firstSiblingSignal?.aborted).toBe(true);
+      expect(secondSiblingSignal?.aborted).toBe(true);
     });
 
     it('passes an already-aborted parent signal to Agent batches', async () => {
