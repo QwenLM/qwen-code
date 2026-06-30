@@ -355,6 +355,7 @@ export class SessionService {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return undefined;
       }
+      this.warn(`readProjectSessionHead: failed to read ${filePath}: ${error}`);
       throw error;
     }
   }

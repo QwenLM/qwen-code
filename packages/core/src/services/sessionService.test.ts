@@ -1631,6 +1631,23 @@ describe('SessionService', () => {
         'conflict',
       );
     });
+
+    it('should warn when reading a session head fails', async () => {
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const error = new Error('malformed JSON');
+      vi.mocked(jsonl.readLines).mockRejectedValue(error);
+
+      await expect(service.getSessionLocation(sessionIdA)).rejects.toThrow(
+        error,
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('readProjectSessionHead: failed to read');
+      expect(warnings[0]).toContain(`${sessionIdA}.jsonl`);
+      expect(warnings[0]).toContain('malformed JSON');
+    });
   });
 
   describe('loadLastSession', () => {
