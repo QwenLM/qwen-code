@@ -37,7 +37,10 @@ import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { isPrintableSearchChar } from '../hooks/useSessionSearchInput.js';
+import {
+  isPrintableSearchChar,
+  removeLastGrapheme,
+} from '../hooks/useSessionSearchInput.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
@@ -349,11 +352,16 @@ export function SettingsDialog({
 
   const allItems = generateSettingsItems();
   // Filter the visible settings by the search query (case-insensitive,
-  // matched against the localized label).
+  // matched against the localized label, the setting key, or its description)
+  // so users who recall a key name (e.g. `general.vimMode`) or a word from the
+  // description still get hits.
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const items = normalizedQuery
-    ? allItems.filter((item) =>
-        item.label.toLowerCase().includes(normalizedQuery),
+    ? allItems.filter(
+        (item) =>
+          item.label.toLowerCase().includes(normalizedQuery) ||
+          item.value.toLowerCase().includes(normalizedQuery) ||
+          (item.description?.toLowerCase().includes(normalizedQuery) ?? false),
       )
     : allItems;
 
@@ -659,15 +667,15 @@ export function SettingsDialog({
             onSelect(undefined, selectedScope);
           }
         } else if (name === 'backspace') {
-          setSearchQuery((q) => q.slice(0, -1));
-        } else if (
-          !ctrl &&
-          typeof key.sequence === 'string' &&
-          key.sequence.length === 1 &&
-          key.sequence >= ' '
-        ) {
-          // Space is allowed here (unlike the list zone, where it toggles a
-          // setting) so multi-word queries like "vim mode" can be typed.
+          // Grapheme-aware so Backspace deletes a whole emoji / surrogate pair
+          // rather than leaving a dangling code unit.
+          setSearchQuery((q) => removeLastGrapheme(q));
+        } else if (isPrintableSearchChar(key) || (!ctrl && name === 'space')) {
+          // Reuse the shared printable predicate (excludes DEL/C1/pastes and
+          // multi-grapheme sequences) so the search box stays in sync with the
+          // list zone's filter. Space is additionally allowed here (unlike the
+          // list zone, where it toggles a setting) so multi-word queries like
+          // "vim mode" can be typed.
           setSearchQuery((q) => q + key.sequence);
         }
         return;
@@ -775,6 +783,10 @@ export function SettingsDialog({
           // At the top of the list, ↑ moves focus up to the search box.
           if (activeSettingIndex === 0) {
             setFocusZone('search');
+            // scrollOffset is already 0 here (it never exceeds
+            // activeSettingIndex), but reset defensively so the viewport can
+            // never be left scrolled past a top-of-list selection.
+            setScrollOffset(0);
           } else {
             const newIndex = activeSettingIndex - 1;
             setActiveSettingIndex(newIndex);
@@ -974,7 +986,7 @@ export function SettingsDialog({
         } else if (name === 'backspace' && searchQuery.length > 0) {
           // Editing the query moves focus up into the search box.
           setFocusZone('search');
-          setSearchQuery((q) => q.slice(0, -1));
+          setSearchQuery((q) => removeLastGrapheme(q));
         } else if (isPrintableSearchChar(key)) {
           // Typing a printable key jumps to the search box and filters.
           // (Digits are handled by the number-edit branch above, which routes
@@ -1061,7 +1073,10 @@ export function SettingsDialog({
               width={width ? width - 4 : undefined}
               availableHeight={
                 availableTerminalHeight != null
-                  ? availableTerminalHeight - 4
+                  ? // Outer Box: border (2) + padding (2) = 4 rows, plus the
+                    // ConfigTabBar (1) and the height-1 spacer (1) above the
+                    // embedded dashboard = 6 rows of chrome in total.
+                    availableTerminalHeight - 6
                   : undefined
               }
             />

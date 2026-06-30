@@ -35,7 +35,7 @@ function splitGraphemes(value: string): string[] {
   return Array.from(graphemeSegmenter.segment(value), ({ segment }) => segment);
 }
 
-function removeLastGrapheme(value: string): string {
+export function removeLastGrapheme(value: string): string {
   const graphemes = splitGraphemes(value);
   graphemes.pop();
   return graphemes.join('');
