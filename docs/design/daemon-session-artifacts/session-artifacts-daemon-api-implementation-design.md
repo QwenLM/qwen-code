@@ -212,7 +212,6 @@ GET /session/:id/artifacts
 {
   "v": 1,
   "sessionId": "session-123",
-  "workspaceCwd": "/repo",
   "artifacts": [
     {
       "id": "a1b2c3d4",
@@ -313,25 +312,31 @@ POST /session/:id/artifacts
 {
   "v": 1,
   "sessionId": "session-123",
-  "change": "created",
-  "artifact": {
-    "id": "a1b2c3d4e5f6",
-    "kind": "link",
-    "storage": "external_url",
-    "title": "任务详情",
-    "description": "调度任务 task_123 的详情页",
-    "url": "https://ops.example.com/tasks/task_123",
-    "mimeType": "text/html",
-    "status": "available",
-    "source": "client",
-    "createdAt": "2026-06-26T10:00:00.000Z",
-    "updatedAt": "2026-06-26T10:00:00.000Z",
-    "metadata": {
-      "resourceType": "scheduler_task"
+  "changes": [
+    {
+      "change": "created",
+      "artifact": {
+        "id": "a1b2c3d4e5f6",
+        "kind": "link",
+        "storage": "external_url",
+        "title": "任务详情",
+        "description": "调度任务 task_123 的详情页",
+        "url": "https://ops.example.com/tasks/task_123",
+        "mimeType": "text/html",
+        "status": "available",
+        "source": "client",
+        "createdAt": "2026-06-26T10:00:00.000Z",
+        "updatedAt": "2026-06-26T10:00:00.000Z",
+        "metadata": {
+          "resourceType": "scheduler_task"
+        }
+      }
     }
-  }
+  ]
 }
 ```
+
+`changes` 中的每一项都必须同步发布为一条 `artifact_changed` SSE event。这样即使一次 POST 触发 upsert 和 eviction，client 也能收到 created/updated 以及 removed 的完整增量。
 
 安全：
 
@@ -386,17 +391,12 @@ export interface DaemonSessionArtifact {
   hookName?: string;
   extensionId?: string;
   clientId?: string;
-  sourceId?: string;
-  visibility?: 'session';
-  expiresAt?: string;
-  sensitivity?: 'normal' | 'sensitive';
   metadata?: Record<string, string | number | boolean | null>;
 }
 
 export interface DaemonSessionArtifactsEnvelope {
   v: 1;
   sessionId: string;
-  workspaceCwd: string;
   artifacts: DaemonSessionArtifact[];
 }
 
@@ -404,6 +404,17 @@ export interface DaemonArtifactChangedData {
   sessionId: string;
   change: 'created' | 'updated' | 'removed';
   artifact: DaemonSessionArtifact;
+}
+
+export interface DaemonSessionArtifactChange {
+  change: 'created' | 'updated' | 'removed';
+  artifact: DaemonSessionArtifact;
+}
+
+export interface DaemonSessionArtifactMutationResult {
+  v: 1;
+  sessionId: string;
+  changes: DaemonSessionArtifactChange[];
 }
 ```
 
@@ -461,19 +472,35 @@ export interface ToolResult {
 
 ### 5.3 Input 到 Public Artifact 的补全规则
 
-`ToolArtifact` 是输入形态，`DaemonSessionArtifact` 是对外返回形态。所有入口都必须先转换为统一的 `SessionArtifactInput`，再由 `SessionArtifactStore` 补全公共字段。
+`ToolArtifact` 是工具返回的输入形态，`SessionArtifactInput` 是所有入口进入 store 前的统一内部输入形态，`DaemonSessionArtifact` 是对外返回形态。所有入口都必须先转换为 `SessionArtifactInput`，再由 `SessionArtifactStore` 补全公共字段。
+
+```ts
+export interface SessionArtifactInput extends ToolArtifact {
+  source: DaemonSessionArtifactSource;
+  toolCallId?: string;
+  toolName?: string;
+  hookName?: string;
+  extensionId?: string;
+  clientId?: string;
+}
+```
+
+来源转换规则：
+
+- `ToolResult.artifacts` / `ArtifactTool`：复制 `ToolArtifact` 字段，补 `source: 'tool'`、`toolCallId`、`toolName`。
+- `record_artifact`：作为 tool source 进入，同样补 `source: 'tool'`、`toolCallId`、`toolName: 'record_artifact'`。
+- hook：复制 hook output artifacts，补 `source: 'hook'`、`hookName`、`extensionId`；如 hook 能拿到触发 tool context，也可补 `toolCallId` / `toolName`。
+- client POST：复制 body，补 `source: 'client'`、`clientId`。
 
 补全规则：
 
 - `id`：由 Section 7 的 identity hash 生成。
 - `source`：由入口上下文决定，tool result / ArtifactTool 为 `tool`，hook 为 `hook`，client POST 为 `client`。
 - `toolCallId` / `toolName`：由 tool call 上下文补入；hook/client 入口没有则不填。
-- `hookName` / `extensionId` / `clientId` / `sourceId`：有上下文时补入，用于审计和 UI 分组。
+- `hookName` / `extensionId` / `clientId`：有上下文时补入，用于审计和 UI 分组。
 - `createdAt`：首次 upsert 时写入。
 - `updatedAt`：每次 upsert 时刷新。
-- `status`：workspace / managed artifact 初始为 `available`，GET 时 best-effort stat 后可变为 `missing`；URL artifact 始终为 `available`。
-- `visibility`：V1 固定为 `session`。
-- `sensitivity`：默认 `normal`；`metadata` 不得携带 secret、token、cookie 或签名凭证。
+- `status`：workspace artifact 初始为 `available`，status cache 刷新后可变为 `missing`；managed / URL artifact 在 V1 不做本机 stat，始终为 `available`。
 - `storage` 默认值：
   - 有 `workspacePath` 时为 `workspace`。
   - 有 `managedId` 且没有 `url` 时为 `managed`。
@@ -491,10 +518,13 @@ export interface ToolResult {
 - `url` 只接受明确登记的 URL 或 ArtifactTool 发布 URL。
 - `workspacePath`、`managedId`、`url` 至少存在一个。
 - 普通工具不得把 `~/.qwen`、`/tmp` 或其他本机绝对路径作为 `workspacePath` 返回。
+- `title` 必填，trim 后长度 1-200 字符，不允许 ASCII 控制字符；client 渲染时必须作为文本或 HTML escape。
 - `description` 是 UI 辅助文字，不进入模型上下文。
+- `description` trim 后最多 1000 字符，不允许 ASCII 控制字符；client 渲染时必须作为文本或 HTML escape。
 - `metadata` 必须是小对象，只允许 primitive value。
 - `metadata` 不放 secret、token、cookie、签名私钥。
 - `sizeBytes` 是 best-effort。
+- `DaemonSessionArtifactsEnvelope` 不返回宿主机绝对 `workspaceCwd`；client 只依赖 `workspacePath` 这类相对路径和 `storage` 字段展示。
 
 ## 6. Artifact 采集来源
 
@@ -659,21 +689,24 @@ return {
 适合场景：
 
 - PostToolUse hook 观察某个 MCP/tool 输出，按组织规则拼业务 URL。
-- PostToolBatch hook 在一批工具完成后汇总多个资源入口。
 - extension 提供 hooks，把企业内部资源 URL 注入右侧产物区。
 - skill frontmatter 注册 PostToolUse hook，在 skill 生效期间自动登记 artifacts。
+- 工具失败后，PostToolUse hook 登记 error trace、失败运行 dashboard 或排障链接。
+- PostToolBatch artifacts 只有在具体运行时存在真实 PostToolBatch 调用点并能把结果送到 daemon bridge 时才接入；daemon ACP 主会话 V1 不假设该通道存在。
 
 需要代码改动：
 
 - `HookOutput.hookSpecificOutput.artifacts?: ToolArtifact[]`。
-- `packages/core/src/hooks/hookAggregator.ts` 对多个 hook 的 `artifacts` 做 concat，不走 last-writer-wins。
+- `packages/core/src/hooks/hookAggregator.ts` 的 `mergeWithOrLogic()` 必须为 `artifacts` 增加 concat 逻辑，不走现有 `hookSpecificOutput` last-writer-wins。
 - `packages/core/src/core/toolHookTriggers.ts` 的 `PostToolUseHookResult` / `PostToolBatchHookResult` 增加 `artifacts?: ToolArtifact[]`。
 - `firePostToolUseHook()` 返回 `artifacts?: ToolArtifact[]`。
 - `firePostToolBatchHook()` 返回 `artifacts?: ToolArtifact[]`。
 - `packages/core/src/core/coreToolScheduler.ts` 必须纳入实现计划，因为它是 `firePostToolBatchHook()` 的调用点，也有独立的 `firePostToolUseHook()` 路径。
-- `Session.runTool()` 合并 hook artifacts 与 tool artifacts。
+- 抽取共享 `collectHookArtifacts()` 或等价 helper，供 `coreToolScheduler.ts` 与 ACP `Session.ts` 两条 PostToolUse 路径复用同一 extraction / validation 前置逻辑，避免两处行为漂移。
+- `Session.runTool()` 合并 hook artifacts 与 tool artifacts；tool result artifacts 仍只来自成功返回的 tool result，但 hook artifacts 不依赖工具成功，失败路径也可以进入 store。
+- 如果工具失败路径没有可附着 `_meta.artifacts` 的成功 result event，hook artifacts 必须走同一个 bridge ingest helper 单独发布，不能被错误结果吞掉。
 - hook artifacts 与 `record_artifact` / client POST 走同一套 validation：URL scheme、workspace path containment、metadata size/type。
-- batch-level artifacts 没有单一 tool call 时，可通过 ACP `extNotification` 发送 `qwen/notify/session/artifact-event`。
+- batch-level artifacts 没有单一 tool call 时，只有在该运行时已经能向 bridge 发送 ACP `extNotification` 的情况下，才可使用 `qwen/notify/session/artifact-event`。
 
 `qwen/notify/session/artifact-event` payload：
 
@@ -695,7 +728,7 @@ return {
 }
 ```
 
-注意：`qwen/notify/session/artifact-event` 只是 batch-level artifacts 的传输 envelope，不应形成第二套 store/validation/dedupe 管道。BridgeClient 必须把 `_meta.artifacts` 与 `artifact-event.artifacts` 都转换为同一个 `SessionArtifactInput[]`，调用同一个 `ingestArtifacts()` / `SessionArtifactStore.upsertMany()`，复用同一套 validation、normalization、enrichment、eviction 和 `artifact_changed` 发布逻辑。
+注意：`qwen/notify/session/artifact-event` 只是 explicit artifacts 的传输 envelope，不应形成第二套 store/validation/dedupe 管道。BridgeClient 必须把 `_meta.artifacts`、hook artifacts 与 `artifact-event.artifacts` 都转换为同一个 `SessionArtifactInput[]`，调用同一个 `ingestArtifacts()` / `SessionArtifactStore.upsertMany()`，复用同一套 validation、normalization、enrichment、eviction 和 `artifact_changed` 发布逻辑。ACP 主会话当前没有 PostToolBatch callsite，不能把 `coreToolScheduler.ts` 的 batch hook 当成 daemon artifacts 面板的默认来源；若后续要支持 daemon 主会话 batch artifacts，必须先增加真实调用点和测试。
 
 ### 6.5 Client / Extension 直接插入
 
@@ -721,9 +754,11 @@ POST /session/:id/artifacts
 
 artifact identity：
 
-- workspace 文件：`sessionId + ':workspace:' + normalizedWorkspacePath`
-- managed 文件：`sessionId + ':managed:' + managedId`
-- external / published URL：`sessionId + ':url:' + normalizedUrl`
+- workspace 文件：`sessionId + ':' + source + ':workspace:' + normalizedWorkspacePath`
+- managed 文件：`sessionId + ':' + source + ':managed:' + managedId`
+- external / published URL：`sessionId + ':' + source + ':url:' + identityUrl`
+
+`source` 是 identity 的一部分。tool、hook、client 对同一 URL 或路径的登记应成为不同 artifact，避免低信任入口覆盖高信任入口的标题、metadata 或 provenance。
 
 对外 id：
 
@@ -740,14 +775,16 @@ artifact identity：
 - 输出统一使用 POSIX slash，去掉开头的 `./`。
 - 不做大小写折叠；即使 macOS 默认文件系统大小写不敏感，identity 仍按字符串区分，避免跨平台行为不一致。
 
-`normalizedUrl`：
+`identityUrl` 与 `url`：
 
 - 使用 WHATWG `new URL(input)` 解析，禁止字符串 `startsWith('http')` 这类宽松判断。
 - 除 `ArtifactTool` trusted published URL 外，普通 link artifact 只允许 `http:` / `https:`。
+- `url` 字段保存清理后的可点击 URL，供 client 打开；不要把 identity 用 URL 反写成可点击 URL。
+- identity 另用内部 `identityUrl` 计算，不作为 public 字段返回。
 - scheme 和 host 小写。
 - 默认端口归一化：`https:443` / `http:80` 不保留。
-- 删除 fragment。
-- 对 query params 按 key/value 排序后重新序列化。
+- 保留 fragment；hash-routed SPA 中 fragment 可能是资源 identity 的一部分。
+- 保留 query 参数原始顺序；有些平台对 query 顺序敏感，V1 不做 query sort。
 - 拒绝或清除 `username` / `password`，不把 URL userinfo 存入 artifact store。
 
 去重行为：
@@ -757,14 +794,17 @@ artifact identity：
 - `createdAt` 保持不变。
 - `updatedAt` 更新。
 - 同一批输入中重复 identity 按数组顺序处理，后者覆盖前者。
-- 不同来源同时 upsert 同一 identity 时，按 bridge 收到事件的顺序 last-write-wins；实现应在单个 `SessionArtifactStore.upsertMany()` 内同步处理，避免异步读改写竞态。
-- `metadata` 做浅合并，后写同名 key 覆盖先写；`title`、`description`、`toolCallId`、`toolName`、`source`、`hookName` 等顶层字段以后写值为准。
+- 同 identity 必然同 source；不同 source 的同 URL / path 不互相覆盖。
+- `source`、`toolCallId`、`toolName`、`hookName`、`extensionId`、`clientId` 等 provenance 字段首次写入后冻结，不以后写值覆盖。
+- `title`、`description`、`mimeType`、`sizeBytes` 可由同 identity 的后续 upsert 更新。
+- `metadata` 做浅合并，后写同名 key 覆盖先写；metadata 不承载 secret 或权限凭证。
+- 实现应在单个 `SessionArtifactStore.upsertMany()` 内同步处理，避免异步读改写竞态。
 
 保留策略：
 
 - 每 session 最多 200 个 artifacts。
 - 返回 `createdAt` 升序。
-- 超出时裁掉最旧项。
+- 超出时按 `updatedAt` 升序裁掉最久未更新项，避免频繁复用的早期 artifact 被一次性低价值输入挤掉。
 - 裁剪必须为每个被移除 artifact 发送 `artifact_changed` / `removed`，或发送一次 `artifacts_trimmed` 让 client 重新拉 snapshot；V1 推荐发送逐条 `removed`，避免 client 长期保留 stale state。
 - 后续可增加 per-source quota，避免单个工具或 hook 挤掉所有高价值 artifacts。
 
@@ -803,11 +843,13 @@ Phase A 先接入 `ToolResult.artifacts` 和 `ArtifactTool`；`record_artifact` 
 - `packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`
   - `_meta.artifacts = params.artifacts`
 - `packages/cli/src/acp-integration/session/Session.ts`
-  - 工具成功后只收集 `toolResult.artifacts`。
+  - 工具成功后收集 `toolResult.artifacts`。
+  - PostToolUse hook artifacts 独立于工具成功/失败收集，用于 error trace / dashboard 等失败诊断产物。
+  - 失败路径 hook artifacts 不能依赖成功 result metadata；必要时直接调用 bridge artifact ingest。
   - 不从普通 `WRITE_FILE` / `EDIT` / `NOTEBOOK_EDIT` 自动派生 artifacts。
   - 传给 `emitResult()`。
 
-### 8.3 Phase C: acp-bridge store and events
+### 8.3 Phase C-1: acp-bridge store and events
 
 新增：
 
@@ -828,18 +870,22 @@ Bridge interface 增加：
 
 ```ts
 getSessionArtifacts(sessionId: string): SessionArtifactsEnvelope;
+addSessionArtifacts(
+  sessionId: string,
+  artifacts: SessionArtifactInput[],
+): DaemonSessionArtifactMutationResult;
 ```
 
 BridgeClient：
 
 - 从 `session_update/tool_call_update._meta.artifacts` 提取 artifacts。
-- 从 `qwen/notify/session/artifact-event` 提取 batch-level artifacts。
-- 两种输入都转换为同一个 `SessionArtifactInput[]`。
-- 统一调用 `ingestArtifacts()` / `SessionArtifactStore.upsertMany()`，不要为 batch artifacts 建第二套 validation 或 dedupe。
-- 发布 `artifact_changed`。
-- 如果 store 因上限裁剪 artifact，发布对应 `removed` event。
+- 从 `qwen/notify/session/artifact-event` 提取 explicit notification artifacts。
+- 所有输入都转换为同一个 `SessionArtifactInput[]`。
+- 统一调用 `ingestArtifacts()` / `SessionArtifactStore.upsertMany()`，不要为 notification artifacts 建第二套 validation 或 dedupe。
+- `upsertMany()` 返回 `DaemonSessionArtifactMutationResult`，包含 created/updated 以及 eviction 产生的 removed changes。
+- 对每个 change 发布 `artifact_changed`。
 
-### 8.4 Phase C: serve snapshot API
+### 8.4 Phase C-2: serve snapshot API
 
 改动：
 
@@ -852,14 +898,15 @@ GET 行为：
 
 - session 不存在：现有 404。
 - 无 artifacts：返回空数组。
-- workspace / managed artifact 维护内部 status cache，例如 `lastStatAt`、`lastKnownSizeBytes`、`lastKnownStatus`。
+- workspace artifact 维护内部 status cache，例如 `lastStatAt`、`lastKnownSizeBytes`、`lastKnownStatus`。
 - upsert 时做一次 best-effort stat。
 - GET 默认使用 cache；仅当 `lastStatAt` 过期时按 TTL 刷新，例如 5-30 秒，并限制并发 stat 数量。
-- stat 失败：返回 `status: 'missing'`，不从 store 中删除。
-- stat 成功：如果此前是 `missing`，返回时恢复 `status: 'available'`。
-- URL artifact 不探测，始终返回 `status: 'available'`。
+- stat 失败：把 store 中状态更新为 `status: 'missing'`，不删除 artifact。
+- stat 成功：如果此前是 `missing`，把 store 中状态恢复为 `status: 'available'`。
+- status cache 刷新导致状态翻转时，发布 `artifact_changed` / `updated`；V1 不监听文件系统，因此该事件只在 upsert、GET TTL refresh 或未来显式 refresh 触发时产生。
+- managed / URL artifact 不探测本机路径，始终返回 `status: 'available'`。
 
-### 8.5 Phase C: SDK list/event support
+### 8.5 Phase C-3: SDK list/event support
 
 改动：
 
@@ -894,15 +941,16 @@ GET 行为：
 - `packages/core/src/hooks/types.ts`
   - `HookOutput.hookSpecificOutput.artifacts?: ToolArtifact[]`。
 - `packages/core/src/hooks/hookAggregator.ts`
-  - `artifacts` 多 hook concat，不走 last-writer-wins。
+  - `mergeWithOrLogic()` 对 `artifacts` 多 hook concat，不走 last-writer-wins。
 - `packages/core/src/core/toolHookTriggers.ts`
   - `PostToolUseHookResult` / `PostToolBatchHookResult` 增加 `artifacts?: ToolArtifact[]`。
 - `packages/core/src/core/coreToolScheduler.ts`
   - 覆盖 core scheduler 的 PostToolUse / PostToolBatch artifacts 传播路径。
 - `packages/cli/src/acp-integration/session/Session.ts`
   - 覆盖 ACP session 的 PostToolUse artifacts 传播路径。
-- ACP session 不新增重复的 PostToolBatch hook callsite；batch artifacts 从 `coreToolScheduler.ts` 的 PostToolBatch 结果产生，再通过 `qwen/notify/session/artifact-event` 进入 bridge。
-- batch-level artifacts 通过 `qwen/notify/session/artifact-event` 发给 bridge。
+- 两条 PostToolUse 路径复用同一个 hook artifact collection helper。
+- ACP session V1 不声明 PostToolBatch artifacts 支持；如果产品要求 daemon 主会话 batch artifacts，必须在 ACP Session 增加真实 PostToolBatch callsite，而不是依赖 `coreToolScheduler.ts` 的非 daemon 主会话路径。
+- 其他运行时如已有 batch-level artifact notification，可通过 `qwen/notify/session/artifact-event` 发给 bridge。
 - BridgeClient 从 `qwen/notify/session/artifact-event` 提取 batch-level artifacts，走同一套 validation 和 upsert。
 
 ### 8.8 Phase F: client POST / SDK add explicit registration
@@ -922,7 +970,7 @@ addSessionArtifact(
   sessionId: string,
   artifact: SessionArtifactInput,
   source: 'client',
-): ArtifactChangedResult;
+): DaemonSessionArtifactMutationResult;
 ```
 
 - SDK 增加：
@@ -958,8 +1006,9 @@ addSessionArtifact(
 - 只允许 primitive value。
 - 不允许 nested object/array，避免 UI 和持久化复杂化。
 - 不放 secret、token、cookie、signed URL、私钥、访问凭证。
-- `sensitivity` 可标记为 `sensitive`，但 V1 不实现跨用户 RBAC；V1 visibility 固定为 session-local。
-- audit 维度通过 `source`、`toolCallId`、`toolName`、`hookName`、`extensionId`、`clientId`、`sourceId`、`createdAt`、`updatedAt` 预留。
+- V1 不提供 `visibility`、`sensitivity`、`expiresAt`、`sourceId` 等无消费者字段；artifact visibility 固定为当前 session-local 语义。
+- audit 维度通过 `source`、`toolCallId`、`toolName`、`hookName`、`extensionId`、`clientId`、`createdAt`、`updatedAt` 承载。
+- provenance 字段首次写入后冻结；展示字段和 metadata 的更新不能改写来源。
 
 ### 9.4 Anti-spam
 
@@ -1085,7 +1134,8 @@ cd packages/core && npx vitest run src/tools/artifact/artifact-tool.test.ts
 - `toolResult.artifacts` 被传给 `emitResult()`。
 - `write_file/edit/notebook_edit` 普通源码修改不自动派生 artifact。
 - `read_file/grep/glob/shell` 不派生 artifact。
-- 工具失败不产生 artifacts。
+- 工具失败时不收集失败 tool result 的 artifacts；PostToolUse hook 显式返回的诊断 artifacts 仍可进入 store。
+- 失败路径 hook artifacts 不依赖成功 result `_meta.artifacts`。
 
 命令：
 
@@ -1094,21 +1144,26 @@ cd packages/cli && npx vitest run src/acp-integration/session/emitters/ToolCallE
 cd packages/cli && npx vitest run src/acp-integration/session/Session.test.ts
 ```
 
-### 13.3 Phase C acp-bridge
+### 13.3 Phase C-1 acp-bridge
 
 覆盖：
 
 - `SessionArtifactStore` created/updated/removed。
 - `ToolArtifact` 到 `DaemonSessionArtifact` 的 enrichment。
+- `SessionArtifactInput` 是所有入口统一的内部输入类型。
 - 默认 `kind` / `storage` 推断。
-- workspacePath / managedId / URL identity 去重。
-- URL normalization：scheme/host lowercase、default port、fragment drop、query sort、userinfo rejection/removal。
+- workspacePath / managedId / URL identity 去重，且 identity 包含 source，跨 source 不互相覆盖。
+- URL validation：scheme/host lowercase、default port 归一、fragment 保留、query 顺序保留、userinfo rejection/removal。
+- `url` 保存清理后的可点击 URL，identity 用内部 `identityUrl`，两者不混用。
 - Path validation：`../../etc/passwd`、workspace 外绝对路径、symlink escape 均被拒绝。
+- Title/description validation：长度限制、trim、控制字符拒绝。
 - Metadata validation：大小限制、primitive-only、nested object/array 拒绝。
-- 上限裁剪会发送 removed event 或 trimmed resync event。
+- 同 identity upsert 不覆盖 provenance 字段，只更新展示字段和 metadata。
+- 上限按 `updatedAt` 裁剪，且会发送 removed event 或 trimmed resync event。
 - `_meta.artifacts` 被写入 store。
 - `artifact_changed` 发布。
 - malformed artifact 被忽略，不影响原始 event。
+- `upsertMany()` / `addSessionArtifact()` 返回包含 eviction changes 的 `DaemonSessionArtifactMutationResult`。
 
 命令：
 
@@ -1117,15 +1172,17 @@ cd packages/acp-bridge && npx vitest run src/sessionArtifacts.test.ts
 cd packages/acp-bridge && npx vitest run src/bridgeClient.test.ts
 ```
 
-### 13.4 Phase C serve
+### 13.4 Phase C-2 serve
 
 覆盖：
 
 - `/capabilities` 包含 `session_artifacts`。
 - `GET /session/:id/artifacts` 返回空列表。
 - 有 artifacts 时返回 envelope。
+- envelope 不返回宿主机绝对 `workspaceCwd`。
 - 未知 session 返回现有错误。
-- workspace artifact GET 时 best-effort stat，缺失文件返回 `status: 'missing'`，文件恢复后返回 `status: 'available'`。
+- workspace artifact GET TTL refresh 时 best-effort stat，缺失文件返回 `status: 'missing'`，文件恢复后返回 `status: 'available'`。
+- status 翻转会更新 store 并发送 `artifact_changed` / `updated`；managed / URL artifact 不做本机 stat。
 - GET 使用 status cache / TTL，避免每次热读对所有 artifacts 做同步 stat。
 
 命令：
@@ -1134,7 +1191,7 @@ cd packages/acp-bridge && npx vitest run src/bridgeClient.test.ts
 cd packages/cli && npx vitest run src/serve/server.test.ts
 ```
 
-### 13.5 Phase C SDK
+### 13.5 Phase C-3 SDK
 
 覆盖：
 
@@ -1162,14 +1219,18 @@ cd packages/sdk-typescript && npx vitest run src/daemon/events.test.ts
 hook artifacts：
 
 - `HookOutput.hookSpecificOutput.artifacts` 通过 `createHookOutput()`、`toolHookTriggers.ts` 进入 `PostToolUseHookResult` / `PostToolBatchHookResult`。
-- `hookAggregator.ts` 多 hook artifacts concat。
+- `hookAggregator.ts` 的 `mergeWithOrLogic()` 多 hook artifacts concat。
 - `coreToolScheduler.ts` 和 ACP `Session.ts` 两条路径都能传播 PostToolUse artifacts。
-- PostToolBatch artifacts 通过 `qwen/notify/session/artifact-event` 被写入 store。
+- 两条 PostToolUse 路径复用共享 hook artifact collection helper。
+- ACP main session 不声明 PostToolBatch artifacts；如后续增加真实 callsite，需要单测覆盖。
+- 已有 batch notification 的运行时可通过 `qwen/notify/session/artifact-event` 被写入 store。
 - hook artifacts 与其他入口经过同一 validation。
+- 工具失败时 hook 返回的 error/dashboard artifact 仍能进入 store。
 
 client POST / SDK add：
 
 - `POST /session/:id/artifacts` 成功 upsert。
+- `POST` 返回 `DaemonSessionArtifactMutationResult`，包含 created/updated 以及 eviction removed changes。
 - `POST` 在未授权/无 mutation token 时被拒绝。
 - `POST` 对 workspace 外 path、path traversal、symlink escape 返回 400。
 - `DaemonClient.addSessionArtifact()` body 正确。
