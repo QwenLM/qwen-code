@@ -119,14 +119,16 @@ export class ChannelCronStore {
       if (enabledForTarget >= maxEnabledJobs) {
         return jobs;
       }
-      created = {
+      const job: ChannelCronJob = {
         ...input,
         id: this.idFactory(),
         enabled: true,
         createdAt: this.now().toISOString(),
         consecutiveFailures: 0,
+        runCount: 0,
       };
-      return [...jobs, created];
+      created = job;
+      return [...jobs, job];
     });
     return created;
   }
