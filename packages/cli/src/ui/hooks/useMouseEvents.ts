@@ -8,7 +8,7 @@
  * out of the KeypressContext pipeline, call each handler, restore on cleanup.
  */
 
-import { useEffect, useRef, useCallback } from 'react';
+import { useContext, useEffect, useRef, useCallback } from 'react';
 import { useStdin, useStdout } from 'ink';
 import {
   enableMouseEvents,
@@ -17,8 +17,28 @@ import {
   type MouseTracking,
 } from '../utils/mouse.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 
 export type MouseHandler = (event: MouseEvent) => void;
+
+export interface MouseEventsOptions {
+  /** Subscribe + enable SGR mouse mode only while this is true. */
+  isActive: boolean;
+  /**
+   * Tracking level to request. `'button'` (?1002h) reports press/drag/release;
+   * `'any'` (?1003h) additionally reports bare motion, needed for hover. The
+   * effective terminal level is the highest any active subscriber requests.
+   */
+  tracking?: MouseTracking;
+  /**
+   * Opt out of the VP gate. By default mouse tracking is enabled only in VP
+   * mode (`ui.useTerminalBuffer`), so non-VP keeps native terminal scrollback.
+   * Set true for surfaces that own the wheel regardless — the VP viewport
+   * (ScrollableList) and alternate-screen modals (ThinkingViewer) — where
+   * there is no main-screen native scrollback to protect.
+   */
+  bypassVpGate?: boolean;
+}
 
 // Per-terminal reference counts, split by tracking level. The effective level
 // is the highest requested: any active subscriber asking for 'any' (hover)
@@ -115,19 +135,29 @@ function releaseMouseMode(
  */
 export function useMouseEvents(
   handler: MouseHandler,
-  {
-    isActive,
-    tracking = 'button',
-  }: { isActive: boolean; tracking?: MouseTracking },
+  { isActive, tracking = 'button', bypassVpGate = false }: MouseEventsOptions,
 ): void {
   const { isRawModeSupported } = useStdin();
   const { stdout } = useStdout();
   const { subscribeMouse, unsubscribeMouse } = useKeypressContext();
 
+  // VP gate: enabling SGR mouse tracking (?1002h) makes the host terminal stop
+  // doing native scrollback on the wheel. That is only acceptable when the app
+  // itself owns the wheel — i.e. in VP mode (ScrollableList) or on an
+  // alternate-screen surface (a modal) that has no native scrollback to begin
+  // with. On the non-VP main screen, holding mouse tracking just hijacks the
+  // wheel (Terminal.app diverts it away from scrollback), so by DEFAULT mouse
+  // tracking is denied outside VP. Surfaces that legitimately consume the wheel
+  // pass `bypassVpGate` to opt in. This keeps the non-VP transcript scrollable
+  // no matter how many click/hover subscribers are added later.
+  const settings = useContext(SettingsContext);
+  const isVpMode = settings?.merged.ui?.useTerminalBuffer ?? false;
+  const vpGateOpen = isVpMode || bypassVpGate;
+
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
 
-  const enabled = isActive && isRawModeSupported;
+  const enabled = isActive && isRawModeSupported && vpGateOpen;
 
   useEffect(() => {
     if (!enabled) return;

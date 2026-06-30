@@ -10,6 +10,8 @@ import { renderHook } from '@testing-library/react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useStdin, useStdout } from 'ink';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { useMouseEvents } from './useMouseEvents.js';
 
 vi.mock('ink', async (importOriginal) => {
@@ -33,9 +35,26 @@ const wrapper = ({ children }: { children: React.ReactNode }) => (
   <KeypressProvider kittyProtocolEnabled={false}>{children}</KeypressProvider>
 );
 
+const vpWrapper = (useTerminalBuffer: boolean) => {
+  const VpWrapper = ({ children }: { children: React.ReactNode }) => (
+    <SettingsContext.Provider
+      value={
+        { merged: { ui: { useTerminalBuffer } } } as unknown as LoadedSettings
+      }
+    >
+      <KeypressProvider kittyProtocolEnabled={false}>
+        {children}
+      </KeypressProvider>
+    </SettingsContext.Provider>
+  );
+  return VpWrapper;
+};
+
+// Mechanism tests exercise enable/disable/ref-counting independent of the VP
+// gate, so they opt out via bypassVpGate.
 function useTwoMouseSubscribers(firstActive: boolean, secondActive: boolean) {
-  useMouseEvents(() => {}, { isActive: firstActive });
-  useMouseEvents(() => {}, { isActive: secondActive });
+  useMouseEvents(() => {}, { isActive: firstActive, bypassVpGate: true });
+  useMouseEvents(() => {}, { isActive: secondActive, bypassVpGate: true });
 }
 
 describe('useMouseEvents', () => {
@@ -105,8 +124,15 @@ describe('useMouseEvents', () => {
         buttonActive: boolean;
         anyActive: boolean;
       }) => {
-        useMouseEvents(() => {}, { isActive: buttonActive });
-        useMouseEvents(() => {}, { isActive: anyActive, tracking: 'any' });
+        useMouseEvents(() => {}, {
+          isActive: buttonActive,
+          bypassVpGate: true,
+        });
+        useMouseEvents(() => {}, {
+          isActive: anyActive,
+          tracking: 'any',
+          bypassVpGate: true,
+        });
       },
       {
         initialProps: { buttonActive: true, anyActive: false },
@@ -140,7 +166,12 @@ describe('useMouseEvents', () => {
 
   it('enables ?1003h directly when the only active subscriber wants hover', () => {
     const { unmount } = renderHook(
-      () => useMouseEvents(() => {}, { isActive: true, tracking: 'any' }),
+      () =>
+        useMouseEvents(() => {}, {
+          isActive: true,
+          tracking: 'any',
+          bypassVpGate: true,
+        }),
       { wrapper },
     );
 
@@ -150,5 +181,29 @@ describe('useMouseEvents', () => {
     stdout.write.mockClear();
     unmount();
     expect(stdout.write).toHaveBeenCalledWith(DISABLE_ANY);
+  });
+
+  describe('VP gate', () => {
+    it('non-VP without bypass: does NOT enable mouse mode (native scrollback preserved)', () => {
+      renderHook(() => useMouseEvents(() => {}, { isActive: true }), {
+        wrapper: vpWrapper(false),
+      });
+      expect(stdout.write).not.toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
+
+    it('VP without bypass: enables mouse mode', () => {
+      renderHook(() => useMouseEvents(() => {}, { isActive: true }), {
+        wrapper: vpWrapper(true),
+      });
+      expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
+
+    it('bypassVpGate: enables mouse mode even in non-VP (modal / VP viewport)', () => {
+      renderHook(
+        () => useMouseEvents(() => {}, { isActive: true, bypassVpGate: true }),
+        { wrapper: vpWrapper(false) },
+      );
+      expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
   });
 });
