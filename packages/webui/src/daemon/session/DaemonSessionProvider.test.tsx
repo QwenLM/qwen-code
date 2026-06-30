@@ -1131,7 +1131,6 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.removePendingPrompt).toHaveBeenCalledWith(
       'session-old',
       'pending-old',
-      { clientId: 'client-current' },
     );
   });
 
