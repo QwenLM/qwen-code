@@ -369,11 +369,12 @@ describe('handleGroup', () => {
     expect(env.isMentioned).toBe(true);
     expect(env.isReplyToBot).toBe(true);
     expect(env.chatId).toBe('group-openid-1');
-    expect(env.text).toBe('[atMention=true] [Bob]: 你好');
+    // allowMention defaults to true — raw content (with <@OPENID> tags) is preserved
+    expect(env.text).toBe('[atMention=true] [Bob]: <@OPENID_BOT> 你好');
   });
 
-  it('清理 <@OPENID> 标签', async () => {
-    const ch = makeChannel();
+  it('allowMention=false 时清理 <@OPENID> 标签', async () => {
+    const ch = makeChannel({ allowMention: false });
     const pvt = ch as unknown as QQChannelRaw;
     pvt.handleGroup(
       makeGroupEvent({

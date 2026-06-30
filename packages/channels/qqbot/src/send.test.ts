@@ -545,7 +545,7 @@ describe('sanitizeLogText (real)', () => {
     const actual = await vi.importActual<
       typeof import('@qwen-code/channel-base')
     >('@qwen-code/channel-base');
-    const result = actual.sanitizeLogText('\x1B[31merror\x1B[0m');
+    const result = actual.sanitizeLogText('\x1B[31merror\x1B[0m', 64);
     expect(result).not.toContain('\x1B');
   });
 
@@ -553,7 +553,7 @@ describe('sanitizeLogText (real)', () => {
     const actual = await vi.importActual<
       typeof import('@qwen-code/channel-base')
     >('@qwen-code/channel-base');
-    const result = actual.sanitizeLogText('\u202Eflipped\u202C');
+    const result = actual.sanitizeLogText('\u202Eflipped\u202C', 64);
     expect(result).not.toContain('\u202E');
     expect(result).not.toContain('\u202A');
   });
@@ -562,7 +562,7 @@ describe('sanitizeLogText (real)', () => {
     const actual = await vi.importActual<
       typeof import('@qwen-code/channel-base')
     >('@qwen-code/channel-base');
-    const result = actual.sanitizeLogText('log\u0085injection');
+    const result = actual.sanitizeLogText('log\u0085injection', 64);
     expect(result).not.toContain('\u0085');
   });
 
@@ -570,7 +570,7 @@ describe('sanitizeLogText (real)', () => {
     const actual = await vi.importActual<
       typeof import('@qwen-code/channel-base')
     >('@qwen-code/channel-base');
-    const result = actual.sanitizeLogText('line1\nline2');
+    const result = actual.sanitizeLogText('line1\nline2', 64);
     // Real newlines in log text should be escaped, not passed through raw
     expect(result).not.toContain('\n');
     // The escape character \\n may appear as the literal string "\n"
@@ -581,7 +581,7 @@ describe('sanitizeLogText (real)', () => {
     const actual = await vi.importActual<
       typeof import('@qwen-code/channel-base')
     >('@qwen-code/channel-base');
-    const result = actual.sanitizeLogText('Normal log message');
+    const result = actual.sanitizeLogText('Normal log message', 64);
     expect(result).toBe('Normal log message');
   });
 });

@@ -1419,7 +1419,7 @@ export class QQChannel extends ChannelBase {
 
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] [${safeName}]: ${sanitizePromptText(cleanText)}`;
+      : `[atMention=${isAtBot}] [${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content ?? '') : cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
