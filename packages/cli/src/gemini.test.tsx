@@ -29,6 +29,8 @@ import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
+const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
+const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 
 describe('gemini import boundary', () => {
   it('does not statically import ACP or noninteractive auth branches', () => {
@@ -137,6 +139,13 @@ vi.mock('./core/initializer.js', () => ({
     shouldOpenAuthDialog: false,
     geminiMdFileCount: 0,
   }),
+}));
+
+vi.mock('./startup/startup-prefetch.js', () => ({
+  startEarlyStartupPrefetches: (...args: unknown[]) =>
+    mockStartEarlyStartupPrefetches(...args),
+  startPostRenderPrefetches: (...args: unknown[]) =>
+    mockStartPostRenderPrefetches(...args),
 }));
 
 vi.mock('./commands/extensions/list.js', () => ({
@@ -534,6 +543,11 @@ describe('gemini.tsx main function', () => {
     }
 
     expect(mockWriteStderrLine).toHaveBeenCalledWith('late memory warning');
+    expect(initializerModule.initializeApp).toHaveBeenCalledWith(
+      configStub,
+      expect.any(Object),
+      { deferIdeConnection: false },
+    );
   });
 
   it('creates non-interactive prompt ids that preserve session correlation', () => {
@@ -858,6 +872,11 @@ describe('gemini.tsx main function', () => {
       configStub,
       expect.any(Object),
     );
+    expect(initializerModule.initializeApp).toHaveBeenCalledWith(
+      configStub,
+      expect.any(Object),
+      { deferIdeConnection: false },
+    );
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
   });
 });
@@ -927,6 +946,15 @@ describe('gemini.tsx main function kitty protocol', () => {
       './config/config.js'
     );
     const { loadSettings } = await import('./config/settings.js');
+    const initializerModule = await import('./core/initializer.js');
+    const initializeAppSpy = vi
+      .spyOn(initializerModule, 'initializeApp')
+      .mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      });
     vi.mocked(loadCliConfig).mockResolvedValue({
       isInteractive: () => true,
       getQuestion: () => '',
@@ -1016,6 +1044,13 @@ describe('gemini.tsx main function kitty protocol', () => {
 
     expect(setRawModeSpy).toHaveBeenCalledWith(true);
     expect(detectAndEnableKittyProtocol).toHaveBeenCalledTimes(1);
+    expect(initializeAppSpy).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        deferIdeConnection: true,
+      },
+    );
   });
 
   it('should run cleanup before exiting on interactive SIGINT', async () => {
@@ -1248,10 +1283,6 @@ describe('startInteractiveUI', () => {
     disableKittyProtocol: vi.fn(),
   }));
 
-  vi.mock('./ui/utils/updateCheck.js', () => ({
-    checkForUpdates: vi.fn(() => Promise.resolve(null)),
-  }));
-
   vi.mock('./utils/cleanup.js', () => ({
     cleanupCheckpoints: vi.fn(() => Promise.resolve()),
     registerCleanup: vi.fn(),
@@ -1302,7 +1333,6 @@ describe('startInteractiveUI', () => {
 
   it('should perform all startup tasks in correct order', async () => {
     const { getCliVersion } = await import('./utils/version.js');
-    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
     const { registerCleanup } = await import('./utils/cleanup.js');
 
     const mockInitializationResult = {
@@ -1328,15 +1358,14 @@ describe('startInteractiveUI', () => {
     const cleanupFn = vi.mocked(registerCleanup).mock.calls[0][0];
     expect(typeof cleanupFn).toBe('function');
 
-    // checkForUpdates should be called asynchronously (not waited for)
-    // We need a small delay to let it execute
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      mockConfig,
+      mockSettings,
+      { connectIde: true },
+    );
   });
 
-  it('should not call checkForUpdates when enableAutoUpdate is false', async () => {
-    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
-
+  it('delegates auto-update gating to post-render prefetch', async () => {
     const settingsWithAutoUpdateDisabled = {
       merged: {
         general: {
@@ -1363,9 +1392,10 @@ describe('startInteractiveUI', () => {
       mockInitializationResult,
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    // checkForUpdates should NOT be called when enableAutoUpdate is false
-    expect(checkForUpdates).not.toHaveBeenCalled();
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      mockConfig,
+      settingsWithAutoUpdateDisabled,
+      { connectIde: true },
+    );
   });
 });
