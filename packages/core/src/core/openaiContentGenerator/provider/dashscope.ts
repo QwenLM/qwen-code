@@ -257,8 +257,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return {};
   }
 
-  getResponseParsingOptions(): OpenAIResponseParsingOptions {
-    if (this.isGlmModel(this.contentGeneratorConfig.model)) {
+  getResponseParsingOptions(model?: string): OpenAIResponseParsingOptions {
+    if (this.isGlmModel(model ?? this.contentGeneratorConfig.model)) {
       return { taggedThinkingTags: true };
     }
     return {};

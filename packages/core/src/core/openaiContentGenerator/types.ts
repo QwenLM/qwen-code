@@ -63,6 +63,18 @@ export interface RequestContext {
    * channel are deduplicated correctly.
    */
   reasoningDeltaState?: StreamingTextDeltaState;
+  /**
+   * Set once tagged content parsing emits a thought in this stream. Used to
+   * suppress duplicate provider reasoning-channel output that arrives in a
+   * different chunk.
+   */
+  hasTaggedThinkingThought?: boolean;
+  /**
+   * Reasoning-channel text buffered while a tagged-thinking stream is still
+   * open. It is emitted only if the stream finishes without tagged content
+   * producing any thought parts.
+   */
+  pendingReasoningText?: string;
 }
 
 export interface ErrorHandler {

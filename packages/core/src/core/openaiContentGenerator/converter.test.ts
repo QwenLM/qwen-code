@@ -4085,6 +4085,150 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('should suppress reasoning_content when the same streaming chunk has tagged thinking content', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const chunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-dual-tagged',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_content: 'duplicate reasoning channel',
+                content: '<think>tagged reasoning</think>final answer',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(chunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'tagged reasoning', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should suppress buffered reasoning_content when later streaming content has tagged thinking', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-reasoning-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'duplicate reasoning channel' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const secondChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-reasoning-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: '<think>tagged reasoning</think>' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-reasoning-3',
+          created: 458,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'final answer' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'tagged reasoning', thought: true },
+      ]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should flush buffered reasoning_content when tagged streaming content has no thinking tags', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-reasoning-only-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_content: 'separate reasoning channel',
+                content: 'final ',
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-reasoning-only-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'answer' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'final ' },
+      ]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'separate reasoning channel', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
     it('should flush unclosed streaming thinking content on finish', () => {
       const context = withTaggedThinkingStreamParser();
 

@@ -1256,7 +1256,16 @@ export function convertOpenAIChunkToGemini(
       contentParts = convertOpenAITextToParts('', requestContext, true);
     }
 
-    if (reasoningText) {
+    if (hasThoughtPart(contentParts)) {
+      requestContext.hasTaggedThinkingThought = true;
+      requestContext.pendingReasoningText = undefined;
+    }
+
+    if (
+      reasoningText &&
+      (!requestContext.responseParsingOptions?.taggedThinkingTags ||
+        !requestContext.hasTaggedThinkingThought)
+    ) {
       const normalizedReasoningText = normalizeStreamingTextDelta(
         reasoningText,
         (requestContext.reasoningDeltaState ??= {
@@ -1265,9 +1274,28 @@ export function convertOpenAIChunkToGemini(
           cumulativeMode: false,
         }),
       );
-      if (normalizedReasoningText && !hasThoughtPart(contentParts)) {
+      if (
+        normalizedReasoningText &&
+        !requestContext.responseParsingOptions?.taggedThinkingTags
+      ) {
         parts.push({ text: normalizedReasoningText, thought: true });
+      } else if (
+        normalizedReasoningText &&
+        !requestContext.hasTaggedThinkingThought
+      ) {
+        requestContext.pendingReasoningText =
+          (requestContext.pendingReasoningText ?? '') + normalizedReasoningText;
       }
+    }
+
+    if (
+      choice.finish_reason &&
+      requestContext.responseParsingOptions?.taggedThinkingTags &&
+      !requestContext.hasTaggedThinkingThought &&
+      requestContext.pendingReasoningText
+    ) {
+      parts.push({ text: requestContext.pendingReasoningText, thought: true });
+      requestContext.pendingReasoningText = undefined;
     }
     parts.push(...contentParts);
 
