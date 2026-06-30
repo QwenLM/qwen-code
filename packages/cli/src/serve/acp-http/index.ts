@@ -362,7 +362,12 @@ export function mountAcpHttp(
     localPort: number | undefined,
     originatorClientId: string,
   ): void {
-    if (opts.token) return;
+    if (opts.token) {
+      writeStderrLine(
+        `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped because /cdp requires bearer auth`,
+      );
+      return;
+    }
     if (cdpMcpRegistered || cdpMcpRegistering) return;
     const runtimeConfig = buildChromeDevToolsMcpRuntimeConfig(localPort);
     if (!runtimeConfig) return;

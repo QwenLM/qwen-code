@@ -82,7 +82,7 @@ import {
 } from '../utils/startupProfiler.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
-// Default-on browser MCP channel; `=0` / `false` disables it for rollback.
+// Browser MCP channel; default-on for Chrome-extension origins or explicit env.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
 // CDP tunnel; default-on for Chrome-extension origins or explicit env opt-in.
 const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
@@ -1102,18 +1102,23 @@ export async function runQwenServe(
     );
   const clientMcpOverWsEnv = process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV];
   const cdpTunnelOverWsEnv = process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV];
+  const chromeExtensionOriginAllowed = hasChromeExtensionOrigin(
+    optsIn.allowOrigins,
+  );
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     clientMcpOverWs:
-      optsIn.clientMcpOverWs ?? !envFlagDisabled(clientMcpOverWsEnv),
+      optsIn.clientMcpOverWs ??
+      (!envFlagDisabled(clientMcpOverWsEnv) &&
+        (clientMcpOverWsEnv !== undefined || chromeExtensionOriginAllowed)),
     cdpTunnelOverWs:
       optsIn.cdpTunnelOverWs ??
       (!envFlagDisabled(cdpTunnelOverWsEnv) &&
         (cdpTunnelOverWsEnv !== undefined ||
-          hasChromeExtensionOrigin(optsIn.allowOrigins))),
+          chromeExtensionOriginAllowed)),
   };
   validateRateLimitOptions(opts);
 

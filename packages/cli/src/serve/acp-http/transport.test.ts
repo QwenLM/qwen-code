@@ -3885,6 +3885,32 @@ describe('ACP WebSocket transport security', () => {
     });
   });
 
+  it('skips chrome-devtools MCP registration when /cdp requires auth', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({
+      cdpTunnelOverWs: true,
+      token: 'secret-token-123',
+    });
+    const ws = await wsConnect({
+      headers: { Authorization: 'Bearer secret-token-123' },
+    });
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' },
+      },
+    });
+
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: chrome-devtools runtime MCP skipped because /cdp requires bearer auth',
+    );
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
   it('rejects WS upgrade with a loopback Origin header on a different port', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'http://localhost:3000');

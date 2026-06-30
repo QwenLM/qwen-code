@@ -698,7 +698,7 @@ describe('runQwenServe runtime startup failures', () => {
     },
   );
 
-  it('auto-enables the CDP tunnel for Chrome extension origins when the env flag is unset', async () => {
+  it('auto-enables browser MCP features for Chrome extension origins when the env flag is unset', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(undefined);
 
     expect(features).toEqual(
@@ -706,13 +706,13 @@ describe('runQwenServe runtime startup failures', () => {
     );
   });
 
-  it('keeps the CDP tunnel disabled for non-extension origins when the env flag is unset', async () => {
+  it('keeps browser MCP features disabled for non-extension origins when the env flag is unset', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
       'https://example.com',
     );
 
-    expect(features).toContain('client_mcp_over_ws');
+    expect(features).not.toContain('client_mcp_over_ws');
     expect(features).not.toContain('cdp_tunnel_over_ws');
   });
 
@@ -1078,7 +1078,6 @@ describe('runQwenServe runtime startup failures', () => {
           'daemon_status',
           'workspace_settings',
           'workspace_reload',
-          'client_mcp_over_ws',
         ]),
         modelServices: [],
         workspaceCwd: boundWorkspace,
@@ -1086,6 +1085,7 @@ describe('runQwenServe runtime startup failures', () => {
         policy: { permission: 'first-responder' },
         limits: { maxPendingPromptsPerSession: 5 },
       });
+      expect(capabilitiesBody.features).not.toContain('client_mcp_over_ws');
       expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
 
       const port = new URL(handle.url).port;
@@ -1468,6 +1468,7 @@ describe('runQwenServe startup observability', () => {
         workspace: tmpDir,
         maxSessions: 1,
         serveWebShell: false,
+        allowOrigins: ['chrome-extension://qwen-test-extension'],
       },
       { bridge: makeFakeBridge() },
     );
