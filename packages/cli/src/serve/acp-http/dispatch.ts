@@ -1137,7 +1137,30 @@ export class AcpDispatcher {
             }
             return;
           }
-          const response = parsePermissionResponse(params);
+          let response: PermissionResponse;
+          try {
+            response = parsePermissionResponse(params);
+          } catch (err) {
+            // Map the validation throw to a structured 400 here so it carries
+            // the same `{ httpStatus }` envelope as every other error path in
+            // this handler — the outer dispatcher catch would otherwise emit a
+            // plain INVALID_PARAMS with no httpStatus for SDK callers.
+            if (err instanceof AcpParamError) {
+              writeStderrLine(
+                `qwen serve: /acp session/permission invalid params (requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, err.message, {
+                    httpStatus: 400,
+                    requestId,
+                  }),
+                );
+              }
+              return;
+            }
+            throw err;
+          }
           const sessionIdParam =
             typeof params['sessionId'] === 'string' &&
             params['sessionId'].length > 0

@@ -1931,10 +1931,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       const [frame] = (await got) as Array<{
         id: number;
-        error: { code: number; message: string };
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
       }>;
       expect(frame.error.code).toBe(-32602);
       expect(frame.error.message).toContain('`outcome` must be');
+      // Carries the same { httpStatus: 400 } envelope as the handler's other
+      // error paths, not a bare INVALID_PARAMS from the outer catch.
+      expect(frame.error.data?.httpStatus).toBe(400);
     },
   );
 
