@@ -110,8 +110,8 @@ export type ContentGeneratorConfig = {
         // each provider adapter maps + clamps this tier onto the active model:
         //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
-        //   - OpenAI has no 'max' (adapters clamp it to 'xhigh'); Gemini caps
-        //     at 'high'.
+        //   - The default OpenAI-compatible pipeline forwards the tier verbatim
+        //     (no 'max' clamp); Gemini caps at 'high'.
         //   - Real Anthropic clamps unsupported 'xhigh'/'max' down to 'high'
         //     (logged once per generator via debugLogger.warn) when the baseURL
         //     doesn't look like a DeepSeek-compatible endpoint, so configs
