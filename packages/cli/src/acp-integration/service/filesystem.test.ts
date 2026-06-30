@@ -622,9 +622,16 @@ describe('AcpFileSystemService', () => {
           { localReadRoots: [localRoot] },
         );
 
-        await expect(svc.readTextFile({ path: filePath })).rejects.toBe(
-          fallbackError,
-        );
+        const err = await svc
+          .readTextFile({ path: filePath })
+          .catch((e: unknown) => e);
+
+        expect(err).toBe(fallbackError);
+        expect(err).toMatchObject({
+          code: 'ENOENT',
+          errno: -2,
+          path: filePath,
+        });
         expect(fallback.readTextFile).toHaveBeenCalledWith({
           path: await fs.realpath(filePath),
         });

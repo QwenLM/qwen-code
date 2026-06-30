@@ -84,6 +84,15 @@ describe('getErrorMessage cause unwrapping', () => {
     ).toBe('fetch failed (cause: -32603: connection refused)');
   });
 
+  it('surfaces message-only plain object causes', () => {
+    expect(
+      getErrorMessage({
+        message: 'fetch failed',
+        cause: { message: 'connection refused' },
+      }),
+    ).toBe('fetch failed (cause: connection refused)');
+  });
+
   it('bounds long messages from plain error-like objects', () => {
     const message = getErrorMessage({ message: 'x'.repeat(2000) });
 
@@ -108,8 +117,20 @@ describe('getErrorMessage cause unwrapping', () => {
     expect(getErrorMessage(circular)).toBe('-32603');
   });
 
+  it('uses String formatting when circular plain objects have no error details', () => {
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    expect(getErrorMessage(circular)).toBe('[object Object]');
+  });
+
   it('uses String formatting for arrays', () => {
     expect(getErrorMessage([1, 2, 3])).toBe('1,2,3');
+  });
+
+  it('uses String formatting for null and undefined', () => {
+    expect(getErrorMessage(null)).toBe('null');
+    expect(getErrorMessage(undefined)).toBe('undefined');
   });
 });
 
