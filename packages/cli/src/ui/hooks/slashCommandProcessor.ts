@@ -122,6 +122,7 @@ export interface SlashCommandProcessorActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    persistScope?: 'workspace' | 'user';
   }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
@@ -821,7 +822,9 @@ export const useSlashCommandProcessor = (
                       actions.openMemoryDialog();
                       return { type: 'handled' };
                     case 'model':
-                      actions.openModelDialog();
+                      actions.openModelDialog({
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'fast-model':
                       actions.openModelDialog({ fastModelMode: true });

@@ -1346,6 +1346,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately).':
+    '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换）',
   "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
     "⚠ '{{model}}' 不是已知的图像能力模型；视觉桥接处理图片时可能会失败。",
   'Set a lighter model for prompt suggestions and speculative execution':
@@ -1354,6 +1356,10 @@ export default {
   'Set the model for voice transcription': '设置语音转写模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '设置用于为纯文本主模型转写图像的图像能力模型',
+  'Persist the model selection to the project settings (workspace scope)':
+    '将模型选择持久化到项目设置（工作区）',
+  'Persist the model selection to the user settings (global scope)':
+    '将模型选择持久化到用户设置（全局）',
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
   'Select Voice Model': '选择语音模型',
@@ -1575,6 +1581,10 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': '选择模型',
+  'Select Model (this project)': '选择模型（当前项目）',
+  'Select Model (global)': '选择模型（全局）',
+  'Model: {{model}} (project)': '模型：{{model}}（项目）',
+  'Model: {{model}} (global)': '模型：{{model}}（全局）',
   'API Key': 'API Key',
   '(default)': '(默认)',
   '(not set)': '(未设置)',
