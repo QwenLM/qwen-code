@@ -72,6 +72,9 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
       const message = getSubagentPlanToolUnavailableMessage(
         ToolNames.ENTER_PLAN_MODE,
       );
+      debugLogger.warn(
+        `[EnterPlanModeTool] Blocked plan lifecycle tool call from subagent: ${ToolNames.ENTER_PLAN_MODE}`,
+      );
       return {
         llmContent: message,
         returnDisplay: message,

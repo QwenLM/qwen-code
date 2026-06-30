@@ -207,6 +207,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       const message = getSubagentPlanToolUnavailableMessage(
         ToolNames.EXIT_PLAN_MODE,
       );
+      debugLogger.warn(
+        `[ExitPlanModeTool] Blocked plan lifecycle tool call from subagent: ${ToolNames.EXIT_PLAN_MODE}`,
+      );
       return {
         llmContent: message,
         returnDisplay: message,
