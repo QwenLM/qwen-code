@@ -1918,7 +1918,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           false,
         );
       } else {
+        // Mirror the keyboard accept path (acceptActiveCompletionSuggestion +
+        // the ACCEPT_SUGGESTION handler) so a click behaves like Enter on the
+        // highlighted suggestion. Capture the suggestion BEFORE
+        // handleAutocomplete mutates the buffer/suggestions.
+        const accepted =
+          index >= 0 && index < completion.suggestions.length
+            ? completion.suggestions[index]
+            : undefined;
         completion.handleAutocomplete(index);
+        exportCompletion.navigatedRef.current = false;
+        setExpandedSuggestionIndex(-1);
+        // For @folder paths, dismiss the completion so the dropdown stays
+        // closed (folder paths append no trailing space, so the @ pattern
+        // would otherwise re-match and re-open it).
+        if (
+          accepted?.isDirectory &&
+          completion.completionMode === CompletionMode.AT
+        ) {
+          dismissCompletion();
+        }
+        // A click is an explicit accept (the mouse equivalent of Enter, never
+        // Tab), so honor submitOnAccept unconditionally — clicking a leaf
+        // command like `/skills` submits it and opens the dialog in one click,
+        // matching the keyboard behavior.
+        if (accepted?.submitOnAccept) {
+          handleSubmitAndClear(`/${accepted.value}`);
+        }
       }
     },
     [
@@ -1927,6 +1953,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       commandSearchCompletion,
       reverseSearchCompletion,
       completion,
+      exportCompletion,
+      dismissCompletion,
+      handleSubmitAndClear,
+      setExpandedSuggestionIndex,
       setCommandSearchActive,
       setReverseSearchActive,
     ],

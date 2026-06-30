@@ -68,6 +68,22 @@ describe('visualClickToOffset', () => {
     expect(visualClickToOffset(buffer, 1, 2)).toBe(5);
   });
 
+  it('snaps to the right side when the right half of a wide char is clicked', () => {
+    const buffer: ClickableBufferState = {
+      lines: ['日本'],
+      allVisualLines: ['日本'],
+      visualToLogicalMap: [[0, 0]],
+    };
+    // '日' occupies cells 0–1. Clicking its left cell (col 0) lands before it
+    // (logical col 0 → offset 0); clicking its right cell (col 1) lands after
+    // it (logical col 1 → offset 1).
+    expect(visualClickToOffset(buffer, 0, 0)).toBe(0);
+    expect(visualClickToOffset(buffer, 0, 1)).toBe(1);
+    // '本' occupies cells 2–3. Right cell (col 3) lands after it (offset 2).
+    expect(visualClickToOffset(buffer, 0, 2)).toBe(1);
+    expect(visualClickToOffset(buffer, 0, 3)).toBe(2);
+  });
+
   it('clicking past the end of the text lands at the line end', () => {
     const buffer: ClickableBufferState = {
       lines: ['hi'],

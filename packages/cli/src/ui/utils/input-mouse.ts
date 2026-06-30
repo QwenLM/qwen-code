@@ -53,7 +53,15 @@ export function visualClickToOffset(
   for (let i = 0; i < chars.length; i++) {
     const charWidth = Math.max(getCachedStringWidth(chars[i]!), 1);
     if (accumulatedWidth + charWidth > clickVisualCol) {
-      codePointIndex = i;
+      // The click falls within this character's cells. For wide glyphs (CJK,
+      // emoji) snap to whichever side of the midpoint the click lands on, so
+      // clicking the right half places the cursor after the character. The
+      // midpoint is `ceil(charWidth / 2)` cells in: a 1-cell character always
+      // resolves to its left boundary (cell offset 0 < 1), while the right
+      // cell of a 2-cell character resolves to the right boundary (offset
+      // 1 >= 1).
+      const offsetWithinChar = clickVisualCol - accumulatedWidth;
+      codePointIndex = offsetWithinChar >= Math.ceil(charWidth / 2) ? i + 1 : i;
       break;
     }
     accumulatedWidth += charWidth;
