@@ -18,6 +18,8 @@ import {
   checkForExtensionUpdate,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
+import { markPluginsChanged } from '../../../../config/plugin-refresh-state.js';
+import { clearPluginCaches } from '../../../../config/hot-reload.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
 import {
   PluginDetailView,
@@ -114,11 +116,23 @@ export const ExtensionActionsView = ({
         switch (action) {
           case 'toggle':
             if (enabled) {
-              await manager.disableExtension(name, settingScopeFor(scope));
+              await manager.disableExtension(
+                name,
+                settingScopeFor(scope),
+                undefined,
+                { refreshTools: false },
+              );
             } else {
-              await manager.enableExtension(name, settingScopeFor(scope));
+              await manager.enableExtension(
+                name,
+                settingScopeFor(scope),
+                undefined,
+                { refreshTools: false },
+              );
             }
             setEnabled(!enabled);
+            await clearPluginCaches(config);
+            markPluginsChanged('extension enablement changed');
             onStatus({
               type: 'success',
               text: t('"{{name}}" {{state}}.', {
@@ -194,7 +208,10 @@ export const ExtensionActionsView = ({
               extension,
               ExtensionUpdateState.UPDATE_AVAILABLE,
               () => {},
+              false,
             );
+            await clearPluginCaches(config);
+            markPluginsChanged('extension updated');
             onStatus({
               type: 'success',
               text: t('Updated "{{name}}".', { name }),
@@ -211,7 +228,7 @@ export const ExtensionActionsView = ({
         onStatus({ type: 'error', text: getErrorMessage(error) });
       }
     },
-    [manager, extension, enabled, scope, onStatus, onReload],
+    [manager, config, extension, enabled, scope, onStatus, onReload],
   );
 
   const handleScope = useCallback(
@@ -225,17 +242,31 @@ export const ExtensionActionsView = ({
         // failed enable can't leave the prefs pointing at a scope the extension
         // isn't actually enabled at.
         if (newScope === 'user') {
-          await manager.enableExtension(name, SettingScope.User);
+          await manager.enableExtension(name, SettingScope.User, undefined, {
+            refreshTools: false,
+          });
         } else {
-          await manager.disableExtension(name, SettingScope.User);
+          await manager.disableExtension(name, SettingScope.User, undefined, {
+            refreshTools: false,
+          });
           try {
-            await manager.enableExtension(name, SettingScope.Workspace);
+            await manager.enableExtension(
+              name,
+              SettingScope.Workspace,
+              undefined,
+              { refreshTools: false },
+            );
           } catch (enableError) {
             // The User-scope disable already landed; if the Workspace enable
             // fails the extension would be disabled everywhere. Roll the User
             // enable back so it isn't silently dead.
             try {
-              await manager.enableExtension(name, SettingScope.User);
+              await manager.enableExtension(
+                name,
+                SettingScope.User,
+                undefined,
+                { refreshTools: false },
+              );
             } catch (rollbackError) {
               // Rollback also failed: the extension is now disabled at every
               // scope. Surface that explicitly — the bare enable error wouldn't
@@ -253,6 +284,8 @@ export const ExtensionActionsView = ({
         manager.setExtensionScope(name, newScope);
         setScope(newScope);
         setEnabled(true);
+        await clearPluginCaches(config);
+        markPluginsChanged('extension scope changed');
         onStatus({
           type: 'success',
           text: t('Set "{{name}}" scope to {{scope}}.', {
@@ -267,7 +300,7 @@ export const ExtensionActionsView = ({
       setScopeBusy(false);
       setSub('detail');
     },
-    [manager, extension, onStatus, onReload],
+    [manager, config, extension, onStatus, onReload],
   );
 
   const handleUninstall = useCallback(
@@ -275,7 +308,11 @@ export const ExtensionActionsView = ({
       if (!manager) return;
       setUninstallBusy(true);
       try {
-        await manager.uninstallExtension(ext.name, false);
+        await manager.uninstallExtension(ext.name, false, undefined, {
+          refreshTools: false,
+        });
+        await clearPluginCaches(config);
+        markPluginsChanged('extension uninstalled');
         onStatus({
           type: 'success',
           text: t('Uninstalled "{{name}}".', { name: ext.name }),
@@ -288,7 +325,7 @@ export const ExtensionActionsView = ({
       }
       onExit();
     },
-    [manager, onStatus, onReload, onExit],
+    [manager, config, onStatus, onReload, onExit],
   );
 
   // Escape: from the detail leaves; from a sub-view returns to the detail.

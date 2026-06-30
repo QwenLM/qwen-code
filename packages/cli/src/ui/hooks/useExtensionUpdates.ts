@@ -5,11 +5,14 @@
  */
 
 import {
+  type Config,
   type ExtensionManager,
   getExtensionDisplayName,
 } from '@qwen-code/qwen-code-core';
 import { getCurrentLanguage } from '../../i18n/index.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { clearPluginCaches } from '../../config/hot-reload.js';
+import { markPluginsChanged } from '../../config/plugin-refresh-state.js';
 import {
   ExtensionUpdateState,
   extensionUpdatesReducer,
@@ -218,6 +221,7 @@ export const useExtensionUpdates = (
   extensionManager: ExtensionManager,
   addItem: UseHistoryManagerReturn['addItem'],
   cwd: string,
+  config?: Config,
 ) => {
   const [extensionsUpdateState, dispatchExtensionStateUpdate] = useReducer(
     extensionUpdatesReducer,
@@ -250,6 +254,7 @@ export const useExtensionUpdates = (
   }, [
     extensions,
     extensionManager,
+    config,
     extensionsUpdateState.extensionStatuses,
     dispatchExtensionStateUpdate,
   ]);
@@ -289,9 +294,19 @@ export const useExtensionUpdates = (
                 payload: { name: extensionName, state },
               });
             },
+            false,
           )
-          .then((result) => {
+          .then(async (result) => {
             if (!result) return;
+            if (config) {
+              try {
+                await clearPluginCaches(config);
+              } catch {
+                // Cache refresh failure is recoverable via /reload-plugins;
+                // don't convert a successful update into a user-facing error.
+              }
+            }
+            markPluginsChanged('extension updated');
             addItem(
               {
                 type: MessageType.INFO,
@@ -323,7 +338,14 @@ export const useExtensionUpdates = (
         Date.now(),
       );
     }
-  }, [extensions, extensionManager, extensionsUpdateState, addItem, cwd]);
+  }, [
+    extensions,
+    extensionManager,
+    config,
+    extensionsUpdateState,
+    addItem,
+    cwd,
+  ]);
 
   const extensionsUpdateStateComputed = useMemo(() => {
     const result = new Map<string, ExtensionUpdateState>();

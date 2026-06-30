@@ -116,6 +116,10 @@ export default {
   'Open homepage': 'Open homepage',
   'Project (Workspace)': 'Project (Workspace)',
   'Refreshed {{count}} extension(s).': 'Refreshed {{count}} extension(s).',
+  'Reload extension runtime changes.': 'Reload extension runtime changes.',
+  'Reload failed.': 'Reload failed.',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reloaded: {{summary}}': 'Reloaded: {{summary}}',
   'Remove from Favorites': 'Remove from Favorites',
   'Remove marketplace': 'Remove marketplace',
   'Remove marketplace "{{name}}"?': 'Remove marketplace "{{name}}"?',
@@ -957,6 +961,8 @@ export default {
     'No plugins available in this marketplace.',
   'Select a plugin to install from marketplace "{{name}}":':
     'Select a plugin to install from marketplace "{{name}}":',
+  'Plugin changes detected. Run `/reload-plugins` to apply them.':
+    'Plugin changes detected. Run `/reload-plugins` to apply them.',
   'Plugin selection cancelled.': 'Plugin selection cancelled.',
   'Select a plugin from "{{name}}"': 'Select a plugin from "{{name}}"',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':

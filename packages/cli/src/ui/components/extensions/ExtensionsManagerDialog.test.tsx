@@ -16,6 +16,10 @@ import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
 import { ShellFocusContext } from '../../contexts/ShellFocusContext.js';
 import { LoadedSettings } from '../../../config/settings.js';
+import {
+  needsPluginRefresh,
+  resetPluginRefreshStateForTesting,
+} from '../../../config/plugin-refresh-state.js';
 import type { UIState } from '../../contexts/UIStateContext.js';
 import type {
   Config,
@@ -98,6 +102,8 @@ const createConfig = (
   ({
     getExtensionManager: () => manager,
     getMcpServers: () => overrides.mcpServers ?? {},
+    getSkillManager: () => undefined,
+    getSubagentManager: () => undefined,
     getToolRegistry: () => undefined,
     getPromptRegistry: () => undefined,
     getResourceRegistry: () => undefined,
@@ -203,6 +209,7 @@ const renderWide = (config: Config, columns: number) => {
 describe('ExtensionsManagerDialog (tabbed)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetPluginRefreshStateForTesting();
   });
 
   it('renders the tab bar with all three tabs', () => {
@@ -421,6 +428,30 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('beta');
     // Plugins show their type + version (parallel to "MCP"), not a bare version.
     expect(frame).toContain('Extension v1.0.0');
+  });
+
+  it('marks plugins stale when toggling an installed plugin', async () => {
+    const manager = createManager({
+      extensions: [mockExtension('alpha', true)],
+    });
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      initialTab: EXTENSIONS_TABS.INSTALLED,
+    });
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('alpha');
+    });
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(manager.disableExtension).toHaveBeenCalledWith(
+        'alpha',
+        expect.any(String),
+        undefined,
+        { refreshTools: false },
+      );
+    });
+    expect(needsPluginRefresh()).toBe(true);
   });
 
   it('nests extension-bundled MCP servers under their extension on the Installed tab', async () => {

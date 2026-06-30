@@ -109,6 +109,10 @@ export default {
   'Open homepage': '打开主页',
   'Project (Workspace)': '项目（工作区）',
   'Refreshed {{count}} extension(s).': '已刷新 {{count}} 个扩展。',
+  'Reload extension runtime changes.': '重新加载扩展运行时变更。',
+  'Reload failed.': '重新加载失败。',
+  'Reload failed: {{message}}': '重新加载失败：{{message}}',
+  'Reloaded: {{summary}}': '已重新加载：{{summary}}',
   'Remove from Favorites': '从收藏中移除',
   'Remove marketplace': '移除市场源',
   'Remove marketplace "{{name}}"?': '移除市场源 "{{name}}"？',
@@ -934,6 +938,8 @@ export default {
   'No plugins available in this marketplace.': '此市场中没有可用的插件。',
   'Select a plugin to install from marketplace "{{name}}":':
     '从市场 "{{name}}" 中选择要安装的插件：',
+  'Plugin changes detected. Run `/reload-plugins` to apply them.':
+    '检测到插件变更。执行 `/reload-plugins` 以应用它们。',
   'Plugin selection cancelled.': '插件选择已取消。',
   'Select a plugin from "{{name}}"': '从 "{{name}}" 中选择插件',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':

@@ -8,6 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { resetPluginRefreshStateForTesting } from '../../config/plugin-refresh-state.js';
 
 import {
   useExtensionUpdates,
@@ -277,6 +278,7 @@ describe('useExtensionUpdates', () => {
   let userExtensionsDir: string;
 
   beforeEach(() => {
+    resetPluginRefreshStateForTesting();
     tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cli-test-home-'));
     vi.mocked(os.homedir).mockReturnValue(tempHomeDir);
     userExtensionsDir = path.join(tempHomeDir, QWEN_DIR, 'extensions');

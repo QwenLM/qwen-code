@@ -16,7 +16,11 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  Extension,
+  MCPServerConfig,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings, Settings } from './settings.js';
 import type {
   SettingsWatcher,
@@ -26,6 +30,7 @@ import {
   registerMcpHotReload,
   mcpServersEqual,
   mcpGatingEqual,
+  reloadPluginsRuntime,
 } from './hot-reload.js';
 import {
   loadMcpApprovals,
@@ -96,6 +101,108 @@ describe('mcpGatingEqual', () => {
     expect(mcpGatingEqual({ excluded: undefined }, { excluded: [] })).toBe(
       true,
     );
+  });
+});
+
+describe('reloadPluginsRuntime', () => {
+  it('refreshes extension runtime and reloads slash commands', async () => {
+    const refreshCache = vi.fn(async () => {});
+    const refreshTools = vi.fn(async () => {});
+    const reinitializeLsp = vi.fn(async () => {});
+    const reloadCommands = vi.fn(async () => {});
+    const activeExtensions = [
+      {
+        name: 'alpha',
+        commands: ['alpha:run', 'alpha:check'],
+        skills: [{ name: 'skill-a' }],
+        hooks: { PreToolUse: [{ command: 'echo ok' }] },
+        mcpServers: { alpha: { command: 'node' } },
+        path: '/extensions/alpha',
+        config: {
+          name: 'alpha',
+          version: '1.0.0',
+          lspServers: {
+            typescript: {
+              command: 'typescript-language-server',
+              extensionToLanguage: { '.ts': 'typescript' },
+            },
+          },
+        },
+      },
+      {
+        name: 'beta',
+        commands: ['beta:run'],
+        skills: [{ name: 'skill-b' }, { name: 'skill-c' }],
+        hooks: { PostToolUse: [{ command: 'echo done' }] },
+        mcpServers: {
+          beta: { command: 'node' },
+          gamma: { command: 'node' },
+        },
+        path: '/extensions/beta',
+        config: { name: 'beta', version: '1.0.0' },
+      },
+    ] as unknown as Extension[];
+    const config = {
+      getExtensionManager: () => ({
+        refreshCache,
+        refreshTools,
+      }),
+      getActiveExtensions: () => activeExtensions,
+      getTargetDir: () => '/workspace',
+      reinitializeLsp,
+    } as unknown as Config;
+
+    const summary = await reloadPluginsRuntime({ config, reloadCommands });
+
+    expect(refreshCache).toHaveBeenCalledOnce();
+    expect(refreshTools).toHaveBeenCalledOnce();
+    expect(reinitializeLsp).toHaveBeenCalledOnce();
+    expect(reloadCommands).toHaveBeenCalledOnce();
+    expect(refreshCache.mock.invocationCallOrder[0]).toBeLessThan(
+      refreshTools.mock.invocationCallOrder[0],
+    );
+    expect(refreshTools.mock.invocationCallOrder[0]).toBeLessThan(
+      reinitializeLsp.mock.invocationCallOrder[0],
+    );
+    expect(reinitializeLsp.mock.invocationCallOrder[0]).toBeLessThan(
+      reloadCommands.mock.invocationCallOrder[0],
+    );
+    expect(summary).toEqual({
+      extensionCount: 2,
+      commandCount: 3,
+      skillCount: 3,
+      hookCount: 2,
+      mcpServerCount: 3,
+      lspServerCount: 1,
+    });
+  });
+
+  it('does not require an LSP reload hook', async () => {
+    const refreshCache = vi.fn(async () => {});
+    const refreshTools = vi.fn(async () => {});
+    const reloadCommands = vi.fn(async () => {});
+    const config = {
+      getExtensionManager: () => ({
+        refreshCache,
+        refreshTools,
+      }),
+      getActiveExtensions: () => [],
+      getTargetDir: () => '/workspace',
+    } as unknown as Config;
+
+    const summary = await reloadPluginsRuntime({ config, reloadCommands });
+
+    expect(refreshCache).toHaveBeenCalledOnce();
+    expect(refreshTools).toHaveBeenCalledOnce();
+    expect(reloadCommands).toHaveBeenCalledOnce();
+    expect(summary).toEqual({
+      extensionCount: 0,
+      commandCount: 0,
+      skillCount: 0,
+      hookCount: 0,
+      mcpServerCount: 0,
+      lspServerCount: 0,
+    });
   });
 });
 

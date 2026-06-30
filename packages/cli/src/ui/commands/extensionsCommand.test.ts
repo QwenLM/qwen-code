@@ -9,6 +9,10 @@ import { MessageType } from '../types.js';
 import { extensionsCommand } from './extensionsCommand.js';
 import { type CommandContext } from './types.js';
 import {
+  needsPluginRefresh,
+  resetPluginRefreshStateForTesting,
+} from '../../config/plugin-refresh-state.js';
+import {
   describe,
   it,
   expect,
@@ -49,6 +53,7 @@ describe('extensionsCommand', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    resetPluginRefreshStateForTesting();
     mockOpenBrowserSecurely.mockResolvedValue(undefined);
     mockExtensionManager = createMockExtensionManager();
     mockGetExtensions.mockReturnValue([]);
@@ -236,7 +241,8 @@ describe('extensionsCommand', () => {
         },
         expect.any(Number),
       );
-      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
+      expect(mockContext.ui.reloadCommands).not.toHaveBeenCalled();
+      expect(needsPluginRefresh()).toBe(true);
     });
 
     it('should redact URL credentials in install progress messages', async () => {

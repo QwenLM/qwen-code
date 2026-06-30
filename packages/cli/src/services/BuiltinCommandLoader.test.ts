@@ -65,6 +65,17 @@ vi.mock('../ui/commands/permissionsCommand.js', async () => {
   };
 });
 
+vi.mock('../ui/commands/reload-plugins-command.js', async () => {
+  const { CommandKind } = await import('../ui/commands/types.js');
+  return {
+    reloadPluginsCommand: {
+      name: 'reload-plugins',
+      description: 'Reload plugins command',
+      kind: CommandKind.BUILT_IN,
+    },
+  };
+});
+
 vi.mock('../ui/commands/hooksCommand.js', async () => {
   const { CommandKind } = await import('../ui/commands/types.js');
   return {
@@ -201,6 +212,9 @@ describe('BuiltinCommandLoader', () => {
 
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
+
+    const reloadPluginsCmd = commands.find((c) => c.name === 'reload-plugins');
+    expect(reloadPluginsCmd).toBeDefined();
   });
 
   it('should include trust command when folder trust is enabled', async () => {

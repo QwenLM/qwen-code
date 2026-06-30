@@ -87,7 +87,7 @@ import {
   profileCheckpoint,
   finalizeStartupProfile,
 } from '../utils/startupProfiler.js';
-import { appEvents } from '../utils/events.js';
+import { appEvents, AppEvent } from '../utils/events.js';
 import process from 'node:process';
 
 /**
@@ -452,6 +452,7 @@ export const AppContainer = (props: AppContainerProps) => {
     extensionManager,
     historyManager.addItem,
     config.getWorkingDir(),
+    config,
   );
 
   const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
@@ -887,6 +888,25 @@ export const AppContainer = (props: AppContainerProps) => {
     );
     updateHandlerRef.current = handler;
     return () => handler?.cleanup();
+  }, [historyManager.addItem]);
+
+  useEffect(() => {
+    const addItem = historyManager.addItem;
+    const onPluginRefreshNeeded = () => {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: t(
+            'Plugin changes detected. Run `/reload-plugins` to apply them.',
+          ),
+        },
+        Date.now(),
+      );
+    };
+    appEvents.on(AppEvent.PluginRefreshNeeded, onPluginRefreshNeeded);
+    return () => {
+      appEvents.off(AppEvent.PluginRefreshNeeded, onPluginRefreshNeeded);
+    };
   }, [historyManager.addItem]);
 
   // Derive widths for InputPrompt using shared helper

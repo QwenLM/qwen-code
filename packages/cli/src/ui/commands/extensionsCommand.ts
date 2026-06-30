@@ -5,6 +5,8 @@
  */
 
 import { getErrorMessage } from '../../utils/errors.js';
+import { clearPluginCaches } from '../../config/hot-reload.js';
+import { markPluginsChanged } from '../../config/plugin-refresh-state.js';
 import { MessageType } from '../types.js';
 import {
   type CommandContext,
@@ -231,7 +233,14 @@ async function installAction(context: CommandContext, args: string) {
       },
       Date.now(),
     );
-    const extension = await extensionManager.installExtension(installMetadata);
+    const extension = await extensionManager.installExtension(
+      installMetadata,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { refreshTools: false },
+    );
     context.ui.addItem(
       {
         type: MessageType.INFO,
@@ -241,8 +250,10 @@ async function installAction(context: CommandContext, args: string) {
       },
       Date.now(),
     );
-    // FIXME: refresh command controlled by ui for now, cannot be auto refreshed by extensionManager
-    context.ui.reloadCommands();
+    if (context.services.config) {
+      await clearPluginCaches(context.services.config);
+    }
+    markPluginsChanged('extension installed');
   } catch (error) {
     context.ui.addItem(
       {

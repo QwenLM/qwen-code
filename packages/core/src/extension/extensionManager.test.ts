@@ -23,7 +23,11 @@ import {
   hashValue,
   type ExtensionConfig,
 } from './extensionManager.js';
-import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
+import type {
+  Config,
+  MCPServerConfig,
+  ExtensionInstallMetadata,
+} from '../index.js';
 
 const mockGit = {
   clone: vi.fn(),
@@ -786,6 +790,78 @@ describe('extension tests', () => {
 
       await manager.enableExtension('ext1', SettingScope.Workspace);
       expect(manager.isEnabled('ext1', tempWorkspaceDir)).toBe(true);
+    });
+
+    it('should skip tool refresh when requested', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+      const mockRestartMcpServers = vi.fn();
+      const mockRefreshCache = vi.fn();
+      const mockRefreshHierarchicalMemory = vi.fn();
+      const manager = createExtensionManager();
+      manager.setConfig({
+        getToolRegistry: () => ({
+          restartMcpServers: mockRestartMcpServers,
+        }),
+        getSkillManager: () => ({
+          refreshCache: mockRefreshCache,
+        }),
+        getSubagentManager: () => ({
+          refreshCache: mockRefreshCache,
+        }),
+        refreshHierarchicalMemory: mockRefreshHierarchicalMemory,
+      } as unknown as Config);
+      await manager.refreshCache();
+
+      await manager.disableExtension('ext1', SettingScope.User, undefined, {
+        refreshTools: false,
+      });
+      expect(manager.isEnabled('ext1')).toBe(false);
+      expect(
+        manager.getLoadedExtensions().find((ext) => ext.name === 'ext1')
+          ?.isActive,
+      ).toBe(false);
+
+      await manager.enableExtension('ext1', SettingScope.User, undefined, {
+        refreshTools: false,
+      });
+
+      expect(mockRestartMcpServers).not.toHaveBeenCalled();
+      expect(mockRefreshCache).not.toHaveBeenCalled();
+      expect(mockRefreshHierarchicalMemory).not.toHaveBeenCalled();
+      expect(manager.isEnabled('ext1')).toBe(true);
+      expect(
+        manager.getLoadedExtensions().find((ext) => ext.name === 'ext1')
+          ?.isActive,
+      ).toBe(true);
+    });
+
+    it('should refresh tools by default when disabling (no options)', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext2',
+        version: '1.0.0',
+      });
+      const mockRestartMcpServers = vi.fn();
+      const manager = createExtensionManager();
+      manager.setConfig({
+        getToolRegistry: () => ({ restartMcpServers: mockRestartMcpServers }),
+        getSkillManager: () => ({ refreshCache: vi.fn() }),
+        getSubagentManager: () => ({ refreshCache: vi.fn() }),
+      } as unknown as Config);
+      await manager.refreshCache();
+
+      // Disable without passing options — refreshTools should still run.
+      await manager.disableExtension('ext2', SettingScope.User);
+
+      expect(manager.isEnabled('ext2')).toBe(false);
+      // Default refreshTools: true means restartMcpServers IS called (unlike
+      // the explicit { refreshTools: false } test above that asserts the
+      // opposite).
+      expect(mockRestartMcpServers).toHaveBeenCalled();
     });
   });
 

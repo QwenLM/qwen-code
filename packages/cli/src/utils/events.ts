@@ -9,6 +9,7 @@ import { EventEmitter } from 'node:events';
 export enum AppEvent {
   OpenDebugConsole = 'open-debug-console',
   LogError = 'log-error',
+  PluginRefreshNeeded = 'plugin-refresh-needed',
   OauthDisplayMessage = 'oauth-display-message',
   OauthAuthUrl = 'oauth-auth-url',
   /**

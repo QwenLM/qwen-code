@@ -112,6 +112,10 @@ export enum SettingScope {
   SystemDefaults = 'SystemDefaults',
 }
 
+interface ExtensionRuntimeRefreshOptions {
+  refreshTools?: boolean;
+}
+
 export interface ExtensionChannelConfig {
   /** Relative path to JS entry point (must export `plugin: ChannelPlugin`) */
   entry: string;
@@ -435,6 +439,7 @@ export class ExtensionManager {
     name: string,
     scope: SettingScope,
     cwd?: string,
+    options?: ExtensionRuntimeRefreshOptions,
   ): Promise<void> {
     const currentDir = cwd ?? this.workspaceDir;
     if (
@@ -455,7 +460,9 @@ export class ExtensionManager {
     const config = getTelemetryConfig(currentDir, this.telemetrySettings);
     logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
     extension.isActive = true;
-    await this.refreshTools();
+    if (options?.refreshTools ?? true) {
+      await this.refreshTools();
+    }
   }
 
   /**
@@ -465,6 +472,7 @@ export class ExtensionManager {
     name: string,
     scope: SettingScope,
     cwd?: string,
+    options?: ExtensionRuntimeRefreshOptions,
   ): Promise<void> {
     const currentDir = cwd ?? this.workspaceDir;
     const config = getTelemetryConfig(currentDir, this.telemetrySettings);
@@ -485,7 +493,9 @@ export class ExtensionManager {
     this.disableByPath(name, true, scopePath);
     logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
     extension.isActive = false;
-    await this.refreshTools();
+    if (options?.refreshTools ?? true) {
+      await this.refreshTools();
+    }
   }
 
   /**
@@ -1018,6 +1028,7 @@ export class ExtensionManager {
     requestSetting?: (setting: ExtensionSetting) => Promise<string>,
     cwd?: string,
     previousExtensionConfig?: ExtensionConfig,
+    options?: ExtensionRuntimeRefreshOptions,
   ): Promise<Extension> {
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
@@ -1287,7 +1298,9 @@ export class ExtensionManager {
               'success',
             ),
           );
-          await this.refreshTools();
+          if (options?.refreshTools ?? true) {
+            await this.refreshTools();
+          }
         } else {
           logExtensionInstallEvent(
             telemetryConfig,
@@ -1301,6 +1314,8 @@ export class ExtensionManager {
           await this.enableExtension(
             newExtensionConfig.name,
             SettingScope.User,
+            undefined,
+            options,
           );
         }
       } finally {
@@ -1385,6 +1400,7 @@ export class ExtensionManager {
     extensionIdentifier: string,
     isUpdate: boolean,
     cwd?: string,
+    options?: ExtensionRuntimeRefreshOptions,
   ): Promise<void> {
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
@@ -1421,7 +1437,9 @@ export class ExtensionManager {
 
     this.removeEnablementConfig(extension.name);
     this.preferencesStore.clear(extension.name);
-    await this.refreshTools();
+    if (options?.refreshTools ?? true) {
+      await this.refreshTools();
+    }
 
     logExtensionUninstall(
       telemetryConfig,
@@ -1512,6 +1530,7 @@ export class ExtensionManager {
           undefined,
           undefined,
           previousExtensionConfig,
+          { refreshTools: enableExtensionReloading },
         );
       } catch (e) {
         callback(extension.name, ExtensionUpdateState.ERROR);

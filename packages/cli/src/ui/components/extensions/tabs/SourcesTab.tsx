@@ -22,6 +22,8 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
+import { clearPluginCaches } from '../../../../config/hot-reload.js';
+import { markPluginsChanged } from '../../../../config/plugin-refresh-state.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
@@ -202,11 +204,20 @@ export const SourcesTab = ({
     setBusy(true);
     try {
       const metadata = await parseInstallSource(input.trim());
-      const ext = await extensionManager.installExtension(metadata);
+      const ext = await extensionManager.installExtension(
+        metadata,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { refreshTools: false },
+      );
       onStatus({
         type: 'success',
         text: t('Installed extension "{{name}}".', { name: ext.name }),
       });
+      await clearPluginCaches(config);
+      markPluginsChanged('extension installed');
       await load();
       onChanged();
       goToList();
@@ -218,7 +229,7 @@ export const SourcesTab = ({
     } finally {
       setBusy(false);
     }
-  }, [extensionManager, input, onStatus, load, onChanged, goToList]);
+  }, [extensionManager, config, input, onStatus, load, onChanged, goToList]);
 
   const openSourceDetail = useCallback(
     async (source: ExtensionSource) => {

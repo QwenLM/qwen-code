@@ -33,6 +33,8 @@ import {
   SettingScope as CliSettingScope,
 } from '../../../../config/settings.js';
 import { getErrorMessage } from '../../../../utils/errors.js';
+import { clearPluginCaches } from '../../../../config/hot-reload.js';
+import { markPluginsChanged } from '../../../../config/plugin-refresh-state.js';
 import type {
   InstalledItem,
   InstalledGroup,
@@ -462,10 +464,21 @@ export const InstalledTab = ({
       });
       try {
         if (item.isActive) {
-          await extensionManager.disableExtension(item.name, scope);
+          await extensionManager.disableExtension(item.name, scope, undefined, {
+            refreshTools: false,
+          });
         } else {
-          await extensionManager.enableExtension(item.name, scope);
+          await extensionManager.enableExtension(item.name, scope, undefined, {
+            refreshTools: false,
+          });
         }
+        try {
+          await clearPluginCaches(config);
+        } catch {
+          // Cache refresh failure is recoverable via /reload-plugins;
+          // don't convert a successful toggle into a user-facing error.
+        }
+        markPluginsChanged('extension enablement changed');
         onStatus({
           type: 'success',
           text: t('"{{name}}" {{state}}.', {
@@ -480,7 +493,7 @@ export const InstalledTab = ({
         mutatingRef.current = false;
       }
     },
-    [extensionManager, load, onStatus],
+    [extensionManager, config, load, onStatus],
   );
 
   const toggleMcp = useCallback(

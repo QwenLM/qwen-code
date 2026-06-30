@@ -9,6 +9,7 @@ import {
   createDebugLogger,
   type Config,
   getMCPServerStatus,
+  LspConfigLoader,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './settings.js';
@@ -21,6 +22,91 @@ import {
 import { appEvents, AppEvent } from '../utils/events.js';
 
 const debugLogger = createDebugLogger('MCP_HOT_RELOAD');
+
+type ConfigWithOptionalLspReload = Config & {
+  reinitializeLsp?: () => void | Promise<void>;
+};
+
+/**
+ * Clear the in-memory caches that serve model-visible skills and agents.
+ * Called immediately after every extension mutation so the next model turn
+ * sees the updated active-extension set without waiting for /reload-plugins.
+ * This is the qwen-code equivalent of Claude Code's clearAllCaches() — it
+ * clears memoization so downstream consumers re-read from getActiveExtensions(),
+ * but does NOT restart MCP servers or reload slash commands.
+ */
+export async function clearPluginCaches(config: Config): Promise<void> {
+  // Guard against null/incomplete config (e.g. in tests or non-interactive
+  // contexts where skill/subagent managers were never initialised).
+  if (!config?.getSkillManager && !config?.getSubagentManager) return;
+  const settled = await Promise.allSettled([
+    config.getSkillManager()?.refreshCache(),
+    config.getSubagentManager()?.refreshCache(),
+  ]);
+  for (const result of settled) {
+    if (result.status === 'rejected') {
+      debugLogger.warn(
+        'clearPluginCaches: a refreshCache leg failed:',
+        result.reason,
+      );
+    }
+  }
+}
+
+export interface ReloadPluginsRuntimeOptions {
+  config: Config;
+  reloadCommands?: () => void | Promise<void>;
+}
+
+export interface ReloadPluginsSummary {
+  extensionCount: number;
+  commandCount: number;
+  skillCount: number;
+  hookCount: number;
+  mcpServerCount: number;
+  lspServerCount: number;
+}
+
+export async function reloadPluginsRuntime({
+  config,
+  reloadCommands,
+}: ReloadPluginsRuntimeOptions): Promise<ReloadPluginsSummary> {
+  const extensionManager = config.getExtensionManager();
+  await extensionManager.refreshCache();
+  const activeExtensions = config.getActiveExtensions();
+  const lspConfigs = await new LspConfigLoader(
+    config.getTargetDir(),
+  ).loadExtensionConfigs(activeExtensions);
+  await extensionManager.refreshTools();
+  await (config as ConfigWithOptionalLspReload).reinitializeLsp?.();
+  await reloadCommands?.();
+
+  return {
+    extensionCount: activeExtensions.length,
+    commandCount: activeExtensions.reduce(
+      (sum, extension) => sum + (extension.commands?.length ?? 0),
+      0,
+    ),
+    skillCount: activeExtensions.reduce(
+      (sum, extension) => sum + (extension.skills?.length ?? 0),
+      0,
+    ),
+    hookCount: activeExtensions.reduce(
+      (sum, extension) =>
+        sum +
+        Object.values(extension.hooks ?? {}).reduce(
+          (hookSum, hooks) => hookSum + hooks.length,
+          0,
+        ),
+      0,
+    ),
+    mcpServerCount: activeExtensions.reduce(
+      (sum, extension) => sum + Object.keys(extension.mcpServers ?? {}).length,
+      0,
+    ),
+    lspServerCount: lspConfigs.length,
+  };
+}
 
 /**
  * The three connection-admission lists discovery consults to decide whether a

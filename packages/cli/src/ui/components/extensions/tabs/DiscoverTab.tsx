@@ -22,6 +22,8 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
+import { clearPluginCaches } from '../../../../config/hot-reload.js';
+import { markPluginsChanged } from '../../../../config/plugin-refresh-state.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
 const debugLogger = createDebugLogger('DISCOVER_TAB');
@@ -219,7 +221,14 @@ export const DiscoverTab = ({
         let ext;
         try {
           const metadata = await parseInstallSource(plugin.installSource);
-          ext = await extensionManager.installExtension(metadata);
+          ext = await extensionManager.installExtension(
+            metadata,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { refreshTools: false },
+          );
         } catch (error) {
           errors.push(
             `${plugin.name}: ${redactUrlCredentials(getErrorMessage(error))}`,
@@ -238,11 +247,15 @@ export const DiscoverTab = ({
             await extensionManager.disableExtension(
               ext.name,
               SettingScope.User,
+              undefined,
+              { refreshTools: false },
             );
             try {
               await extensionManager.enableExtension(
                 ext.name,
                 SettingScope.Workspace,
+                undefined,
+                { refreshTools: false },
               );
             } catch (enableError) {
               // The User-scope disable already landed; roll it back so a failed
@@ -253,6 +266,8 @@ export const DiscoverTab = ({
                 await extensionManager.enableExtension(
                   ext.name,
                   SettingScope.User,
+                  undefined,
+                  { refreshTools: false },
                 );
               } catch (rollbackError) {
                 // Rollback failed: the extension is now disabled at every scope.
@@ -286,6 +301,15 @@ export const DiscoverTab = ({
       }
       setInstalling(false);
       setSelectedKeys(new Set());
+      if (installed > 0) {
+        try {
+          await clearPluginCaches(config);
+        } catch {
+          // Cache refresh failure is recoverable via /reload-plugins;
+          // don't suppress the install-success UI for a cache error.
+        }
+        markPluginsChanged('extension installed');
+      }
       if (errors.length === 0) {
         onStatus({
           type: 'success',
@@ -320,7 +344,7 @@ export const DiscoverTab = ({
         goToList();
       }
     },
-    [extensionManager, onStatus, load, onInstalled, goToList, onLockChange],
+    [extensionManager, config, onStatus, load, onInstalled, goToList, onLockChange],
   );
 
   const installWithScope = useCallback(
