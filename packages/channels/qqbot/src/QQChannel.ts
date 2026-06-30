@@ -1095,9 +1095,16 @@ export class QQChannel extends ChannelBase {
                   .then((info) => {
                     if (info?.id) {
                       this.botOpenId = info.id;
+                      process.stderr.write(
+                        `[QQ:${this.name}] @me id=${info.id}\n`,
+                      );
                       if (this.qqConfig.allowMention !== false) {
                         this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
                       }
+                    } else {
+                      process.stderr.write(
+                        `[QQ:${this.name}] @me returned no id\n`,
+                      );
                     }
                   })
                   .catch(() => {});
@@ -1116,9 +1123,16 @@ export class QQChannel extends ChannelBase {
                   .then((info) => {
                     if (info?.id) {
                       this.botOpenId = info.id;
+                      process.stderr.write(
+                        `[QQ:${this.name}] @me id=${info.id}\n`,
+                      );
                       if (this.qqConfig.allowMention !== false) {
                         this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
                       }
+                    } else {
+                      process.stderr.write(
+                        `[QQ:${this.name}] @me returned no id\n`,
+                      );
                     }
                   })
                   .catch(() => {});
@@ -1136,9 +1150,14 @@ export class QQChannel extends ChannelBase {
               .then((info) => {
                 if (info?.id) {
                   this.botOpenId = info.id;
+                  process.stderr.write(`[QQ:${this.name}] @me id=${info.id}\n`);
                   if (this.qqConfig.allowMention !== false) {
                     this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
                   }
+                } else {
+                  process.stderr.write(
+                    `[QQ:${this.name}] @me returned no id\n`,
+                  );
                 }
               })
               .catch(() => {});
