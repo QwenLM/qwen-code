@@ -6,6 +6,13 @@ const mockSetGlobalDispatcher = vi.hoisted(() => vi.fn());
 const mockProxyAgent = vi.hoisted(() =>
   vi.fn((url: string) => ({ proxyUrl: url })),
 );
+const mockNormalizeProxyUrl = vi.hoisted(() => vi.fn((url?: string) => url));
+const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
+  vi.fn(() => '/tmp/qwen-home'),
+);
+const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockAppendChannelMemory = vi.hoisted(() => vi.fn());
+const mockClearChannelMemory = vi.hoisted(() => vi.fn());
 const mockLoadSettings = vi.hoisted(() => vi.fn());
 const mockGetExtensionManager = vi.hoisted(() => vi.fn());
 const mockReadServiceInfo = vi.hoisted(() => vi.fn());
@@ -50,6 +57,16 @@ const mockSessionRouter = vi.hoisted(() =>
 vi.mock('undici', () => ({
   ProxyAgent: mockProxyAgent,
   setGlobalDispatcher: mockSetGlobalDispatcher,
+}));
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  appendChannelMemory: mockAppendChannelMemory,
+  clearChannelMemory: mockClearChannelMemory,
+  normalizeProxyUrl: mockNormalizeProxyUrl,
+  readChannelMemory: mockReadChannelMemory,
+  Storage: {
+    getGlobalQwenDir: mockStorageGetGlobalQwenDir,
+  },
 }));
 
 vi.mock('../../config/settings.js', () => ({
@@ -127,10 +144,12 @@ beforeEach(() => {
   mockGetExtensionManager.mockResolvedValue({ getLoadedExtensions: () => [] });
   mockGetPlugin.mockResolvedValue({ createChannel: mockCreateChannel });
   mockLoadSettings.mockReturnValue({ merged: { channels: {} } });
+  mockNormalizeProxyUrl.mockImplementation((url?: string) => url);
   mockParseChannelConfig.mockResolvedValue(mockParsedChannelConfig);
   mockReadServiceInfo.mockReturnValue(null);
   mockRouterGetTarget.mockReturnValue(undefined);
   mockRouterRestoreSessions.mockResolvedValue({ failed: 0, restored: 0 });
+  mockStorageGetGlobalQwenDir.mockReturnValue('/tmp/qwen-home');
   delete process.env['HTTPS_PROXY'];
   delete process.env['https_proxy'];
   delete process.env['HTTP_PROXY'];
@@ -214,6 +233,84 @@ describe('startCommand.handler', () => {
       mockParsedChannelConfig,
       expect.any(Object),
       expect.objectContaining({ proxy: settingsProxy }),
+    );
+  });
+
+  it('passes channel memory callbacks when starting a named channel', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.objectContaining({
+        channelMemory: {
+          appendChannelMemory: mockAppendChannelMemory,
+          clearChannelMemory: mockClearChannelMemory,
+          readChannelMemory: mockReadChannelMemory,
+        },
+      }),
+    );
+  });
+
+  it('passes channel memory callbacks when starting all channels', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        channels: {
+          discord: { type: 'telegram' },
+          telegram: { type: 'telegram' },
+        },
+      },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+    expect(mockCreateChannel).toHaveBeenNthCalledWith(
+      1,
+      'discord',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.objectContaining({
+        channelMemory: {
+          appendChannelMemory: mockAppendChannelMemory,
+          clearChannelMemory: mockClearChannelMemory,
+          readChannelMemory: mockReadChannelMemory,
+        },
+      }),
+    );
+    expect(mockCreateChannel).toHaveBeenNthCalledWith(
+      2,
+      'telegram',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.objectContaining({
+        channelMemory: {
+          appendChannelMemory: mockAppendChannelMemory,
+          clearChannelMemory: mockClearChannelMemory,
+          readChannelMemory: mockReadChannelMemory,
+        },
+      }),
     );
   });
 });

@@ -2,12 +2,19 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { CommandModule } from 'yargs';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
-import { normalizeProxyUrl, Storage } from '@qwen-code/qwen-code-core';
+import {
+  appendChannelMemory,
+  clearChannelMemory,
+  normalizeProxyUrl,
+  readChannelMemory,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
 import type {
   ChannelBase,
+  ChannelBaseOptions,
   ChannelPlugin,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
@@ -55,6 +62,16 @@ export function resolveProxy(
 
 function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
+}
+
+function channelMemoryOptions(): Pick<ChannelBaseOptions, 'channelMemory'> {
+  return {
+    channelMemory: {
+      readChannelMemory,
+      appendChannelMemory,
+      clearChannelMemory,
+    },
+  };
 }
 
 function loadChannelsConfig(): Record<string, unknown> {
@@ -141,7 +158,7 @@ async function createChannel(
   name: string,
   config: Awaited<ReturnType<typeof parseChannelConfig>>,
   bridge: AcpBridge,
-  options?: { router?: SessionRouter; proxy?: string },
+  options?: ChannelBaseOptions,
 ): Promise<ChannelBase> {
   const channelPlugin = await getPlugin(config.type);
   if (!channelPlugin) {
@@ -221,7 +238,11 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   );
   const channels: Map<string, ChannelBase> = new Map();
 
-  const channel = await createChannel(name, config, bridge, { router, proxy });
+  const channel = await createChannel(name, config, bridge, {
+    router,
+    proxy,
+    ...channelMemoryOptions(),
+  });
   channels.set(name, channel);
   registerToolCallDispatch(bridge, router, channels);
 
@@ -370,7 +391,11 @@ async function startAll(proxy?: string): Promise<void> {
   for (const { name, config } of parsed) {
     channels.set(
       name,
-      await createChannel(name, config, bridge, { router, proxy }),
+      await createChannel(name, config, bridge, {
+        router,
+        proxy,
+        ...channelMemoryOptions(),
+      }),
     );
   }
   registerToolCallDispatch(bridge, router, channels);
