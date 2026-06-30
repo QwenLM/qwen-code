@@ -1020,7 +1020,7 @@ describe('SessionService', () => {
   });
 
   describe('archiveSessions', () => {
-    it('should move active sessions into the archive directory', async () => {
+    const mockActiveSessionOnly = () => {
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
           if (filePath.includes('/chats/archive/')) {
@@ -1031,7 +1031,26 @@ describe('SessionService', () => {
           return [recordA1];
         },
       );
+    };
 
+    const mockActiveWorktreeSidecarOnly = () => {
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.endsWith(`/chats/archive/${sessionIdA}.jsonl`)) {
+          return false;
+        }
+        if (value.endsWith(`/chats/${sessionIdA}.worktree.json`)) {
+          return true;
+        }
+        if (value.endsWith(`/chats/archive/${sessionIdA}.worktree.json`)) {
+          return false;
+        }
+        return false;
+      });
+    };
+
+    it('should move active sessions into the archive directory', async () => {
+      mockActiveSessionOnly();
       const result = await sessionService.archiveSessions([sessionIdA]);
 
       expect(result.archived).toEqual([sessionIdA]);
@@ -1045,6 +1064,64 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should not move JSONL when archiving worktree sidecar fails', async () => {
+      mockActiveSessionOnly();
+      mockActiveWorktreeSidecarOnly();
+      const sidecarError = new Error('sidecar move failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (sourcePath.toString().endsWith('.worktree.json')) {
+          throw sidecarError;
+        }
+        return undefined;
+      });
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: sidecarError },
+      ]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should roll back worktree sidecar when archiving JSONL fails', async () => {
+      mockActiveSessionOnly();
+      mockActiveWorktreeSidecarOnly();
+      const jsonlError = new Error('jsonl move failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (sourcePath.toString().endsWith('.jsonl')) {
+          throw jsonlError;
+        }
+        return undefined;
+      });
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: jsonlError },
+      ]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
       );
     });
 

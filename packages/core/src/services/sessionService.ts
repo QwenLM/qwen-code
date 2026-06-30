@@ -1055,17 +1055,32 @@ export class SessionService {
         }
 
         fs.mkdirSync(this.getArchiveChatsDir(), { recursive: true });
-        fs.renameSync(sourcePath, targetPath);
+        const activeSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'active',
+        );
+        const archivedSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'archived',
+        );
+        const sidecarMoved = this.moveOptionalFile(
+          activeSidecar,
+          archivedSidecar,
+          { failIfTargetExists: true },
+        );
         try {
-          this.moveOptionalFile(
-            this.getWorktreeSessionPathForState(sessionId, 'active'),
-            this.getWorktreeSessionPathForState(sessionId, 'archived'),
-            { failIfTargetExists: false },
-          );
+          fs.renameSync(sourcePath, targetPath);
         } catch (error) {
-          debugLogger.warn(
-            `archiveSessions: failed to move worktree sidecar for ${sessionId}: ${error}`,
-          );
+          if (sidecarMoved) {
+            try {
+              fs.renameSync(archivedSidecar, activeSidecar);
+            } catch (rollbackError) {
+              debugLogger.warn(
+                `archiveSessions: failed to roll back worktree sidecar for ${sessionId}: ${rollbackError}`,
+              );
+            }
+          }
+          throw error;
         }
         archived.push(sessionId);
       } catch (error) {
