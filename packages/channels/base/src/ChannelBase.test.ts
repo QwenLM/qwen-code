@@ -511,6 +511,31 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('/loop add rejects single-scope sessions', async () => {
+      const createLoop = vi.fn();
+      const ch = createChannel(
+        { sessionScope: 'single' },
+        {
+          loopController: {
+            create: createLoop,
+            listForTarget: vi.fn(),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.handleInbound(
+        envelope({ text: '/loop add "0 9 * * *" post summary' }),
+      );
+
+      expect(createLoop).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toBe(
+        'Loops are not supported when sessionScope is single.',
+      );
+    });
+
     it('/schedule is not a local command', async () => {
       const ch = createChannel(
         {},
@@ -4985,6 +5010,50 @@ describe('ChannelBase', () => {
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
       ]);
+    });
+
+    it('disables single-scope loop prompts before they reach the agent', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { sessionScope: 'single' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'group-1',
+            isGroup: true,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow(
+        'Loop messages are not supported with single session scope.',
+      );
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('starts the loop timeout after the queued turn begins', async () => {

@@ -74,9 +74,7 @@ function channelLoopPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
 }
 
-function createLoopController(
-  store: ChannelLoopStore,
-): ChannelLoopController {
+function createLoopController(store: ChannelLoopStore): ChannelLoopController {
   return {
     create: (input) => store.create(input),
     createForTarget: (input, maxEnabledLoops) =>
@@ -339,6 +337,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         await bridge.start();
         router.setBridge(bridge);
         channel.setBridge(bridge);
+        await channel.connect();
         registerToolCallDispatch(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
@@ -531,6 +530,9 @@ async function startAll(proxy?: string): Promise<void> {
         router.setBridge(bridge);
         for (const channel of channels.values()) {
           channel.setBridge(bridge);
+        }
+        for (const channel of connectedChannels.values()) {
+          await channel.connect();
         }
         registerToolCallDispatch(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);

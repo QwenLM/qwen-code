@@ -297,9 +297,7 @@ describe('startCommand.handler', () => {
     const options = mockCreateChannel.mock.calls[0]?.[3] as
       | ChannelBaseOptions
       | undefined;
-    expect(() =>
-      options?.loopController?.validateCron('0 0 31 2 *'),
-    ).toThrow();
+    expect(() => options?.loopController?.validateCron('0 0 31 2 *')).toThrow();
   });
 
   it('starts a standalone AcpBridge before creating the channel', async () => {
@@ -423,6 +421,7 @@ describe('startCommand.handler', () => {
       const restartedBridge = mockAcpBridge.mock.results[1]!.value;
       expect(mockRouterSetBridge).toHaveBeenCalledWith(restartedBridge);
       expect(mockChannelSetBridge).toHaveBeenCalledWith(restartedBridge);
+      expect(mockChannelConnect).toHaveBeenCalledTimes(2);
 
       const sessionDiedCalls = mockBridgeOn.mock.calls.filter(
         ([eventName]) => eventName === 'sessionDied',
@@ -432,6 +431,9 @@ describe('startCommand.handler', () => {
         sessionId: string;
       }) => void;
       expect(mockBridgeOn.mock.invocationCallOrder.at(-2)).toBeLessThan(
+        mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
+      );
+      expect(mockChannelConnect.mock.invocationCallOrder[1]).toBeLessThan(
         mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
       );
 

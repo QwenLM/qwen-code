@@ -250,6 +250,12 @@ export abstract class ChannelBase {
     if (!this.supportsProactiveSend()) {
       throw new Error('Channel does not support proactive loop messages.');
     }
+    if (this.config.sessionScope === 'single') {
+      await this.loopController?.disable(job.id);
+      throw new Error(
+        'Loop messages are not supported with single session scope.',
+      );
+    }
     if (job.channelName !== this.name) {
       throw new Error(
         `Loop ${job.id} belongs to ${job.channelName}, not ${this.name}.`,
@@ -875,6 +881,13 @@ export abstract class ChannelBase {
       await this.sendMessage(
         envelope.chatId,
         'This channel does not support proactive loop messages.',
+      );
+      return true;
+    }
+    if (this.config.sessionScope === 'single') {
+      await this.sendMessage(
+        envelope.chatId,
+        'Loops are not supported when sessionScope is single.',
       );
       return true;
     }
