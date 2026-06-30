@@ -13,7 +13,11 @@ import {
   SessionArchivedError,
   SessionConflictError,
 } from '../acp-session-bridge.js';
-import { assertSessionLoadable } from './session-archive.js';
+import {
+  archiveDaemonSessions,
+  assertSessionLoadable,
+  SessionArchiveCoordinator,
+} from './session-archive.js';
 
 describe('assertSessionLoadable', () => {
   let runtimeDir: string;
@@ -62,6 +66,54 @@ describe('assertSessionLoadable', () => {
   });
 });
 
+describe('archiveDaemonSessions', () => {
+  let runtimeDir: string;
+  let workspaceDir: string;
+
+  beforeEach(() => {
+    runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-archive-test-'));
+    workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('deduplicates ids and avoids re-reading classified active sessions', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440002';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const getLocationSpy = vi.spyOn(service, 'getSessionLocation');
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId, sessionId],
+      service,
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      archived: [sessionId],
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    });
+    expect(closeSession).toHaveBeenCalledTimes(1);
+    expect(getLocationSpy).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(true);
+  });
+});
+
 function writeSessionFile(
   workspaceDir: string,
   sessionId: string,
@@ -74,5 +126,32 @@ function writeSessionFile(
   const targetDir =
     state === 'archived' ? path.join(chatsDir, 'archive') : chatsDir;
   fs.mkdirSync(targetDir, { recursive: true });
-  fs.writeFileSync(path.join(targetDir, `${sessionId}.jsonl`), '{}\n');
+  fs.writeFileSync(
+    path.join(targetDir, `${sessionId}.jsonl`),
+    `${JSON.stringify({
+      uuid: 'record-1',
+      parentUuid: null,
+      sessionId,
+      timestamp: '2024-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'hello' }] },
+      cwd: workspaceDir,
+      version: '1.0.0',
+    })}\n`,
+  );
+}
+
+function sessionPath(
+  workspaceDir: string,
+  sessionId: string,
+  state: 'active' | 'archived',
+): string {
+  const chatsDir = path.join(
+    new Storage(workspaceDir).getProjectDir(),
+    'chats',
+  );
+  return path.join(
+    state === 'archived' ? path.join(chatsDir, 'archive') : chatsDir,
+    `${sessionId}.jsonl`,
+  );
 }

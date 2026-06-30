@@ -198,14 +198,15 @@ export async function archiveDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
 }): Promise<DaemonArchiveSessionsResult> {
   const { sessionIds, service, bridge, coordinator } = params;
+  const uniqueSessionIds = [...new Set(sessionIds)];
   const archived: string[] = [];
   const alreadyArchived: string[] = [];
   const notFound: string[] = [];
   const errors: Array<{ sessionId: string; error: unknown }> = [];
 
-  await coordinator.runExclusiveMany(sessionIds, async () => {
+  await coordinator.runExclusiveMany(uniqueSessionIds, async () => {
     const activeIds: string[] = [];
-    for (const sessionId of sessionIds) {
+    for (const sessionId of uniqueSessionIds) {
       try {
         const location = await service.getSessionLocation(sessionId);
         if (location === undefined) {
@@ -252,21 +253,23 @@ export async function archiveDaemonSessions(params: {
       }
     }
 
-    for (const sessionId of archiveIds) {
-      try {
-        const result = await service.archiveSessions([sessionId]);
-        archived.push(...result.archived);
-        alreadyArchived.push(...result.alreadyArchived);
-        notFound.push(...result.notFound);
-        errors.push(...result.errors);
-      } catch (err) {
+    try {
+      const result = await service.archiveSessions(archiveIds, {
+        knownLocation: 'active',
+      });
+      archived.push(...result.archived);
+      alreadyArchived.push(...result.alreadyArchived);
+      notFound.push(...result.notFound);
+      errors.push(...result.errors);
+    } catch (err) {
+      for (const sessionId of archiveIds) {
         errors.push({ sessionId, error: err });
       }
     }
   });
 
   logSessionArchiveResult('archive', {
-    requested: sessionIds,
+    requested: uniqueSessionIds,
     changed: archived,
     already: alreadyArchived,
     notFound,

@@ -136,6 +136,10 @@ export interface ArchiveSessionsResult {
   errors: Array<{ sessionId: string; error: Error }>;
 }
 
+export interface ArchiveSessionsOptions {
+  knownLocation?: 'active';
+}
+
 export interface UnarchiveSessionsResult {
   unarchived: string[];
   alreadyActive: string[];
@@ -1050,7 +1054,10 @@ export class SessionService {
     }
   }
 
-  async archiveSessions(sessionIds: string[]): Promise<ArchiveSessionsResult> {
+  async archiveSessions(
+    sessionIds: string[],
+    options: ArchiveSessionsOptions = {},
+  ): Promise<ArchiveSessionsResult> {
     const archived: string[] = [];
     const alreadyArchived: string[] = [];
     const notFound: string[] = [];
@@ -1058,17 +1065,23 @@ export class SessionService {
 
     for (const sessionId of [...new Set(sessionIds)]) {
       try {
-        const location = await this.getSessionLocation(sessionId);
-        if (location === undefined) {
+        if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
           notFound.push(sessionId);
           continue;
         }
-        if (location === 'archived') {
-          alreadyArchived.push(sessionId);
-          continue;
-        }
-        if (location === 'conflict') {
-          throw new Error(`Session archive conflict: ${sessionId}`);
+        if (options.knownLocation !== 'active') {
+          const location = await this.getSessionLocation(sessionId);
+          if (location === undefined) {
+            notFound.push(sessionId);
+            continue;
+          }
+          if (location === 'archived') {
+            alreadyArchived.push(sessionId);
+            continue;
+          }
+          if (location === 'conflict') {
+            throw new Error(`Session archive conflict: ${sessionId}`);
+          }
         }
 
         const sourcePath = this.getSessionFilePath(sessionId, 'active');
@@ -1086,23 +1099,13 @@ export class SessionService {
           sessionId,
           'archived',
         );
-        const sidecarMoved = this.moveOptionalFile(
-          activeSidecar,
-          archivedSidecar,
-        );
+        fs.renameSync(sourcePath, targetPath);
         try {
-          fs.renameSync(sourcePath, targetPath);
-        } catch (error) {
-          if (sidecarMoved) {
-            try {
-              fs.renameSync(archivedSidecar, activeSidecar);
-            } catch (rollbackError) {
-              this.warn(
-                `archiveSessions: failed to roll back worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${rollbackError}`,
-              );
-            }
-          }
-          throw error;
+          this.moveOptionalFile(activeSidecar, archivedSidecar);
+        } catch (sidecarError) {
+          this.warn(
+            `archiveSessions: failed to move worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${sidecarError}`,
+          );
         }
         archived.push(sessionId);
       } catch (error) {
@@ -1153,23 +1156,13 @@ export class SessionService {
           sessionId,
           'active',
         );
-        const sidecarMoved = this.moveOptionalFile(
-          archivedSidecar,
-          activeSidecar,
-        );
+        fs.renameSync(sourcePath, targetPath);
         try {
-          fs.renameSync(sourcePath, targetPath);
-        } catch (error) {
-          if (sidecarMoved) {
-            try {
-              fs.renameSync(activeSidecar, archivedSidecar);
-            } catch (rollbackError) {
-              this.warn(
-                `unarchiveSessions: failed to roll back worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${rollbackError}`,
-              );
-            }
-          }
-          throw error;
+          this.moveOptionalFile(archivedSidecar, activeSidecar);
+        } catch (sidecarError) {
+          this.warn(
+            `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
+          );
         }
         unarchived.push(sessionId);
       } catch (error) {
