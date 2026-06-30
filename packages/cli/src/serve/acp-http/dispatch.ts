@@ -310,10 +310,15 @@ function parsePermissionResponse(
     }
   }
 
-  const response: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(params)) {
-    if (key === 'sessionId' || key === 'requestId') continue;
-    response[key] = value;
+  // Whitelist only the fields the bridge contract defines — `outcome` and the
+  // ACP-reserved `_meta` passthrough — rather than forwarding every remaining
+  // client key. The previous copy-all let a client inject arbitrary top-level
+  // args (e.g. `force`, `role`) into the server-side bridge call; harmless
+  // today since the bridge reads only `outcome`, but a needless client-controlled
+  // surface on a server API argument.
+  const response: Record<string, unknown> = { outcome };
+  if ('_meta' in params) {
+    response['_meta'] = params['_meta'];
   }
   return response as PermissionResponse;
 }
@@ -1241,7 +1246,12 @@ export class AcpDispatcher {
             }
             return;
           }
-          this.registry?.deletePendingPermission(requestId, sessionId);
+          // Drop the exact resolved entry through the shared helper (same
+          // pattern as resolveClientResponse), using the conn/map-key
+          // `pendingRef` already carries instead of re-matching by requestId.
+          if (pendingRef) {
+            this.dropResolvedPermission(pendingRef.conn, pendingRef.id);
+          }
           this.replyConn(conn, id, {});
           return;
         }

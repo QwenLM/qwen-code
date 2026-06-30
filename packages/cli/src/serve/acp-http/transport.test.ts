@@ -1377,11 +1377,13 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('cross-connection permission response resolves for a co-owned session', async () => {
     let resolvedWith: unknown;
+    let voteCount = 0;
     bridge.respondToSessionPermission = ((
       sessionId: string,
       requestId: string,
       resp: unknown,
     ) => {
+      voteCount += 1;
       resolvedWith = { sessionId, requestId, resp };
       return true;
     }) as never;
@@ -1426,6 +1428,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         requestId: 'perm-cross',
         resp: { outcome: { outcome: 'selected', optionId: 'allow' } },
       });
+      expect(voteCount).toBe(1);
+      // The resolved entry must be removed so a duplicate vote on the same id
+      // can't reach the bridge again — locks down the cross-connection cleanup
+      // (dropResolvedPermission) that is the core of this PR.
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(voteCount).toBe(1);
     } finally {
       reader.close();
     }
