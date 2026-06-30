@@ -104,12 +104,22 @@ function isDeepSeekAnthropicProvider(
  * `vertex_ai/…`) match. Unknown/unversioned ids fall back to low/medium/high so
  * we never send a tier the server might 400 on. Effort levels above what the
  * model supports are clamped by the caller via clampReasoningEffort.
+ *
+ * The minor-version group is capped at one or two digits and a trailing
+ * `(?!\d)` so an 8-digit date suffix (`claude-opus-4-20250514` = Opus 4.0) is
+ * not mis-parsed as a minor version — otherwise `minor` would be `20250514`
+ * (or, with a bare 1–2 digit cap, the greedy `20`), making `atLeast(4, 6)` /
+ * `atLeast(4, 7)` true and wrongly granting Opus 4.0 the `xhigh`/`max` tiers it
+ * does not support (a server 400). Dated ids that do carry a minor, like
+ * `claude-opus-4-7-20251101`, still resolve to minor `7`.
  */
 function anthropicSupportedEffortTiers(model: string): ReasoningEffort[] {
   const tiers: ReasoningEffort[] = ['low', 'medium', 'high'];
   const match = model
     .toLowerCase()
-    .match(/claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?/);
+    .match(
+      /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?/,
+    );
   if (!match) {
     return tiers;
   }
