@@ -27,6 +27,7 @@ import {
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
+  detectAutonomousSentinel,
   detectLoopSentinel,
   SendMessageType,
   buildSyntheticToolResponseParts,
@@ -72,6 +73,13 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
  * slow agent can't block exit indefinitely.
  */
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
+
+function isHeadlessLoopSentinel(prompt: string): boolean {
+  return (
+    detectLoopSentinel(prompt) !== null ||
+    detectAutonomousSentinel(prompt) !== null
+  );
+}
 
 /**
  * Body of the synthesised `tool_result` for a `tool_use` block that was
@@ -150,11 +158,11 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
 }
 
 /**
- * Headless handling for a fired `.qwen/loop.md` cron sentinel. loop.md
- * expansion is interactive-only for now, so a bare sentinel can't be turned
- * into a real prompt here — the tick is skipped (no-op) rather than sent to the
- * model as empty content. Returns true when `job` was a sentinel so the caller
- * skips enqueuing it.
+ * Headless handling for fired loop sentinels. loop.md and autonomous sentinel
+ * expansion is interactive-only for now, so a bare sentinel can't be turned into
+ * a real prompt here — the tick is skipped (no-op) rather than sent to the model
+ * as empty content. Returns true when `job` was a sentinel so the caller skips
+ * enqueuing it.
  *
  * A recurring SESSION (non-durable) loop.md job would otherwise stay in
  * `scheduler.sessionSize` and re-fire every interval, pinning the headless run
@@ -172,7 +180,7 @@ export function skipHeadlessLoopSentinel(
   scheduler: CronScheduler,
   job: CronJob,
 ): boolean {
-  if (!detectLoopSentinel(job.prompt)) {
+  if (!isHeadlessLoopSentinel(job.prompt)) {
     return false;
   }
   if (job.recurring && !job.durable) {
@@ -1690,14 +1698,14 @@ export async function runNonInteractive(
             : config.getCronScheduler();
 
           if (scheduler) {
-            // A headless run can't expand a `<<loop.md>>` sentinel, so durable
-            // loop.md jobs must be skipped at the scheduler level — firing one
-            // here would stamp+persist its lastFiredAt while the work is skipped
-            // (see skipHeadlessLoopSentinel), silently consuming a tick the
-            // owning interactive session should run. Set BEFORE enableDurable so
-            // a buffered catch-up flush at start() honors it too.
-            scheduler.setSkipDurableFire(
-              (job) => detectLoopSentinel(job.prompt) !== null,
+            // A headless run can't expand loop sentinels, so durable loop jobs
+            // must be skipped at the scheduler level — firing one here would
+            // stamp+persist its lastFiredAt while the work is skipped (see
+            // skipHeadlessLoopSentinel), silently consuming a tick the owning
+            // interactive session should run. Set BEFORE enableDurable so a
+            // buffered catch-up flush at start() honors it too.
+            scheduler.setSkipDurableFire((job) =>
+              isHeadlessLoopSentinel(job.prompt),
             );
             // Durable tasks live under ~/.qwen (user-owned, not in the
             // working tree), so no folder-trust gate is needed here.
@@ -1759,11 +1767,11 @@ export async function runNonInteractive(
               };
 
               scheduler.start((job: CronJob) => {
-                // A bare loop.md sentinel can't expand in a headless run, so the
+                // A bare loop sentinel can't expand in a headless run, so the
                 // tick is skipped. skipHeadlessLoopSentinel also deletes a
                 // recurring session job so it stops re-firing and sessionSize
                 // can fall to zero — otherwise checkCronDone never resolves and
-                // the run hangs. Full headless loop.md support is a follow-up.
+                // the run hangs. Full headless loop support is a follow-up.
                 if (skipHeadlessLoopSentinel(scheduler, job)) {
                   checkCronDone();
                   return;
