@@ -3806,7 +3806,7 @@ export class Session implements SessionContext {
         this.config,
         promptId,
         toolLoopState,
-        functionCalls.length,
+        dedupedFunctionCalls.length,
       )
     ) {
       return {
@@ -4068,11 +4068,12 @@ export class Session implements SessionContext {
             await fillLoopSkippedFrom(idx + 1);
             return results;
           }
-          if (
+          const invalidToolErrorNearThreshold =
             toolLoopState &&
-            toolLoopState.invalidToolParamErrors.size > 0 &&
-            executing.size > 0
-          ) {
+            [...toolLoopState.invalidToolParamErrors.values()].some(
+              (count) => count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD - 1,
+            );
+          if (invalidToolErrorNearThreshold && executing.size > 0) {
             await Promise.all(executing);
             if (results.some((result) => result?.loopDetected)) {
               onStopAfterLoopDetected?.();

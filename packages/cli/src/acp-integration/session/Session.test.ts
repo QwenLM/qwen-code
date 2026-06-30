@@ -2660,7 +2660,7 @@ describe('Session', () => {
         ).toEqual(preservedResponses);
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
-            'Stopping ACP turn after 102 tool calls in one turn.',
+            'Stopping ACP turn after 101 tool calls in one turn.',
           ),
         );
       });
@@ -9650,6 +9650,83 @@ describe('Session', () => {
         error:
           'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
       });
+      expect(cancelledExecute).not.toHaveBeenCalled();
+      expect(laterExecute).not.toHaveBeenCalled();
+    });
+
+    it('skips later pre-loop tools after non-question permission cancellation', async () => {
+      const cancelledExecute = vi.fn();
+      const laterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.SHELL
+          ? mockConfirmingTool(name, cancelledExecute, 'exec')
+          : mockAllowedTool(name, laterExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map<string, number>(),
+        loopDetected: false,
+      };
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-pre-loop-shell-cancel',
+        [
+          {
+            id: 'shell_call',
+            name: core.ToolNames.SHELL,
+            args: { command: 'echo denied' },
+          },
+          {
+            id: 'read_1',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/one' },
+          },
+          {
+            id: 'read_2',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/two' },
+          },
+          {
+            id: 'read_3',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/three' },
+          },
+        ],
+        toolLoopState,
+      );
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'shell_call',
+        'read_1',
+        'read_2',
+        'read_3',
+      ]);
+      expect(
+        result.parts.slice(1).map((part) => part.functionResponse?.response),
+      ).toEqual([
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+      ]);
       expect(cancelledExecute).not.toHaveBeenCalled();
       expect(laterExecute).not.toHaveBeenCalled();
     });
