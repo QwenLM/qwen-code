@@ -90,8 +90,11 @@ jobs:
           FORCED_ISSUE: '${{ inputs.issue_number }}'
           FORCED_PR: '${{ inputs.pr_number }}'
           EVENT_NAME: '${{ github.event_name }}'
+          BUG_LABEL: 'type/bug'
           ISSUE_IS_BUG: "${{ contains(github.event.issue.labels.*.name, 'type/bug') }}"
+          ISSUE_IS_READY: "${{ contains(github.event.issue.labels.*.name, 'status/ready-for-agent') }}"
           ISSUE_LABEL: '${{ github.event.label.name }}'
+          ISSUE_STATE: '${{ github.event.issue.state }}'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           SCHEDULE: '${{ github.event.schedule }}'
         run: |-
@@ -111,7 +114,8 @@ jobs:
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
-                if [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" && "${ISSUE_IS_BUG}" == 'true' ]]; then
+                if [[ "${ISSUE_STATE}" == 'open' && "${ISSUE_IS_BUG}" == 'true' && "${ISSUE_IS_READY}" == 'true' ]] \
+                  && [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" ]]; then
                   DO_ISSUE=true
                 fi
               fi
@@ -191,12 +195,15 @@ jobs:
             echo "🎯 Forced issue #${FORCED_ISSUE}"
             forced_issue_json="${WORKDIR}/forced-issue.json"
             gh issue view "${FORCED_ISSUE}" --repo "${REPO}" \
-              --json number,title,body,labels,createdAt,url \
+              --json number,title,body,labels,createdAt,url,state \
               > "${forced_issue_json}"
             if jq -e \
               '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
               "${forced_issue_json}" > /dev/null; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} has an autofix exclusion label; skipping."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            elif [[ "$(jq -r '.state // ""' "${forced_issue_json}")" != 'OPEN' ]]; then
+              echo "⏭️ Forced issue #${FORCED_ISSUE} is not open; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             else
               if ! jq -c '[. + {autofixTier: 0}]' "${forced_issue_json}" > "${WORKDIR}/candidates.json"; then
