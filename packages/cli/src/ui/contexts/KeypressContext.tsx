@@ -228,6 +228,18 @@ export function KeypressProvider({
     let sgrMouseBuffer = '';
     let sgrMouseTimeout: NodeJS.Timeout | null = null;
 
+    // Abandon any in-progress SGR mouse reassembly: clear the swallow flag, the
+    // partial buffer, and the reassembly timeout. Shared by every branch that
+    // bails out of mouse parsing (bracketed-paste takeover, ctrl+c, teardown).
+    const resetSgrMouse = () => {
+      swallowingSgrMouse = false;
+      sgrMouseBuffer = '';
+      if (sgrMouseTimeout) {
+        clearTimeout(sgrMouseTimeout);
+        sgrMouseTimeout = null;
+      }
+    };
+
     const updateKittyBuffer = (value: string) => {
       kittySequenceBufferRef.current = value;
     };
@@ -722,21 +734,11 @@ export function KeypressProvider({
       // buffer instead, and discard any half-built mouse fragment.
       if (isPaste) {
         if (swallowingSgrMouse) {
-          swallowingSgrMouse = false;
-          sgrMouseBuffer = '';
-          if (sgrMouseTimeout) {
-            clearTimeout(sgrMouseTimeout);
-            sgrMouseTimeout = null;
-          }
+          resetSgrMouse();
         }
       } else if (swallowingSgrMouse) {
         if (key.ctrl && key.name === 'c') {
-          swallowingSgrMouse = false;
-          sgrMouseBuffer = '';
-          if (sgrMouseTimeout) {
-            clearTimeout(sgrMouseTimeout);
-            sgrMouseTimeout = null;
-          }
+          resetSgrMouse();
         } else if (key.name === 'paste-start') {
           // Bracketed paste takes priority over a half-built SGR mouse
           // fragment. If a paste begins mid-reassembly (e.g. a mouse-move
@@ -746,12 +748,7 @@ export function KeypressProvider({
           // and let an SGR sequence embedded in the pasted content be
           // reconstructed into a real click. Discard the fragment and fall
           // through so the paste-start handler sets `isPaste = true`.
-          swallowingSgrMouse = false;
-          sgrMouseBuffer = '';
-          if (sgrMouseTimeout) {
-            clearTimeout(sgrMouseTimeout);
-            sgrMouseTimeout = null;
-          }
+          resetSgrMouse();
         } else {
           sgrMouseBuffer += key.sequence;
           if (key.name === 'm' || key.sequence === 'M') {
@@ -1281,12 +1278,7 @@ export function KeypressProvider({
       clearKittyBufferAndTimeout();
       clearPasteIdleTimeout();
 
-      if (sgrMouseTimeout) {
-        clearTimeout(sgrMouseTimeout);
-        sgrMouseTimeout = null;
-      }
-      swallowingSgrMouse = false;
-      sgrMouseBuffer = '';
+      resetSgrMouse();
 
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);

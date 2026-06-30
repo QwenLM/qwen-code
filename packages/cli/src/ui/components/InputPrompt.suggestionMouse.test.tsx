@@ -246,4 +246,26 @@ describe('InputPrompt suggestion mouse routing', () => {
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
   });
+
+  it('clicking an @folder suggestion dismisses the completion so the dropdown stays closed', () => {
+    // @-mention mode showing a directory suggestion: accepting a folder appends
+    // no trailing space, so the @ pattern would re-match and re-open the
+    // dropdown unless the completion is explicitly dismissed.
+    mockBuffer = makeBuffer('@src');
+    props.buffer = mockBuffer;
+    vi.mocked(useCommandCompletion).mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      suggestions: [{ label: 'src/', value: 'src/', isDirectory: true }],
+    } as unknown as UseCommandCompletionReturn);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    act(() => {
+      (captured.props!['onSelectIndex'] as (i: number) => void)(0);
+    });
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
 });
