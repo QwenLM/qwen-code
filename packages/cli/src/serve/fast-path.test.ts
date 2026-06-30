@@ -380,7 +380,9 @@ describe('CLI entry import boundary', () => {
     expect(fastPathSource).not.toContain('@qwen-code/qwen-code-core');
     expect(fastPathSource).toContain('bootSettings: settings');
     expect(fastPathSource).toContain('resolveOnListen: true');
-    expect(fastPathSource).toContain('deferRuntimeUntilFirstHealth: true');
+    expect(fastPathSource).toContain(
+      'deferRuntimeUntilFirstHealth: !parsed.open',
+    );
   });
 
   it('uses the shared headless yolo warning helper on the serve fast path', () => {

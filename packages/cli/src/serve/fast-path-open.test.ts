@@ -104,6 +104,10 @@ describe('serve fast path --open import boundary', () => {
     ]);
 
     await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    expect(runQwenServe).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ deferRuntimeUntilFirstHealth: false }),
+    );
     await Promise.resolve();
     expect(serveCommandImported).toBe(false);
 
@@ -147,6 +151,10 @@ describe('serve fast path --open import boundary', () => {
     ]);
 
     await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    expect(runQwenServe).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ deferRuntimeUntilFirstHealth: false }),
+    );
     await Promise.resolve();
     expect(serveCommandImported).toBe(false);
 

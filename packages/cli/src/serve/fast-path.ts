@@ -495,7 +495,7 @@ export async function tryRunServeFastPath(
     handle = await runQwenServe(parsed.options, {
       ...(settings ? { bootSettings: settings } : {}),
       resolveOnListen: true,
-      deferRuntimeUntilFirstHealth: true,
+      deferRuntimeUntilFirstHealth: !parsed.open,
     });
     try {
       emitHeadlessYoloWarning(settings);
