@@ -24,7 +24,7 @@ import {
 import type {
   ChannelConfig,
   ChannelBaseOptions,
-  AcpBridge,
+  ChannelAgentBridge,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
