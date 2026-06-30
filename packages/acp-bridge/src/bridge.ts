@@ -4695,13 +4695,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (target.state === 'queued') {
         target.releaseSlot();
       }
-      entry.events.publish({
-        type: 'pending_prompt_completed',
-        data: { sessionId, promptId, state: 'removed' },
-        ...(target.originatorClientId
-          ? { originatorClientId: target.originatorClientId }
-          : {}),
-      });
+      try {
+        entry.events.publish({
+          type: 'pending_prompt_completed',
+          data: { sessionId, promptId, state: 'removed' },
+          ...(target.originatorClientId
+            ? { originatorClientId: target.originatorClientId }
+            : {}),
+        });
+      } catch {
+        /* bus may be closed during session teardown */
+      }
       return { removed: true };
     },
 

@@ -202,6 +202,9 @@ export function useQueuedPrompts({
           };
           continue;
         }
+        if (submittingMatches.length > 1) {
+          continue;
+        }
         if (shouldHidePrompt) {
           continue;
         }
