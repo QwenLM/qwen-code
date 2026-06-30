@@ -596,7 +596,7 @@ describe('handleGroupAll', () => {
     expect(env.text).toBe('/help');
   });
 
-  it('bot 消息（event.author.bot）被忽略', async () => {
+  it('bot 消息带 [bot] 标记传递给 handleInbound', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
     pvt.handleGroupAll(
@@ -606,7 +606,10 @@ describe('handleGroupAll', () => {
       }),
     );
     await vi.advanceTimersByTimeAsync(600);
-    expect(mockHandleInbound).not.toHaveBeenCalled();
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env.text).toContain('[bot]');
+    expect(env.text).toContain('[bot-1]');
   });
 
   it('groupActiveMsgEnabled=false 时被阻断', async () => {

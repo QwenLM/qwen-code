@@ -260,6 +260,12 @@ export class QQChannel extends ChannelBase {
           '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
         );
       }
+      parts.push(
+        '',
+        '## 关于机器人消息',
+        '',
+        '消息前缀 [bot] 表示该消息来自另一个机器人。是否回复由你自主判断。',
+      );
       this.config.instructions = parts.join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -1400,6 +1406,8 @@ export class QQChannel extends ChannelBase {
     // itself is the direct target.
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
     const isSlash = isAtBot && cleanText.startsWith('/');
+    const isBot = event.author.bot === true;
+    const botTag = isBot ? '[bot] ' : '';
 
     // Log slash commands with safeName for audit trail
     if (isSlash) {
@@ -1423,7 +1431,7 @@ export class QQChannel extends ChannelBase {
 
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] [${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content ?? '') : cleanText)}`;
+      : `[atMention=${isAtBot}] ${botTag}[${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content ?? '') : cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1528,7 +1536,8 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) return;
+    const isBot = event.author.bot === true;
+    const botTag = isBot ? '[bot] ' : '';
 
     const content = event.content?.trim() ?? '';
     // Compute cleanText early so keyword matching and text construction
@@ -1579,7 +1588,7 @@ export class QQChannel extends ChannelBase {
     // the content reaches the LLM to prevent prompt-injection-based @mentions.
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] [${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
+      : `[atMention=${isAtBot}] ${botTag}[${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
 
     // Only track replyMsgId for at-mention messages — non-@messages should
     // not clobber a preceding @mention's replyMsgId, or the bot's response
