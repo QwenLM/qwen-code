@@ -2483,6 +2483,52 @@ describe('Session', () => {
         });
       });
 
+      it('does not stop disabled tools as repeated invalid parameter calls', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn().mockResolvedValue(false),
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'write_file',
+          kind: core.Kind.Edit,
+          build: vi.fn(),
+        });
+        const functionCalls: FunctionCall[] = [
+          { id: 'write_1', name: 'write_file', args: {} },
+          { id: 'write_2', name: 'write_file', args: {} },
+          { id: 'write_3', name: 'write_file', args: {} },
+        ];
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-disabled-tool',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).not.toBe(true);
+        expect(toolLoopState.invalidToolParamErrors.size).toBe(0);
+        expect(result.parts).toHaveLength(3);
+      });
+
       it('stops early tool lookup errors after repeated invalid tool calls', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockToolRegistry.getTool.mockReturnValue(undefined);

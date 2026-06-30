@@ -4277,7 +4277,10 @@ export class Session implements SessionContext {
     const earlyErrorResponse = async (
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
-      opts?: { stopAfterPermissionCancel?: boolean },
+      opts?: {
+        recordInvalidToolParams?: boolean;
+        stopAfterPermissionCancel?: boolean;
+      },
     ) => {
       spanError = error.message;
       cleanupAgentToolResources();
@@ -4294,6 +4297,7 @@ export class Session implements SessionContext {
         errorType: undefined,
       });
       const loopDetected =
+        opts?.recordInvalidToolParams === true &&
         !activeToolAbortSignal.aborted &&
         !opts?.stopAfterPermissionCancel &&
         recordDaemonInvalidToolParams(
@@ -4311,7 +4315,9 @@ export class Session implements SessionContext {
     };
 
     if (!fc.name) {
-      return earlyErrorResponse(new Error('Missing function name'));
+      return earlyErrorResponse(new Error('Missing function name'), undefined, {
+        recordInvalidToolParams: true,
+      });
     }
 
     const toolName = fc.name;
@@ -4321,6 +4327,8 @@ export class Session implements SessionContext {
     if (!tool) {
       return earlyErrorResponse(
         new Error(`Tool "${toolName}" not found in registry.`),
+        toolName,
+        { recordInvalidToolParams: true },
       );
     }
 
