@@ -391,8 +391,10 @@ export class QQChannel extends ChannelBase {
       return null;
     }
     const base = getApiBase(Boolean(this.qqConfig.sandbox));
+    const routeType =
+      this.chatTypeMap.get(chatId) || this.qqConfig.chatTypes?.[chatId];
     const path =
-      this.chatTypeMap.get(chatId) === 'group'
+      routeType === 'group'
         ? `/v2/groups/${chatId}/messages`
         : `/v2/users/${chatId}/messages`;
     return { base, path };

@@ -71,6 +71,13 @@ export interface QQChannelConfig {
    * When false, `<@OPENID>` tags are stripped before reaching the LLM.
    */
   allowMention?: boolean;
+  /** Route overrides for chat IDs that haven't been seen inbound yet.
+   *  Key: chat openid (group_openid or user_openid).
+   *  Value: 'group' or 'c2c'.
+   *  Used by resolveRoute() as fallback when chatTypeMap has no entry.
+   *  Essential for cron/scheduled messages to known groups.
+   */
+  chatTypes?: Record<string, string>;
 }
 
 /** Robot added to a group. */
