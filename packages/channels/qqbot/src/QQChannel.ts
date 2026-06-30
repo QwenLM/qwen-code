@@ -549,14 +549,15 @@ export class QQChannel extends ChannelBase {
     state.timer = setTimeout(() => {
       state!.timer = null;
       const toFlush = state!.buffer;
-      if (toFlush) {
-        this.sendMessage(state!.chatId, toFlush).catch((err) => {
-          process.stderr.write(
-            `[QQ:${this.name}] idleFlush send failed: ${err}\n`,
-          );
-        });
-        state!.buffer = '';
-      }
+      if (!toFlush) return;
+      // Clear buffer before send; restore on failure so text is not lost.
+      state!.buffer = '';
+      this.sendMessage(state!.chatId, toFlush).catch((err) => {
+        process.stderr.write(
+          `[QQ:${this.name}] idleFlush send failed: ${err}\n`,
+        );
+        state!.buffer = toFlush + (state!.buffer || '');
+      });
     }, 2000);
     state.timer.unref?.();
   }
@@ -896,14 +897,18 @@ export class QQChannel extends ChannelBase {
           // Retry up to 10 times at 60s intervals, then give up.
           // Token refresh failure after 10 attempts (10 min) indicates
           // a persistent issue (revoked credentials, DNS, firewall) that
-          // won't resolve by retrying — emit FATAL and stop.
+          // won't resolve by retrying — disconnect and reconnect so the
+          // fresh connection re-fetches the token, preventing zombie-state
+          // where the WS stays connected but outbound messages are dropped.
           let retryCount = 0;
           const retry = () => {
             if (this.disposed) return;
             if (++retryCount > 10) {
               process.stderr.write(
-                `[QQ:${this.name}] FATAL: token refresh exhausted after ${retryCount} attempts\n`,
+                `[QQ:${this.name}] FATAL: token refresh exhausted, reconnecting\n`,
               );
+              this.disconnect();
+              setTimeout(() => this.connect(), 1000);
               return;
             }
             this.tokenRefreshTimer = setTimeout(() => {
