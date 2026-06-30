@@ -184,24 +184,24 @@ describe('isDuplicate', () => {
   it('首次消息不重复', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    expect(pvt.isDuplicate('evt-001')).toBe(false);
+    expect(pvt['isDuplicate']('evt-001')).toBe(false);
   });
 
   it('相同 ID 第二次返回 true（重复）', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.isDuplicate('evt-001');
-    expect(pvt.isDuplicate('evt-001')).toBe(true);
+    pvt['isDuplicate']('evt-001');
+    expect(pvt['isDuplicate']('evt-001')).toBe(true);
   });
 
   it('5 分钟后旧条目被清理，相同 ID 不再重复', () => {
     vi.setSystemTime(0);
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.isDuplicate('evt-001');
+    pvt['isDuplicate']('evt-001');
     // advance past the 5-minute TTL (300s) + one 60s cleanup interval
     vi.advanceTimersByTime(360_001);
-    expect(pvt.isDuplicate('evt-001')).toBe(false);
+    expect(pvt['isDuplicate']('evt-001')).toBe(false);
   });
 
   it('自动启动 seenCleanupTimer', () => {
@@ -211,7 +211,7 @@ describe('isDuplicate', () => {
     expect(
       (ch as unknown as Record<string, unknown>)['seenCleanupTimer'],
     ).toBeNull();
-    pvt.isDuplicate('evt-001');
+    pvt['isDuplicate']('evt-001');
     expect(
       (ch as unknown as Record<string, unknown>)['seenCleanupTimer'],
     ).not.toBeNull();
@@ -220,8 +220,8 @@ describe('isDuplicate', () => {
   it('不同 ID 不重复', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    expect(pvt.isDuplicate('evt-001')).toBe(false);
-    expect(pvt.isDuplicate('evt-002')).toBe(false);
+    expect(pvt['isDuplicate']('evt-001')).toBe(false);
+    expect(pvt['isDuplicate']('evt-002')).toBe(false);
   });
 });
 
@@ -232,7 +232,7 @@ describe('handleC2C', () => {
   it('设置 chatTypeMap 为 c2c', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleC2C(makeC2CEvent());
+    pvt['handleC2C'](makeC2CEvent());
     const chatTypeMap = (ch as unknown as Record<string, unknown>)[
       'chatTypeMap'
     ] as Map<string, string>;
@@ -243,7 +243,7 @@ describe('handleC2C', () => {
     const before = Date.now();
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleC2C(makeC2CEvent());
+    pvt['handleC2C'](makeC2CEvent());
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
     ] as Map<string, { msgId: string; timestamp: number }>;
@@ -256,7 +256,7 @@ describe('handleC2C', () => {
   it('触发 handleInbound 带正确参数', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleC2C(makeC2CEvent());
+    pvt['handleC2C'](makeC2CEvent());
     // flush microtasks to let the .catch handler settle
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
@@ -271,7 +271,7 @@ describe('handleC2C', () => {
   it('斜杠命令不包装 atMention', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleC2C(makeC2CEvent({ content: '/help' }));
+    pvt['handleC2C'](makeC2CEvent({ content: '/help' }));
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env.text).toBe('/help');
@@ -280,7 +280,7 @@ describe('handleC2C', () => {
   it('空消息（纯图片/贴纸）不触发 handleInbound', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleC2C(makeC2CEvent({ content: '   ' }));
+    pvt['handleC2C'](makeC2CEvent({ content: '   ' }));
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
@@ -289,8 +289,8 @@ describe('handleC2C', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     const evt = makeC2CEvent();
-    pvt.handleC2C(evt);
-    pvt.handleC2C(evt);
+    pvt['handleC2C'](evt);
+    pvt['handleC2C'](evt);
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
@@ -298,7 +298,7 @@ describe('handleC2C', () => {
   it('作者名含 [ ] 字符时被清理', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleC2C(
+    pvt['handleC2C'](
       makeC2CEvent({
         author: { user_openid: 'user-openid-2', username: '[GM] Eve' },
         content: 'hello',
@@ -317,7 +317,7 @@ describe('handleGroup', () => {
   it('设置 chatTypeMap 为 group', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(makeGroupEvent());
+    pvt['handleGroup'](makeGroupEvent());
     const chatTypeMap = (ch as unknown as Record<string, unknown>)[
       'chatTypeMap'
     ] as Map<string, string>;
@@ -328,7 +328,7 @@ describe('handleGroup', () => {
     const before = Date.now();
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(
+    pvt['handleGroup'](
       makeGroupEvent({
         mentions: [
           {
@@ -351,7 +351,7 @@ describe('handleGroup', () => {
   it('触发 handleInbound 带正确参数：isGroup=true, isMentioned=true', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(
+    pvt['handleGroup'](
       makeGroupEvent({
         mentions: [
           {
@@ -376,7 +376,7 @@ describe('handleGroup', () => {
   it('allowMention=false 时清理 <@OPENID> 标签', async () => {
     const ch = makeChannel({ allowMention: false });
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(
+    pvt['handleGroup'](
       makeGroupEvent({
         content: '<@OPENID_BOT> 帮我翻译这段',
         mentions: [
@@ -396,7 +396,7 @@ describe('handleGroup', () => {
   it('清理 <@OPENID> 标签后的空消息不触发', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(makeGroupEvent({ content: '<@OPENID_BOT>   ' }));
+    pvt['handleGroup'](makeGroupEvent({ content: '<@OPENID_BOT>   ' }));
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
@@ -404,7 +404,7 @@ describe('handleGroup', () => {
   it('斜杠命令不包装 atMention', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(
+    pvt['handleGroup'](
       makeGroupEvent({
         content: '/status',
         mentions: [
@@ -425,8 +425,8 @@ describe('handleGroup', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     const evt = makeGroupEvent();
-    pvt.handleGroup(evt);
-    pvt.handleGroup(evt);
+    pvt['handleGroup'](evt);
+    pvt['handleGroup'](evt);
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
@@ -434,7 +434,7 @@ describe('handleGroup', () => {
   it('缺失 group_openid 时直接 return', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroup(
+    pvt['handleGroup'](
       makeGroupEvent({
         group_openid: undefined,
       } as Partial<QQGroupMessageEvent>),
@@ -453,7 +453,7 @@ describe('handleGroup', () => {
     replyMsgId.set('group-openid-1', { msgId: 'old-msg', timestamp: 0 });
 
     // Trigger handleGroup with @all mention (is_you: false)
-    pvt.handleGroup(
+    pvt['handleGroup'](
       makeGroupEvent({
         content: '<@all> 大家看看',
         mentions: [{ scope: 'all' as const, is_you: false }],
@@ -482,7 +482,7 @@ describe('handleGroupAll', () => {
   it('默认 policy=log 时不触发 handleInbound', async () => {
     const ch = makeChannel(); // default groupAllPolicy='log'
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroupAll(makeGroupAllEvent());
+    pvt['handleGroupAll'](makeGroupAllEvent());
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
@@ -490,7 +490,7 @@ describe('handleGroupAll', () => {
   it('policy=log 时设置 chatTypeMap', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroupAll(makeGroupAllEvent());
+    pvt['handleGroupAll'](makeGroupAllEvent());
     const chatTypeMap = (ch as unknown as Record<string, unknown>)[
       'chatTypeMap'
     ] as Map<string, string>;
@@ -500,7 +500,7 @@ describe('handleGroupAll', () => {
   it('policy=all 时触发 handleInbound', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroupAll(makeGroupAllEvent({ content: 'hello world' }));
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello world' }));
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
@@ -516,14 +516,14 @@ describe('handleGroupAll', () => {
     const pvt = ch as unknown as QQChannelRaw;
 
     // non-matching
-    pvt.handleGroupAll(makeGroupAllEvent({ content: 'hello world' }));
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello world' }));
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
 
     mockHandleInbound.mockClear();
 
     // matching keyword 'help' (case-insensitive)
-    pvt.handleGroupAll(
+    pvt['handleGroupAll'](
       makeGroupAllEvent({ id: 'msg-002', content: '我需要 HELP' }),
     );
     await vi.advanceTimersByTimeAsync(600);
@@ -537,7 +537,7 @@ describe('handleGroupAll', () => {
     });
     const pvt = ch as unknown as QQChannelRaw;
 
-    pvt.handleGroupAll(makeGroupAllEvent({ content: '有个问答想请教' }));
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: '有个问答想请教' }));
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
@@ -545,7 +545,9 @@ describe('handleGroupAll', () => {
   it('isAtBot=false 时不设置 replyMsgId', () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroupAll(makeGroupAllEvent({ content: 'hello', mentions: [] }));
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({ content: 'hello', mentions: [] }),
+    );
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
     ] as Map<string, unknown>;
@@ -555,7 +557,7 @@ describe('handleGroupAll', () => {
   it('isAtBot=true 时设置 replyMsgId', () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroupAll(
+    pvt['handleGroupAll'](
       makeGroupAllEvent({
         content: '<@OPENID_BOT> hello',
         mentions: [
@@ -578,7 +580,7 @@ describe('handleGroupAll', () => {
   it('斜杠命令（isAtBot + /prefix）用 cleanText 发送', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroupAll(
+    pvt['handleGroupAll'](
       makeGroupAllEvent({
         content: '<@OPENID_BOT> /help',
         mentions: [
@@ -599,7 +601,7 @@ describe('handleGroupAll', () => {
   it('bot 消息带 [bot] 标记传递给 handleInbound', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroupAll(
+    pvt['handleGroupAll'](
       makeGroupAllEvent({
         content: 'auto reply',
         author: { member_openid: 'bot-1', bot: true },
@@ -620,7 +622,7 @@ describe('handleGroupAll', () => {
     ] as Map<string, boolean>;
     groupActiveMsgEnabled.set('group-openid-1', false);
 
-    pvt.handleGroupAll(makeGroupAllEvent({ content: 'hello' }));
+    pvt['handleGroupAll'](makeGroupAllEvent({ content: 'hello' }));
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
@@ -629,8 +631,8 @@ describe('handleGroupAll', () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
     const evt = makeGroupAllEvent({ content: 'hello' });
-    pvt.handleGroupAll(evt);
-    pvt.handleGroupAll(evt);
+    pvt['handleGroupAll'](evt);
+    pvt['handleGroupAll'](evt);
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
@@ -638,7 +640,7 @@ describe('handleGroupAll', () => {
   it('isAtBot=false 时的 text 格式正确', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
-    pvt.handleGroupAll(
+    pvt['handleGroupAll'](
       makeGroupAllEvent({ content: 'hello world', mentions: [] }),
     );
     await vi.advanceTimersByTimeAsync(600);
@@ -660,7 +662,7 @@ describe('群管理事件', () => {
         op_member_openid: 'admin-1',
         timestamp: Date.now(),
       };
-      pvt.handleGroupAddRobot(evt);
+      pvt['handleGroupAddRobot'](evt);
       const chatTypeMap = (ch as unknown as Record<string, unknown>)[
         'chatTypeMap'
       ] as Map<string, string>;
@@ -703,7 +705,7 @@ describe('群管理事件', () => {
         op_member_openid: 'admin-1',
         timestamp: Date.now(),
       };
-      pvt.handleGroupDelRobot(evt);
+      pvt['handleGroupDelRobot'](evt);
 
       expect(chatTypeMap.has('group-del-1')).toBe(false);
       expect(replyMsgId.has('group-del-1')).toBe(false);
@@ -732,7 +734,7 @@ describe('群管理事件', () => {
         op_member_openid: 'admin-1',
         timestamp: Date.now(),
       };
-      pvt.handleGroupDelRobot(evt);
+      pvt['handleGroupDelRobot'](evt);
 
       expect(spy).toHaveBeenCalled();
       spy.mockRestore();
@@ -754,7 +756,7 @@ describe('群管理事件', () => {
         op_member_openid: 'admin-1',
         timestamp: Date.now(),
       };
-      pvt.handleGroupMsgReject(evt);
+      pvt['handleGroupMsgReject'](evt);
       expect(groupActiveMsgEnabled.get('group-reject-1')).toBe(false);
     });
   });
@@ -774,7 +776,7 @@ describe('群管理事件', () => {
         op_member_openid: 'admin-1',
         timestamp: Date.now(),
       };
-      pvt.handleGroupMsgReceive(evt);
+      pvt['handleGroupMsgReceive'](evt);
       expect(groupActiveMsgEnabled.get('group-recv-1')).toBe(true);
     });
   });

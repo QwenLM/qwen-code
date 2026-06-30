@@ -12,7 +12,6 @@
  * @see https://bot.q.qq.com/wiki/develop/api-v2/
  */
 
-import type { EventEmitter } from 'events';
 import {
   ChannelBase,
   SessionRouter,
@@ -77,8 +76,6 @@ export class QQChannel extends ChannelBase {
   private accessToken: string = '';
   private tokenExpiresAt: number = 0;
   private tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Stored toolCall listener for cleanup in disconnect(). */
-  private _toolCallListener: ((event: ToolCallEvent) => void) | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatInterval: number = 45000;
   private seq: number = 0;
@@ -186,27 +183,6 @@ export class QQChannel extends ChannelBase {
       stateDir,
       `${safeName}-sessions-backup.json`,
     );
-    const toolCallListener = (event: ToolCallEvent) => {
-      const target = this.router.getTarget(event.sessionId);
-      if (target) {
-        this.onToolCall(target.chatId, event);
-      }
-    };
-    this._toolCallListener = toolCallListener;
-    if (this.bridge?.on) {
-      this.bridge.on('toolCall', toolCallListener);
-    } else {
-      try {
-        (this.bridge as unknown as EventEmitter).addListener?.(
-          'toolCall',
-          toolCallListener,
-        );
-      } catch (e: unknown) {
-        process.stderr.write(
-          `[QQ:${name}] Bridge toolCall listener registration failed: ${e instanceof Error ? e.message : String(e)}\n`,
-        );
-      }
-    }
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -448,10 +424,6 @@ export class QQChannel extends ChannelBase {
     this.streamState.clear();
     this.flushQQState();
     this.backupGlobalSessions();
-    if (this._toolCallListener) {
-      this.bridge?.off?.('toolCall', this._toolCallListener);
-      this._toolCallListener = null;
-    }
     if (this.ws) {
       this.ws.close(1000);
       this.ws = null;
@@ -643,7 +615,9 @@ export class QQChannel extends ChannelBase {
       this.saveTimer = null;
     }
     try {
-      writeFileSync(this.qqStatePath, this.serializeQQState(), { mode: 0o600 });
+      const tmpPath = this.qqStatePath + '.tmp';
+      writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
+      renameSync(tmpPath, this.qqStatePath);
     } catch (e) {
       process.stderr.write(
         `[QQ:${this.name}] flushQQState write failed: ${e instanceof Error ? e.message : String(e)}\n`,
@@ -1158,6 +1132,10 @@ export class QQChannel extends ChannelBase {
               this.ws.readyState === WebSocket.CONNECTING)
           ) {
             this.ws.close(4002);
+            if (this.connectReject) {
+              this.connectReject(new Error('Timed out waiting for READY'));
+              this.connectReject = null;
+            }
           }
         }, 30_000);
         this.readyTimeout.unref?.();
@@ -1458,7 +1436,7 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.set(groupId, 'group');
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Added to group ${groupId} by ${event.op_member_openid}\n`,
+      `[QQ:${this.name}] Added to group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}\n`,
     );
   }
 
@@ -1483,7 +1461,7 @@ export class QQChannel extends ChannelBase {
     }
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Removed from group ${groupId} by ${event.op_member_openid}\n`,
+      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}\n`,
     );
   }
 
@@ -1492,7 +1470,7 @@ export class QQChannel extends ChannelBase {
     this.groupActiveMsgEnabled.set(event.group_openid, false);
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Active msg disabled for group ${event.group_openid}\n`,
+      `[QQ:${this.name}] Active msg disabled for group ${sanitizeLogText(event.group_openid, 64)}\n`,
     );
   }
 
@@ -1501,7 +1479,7 @@ export class QQChannel extends ChannelBase {
     this.groupActiveMsgEnabled.set(event.group_openid, true);
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Active msg enabled for group ${event.group_openid}\n`,
+      `[QQ:${this.name}] Active msg enabled for group ${sanitizeLogText(event.group_openid, 64)}\n`,
     );
   }
 

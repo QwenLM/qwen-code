@@ -193,9 +193,13 @@ describe('flushQQState', () => {
     const ch = makeChannel();
     (ch as unknown as { flushQQState: () => void }).flushQQState();
     // no timer advancement needed — should write immediately
-    expect(writeFileSync).toHaveBeenCalledWith(statePath, expect.any(String), {
-      mode: 0o600,
-    });
+    expect(writeFileSync).toHaveBeenCalledWith(
+      statePath + '.tmp',
+      expect.any(String),
+      {
+        mode: 0o600,
+      },
+    );
   });
 
   it('cancels pending debounce when flushing', () => {
@@ -210,9 +214,13 @@ describe('flushQQState', () => {
   it('called during disconnect()', () => {
     const ch = makeChannel();
     ch.disconnect();
-    expect(writeFileSync).toHaveBeenCalledWith(statePath, expect.any(String), {
-      mode: 0o600,
-    });
+    expect(writeFileSync).toHaveBeenCalledWith(
+      statePath + '.tmp',
+      expect.any(String),
+      {
+        mode: 0o600,
+      },
+    );
   });
 });
 
