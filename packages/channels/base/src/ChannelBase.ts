@@ -387,6 +387,7 @@ export abstract class ChannelBase {
     timeoutMs: number | undefined,
   ): Promise<string> {
     const prompt = promptBridge.prompt(sessionId, promptText, {});
+    prompt.catch(() => {});
     if (timeoutMs === undefined) {
       return prompt;
     }
@@ -405,7 +406,8 @@ export abstract class ChannelBase {
     } catch (err) {
       if (err instanceof Error && err.message === 'scheduled job timed out') {
         promptState.cancelled = true;
-        void promptBridge.cancelSession(sessionId).catch((cancelErr) => {
+        this.onSessionDied(sessionId);
+        await promptBridge.cancelSession(sessionId).catch((cancelErr) => {
           process.stderr.write(
             `[${this.name}] cancelSession failed for timed out scheduled job ${jobId} in session ${sessionId}: ${
               cancelErr instanceof Error ? cancelErr.message : cancelErr
