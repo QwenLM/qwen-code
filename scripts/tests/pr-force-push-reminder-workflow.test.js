@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -106,6 +106,10 @@ describe('pr force-push reminder workflow', () => {
     expect(workflow).toContain('<!-- pr-force-push-reminder -->');
     expect(workflow).toContain("c.user?.type === 'Bot'");
     expect(workflow).toContain("c.user?.login === 'github-actions[bot]'");
+    // Assert the skip path itself, so deleting the guard fails a test.
+    expect(workflow).toContain(
+      'Reminder already posted by the bot on this PR; skipping.',
+    );
   });
 
   it('wraps every GitHub write/read in error logging that rethrows', () => {
