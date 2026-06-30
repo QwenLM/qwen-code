@@ -1520,6 +1520,75 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('keeps historical image refs stable and reattaches only recent image bytes', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
+        },
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'new-shot' } }],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => 'response',
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'continue' },
+        'prompt-id-image-refs',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      const contents = request?.contents as Content[];
+      const serialized = JSON.stringify(contents);
+      expect(serialized).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
+      );
+      expect(serialized).not.toContain('"data":"old-shot"');
+      expect(serialized?.match(/"data":"new-shot"/g)).toHaveLength(1);
+      expect(contents.at(-1)).toEqual({
+        role: 'user',
+        parts: [
+          {
+            text: expect.stringContaining('Recent images reattached'),
+          },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'new-shot',
+              displayName: undefined,
+            },
+          },
+        ],
+      });
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {

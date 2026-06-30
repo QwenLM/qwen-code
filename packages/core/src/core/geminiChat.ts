@@ -56,7 +56,15 @@ import {
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
-import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
+import {
+  resolveCompactionTuning,
+  resolveSlimmingConfig,
+} from '../services/compactionInputSlimming.js';
+import {
+  FileSystemImagePayloadStore,
+  getImagePayloadCacheDir,
+  prepareImagePayloadsForRequest,
+} from '../services/imagePayloadReferences.js';
 import {
   estimateContentTokens,
   estimatePromptTokens,
@@ -1492,7 +1500,22 @@ export class GeminiChat {
    * defensive deep copy for caller mutation safety.
    */
   private getRequestHistory(): Content[] {
-    return extractCuratedHistory(this.history).map(copyContentContainer);
+    const requestHistory = extractCuratedHistory(this.history).map(
+      copyContentContainer,
+    );
+    const { maxRecentImages } = resolveCompactionTuning(
+      this.config.getChatCompression(),
+    );
+    const imageStore = new FileSystemImagePayloadStore(
+      getImagePayloadCacheDir(
+        this.config.storage.getProjectTempDir(),
+        this.config.getSessionId(),
+      ),
+    );
+    return prepareImagePayloadsForRequest(requestHistory, {
+      maxRecentImages,
+      store: imageStore,
+    });
   }
 
   /**
