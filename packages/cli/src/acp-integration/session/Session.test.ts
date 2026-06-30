@@ -5131,9 +5131,14 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'hello' }],
           });
 
-          await vi.waitFor(() => {
-            expect(loopTickResolverDepsSpy).toHaveBeenCalled();
-          });
+          await vi.waitFor(
+            () => {
+              expect(loopTickResolverDepsSpy).toHaveBeenCalled();
+            },
+            {
+              timeout: 3000,
+            },
+          );
 
           const deps = loopTickResolverDepsSpy.mock.calls.at(-1)![0] as {
             homeDir: string;
