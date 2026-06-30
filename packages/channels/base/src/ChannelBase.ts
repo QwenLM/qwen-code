@@ -533,7 +533,7 @@ export abstract class ChannelBase {
         this.logChannelMemoryError('save', envelope, message);
         await this.sendMessage(
           envelope.chatId,
-          `Failed to save channel memory: ${message}`,
+          `Failed to save channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return true;
       }
@@ -562,7 +562,7 @@ export abstract class ChannelBase {
         this.logChannelMemoryError('read', envelope, message);
         await this.sendMessage(
           envelope.chatId,
-          `Failed to read channel memory: ${message}`,
+          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return true;
       }
@@ -598,7 +598,7 @@ export abstract class ChannelBase {
         this.logChannelMemoryError('clear', envelope, message);
         await this.sendMessage(
           envelope.chatId,
-          `Failed to clear channel memory: ${message}`,
+          `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return true;
       }
@@ -791,6 +791,10 @@ export abstract class ChannelBase {
 
   private channelMemoryErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private channelMemoryUserErrorMessage(): string {
+    return 'An error occurred while accessing channel memory.';
   }
 
   private logChannelMemoryError(
@@ -1371,6 +1375,11 @@ export abstract class ChannelBase {
             promptText = `${context.join('\n\n')}\n\n${promptText}`;
           }
         } catch (error) {
+          this.logChannelMemoryError(
+            'read',
+            envelope,
+            this.channelMemoryErrorMessage(error),
+          );
           this.instructedSessions.delete(sessionId);
           throw error;
         }

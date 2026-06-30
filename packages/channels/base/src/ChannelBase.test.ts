@@ -250,6 +250,9 @@ describe('ChannelBase', () => {
         clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
       };
       const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
 
       await ch.handleInbound(
         envelope({ text: '/remember-channel new memory', senderId: 'alice' }),
@@ -258,9 +261,13 @@ describe('ChannelBase', () => {
       expect(ch.sent).toEqual([
         {
           chatId: 'chat1',
-          text: 'Failed to save channel memory: Channel memory exceeds maximum size',
+          text: 'Failed to save channel memory: An error occurred while accessing channel memory.',
         },
       ]);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Channel memory exceeds maximum size'),
+      );
+      stderrSpy.mockRestore();
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
@@ -312,14 +319,24 @@ describe('ChannelBase', () => {
         clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
       };
       const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
 
       await ch.handleInbound(
         envelope({ text: '/channel-memory', senderId: 'alice' }),
       );
 
       expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'Failed to read channel memory: disk full' },
+        {
+          chatId: 'chat1',
+          text: 'Failed to read channel memory: An error occurred while accessing channel memory.',
+        },
       ]);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('disk full'),
+      );
+      stderrSpy.mockRestore();
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
@@ -362,14 +379,22 @@ describe('ChannelBase', () => {
         clearChannelMemory: vi.fn().mockRejectedValue(new Error('EACCES')),
       };
       const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
 
       await ch.handleInbound(
         envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
       );
 
       expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'Failed to clear channel memory: EACCES' },
+        {
+          chatId: 'chat1',
+          text: 'Failed to clear channel memory: An error occurred while accessing channel memory.',
+        },
       ]);
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+      stderrSpy.mockRestore();
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
@@ -2267,11 +2292,18 @@ describe('ChannelBase', () => {
         { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
         { channelMemory },
       );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
 
       await expect(
         ch.handleInbound(envelope({ text: 'first', senderId: 'alice' })),
       ).rejects.toThrow('memory boom');
       expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('memory boom'),
+      );
+      stderrSpy.mockRestore();
 
       await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
 

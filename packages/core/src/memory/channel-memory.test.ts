@@ -189,6 +189,20 @@ describe('channel memory', () => {
     ).toBeLessThanOrEqual(MAX_CHANNEL_MEMORY_BYTES);
   });
 
+  it('serializes clear after pending appends', async () => {
+    const target: ChannelMemoryTarget = {
+      channelName: 'prod',
+      chatId: 'chat-1',
+    };
+
+    const appends = Array.from({ length: 20 }, (_, index) =>
+      appendChannelMemory(target, `entry ${index}`),
+    );
+    await Promise.all([...appends, clearChannelMemory(target)]);
+
+    await expect(readChannelMemory(target)).resolves.toBe('');
+  });
+
   it('reads oversized existing memory as empty', async () => {
     const target: ChannelMemoryTarget = {
       channelName: 'prod',

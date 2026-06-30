@@ -110,7 +110,14 @@ export async function readChannelMemory(
     );
     return '';
   }
-  return fs.readFile(filePath, 'utf8');
+  try {
+    return await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return '';
+    }
+    throw error;
+  }
 }
 
 export async function appendChannelMemory(
@@ -151,13 +158,26 @@ export async function clearChannelMemory(
   target: ChannelMemoryTarget,
 ): Promise<ChannelMemoryWriteResult> {
   const filePath = getChannelMemoryFilePath(target);
-  try {
-    await fs.unlink(filePath);
-    return { changed: true, filePath };
-  } catch (error) {
-    if (isMissingFile(error)) {
-      return { changed: false, filePath };
+  return serializeAppend(filePath, async () => {
+    let release: () => Promise<void>;
+    try {
+      release = await lockfile.lock(filePath, LOCK_OPTIONS);
+    } catch (error) {
+      if (isMissingFile(error)) {
+        return { changed: false, filePath };
+      }
+      throw error;
     }
-    throw error;
-  }
+    try {
+      await fs.unlink(filePath);
+      return { changed: true, filePath };
+    } catch (error) {
+      if (isMissingFile(error)) {
+        return { changed: false, filePath };
+      }
+      throw error;
+    } finally {
+      await release();
+    }
+  });
 }
