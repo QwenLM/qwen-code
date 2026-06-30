@@ -1746,6 +1746,75 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('session/permission rejects a sessionId that does not match the pending requestId', async () => {
+    const resolved: unknown[] = [];
+    bridge.respondToSessionPermission = ((
+      _s: string,
+      _r: string,
+      resp: unknown,
+    ) => {
+      resolved.push(resp);
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-mismatch',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 30,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next();
+      // requestId belongs to sess-1, but the client claims sess-WRONG.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 31,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-WRONG',
+          requestId: 'perm-mismatch',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      };
+      expect(frame.id).toBe(31);
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.data?.httpStatus).toBe(409);
+      expect(frame.error.message).toContain('does not belong');
+      // The mismatched vote must not have reached the bridge.
+      expect(resolved).toEqual([]);
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
   it('session/permission returns 404 when no pending request matches the requestId', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);

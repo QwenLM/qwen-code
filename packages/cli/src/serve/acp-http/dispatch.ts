@@ -726,7 +726,7 @@ export class AcpDispatcher {
     req: PendingClientRequest,
   ): void {
     if (this.registry) {
-      this.registry.deletePendingPermission(req.sessionId, req.bridgeRequestId);
+      this.registry.deletePendingPermission(req.bridgeRequestId, req.sessionId);
       return;
     }
     conn.pending.delete(id);
@@ -1088,11 +1088,37 @@ export class AcpDispatcher {
             params['sessionId'].length > 0
               ? params['sessionId']
               : undefined;
-          const pendingRef = this.registry?.findPendingPermission(
-            requestId,
-            sessionIdParam,
-          );
-          const sessionId = sessionIdParam ?? pendingRef?.req.sessionId;
+          // Look up by the globally-unique `requestId` alone, then validate
+          // the client's `sessionId` against the pending entry instead of
+          // trusting it for routing. A mismatched `sessionId` previously fell
+          // through to `sessionIdParam`, which (a) routed `requireOwned` and
+          // the bridge vote at the wrong session and (b) left the real pending
+          // entry to leak until teardown. Reject the mismatch explicitly.
+          const pendingRef = this.registry?.findPendingPermission(requestId);
+          if (
+            sessionIdParam &&
+            pendingRef &&
+            sessionIdParam !== pendingRef.req.sessionId
+          ) {
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote rejected: requestId ${logSafe(requestId)} does not belong to session ${logSafe(sessionIdParam)}`,
+            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'requestId does not belong to the specified session',
+                  { httpStatus: 409, sessionId: sessionIdParam, requestId },
+                ),
+              );
+            }
+            return;
+          }
+          // The pending entry's own session is authoritative; fall back to the
+          // client's `sessionId` only when no entry was found (so the
+          // bridge-rejection 409 path below can still report it).
+          const sessionId = pendingRef?.req.sessionId ?? sessionIdParam;
           if (!sessionId) {
             writeStderrLine(
               `qwen serve: /acp session/permission vote dropped: no pending request for requestId ${logSafe(requestId)}`,
@@ -1147,7 +1173,7 @@ export class AcpDispatcher {
             }
             return;
           }
-          this.registry?.deletePendingPermission(sessionId, requestId);
+          this.registry?.deletePendingPermission(requestId, sessionId);
           this.replyConn(conn, id, {});
           return;
         }

@@ -896,7 +896,7 @@ describe('ConnectionRegistry.getSnapshot', () => {
         registry.findPendingPermission('perm-1', 'wrong-session'),
       ).toBeUndefined();
 
-      registry.deletePendingPermission('sess-1', 'perm-1');
+      registry.deletePendingPermission('perm-1', 'sess-1');
 
       expect(registry.findPendingClientRequest(idA)).toBeUndefined();
     } finally {

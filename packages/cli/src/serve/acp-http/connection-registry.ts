@@ -917,14 +917,13 @@ export class ConnectionRegistry {
 
   /**
    * Locate the single pending permission entry matching `requestId` (and
-   * optionally `sessionId`). Shared by {@link findPendingPermission} and
-   * {@link deletePendingPermission} so the matching predicate lives in one
-   * place — a future change to the predicate cannot let find and delete drift
-   * apart. Permission request IDs are connection-qualified
-   * (`_qwen_perm_<connectionId>_N`) and therefore globally unique, so at most
-   * one entry can match across the whole registry.
+   * optionally `sessionId`). {@link deletePendingPermission} delegates here so
+   * the matching predicate lives in one place — a future change to it cannot
+   * let find and delete drift apart. Permission request IDs are
+   * connection-qualified (`_qwen_perm_<connectionId>_N`) and therefore globally
+   * unique, so at most one entry can match across the whole registry.
    */
-  private findPendingPermissionEntry(
+  findPendingPermission(
     requestId: string,
     sessionId?: string,
   ): PendingClientRequestRef | undefined {
@@ -942,15 +941,11 @@ export class ConnectionRegistry {
     return undefined;
   }
 
-  findPendingPermission(
-    requestId: string,
-    sessionId?: string,
-  ): PendingClientRequestRef | undefined {
-    return this.findPendingPermissionEntry(requestId, sessionId);
-  }
-
-  deletePendingPermission(sessionId: string, requestId: string): void {
-    const match = this.findPendingPermissionEntry(requestId, sessionId);
+  // Argument order matches `findPendingPermission` (requestId first) so the two
+  // can never be called with swapped string args — a swap would silently match
+  // nothing and leak the entry until teardown, with no type error to catch it.
+  deletePendingPermission(requestId: string, sessionId: string): void {
+    const match = this.findPendingPermission(requestId, sessionId);
     if (match) {
       match.conn.pending.delete(match.id);
     }
