@@ -1,5 +1,6 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import { loadSettings } from '../../config/settings.js';
 import {
   DaemonChannelBridge,
   sanitizeLogText,
@@ -19,8 +20,10 @@ import {
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
   QWEN_DAEMON_WORKSPACE_ENV,
+  QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { resolveProxy } from './proxy.js';
 import {
   createChannel,
   loadChannelsConfig,
@@ -28,12 +31,10 @@ import {
   parseConfiguredChannels,
   registerSessionCleanup,
   registerToolCallDispatch,
-  sessionsPath,
   type ParsedChannel,
 } from './runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
-const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -224,6 +225,11 @@ export async function runChannelDaemonWorker(
   }
 
   await loadChannelsFromExtensions();
+  const settings = loadSettings(daemonWorkspace);
+  const proxy = resolveProxy(
+    undefined,
+    settings.merged.proxy as string | undefined,
+  );
   const channelsConfig = loadChannelsConfig(daemonWorkspace);
   const names = selectedChannelNames(channelsConfig, opts.selection);
   const parsed = await parseConfiguredChannels(channelsConfig, names, {
@@ -265,7 +271,7 @@ export async function runChannelDaemonWorker(
       bridgeFacade,
       daemonWorkspace,
       'user',
-      sessionsPath(),
+      undefined,
     );
     for (const { name, config } of parsed) {
       router.setChannelScope(name, config.sessionScope);
@@ -274,7 +280,10 @@ export async function runChannelDaemonWorker(
     for (const { name, config } of parsed) {
       channels.set(
         name,
-        await createChannel(name, config, bridgeFacade, { router }),
+        await createChannel(name, config, bridgeFacade, {
+          ...(proxy ? { proxy } : {}),
+          router,
+        }),
       );
     }
     registerToolCallDispatch(bridgeFacade, router, channels);
@@ -284,7 +293,8 @@ export async function runChannelDaemonWorker(
       try {
         await channel.connect();
         connected.push(name);
-        writeStdoutLine(`[Channel] "${name}" connected.`);
+        const safeName = sanitizeLogText(name, 128);
+        writeStdoutLine(`[Channel] "${safeName}" connected.`);
       } catch (err) {
         const safeName = sanitizeLogText(name, 128);
         const safeMessage = sanitizeLogText(
@@ -376,10 +386,13 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           await handle.close();
           process.exit(0);
         } catch (err) {
+          const safeReason = sanitizeLogText(reason, 128);
+          const safeMessage = sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            512,
+          );
           writeStderrLine(
-            `[Channel] daemon worker failed to shut down after ${reason}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
+            `[Channel] daemon worker failed to shut down after ${safeReason}: ${safeMessage}`,
           );
           process.exit(1);
         }
@@ -390,9 +403,11 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         void shutdown('disconnect');
       });
     } catch (err) {
-      writeStderrLine(
-        `[Channel] daemon worker failed: ${err instanceof Error ? err.message : String(err)}`,
+      const safeMessage = sanitizeLogText(
+        err instanceof Error ? err.message : String(err),
+        512,
       );
+      writeStderrLine(`[Channel] daemon worker failed: ${safeMessage}`);
       process.exit(1);
     }
 

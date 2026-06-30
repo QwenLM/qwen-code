@@ -1,7 +1,8 @@
 import type { ChannelConfig } from '@qwen-code/channel-base';
 import { resolvePath } from '@qwen-code/channel-base';
-import * as path from 'node:path';
 import { getPlugin, supportedTypes } from './channel-registry.js';
+
+export { findCliEntryPath } from './cli-entry-path.js';
 
 export function resolveEnvVars(value: string): string {
   if (value.startsWith('$')) {
@@ -15,14 +16,6 @@ export function resolveEnvVars(value: string): string {
     return envValue;
   }
   return value;
-}
-
-export function findCliEntryPath(): string {
-  const mainModule = process.argv[1];
-  if (mainModule) {
-    return path.resolve(mainModule);
-  }
-  throw new Error('Cannot determine CLI entry path');
 }
 
 function resolveOptionalStringField(

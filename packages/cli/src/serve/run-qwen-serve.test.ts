@@ -28,7 +28,7 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
-import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelWorkerSnapshot , CreateChannelWorkerSupervisorOptions } from './channel-worker-supervisor.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
@@ -1353,6 +1353,102 @@ describe('runQwenServe channel worker supervisor', () => {
 
     expect(order).toEqual(['worker', 'bridge']);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('passes a loopback daemon URL to workers when serve binds a wildcard host', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-loopback-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    let workerOptions: CreateChannelWorkerSupervisorOptions | undefined;
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        token: 'test-token',
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn((opts) => {
+          workerOptions = opts;
+          return worker;
+        }),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      const port = new URL(handle.url).port;
+      expect(workerOptions?.daemonUrl).toBe(`http://127.0.0.1:${port}`);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not write a worker pidfile after runtime startup already timed out', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-timeout-')),
+    );
+    let releaseStart!: () => void;
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    worker.start.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        }),
+    );
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+        resolveOnListen: true,
+        runtimeStartupTimeoutMs: 1,
+      },
+    );
+
+    try {
+      await expect(
+        Promise.race([
+          handle.runtimeReady,
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error('runtimeReady did not settle')),
+              1000,
+            ),
+          ),
+        ]),
+      ).rejects.toThrow('Daemon runtime startup timed out after 1ms.');
+      releaseStart();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(pidfile.writeServeServiceInfo).not.toHaveBeenCalled();
+    } finally {
+      releaseStart?.();
+      await handle.close();
+    }
   });
 
   it('reports a warning when the ready channel worker exits', async () => {

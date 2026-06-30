@@ -146,6 +146,24 @@ describe('writeServiceInfo + readServiceInfo', () => {
     });
   });
 
+  it('does not let standalone startup overwrite a serve-owned reservation', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    reserveServeServiceInfo({
+      channels: ['telegram'],
+      servePid: 4321,
+    });
+
+    expect(() => writeServiceInfo(['telegram'])).toThrow('EEXIST');
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'serve',
+      pid: 4321,
+      servePid: 4321,
+      channels: ['telegram'],
+    });
+  });
+
   it('returns null when no PID file exists', () => {
     const info = readServiceInfo();
     expect(info).toBeNull();

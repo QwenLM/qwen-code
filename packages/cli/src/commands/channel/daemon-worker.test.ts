@@ -8,6 +8,12 @@ const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
 const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
+const mockLoadSettings = vi.hoisted(() =>
+  vi.fn(() => ({ merged: { proxy: 'http://settings-proxy:8080' } })),
+);
+const mockResolveProxy = vi.hoisted(() =>
+  vi.fn((_cliProxy?: string, settingsProxy?: string) => settingsProxy),
+);
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockSanitizeLogText = vi.hoisted(() =>
@@ -64,6 +70,14 @@ vi.mock('@qwen-code/acp-bridge/workspacePaths', () => ({
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
+}));
+
+vi.mock('../../config/settings.js', () => ({
+  loadSettings: mockLoadSettings,
+}));
+
+vi.mock('./proxy.js', () => ({
+  resolveProxy: mockResolveProxy,
 }));
 
 vi.mock('./runtime.js', () => ({
@@ -306,9 +320,16 @@ describe('runChannelDaemonWorker', () => {
       parsedTelegram.config,
       bridgeFacade,
       expect.objectContaining({
+        proxy: 'http://settings-proxy:8080',
         router: mockSessionRouter.mock.results[0]!.value,
       }),
     );
+    expect(mockResolveProxy).toHaveBeenCalledWith(
+      undefined,
+      'http://settings-proxy:8080',
+    );
+    expect(mockSessionsPath).not.toHaveBeenCalled();
+    expect(mockSessionRouter.mock.calls[0]![3]).toBeUndefined();
     expect(ready).toHaveBeenCalledWith({
       channels: ['telegram'],
       pid: process.pid,
@@ -346,6 +367,32 @@ describe('runChannelDaemonWorker', () => {
       'thread',
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('feishu', 'single');
+  });
+
+  it('sanitizes channel names before writing connected logs', async () => {
+    const sdk = createSdk();
+    const unsafeName = 'evil\nchannel';
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      [unsafeName]: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      {
+        ...parsedTelegram,
+        name: unsafeName,
+      },
+    ]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockSanitizeLogText).toHaveBeenCalledWith(unsafeName, 128);
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] "evil channel" connected.',
+    );
   });
 
   it('exposes shellCommand only when capabilities include session_shell_command', async () => {

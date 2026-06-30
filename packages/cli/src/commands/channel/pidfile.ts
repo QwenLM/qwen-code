@@ -133,7 +133,7 @@ export function writeServiceInfo(channels: string[]): void {
     channels,
   };
 
-  writeInfo(info);
+  writeInfo(info, 'wx');
 }
 
 export function writeServeServiceInfo({

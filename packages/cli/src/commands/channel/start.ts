@@ -1,11 +1,10 @@
 import type { CommandModule } from 'yargs';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
-import { normalizeProxyUrl } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
 import type { ChannelBase } from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
+import { resolveProxy } from './proxy.js';
 import {
   readServiceInfo,
   writeServiceInfo,
@@ -22,39 +21,11 @@ import {
 } from './runtime.js';
 
 export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
+export { resolveProxy } from './proxy.js';
 
 const MAX_CRASH_RESTARTS = 3;
 const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
 const RESTART_DELAY_MS = 3000;
-
-/**
- * Resolve and apply proxy settings for the channel service process.
- *
- * The normal CLI path applies proxy via loadCliConfig → Config constructor →
- * setGlobalDispatcher, but `channel start` never calls loadCliConfig. This
- * replicates the same resolution logic (--proxy flag → settings.proxy →
- * HTTPS_PROXY → HTTP_PROXY) and applies the global dispatcher for native
- * fetch() calls. The resolved URL is also passed to channels via
- * ChannelBaseOptions so adapters can configure their own HTTP clients (e.g.
- * grammy uses node-fetch which needs a separate agent).
- */
-export function resolveProxy(
-  cliProxy?: string,
-  settingsProxy?: string,
-): string | undefined {
-  const proxyUrl = normalizeProxyUrl(
-    cliProxy ||
-      settingsProxy ||
-      process.env['HTTPS_PROXY'] ||
-      process.env['https_proxy'] ||
-      process.env['HTTP_PROXY'] ||
-      process.env['http_proxy'],
-  );
-  if (proxyUrl) {
-    setGlobalDispatcher(new ProxyAgent(proxyUrl));
-  }
-  return proxyUrl;
-}
 
 /** Check for duplicate instance and abort if one is already running. */
 function checkDuplicateInstance(): void {

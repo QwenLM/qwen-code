@@ -6,19 +6,52 @@ import {
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
   QWEN_DAEMON_WORKSPACE_ENV,
+  QWEN_SERVER_TOKEN_ENV,
 } from './channel-worker-env.js';
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
-const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
-const CHANNEL_WORKER_ENV_DENYLIST = [
-  QWEN_SERVER_TOKEN_ENV,
-  QWEN_DAEMON_TOKEN_ENV,
-  'ANTHROPIC_API_KEY',
-  'DASHSCOPE_API_KEY',
-  'GEMINI_API_KEY',
-  'GOOGLE_API_KEY',
-  'OPENAI_API_KEY',
-  'QWEN_API_KEY',
+const CHANNEL_WORKER_ENV_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'USERPROFILE',
+  'USER',
+  'USERNAME',
+  'LOGNAME',
+  'SHELL',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TERM',
+  'NO_COLOR',
+  'FORCE_COLOR',
+  'CI',
+  'DEV',
+  'NODE_ENV',
+  'NODE_OPTIONS',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'SystemRoot',
+  'WINDIR',
+  'ProgramFiles',
+  'XDG_CONFIG_HOME',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'QWEN_HOME',
+  'QWEN_RUNTIME_DIR',
+  'QWEN_CLI_ENTRY',
+  'QWEN_SERVE_DEBUG',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'ALL_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'all_proxy',
 ];
 
 export type ChannelWorkerState =
@@ -79,6 +112,7 @@ export interface CreateChannelWorkerSupervisorOptions {
   selection: ServeChannelSelection;
   startupTimeoutMs?: number;
   spawnWorker?: SpawnChannelWorker;
+  onExit?: (snapshot: ChannelWorkerSnapshot) => void;
 }
 
 function selectionChannelArgs(selection: ServeChannelSelection): string[] {
@@ -140,6 +174,30 @@ function hasObservedExit(snapshot: ChannelWorkerSnapshot): boolean {
   return snapshot.exitCode !== undefined || snapshot.signal !== undefined;
 }
 
+function createWorkerEnv(opts: {
+  daemonUrl: string;
+  daemonToken?: string;
+  workspace: string;
+}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of CHANNEL_WORKER_ENV_ALLOWLIST) {
+    const value = process.env[name];
+    if (value !== undefined) {
+      env[name] = value;
+    }
+  }
+  env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+  env[CHANNEL_DAEMON_WORKER_SENTINEL] = '1';
+  env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
+  env[QWEN_DAEMON_WORKSPACE_ENV] = opts.workspace;
+  delete env[QWEN_SERVER_TOKEN_ENV];
+  delete env[QWEN_DAEMON_TOKEN_ENV];
+  if (opts.daemonToken) {
+    env[QWEN_DAEMON_TOKEN_ENV] = opts.daemonToken;
+  }
+  return env;
+}
+
 export function createChannelWorkerSupervisor(
   opts: CreateChannelWorkerSupervisorOptions,
 ): ChannelWorkerSupervisor {
@@ -152,18 +210,30 @@ export function createChannelWorkerSupervisor(
   };
   let ready = false;
 
+  const snapshotCopy = (): ChannelWorkerSnapshot => ({
+    ...snapshot,
+    channels: [...snapshot.channels],
+  });
+
   const setExited = (
     state: ChannelWorkerState,
     code: number | null,
     signal: NodeJS.Signals | null,
     error?: string,
   ) => {
-    snapshot = {
+    const next: ChannelWorkerSnapshot = {
       ...snapshot,
       state,
       exitCode: code,
       signal,
-      ...(error ? { error } : {}),
+    };
+    if (error) {
+      next.error = error;
+    } else {
+      delete next.error;
+    }
+    snapshot = {
+      ...next,
     };
   };
 
@@ -176,19 +246,11 @@ export function createChannelWorkerSupervisor(
         'daemon-worker',
         ...selectionChannelArgs(opts.selection),
       ];
-      const env: NodeJS.ProcessEnv = {
-        ...process.env,
-        QWEN_CODE_NO_RELAUNCH: 'true',
-        [CHANNEL_DAEMON_WORKER_SENTINEL]: '1',
-        [QWEN_DAEMON_URL_ENV]: opts.daemonUrl,
-        [QWEN_DAEMON_WORKSPACE_ENV]: opts.workspace,
-      };
-      for (const name of CHANNEL_WORKER_ENV_DENYLIST) {
-        delete env[name];
-      }
-      if (opts.daemonToken) {
-        env[QWEN_DAEMON_TOKEN_ENV] = opts.daemonToken;
-      }
+      const env = createWorkerEnv({
+        daemonUrl: opts.daemonUrl,
+        workspace: opts.workspace,
+        ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+      });
       snapshot = {
         enabled: true,
         state: 'starting',
@@ -240,19 +302,31 @@ export function createChannelWorkerSupervisor(
           code: number | null,
           signal: NodeJS.Signals | null,
         ) {
+          if (settled && !ready) return;
           const state = ready ? 'exited' : 'failed';
           const message = `Channel worker exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'}).`;
           setExited(state, code, signal, ready ? undefined : message);
+          if (ready) {
+            opts.onExit?.(snapshotCopy());
+          }
           if (!settled) {
             failBeforeReady(new Error(message));
           }
         }
         function settleError(err: Error) {
-          snapshot = {
-            ...snapshot,
-            state: ready ? 'exited' : 'failed',
-            error: err.message,
-          };
+          if (settled && !ready) return;
+          if (ready || child?.pid === undefined) {
+            setExited(ready ? 'exited' : 'failed', null, null, err.message);
+          } else {
+            snapshot = {
+              ...snapshot,
+              state: 'failed',
+              error: err.message,
+            };
+          }
+          if (ready) {
+            opts.onExit?.(snapshotCopy());
+          }
           if (!settled) {
             failBeforeReady(err);
           }
@@ -267,6 +341,7 @@ export function createChannelWorkerSupervisor(
             error,
           };
           failBeforeReady(new Error(error));
+          child?.kill('SIGTERM');
         }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
         startupTimer.unref();
         child!.on('message', settleReady);
@@ -312,19 +387,5 @@ export function createChannelWorkerSupervisor(
     snapshot() {
       return { ...snapshot, channels: [...snapshot.channels] };
     },
-  };
-}
-
-export function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
-  const snapshot: ChannelWorkerSnapshot = {
-    enabled: false,
-    state: 'disabled',
-    channels: [],
-  };
-  return {
-    async start() {},
-    async stop() {},
-    killAllSync() {},
-    snapshot: () => ({ ...snapshot, channels: [] }),
   };
 }

@@ -80,13 +80,14 @@ import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
+import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
+import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
 
-const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 // Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
 // `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
 // the daemon WS. Off by default while the contract settles.
@@ -322,6 +323,19 @@ function formatHostForUrl(host: string): string {
   return host;
 }
 
+function formatChannelWorkerDaemonUrl(host: string, port: number): string {
+  const normalized = host.trim().toLowerCase();
+  if (
+    normalized === '' ||
+    normalized === '0.0.0.0' ||
+    normalized === '::' ||
+    normalized === '[::]'
+  ) {
+    return `http://127.0.0.1:${port}`;
+  }
+  return `http://${formatHostForUrl(host)}:${port}`;
+}
+
 /**
  * Pull the `context.fileName` snapshot out of merged settings into a
  * typed string, falling back to `undefined` when the value is missing
@@ -453,14 +467,6 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
   };
-}
-
-function findCliEntryPathForServe(): string {
-  const mainModule = process.argv[1];
-  if (mainModule) {
-    return path.resolve(mainModule);
-  }
-  throw new Error('Cannot determine CLI entry path');
 }
 
 function channelSelectionPidfileNames(
@@ -2161,16 +2167,31 @@ export async function runQwenServe(
             );
           }
           channelWorker = createSupervisor({
-            cliEntryPath: findCliEntryPathForServe(),
-            daemonUrl: url,
+            cliEntryPath: findCliEntryPath(),
+            daemonUrl: formatChannelWorkerDaemonUrl(opts.hostname, actualPort),
             ...(token ? { daemonToken: token } : {}),
             workspace: boundWorkspace,
             selection: opts.channelSelection,
+            onExit: (snapshot) => {
+              daemonLog.warn(
+                `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
+                  `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'})`,
+              );
+            },
           });
         }
       } catch (err) {
         removeCurrentServePidfile();
-        reject(err instanceof Error ? err : new Error(String(err)));
+        const error = err instanceof Error ? err : new Error(String(err));
+        server.close((closeErr) => {
+          if (closeErr) {
+            daemonLog.error(
+              'server close after channel worker setup error failed',
+              closeErr,
+            );
+          }
+          reject(error);
+        });
         return;
       }
       writeStdoutLine(
@@ -2291,8 +2312,10 @@ export async function runQwenServe(
         if (runtimeStartupSettled) return;
         if (opts.channelSelection) {
           await channelWorker.start();
+          if (runtimeStartupSettled) return;
           writeChannelWorkerPidfile();
         }
+        if (runtimeStartupSettled) return;
         runtimeStartupSettled = true;
         clearRuntimeStartupTimer();
         markRuntimeReady();
