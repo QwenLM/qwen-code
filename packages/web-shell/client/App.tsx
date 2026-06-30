@@ -939,9 +939,12 @@ export function App({
     };
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
+    const preventScroll = (e: TouchEvent) => e.preventDefault();
+    document.addEventListener('touchmove', preventScroll, { passive: false });
     window.addEventListener('keydown', onKey, true);
     return () => {
       document.body.style.overflow = prevOverflow;
+      document.removeEventListener('touchmove', preventScroll);
       window.removeEventListener('keydown', onKey, true);
     };
   }, [mobileDrawerOpen, closeMobileDrawer]);
