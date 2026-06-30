@@ -9652,7 +9652,7 @@ describe('createServeApp', () => {
       expect(archiveRes.body.archived).toEqual([sid]);
     });
 
-    it('returns session_archiving for overlapping archive batches before partial work starts', async () => {
+    it('returns session_archiving for overlapping archive batches', async () => {
       const sidA = '66666666-bbbb-cccc-dddd-eeeeeeeeeeee';
       const sidB = '77777777-bbbb-cccc-dddd-eeeeeeeeeeee';
       await writeSession(sidA);
@@ -9660,11 +9660,15 @@ describe('createServeApp', () => {
 
       let closeAStarted!: () => void;
       let releaseCloseA!: () => void;
+      let closeBStarted!: () => void;
       const closeAStartedPromise = new Promise<void>((resolve) => {
         closeAStarted = resolve;
       });
       const closeAReleasedPromise = new Promise<void>((resolve) => {
         releaseCloseA = resolve;
+      });
+      const closeBStartedPromise = new Promise<void>((resolve) => {
+        closeBStarted = resolve;
       });
 
       const bridge = fakeBridge({
@@ -9672,6 +9676,8 @@ describe('createServeApp', () => {
           if (sessionId === sidA) {
             closeAStarted();
             await closeAReleasedPromise;
+          } else if (sessionId === sidB) {
+            closeBStarted();
           }
         },
       });
@@ -9683,6 +9689,7 @@ describe('createServeApp', () => {
         .send({ sessionIds: [sidA, sidB] })
         .then((res) => res);
       await closeAStartedPromise;
+      await closeBStartedPromise;
 
       const secondRes = await request(app)
         .post('/sessions/archive')
@@ -9693,7 +9700,10 @@ describe('createServeApp', () => {
         code: 'session_archiving',
         sessionId: sidB,
       });
-      expect(bridge.closeCalls.map((call) => call.sessionId)).toEqual([sidA]);
+      expect(bridge.closeCalls.map((call) => call.sessionId)).toEqual([
+        sidA,
+        sidB,
+      ]);
 
       releaseCloseA();
       const firstRes = await firstArchive;

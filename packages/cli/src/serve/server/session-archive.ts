@@ -140,11 +140,11 @@ export async function archiveDaemonSessions(params: {
   const errors: Array<{ sessionId: string; error: unknown }> = [];
 
   await coordinator.runExclusiveMany(sessionIds, async () => {
-    for (const sessionId of sessionIds) {
-      try {
-        // Close+flush before moving JSONL: live writers keep the active path.
-        // If the later move fails, the active JSONL remains and a retry treats
-        // SessionNotFound as the recoverable "already closed" state.
+    // Close+flush before moving JSONL: live writers keep the active path.
+    // If the later move fails, the active JSONL remains and a retry treats
+    // SessionNotFound as the recoverable "already closed" state.
+    const closeResults = await Promise.allSettled(
+      sessionIds.map(async (sessionId) => {
         try {
           await bridge.closeSession(sessionId, undefined, {
             requireAgentClose: true,
@@ -154,6 +154,21 @@ export async function archiveDaemonSessions(params: {
             throw err;
           }
         }
+      }),
+    );
+    const archiveIds: string[] = [];
+    for (let i = 0; i < closeResults.length; i++) {
+      const sessionId = sessionIds[i]!;
+      const result = closeResults[i]!;
+      if (result.status === 'fulfilled') {
+        archiveIds.push(sessionId);
+      } else {
+        errors.push({ sessionId, error: result.reason });
+      }
+    }
+
+    for (const sessionId of archiveIds) {
+      try {
         const result = await service.archiveSessions([sessionId]);
         archived.push(...result.archived);
         alreadyArchived.push(...result.alreadyArchived);
