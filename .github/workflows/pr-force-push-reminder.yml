@@ -43,10 +43,22 @@ jobs:
               return;
             }
 
-            // Skip automation-driven updates (e.g. integration/autofix bots).
-            // Only humans rebasing/force-pushing should get the reminder.
-            if (context.payload.sender?.type === 'Bot') {
-              console.log(`Push made by bot "${context.payload.sender.login}"; skipping.`);
+            // Skip automation-driven updates. A GitHub App push has
+            // sender.type === 'Bot', but the repo's own autofix bot pushes
+            // (including force-pushes) via a PAT as the user account
+            // qwen-code-dev-bot, which arrives with sender.type === 'User' — so
+            // also skip known automation logins (mirrors qwen-autofix.yml's
+            // KNOWN_BOTS). Only human contributors should be reminded.
+            const sender = context.payload.sender;
+            const KNOWN_AUTOMATION = new Set([
+              'qwen-code-ci-bot',
+              'qwen-code-dev-bot',
+              'github-actions',
+              'github-actions[bot]',
+              'gemini-cli-robot',
+            ]);
+            if (sender?.type === 'Bot' || KNOWN_AUTOMATION.has(sender?.login)) {
+              console.log(`Push made by automation "${sender?.login}" (${sender?.type}); skipping.`);
               return;
             }
 
@@ -64,11 +76,16 @@ jobs:
               });
               status = cmp.data.status;
             } catch (err) {
-              // The compare can 404 if the old tip is no longer reachable.
-              // Stay conservative and skip rather than risk a false accusation.
-              const reason = err.status || err.message;
-              console.log(`Could not compare ${before}...${after}: ${reason}. Skipping.`);
-              return;
+              // A 404 means the old tip (`before`) is no longer reachable — it
+              // was orphaned by the force-push and already GC'd. Skip
+              // conservatively rather than risk a false accusation. Any other
+              // error (403/429/5xx) is a real failure: rethrow so the run goes
+              // red and the outage is visible instead of a silent no-op.
+              if (err.status === 404) {
+                console.log(`Old tip ${before} no longer reachable (404); skipping.`);
+                return;
+              }
+              throw err;
             }
 
             console.log(`Compare ${before.slice(0, 7)}...${after.slice(0, 7)} => ${status}`);
@@ -86,8 +103,18 @@ jobs:
               issue_number: pr.number,
               per_page: 100,
             });
-            if (comments.some((c) => c.body && c.body.includes(MARKER))) {
-              console.log('Reminder already posted on this PR; skipping.');
+            // Only trust the marker on our own bot's comment — otherwise anyone
+            // could permanently suppress reminders by pasting the marker string.
+            if (
+              comments.some(
+                (c) =>
+                  c.user?.type === 'Bot' &&
+                  c.user?.login === 'github-actions[bot]' &&
+                  c.body &&
+                  c.body.includes(MARKER),
+              )
+            ) {
+              console.log('Reminder already posted by the bot on this PR; skipping.');
               return;
             }
 
@@ -113,10 +140,17 @@ jobs:
               '</details>',
             ].join('\n');
 
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              body,
-            });
-            console.log(`Posted force-push reminder on PR #${pr.number}.`);
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body,
+              });
+              console.log(`Posted force-push reminder on PR #${pr.number}.`);
+            } catch (err) {
+              // Surface auth/rate-limit/transient failures with context and let
+              // the run go red instead of failing silently.
+              core.error(`Failed to comment on PR #${pr.number}: ${err.status} ${err.message}`);
+              throw err;
+            }
