@@ -2569,13 +2569,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `session_closed` is terminal. Close the bus before ACP cancel so any
     // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
-    let agentCloseError: unknown;
     if (!requireAgentClose) {
-      try {
-        await notifyAgentSessionClose(entry, ci, 'closeSession');
-      } catch (err) {
-        agentCloseError = err;
-      }
+      await notifyAgentSessionClose(entry, ci, 'closeSession');
     }
     try {
       await telemetry.withSpan(
@@ -2592,9 +2587,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
       await startIdleTimer(ci, `closeSession "${sessionId}"`);
-    }
-    if (agentCloseError !== undefined) {
-      throw agentCloseError;
     }
   }
 

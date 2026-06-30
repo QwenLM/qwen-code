@@ -399,19 +399,12 @@ export class SessionService {
     }
   }
 
-  private moveOptionalFile(
-    sourcePath: string,
-    targetPath: string,
-    options: { failIfTargetExists: boolean },
-  ): boolean {
+  private moveOptionalFile(sourcePath: string, targetPath: string): boolean {
     if (!fs.existsSync(sourcePath)) {
       return false;
     }
     if (fs.existsSync(targetPath)) {
-      if (options.failIfTargetExists) {
-        throw new Error('Archive sidecar conflict: destination already exists');
-      }
-      return false;
+      throw new Error('Archive sidecar conflict: destination already exists');
     }
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.renameSync(sourcePath, targetPath);
@@ -1086,7 +1079,6 @@ export class SessionService {
         const sidecarMoved = this.moveOptionalFile(
           activeSidecar,
           archivedSidecar,
-          { failIfTargetExists: true },
         );
         try {
           fs.renameSync(sourcePath, targetPath);
@@ -1154,7 +1146,6 @@ export class SessionService {
         const sidecarMoved = this.moveOptionalFile(
           archivedSidecar,
           activeSidecar,
-          { failIfTargetExists: true },
         );
         try {
           fs.renameSync(sourcePath, targetPath);
