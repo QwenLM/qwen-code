@@ -88,7 +88,7 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-g
 Before "is the direction right?", ask **"does this problem actually exist?"**
 
 - **Observed bug** (linked issue, reproduction, before/after) → proceed.
-- **Theoretical hardening** ("could theoretically send X" with no evidence) → **request changes.** Ask for a reproduction. If the author cannot provide one on re-run, leave for maintainer to decide.
+- **Theoretical hardening** ("could theoretically send X" with no evidence) → **request changes.** Ask for a reproduction. If the author cannot provide one on re-run, escalate to the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set) and stop — do not proceed to Stage 2.
 - **No reproduction = no fix.** A `fix:` PR without reproduction is a hypothesis — belongs in issues, not PRs.
 
 **"direction is correct" ≠ "problem exists."** If the runtime already handles the case correctly, there is no bug — only code hygiene. Code hygiene does not warrant a PR.
