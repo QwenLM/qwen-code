@@ -115,6 +115,10 @@ const ClickableThinkMessage: React.FC<{
 }) => {
   const ref = useRef<DOMElement>(null);
   const { openThinkingViewer } = useThinkingViewer();
+  // Click-to-expand needs SGR mouse tracking. We do NOT pass `bypassVpGate`, so
+  // useMouseEvents enables it only in VP mode; in non-VP the click handler
+  // stays dormant and native terminal scrollback is preserved (the block still
+  // expands via Alt+T — the "option+t to expand" affordance it already shows).
   const isActive = !isPending && !expanded;
   const sanitizedViewerText = useMemo(
     () => escapeAnsiCtrlCodes(viewerText),

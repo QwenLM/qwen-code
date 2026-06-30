@@ -406,6 +406,9 @@ function applyPersistedCliFlagOverrides(
   if (flags.bare !== undefined) {
     ov.getBareMode = () => flags.bare;
   }
+  if (flags.safeMode !== undefined) {
+    ov.isSafeMode = () => flags.safeMode;
+  }
   if (hasOwn(flags, 'sandbox')) {
     const sandbox = flags.sandbox ?? undefined;
     ov.getSandbox = () => sandbox;
@@ -431,6 +434,7 @@ function capturePersistedCliFlags(
   return {
     approvalMode: resolvedApprovalMode,
     bare: config.getBareMode(),
+    safeMode: config.isSafeMode(),
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
     model: config.getModel(),
@@ -1277,7 +1281,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
-          string | Content,
+          | string
+          | Content,
         initialMessages,
       };
       toolConfig = {
@@ -2224,7 +2229,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // already requires confirmation — this only flips deny → surface.)
         const shouldBubble = Boolean(
           subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
-          this.config.isInteractive(),
+            this.config.isInteractive(),
         );
         // Use Object.create so the resolved approval mode override (e.g.
         // subagent-level `approvalMode: auto-edit`) is preserved.

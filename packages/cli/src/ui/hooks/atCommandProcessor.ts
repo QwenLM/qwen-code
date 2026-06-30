@@ -30,10 +30,13 @@ import { matchMcpServerPrefix } from './mcpResourceRef.js';
 import {
   parseExtensionRef,
   matchExtensionByRef,
-  buildExtensionContextText,
   buildExtensionRef,
-  sanitizeDisplayText,
 } from './extension-mention-ref.js';
+import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  getExtensionDisplayName,
+} from '../../utils/extension-mention.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -506,8 +509,6 @@ export async function resolveAtCommandQuery({
   // in the file-read error path (mirroring how resourceDisplays/resourceLabels
   // are already built before the file read).
   // Aggregate cap across all extensions to prevent unbounded context injection.
-  const EXTENSION_CONTEXT_BUDGET = 200_000; // 200KB total
-  const PER_FILE_CAP = 50_000; // 50KB per context file
   let extensionContextBudgetRemaining = EXTENSION_CONTEXT_BUDGET;
 
   const extensionParts: Part[] = [];
@@ -515,68 +516,17 @@ export async function resolveAtCommandQuery({
   const extensionLabels: string[] = [];
   for (let i = 0; i < extensionMentions.length; i++) {
     const { extension } = extensionMentions[i];
-    const displayName =
-      sanitizeDisplayText(extension.displayName || extension.name) ||
-      extension.name;
+    const displayName = getExtensionDisplayName(extension);
     const callId = `client-extension-${userMessageTimestamp}-${i}`;
 
-    let contextText = buildExtensionContextText(extension);
+    const context = await buildExtensionMentionContext(extension, {
+      remainingBudget: extensionContextBudgetRemaining,
+      signal,
+      onDebugMessage,
+    });
+    extensionContextBudgetRemaining = context.remainingBudget;
 
-    // Read extension context files in parallel, with symlink-aware path
-    // traversal and budget checks.
-    if (extension.contextFiles && extension.contextFiles.length > 0) {
-      const fileReads = await Promise.allSettled(
-        extension.contextFiles.map(async (contextFilePath) => {
-          // Resolve symlinks to prevent path traversal via symlinks within
-          // the extension directory (e.g., context.md -> ~/.ssh/id_rsa).
-          let realPath: string;
-          let realExtPath: string;
-          try {
-            realPath = await fs.realpath(contextFilePath);
-            realExtPath = await fs.realpath(extension.path);
-          } catch {
-            onDebugMessage(
-              `Skipping unreadable context file: ${contextFilePath}`,
-            );
-            return null;
-          }
-          if (!isSubpath(realExtPath, realPath)) {
-            onDebugMessage(
-              `Skipping context file outside extension directory: ${contextFilePath}`,
-            );
-            return null;
-          }
-          return fs.readFile(realPath, { encoding: 'utf-8', signal });
-        }),
-      );
-
-      for (let j = 0; j < fileReads.length; j++) {
-        const outcome = fileReads[j];
-        if (outcome.status === 'rejected') {
-          onDebugMessage(
-            `Failed to read extension context file ${extension.contextFiles[j]}: ${getErrorMessage(outcome.reason)}`,
-          );
-          continue;
-        }
-        const content = outcome.value;
-        if (!content || !content.trim()) continue;
-        if (extensionContextBudgetRemaining <= 0) {
-          onDebugMessage(
-            `Extension context budget exhausted, skipping remaining files.`,
-          );
-          break;
-        }
-        const cap = Math.min(PER_FILE_CAP, extensionContextBudgetRemaining);
-        const cappedContent =
-          content.length > cap
-            ? content.slice(0, cap) + '\n... (truncated)'
-            : content;
-        contextText += `\n\n${cappedContent}`;
-        extensionContextBudgetRemaining -= cappedContent.length;
-      }
-    }
-
-    extensionParts.push({ text: contextText });
+    extensionParts.push({ text: context.text });
     extensionLabels.push(buildExtensionRef(extension.name));
     extensionDisplays.push({
       callId,

@@ -1870,36 +1870,39 @@ describe('standalone release packaging', () => {
     }
   });
 
-  itOnUnix('packages a Unix standalone archive with a serve fast path shim', () => {
-    const createdDist = ensureMinimalDist();
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+  itOnUnix(
+    'packages a Unix standalone archive with a serve fast path shim',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
-    try {
-      const archive = packageFakeStandalone(tmpDir);
-      const extractDir = path.join(tmpDir, 'extract');
-      mkdirSync(extractDir, { recursive: true });
-      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
-        stdio: 'ignore',
-      });
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+          stdio: 'ignore',
+        });
 
-      expect(
-        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
-      ).toBe(true);
-      const shim = readScript(
-        path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
-      );
-      expect(shim).toContain('if [ "${1:-}" = "serve" ]; then');
-      expect(shim).toContain(
-        'exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"',
-      );
-      expect(shim).toContain(
-        'exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"',
-      );
-    } finally {
-      restoreMinimalDist(createdDist);
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+        expect(
+          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+        ).toBe(true);
+        const shim = readScript(
+          path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
+        );
+        expect(shim).toContain('if [ "${1:-}" = "serve" ]; then');
+        expect(shim).toContain(
+          'exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"',
+        );
+        expect(shim).toContain(
+          'exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"',
+        );
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   itOnUnix('does not package audio-capture test artifacts', () => {
     const createdDist = ensureMinimalDist();

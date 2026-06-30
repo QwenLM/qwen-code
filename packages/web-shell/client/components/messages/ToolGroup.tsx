@@ -110,14 +110,18 @@ function hasEditContent(tool: ACPToolCall): boolean {
   return hasDiffContent(tool) || !!extractText(tool);
 }
 
-function extractDiff(tool: ACPToolCall): string {
+export function extractDiff(tool: ACPToolCall): string {
+  const rawFileDiff = getRawFileDiff(tool);
+  if (rawFileDiff) return rawFileDiff;
+
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
       return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
-  return getRawFileDiff(tool);
+
+  return '';
 }
 
 export function getRawFileDiff(tool: ACPToolCall): string {
@@ -392,7 +396,8 @@ function getAgentDisplayInfo(
     0;
 
   const stats = taskExec?.['executionSummary'] as
-    Record<string, unknown> | undefined;
+    | Record<string, unknown>
+    | undefined;
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDurationMs(stats['totalDurationMs'])

@@ -37,7 +37,8 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
   const parts: string[] = [];
   const taskExec = getTaskExecutionRecord(agent.rawOutput);
   const stats = taskExec?.['executionSummary'] as
-    Record<string, unknown> | undefined;
+    | Record<string, unknown>
+    | undefined;
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDuration(stats['totalDurationMs'])
