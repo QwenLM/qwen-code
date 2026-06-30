@@ -14,12 +14,14 @@ name: 'Qwen Autofix'
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
 # through CI_DEV_BOT_PAT so the bot acts as a single identity, qwen-code-dev-bot.
+# PAT label writes can emit issues:labeled events; the route guards below make
+# those runs exit unless the label, issue state, and bug label all match.
 on:
   issues:
     types:
       - 'labeled'
   schedule:
-    - cron: '0 0,12 * * *' # Issue + review every 12h
+    - cron: '0 0,12 * * *' # Issue + review every 12h; must match route SCHEDULE check
     - cron: '0 4,8,16,20 * * *' # Review only between issue runs
   workflow_dispatch:
     inputs:
@@ -94,6 +96,7 @@ jobs:
           ISSUE_IS_BUG: "${{ contains(github.event.issue.labels.*.name, 'type/bug') }}"
           ISSUE_IS_READY: "${{ contains(github.event.issue.labels.*.name, 'status/ready-for-agent') }}"
           ISSUE_LABEL: '${{ github.event.label.name }}'
+          ISSUE_NUMBER: '${{ github.event.issue.number }}'
           ISSUE_STATE: '${{ github.event.issue.state }}'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           SCHEDULE: '${{ github.event.schedule }}'
@@ -109,6 +112,7 @@ jobs:
               # dedicated 00/12 UTC schedule. Use the event payload instead of
               # wall-clock time because GitHub may delay scheduled runs.
               DO_REVIEW=true
+              # Must match the issue-phase cron string on the schedule trigger.
               if [[ "${EVENT_NAME}" == 'schedule' && "${SCHEDULE}" == '0 0,12 * * *' ]]; then
                 DO_ISSUE=true
               fi
@@ -128,7 +132,7 @@ jobs:
           [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${FORCED_PR}" ]] && DO_REVIEW=true
           echo "do_issue=${DO_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "do_review=${DO_REVIEW}" >> "${GITHUB_OUTPUT}"
-          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' schedule='${SCHEDULE:-n/a}' → issue=${DO_ISSUE} review=${DO_REVIEW}"
+          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' schedule='${SCHEDULE:-n/a}' → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
   # ISSUE PHASE — locate one unattended bug, fix it, open a PR.
