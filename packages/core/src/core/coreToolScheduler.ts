@@ -788,6 +788,10 @@ function batchResponseOutputSize(call: CompletedToolCall): number {
 
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
+// NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
+// LLM-facing prompt directive (injected into the model prompt, not rendered in
+// the TUI). The width-1 glyph rationale used elsewhere in this change does not
+// apply here — these are not terminal strings to "fix" for column width.
 /** Directive injected when a tool call repeatedly fails validation. */
 const RETRY_LOOP_STOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +

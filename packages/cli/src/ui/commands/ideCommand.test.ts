@@ -116,7 +116,7 @@ describe('ideCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: '● Connected to VS Code',
+        content: '✓ Connected to VS Code',
       });
     });
 
@@ -147,7 +147,7 @@ describe('ideCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: `● Disconnected`,
+        content: `✗ Disconnected`,
       });
     });
 
@@ -165,7 +165,7 @@ describe('ideCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: `● Disconnected: ${details}`,
+        content: `✗ Disconnected: ${details}`,
       });
     });
   });
@@ -224,7 +224,7 @@ describe('ideCommand', () => {
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'info',
-          text: '● Connected to VS Code',
+          text: '✓ Connected to VS Code',
         }),
         expect.any(Number),
       );
