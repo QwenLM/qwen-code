@@ -12,6 +12,7 @@ describe('toModelVisibleSubagentResult', () => {
   it.each([
     ['', ''],
     ['plain text', 'plain text'],
+    ['<summary>just summary</summary>', 'just summary'],
     ['<analysis>scratch</analysis><summary>visible</summary>', 'visible'],
     [
       '<analysis>scratch <summary>hidden</summary></analysis><summary>visible</summary>',
