@@ -224,22 +224,19 @@ export class ChannelLoopStore {
 }
 
 function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
-  const aIsGroup = a.isGroup === true;
-  const bIsGroup = b.isGroup === true;
-  const sameGroupChat = aIsGroup && bIsGroup;
   return (
     a.channelName === b.channelName &&
-    (sameGroupChat || a.senderId === b.senderId) &&
+    a.senderId === b.senderId &&
     a.chatId === b.chatId &&
     a.threadId === b.threadId &&
-    aIsGroup === bIsGroup
+    a.isGroup === b.isGroup
   );
 }
 
 function normalizeTarget(target: SessionTarget): SessionTarget {
   return {
     ...target,
-    isGroup: target.isGroup === true,
+    isGroup: target.isGroup === undefined ? undefined : target.isGroup === true,
   };
 }
 

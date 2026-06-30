@@ -28,6 +28,12 @@ describe('ChannelLoopScheduler', () => {
     runCount: 0,
   };
 
+  const runOptions = (timeoutMs = 300_000) =>
+    expect.objectContaining({
+      timeoutMs,
+      shouldContinue: expect.any(Function),
+    });
+
   beforeEach(() => {
     jobs = [{ ...baseJob }];
     nowMs = Date.parse('2026-06-30T01:05:30.000Z');
@@ -85,9 +91,7 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, {
-      timeoutMs: 300_000,
-    });
+    expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, runOptions());
     expect(store.update).toHaveBeenCalledWith('job-1', {
       lastFiredAt: '2026-06-30T01:05:30.000Z',
       lastFinishedAt: '2026-06-30T01:05:30.000Z',
@@ -197,6 +201,36 @@ describe('ChannelLoopScheduler', () => {
       'job-1',
       expect.objectContaining({ lastResultPreview: 'stale result' }),
     );
+    expect(store.update).toHaveBeenCalledWith('job-1', {
+      runningSince: undefined,
+    });
+  });
+
+  it('uses lastFinishedAt as the recurrence anchor', async () => {
+    jobs = [
+      {
+        ...baseJob,
+        lastFiredAt: '2026-06-30T01:00:00.000Z',
+        lastFinishedAt: '2026-06-30T01:05:00.000Z',
+      },
+    ];
+    const nextFireTime = vi.fn((_, after: Date) => {
+      return new Date(after.getTime() + 60_000);
+    });
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date('2026-06-30T01:05:30.000Z'),
+      nextFireTime,
+    });
+
+    await scheduler.tick();
+
+    expect(runLoopPrompt).not.toHaveBeenCalled();
+    expect(nextFireTime).toHaveBeenCalledWith(
+      baseJob.cron,
+      new Date('2026-06-30T01:05:00.000Z'),
+    );
   });
 
   it('passes the timeout budget to the channel runner', async () => {
@@ -210,9 +244,7 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, {
-      timeoutMs: 1234,
-    });
+    expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, runOptions(1234));
   });
 
   it('marks a loop as running before awaiting the channel loop', async () => {
@@ -251,17 +283,20 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledWith('job-1', {
-      lastFiredAt: '2026-06-30T01:05:30.000Z',
-      lastFinishedAt: '2026-06-30T01:05:30.000Z',
-      lastStatus: 'error',
-      lastError: 'cannot cold send',
-      lastResultPreview: undefined,
-      consecutiveFailures: 5,
-      runningSince: undefined,
-      runCount: 1,
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith('job-1', {
+        lastFiredAt: '2026-06-30T01:05:30.000Z',
+        lastFinishedAt: '2026-06-30T01:05:30.000Z',
+        lastStatus: 'error',
+        lastError: 'cannot cold send',
+        lastResultPreview: undefined,
+        consecutiveFailures: 5,
+        runningSince: undefined,
+        runCount: 1,
+        enabled: false,
+      });
     });
-    expect(store.disable).toHaveBeenCalledWith('job-1');
+    expect(store.disable).not.toHaveBeenCalled();
   });
 
   it('disables one-shot loops after a failed attempt', async () => {
@@ -276,10 +311,12 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledWith(
-      'job-1',
-      expect.objectContaining({ lastStatus: 'error', enabled: false }),
-    );
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith(
+        'job-1',
+        expect.objectContaining({ lastStatus: 'error', enabled: false }),
+      );
+    });
   });
 
   it('records failure finish time when the loop fails', async () => {
@@ -296,13 +333,15 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledWith(
-      'job-1',
-      expect.objectContaining({
-        lastFiredAt: '2026-06-30T01:05:30.000Z',
-        lastFinishedAt: '2026-06-30T01:05:45.000Z',
-      }),
-    );
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith(
+        'job-1',
+        expect.objectContaining({
+          lastFiredAt: '2026-06-30T01:05:30.000Z',
+          lastFinishedAt: '2026-06-30T01:05:45.000Z',
+        }),
+      );
+    });
   });
 
   it('skips jobs for channels owned by another process', async () => {
@@ -337,9 +376,7 @@ describe('ChannelLoopScheduler', () => {
 
     void scheduler.tick();
     await vi.waitFor(() => {
-      expect(runLoopPrompt).toHaveBeenCalledWith(secondJob, {
-        timeoutMs: 300_000,
-      });
+      expect(runLoopPrompt).toHaveBeenCalledWith(secondJob, runOptions());
     });
   });
 
@@ -363,17 +400,13 @@ describe('ChannelLoopScheduler', () => {
 
     void scheduler.tick();
     await vi.waitFor(() => {
-      expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, {
-        timeoutMs: 300_000,
-      });
+      expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, runOptions());
     });
     jobs = [jobs[0]!, laterJob];
     void scheduler.tick();
 
     await vi.waitFor(() => {
-      expect(runLoopPrompt).toHaveBeenCalledWith(laterJob, {
-        timeoutMs: 300_000,
-      });
+      expect(runLoopPrompt).toHaveBeenCalledWith(laterJob, runOptions());
     });
   });
 
@@ -440,7 +473,7 @@ describe('ChannelLoopScheduler', () => {
 
     expect(runLoopPrompt).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'job-2' }),
-      { timeoutMs: 300_000 },
+      runOptions(),
     );
   });
 });

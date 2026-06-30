@@ -23,10 +23,7 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-import type {
-  ChannelLoop,
-  ChannelLoopInput,
-} from './ChannelLoopStore.js';
+import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -66,6 +63,7 @@ export interface ChannelLoopController {
 
 export interface ChannelLoopPromptOptions {
   timeoutMs?: number;
+  shouldContinue?: () => Promise<boolean>;
 }
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
@@ -263,9 +261,7 @@ export abstract class ChannelBase {
     }
     if (!this.isStoredLoopTargetAuthorized(job.target, job.createdBy)) {
       await this.loopController?.disable(job.id);
-      throw new Error(
-        `Loop ${job.id} target is no longer authorized.`,
-      );
+      throw new Error(`Loop ${job.id} target is no longer authorized.`);
     }
 
     const sessionId = await this.router.resolve(
@@ -290,7 +286,12 @@ export abstract class ChannelBase {
         process.stderr.write(
           `[${this.name}] dropped loop ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
         );
-        throw new Error('loop dropped because session was cleared before it ran');
+        throw new Error(
+          'loop dropped because session was cleared before it ran',
+        );
+      }
+      if (options.shouldContinue && !(await options.shouldContinue())) {
+        throw new Error('loop dropped because it is no longer enabled');
       }
 
       let doneResolve: () => void = () => {};
@@ -326,7 +327,13 @@ export abstract class ChannelBase {
         if (promptState.cancelRequested && !promptState.cancelled) {
           promptState.cancelled = await promptState.cancelRequested;
         }
-        if (!promptState.cancelled && response) {
+        if (promptState.cancelled) {
+          throw new Error('loop cancelled before delivery');
+        }
+        if (options.shouldContinue && !(await options.shouldContinue())) {
+          throw new Error('loop dropped before delivery');
+        }
+        if (response) {
           await this.pushProactive(job.target, response);
         }
         return response;
@@ -406,6 +413,7 @@ export abstract class ChannelBase {
     } catch (err) {
       if (err instanceof Error && err.message === 'loop timed out') {
         promptState.cancelled = true;
+        this.bumpSessionGeneration(sessionId);
         this.onSessionDied(sessionId);
         promptBridge.cancelSession(sessionId).catch((cancelErr) => {
           process.stderr.write(
@@ -426,6 +434,13 @@ export abstract class ChannelBase {
   onSessionDied(sessionId: string): void {
     this.router.removeSessionId(sessionId);
     this.instructedSessions.delete(sessionId);
+  }
+
+  private bumpSessionGeneration(sessionId: string): void {
+    this.sessionGenerations.set(
+      sessionId,
+      (this.sessionGenerations.get(sessionId) ?? 0) + 1,
+    );
   }
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
@@ -826,10 +841,7 @@ export abstract class ChannelBase {
     args: string,
   ): Promise<boolean> {
     if (!this.loopController) {
-      await this.sendMessage(
-        envelope.chatId,
-        'Loops are not available.',
-      );
+      await this.sendMessage(envelope.chatId, 'Loops are not available.');
       return true;
     }
     if (!this.isAuthorizedForSharedSession(envelope)) {
@@ -913,7 +925,7 @@ export abstract class ChannelBase {
       cwd: this.config.cwd,
       cron: parsed.cron,
       prompt,
-      label: prompt.length > 60 ? `${prompt.slice(0, 57)}...` : prompt,
+      label: truncateLoopLabel(prompt),
       recurring: true,
       createdBy: sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
@@ -945,10 +957,7 @@ export abstract class ChannelBase {
       return true;
     }
 
-    await this.sendMessage(
-      envelope.chatId,
-      `Loop ${job.id}: ${job.cron}`,
-    );
+    await this.sendMessage(envelope.chatId, `Loop ${job.id}: ${job.cron}`);
     return true;
   }
 
@@ -1031,9 +1040,7 @@ export abstract class ChannelBase {
 
   private formatNextFireTime(job: ChannelLoop): string {
     try {
-      return (
-        this.loopController?.nextFireTime?.(job).toISOString() ?? 'n/a'
-      );
+      return this.loopController?.nextFireTime?.(job).toISOString() ?? 'n/a';
     } catch {
       return 'invalid cron';
     }
@@ -1075,6 +1082,9 @@ export abstract class ChannelBase {
     target: SessionTarget,
     senderName: string,
   ): boolean {
+    if (target.isGroup === undefined) {
+      return false;
+    }
     const envelope: Envelope = {
       channelName: this.name,
       senderId: target.senderId,
@@ -1088,7 +1098,7 @@ export abstract class ChannelBase {
     };
     return (
       this.groupGate.check(envelope).allowed &&
-      this.gate.check(target.senderId, senderName).allowed &&
+      this.gate.isAllowed(target.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -1823,4 +1833,9 @@ export abstract class ChannelBase {
       );
     }
   }
+}
+
+function truncateLoopLabel(prompt: string): string {
+  const chars = Array.from(prompt);
+  return chars.length > 60 ? `${chars.slice(0, 57).join('')}...` : prompt;
 }

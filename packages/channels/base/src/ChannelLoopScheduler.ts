@@ -9,7 +9,7 @@ const MAX_RESULT_PREVIEW_LENGTH = 500;
 export interface ChannelLoopRunner {
   runLoopPrompt(
     job: ChannelLoop,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; shouldContinue?: () => Promise<boolean> },
   ): Promise<string | undefined>;
 }
 
@@ -81,8 +81,12 @@ export class ChannelLoopScheduler {
   }
 
   private async runTick(): Promise<void> {
+    const generation = this.generation;
     const now = this.now();
     const jobs = await this.store.list();
+    if (this.generation !== generation) {
+      return;
+    }
     const dueJobs = jobs.filter(
       (job) =>
         job.enabled &&
@@ -91,13 +95,15 @@ export class ChannelLoopScheduler {
         this.isDue(job, now),
     );
     for (const job of dueJobs) {
-      void this.fireOnce(job, now);
+      void this.fireOnce(job, now, generation);
     }
   }
 
   private isDue(job: ChannelLoop, now: Date): boolean {
     try {
-      const after = new Date(job.lastFiredAt ?? job.createdAt);
+      const after = new Date(
+        job.lastFinishedAt ?? job.lastFiredAt ?? job.createdAt,
+      );
       return this.nextFireTime(job.cron, after).getTime() <= now.getTime();
     } catch (err) {
       process.stderr.write(
@@ -107,9 +113,12 @@ export class ChannelLoopScheduler {
     }
   }
 
-  private async fireOnce(job: ChannelLoop, now: Date): Promise<void> {
+  private async fireOnce(
+    job: ChannelLoop,
+    now: Date,
+    generation: number,
+  ): Promise<void> {
     const token = Symbol(job.id);
-    const generation = this.generation;
     this.inFlightJobs.set(job.id, token);
     try {
       await this.fire(job, now, generation);
@@ -135,29 +144,49 @@ export class ChannelLoopScheduler {
     }
     const latestJob = await this.findJob(job.id);
     if (!latestJob?.enabled) return;
+    if (this.generation !== generation) return;
 
     let resultPreview: string | undefined;
     try {
       await this.store.update(latestJob.id, {
         runningSince: now.toISOString(),
       });
+      if (this.generation !== generation) {
+        await this.clearRunningSince(latestJob.id);
+        return;
+      }
       resultPreview = await channel.runLoopPrompt(latestJob, {
         timeoutMs: this.loopTimeoutMs,
+        shouldContinue: async () => {
+          if (this.generation !== generation) {
+            return false;
+          }
+          const currentJob = await this.findJob(latestJob.id);
+          return currentJob?.enabled === true;
+        },
       });
     } catch (err) {
-      if (this.generation !== generation) return;
+      const currentJob = await this.findJob(latestJob.id);
+      if (this.generation !== generation || !currentJob?.enabled) {
+        await this.clearRunningSince(latestJob.id);
+        return;
+      }
       await this.recordFailure(
-        latestJob,
+        currentJob,
         now,
         err instanceof Error ? err.message : String(err),
       );
       return;
     }
-    if (this.generation !== generation) return;
+    if (this.generation !== generation) {
+      await this.clearRunningSince(latestJob.id);
+      return;
+    }
 
+    const finishedAt = this.now();
     const patch: ChannelLoopPatch = {
       lastFiredAt: now.toISOString(),
-      lastFinishedAt: this.now().toISOString(),
+      lastFinishedAt: finishedAt.toISOString(),
       lastResultPreview: truncateResultPreview(resultPreview),
       lastStatus: 'ok',
       lastError: undefined,
@@ -182,6 +211,16 @@ export class ChannelLoopScheduler {
     return jobs.find((job) => job.id === id);
   }
 
+  private async clearRunningSince(id: string): Promise<void> {
+    try {
+      await this.store.update(id, { runningSince: undefined });
+    } catch (err) {
+      process.stderr.write(
+        `[scheduler] failed to clear running state for loop ${id}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
   private async recordFailure(
     job: ChannelLoop,
     now: Date,
@@ -201,10 +240,10 @@ export class ChannelLoopScheduler {
     if (!job.recurring) {
       patch.enabled = false;
     }
-    await this.store.update(job.id, patch);
     if (consecutiveFailures >= this.maxConsecutiveFailures) {
-      await this.store.disable(job.id);
+      patch.enabled = false;
     }
+    await this.store.update(job.id, patch);
   }
 }
 

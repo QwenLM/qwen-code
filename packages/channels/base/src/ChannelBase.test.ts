@@ -4,10 +4,7 @@ import type { ChannelConfig, Envelope } from './types.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
-import type {
-  ChannelLoop,
-  ChannelLoopInput,
-} from './ChannelLoopStore.js';
+import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -476,9 +473,7 @@ describe('ChannelBase', () => {
         consecutiveFailures: 0,
         runCount: 0,
       };
-      const createLoop = vi.fn(
-        async (_input: ChannelLoopInput) => created,
-      );
+      const createLoop = vi.fn(async (_input: ChannelLoopInput) => created);
       const ch = createChannel(
         {},
         {
@@ -531,14 +526,8 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '/schedule list' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith(
-        's-1',
-        '/schedule list',
-        {},
-      );
-      expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'agent response' },
-      ]);
+      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {});
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
     });
 
     it('/loop commands require shared-session authorization', async () => {
@@ -4967,6 +4956,7 @@ describe('ChannelBase', () => {
           channelName: 'test-chan',
           senderId: 'alice',
           chatId: 'group-1',
+          isGroup: true,
         },
         cwd: '/tmp',
         cron: '0 9 * * *',
@@ -5035,6 +5025,7 @@ describe('ChannelBase', () => {
               channelName: 'test-chan',
               senderId: 'alice',
               chatId: 'group-1',
+              isGroup: true,
             },
             cwd: '/tmp',
             cron: '0 9 * * *',
@@ -5180,6 +5171,56 @@ describe('ChannelBase', () => {
       expect(ch.proactive).toEqual([]);
     });
 
+    it('fails a queued loop when it is disabled before it runs', async () => {
+      let resolveFirstPrompt: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveFirstPrompt = resolve;
+          }),
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      const shouldContinue = vi.fn().mockResolvedValue(false);
+
+      const inbound = ch.handleInbound(envelope({ text: 'first task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const loopRun = ch.runLoopPrompt(
+        {
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'User 1',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        },
+        { shouldContinue },
+      );
+
+      resolveFirstPrompt('first response');
+      await inbound;
+
+      await expect(loopRun).rejects.toThrow(
+        'loop dropped because it is no longer enabled',
+      );
+      expect(shouldContinue).toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      expect(ch.proactive).toEqual([]);
+    });
+
     it('evicts the bridge session after a loop timeout', async () => {
       let rejectLatePrompt: (error: Error) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>)
@@ -5214,6 +5255,7 @@ describe('ChannelBase', () => {
             createdBy: 'Alice',
             createdAt: '2026-06-30T01:00:00.000Z',
             consecutiveFailures: 0,
+            runCount: 0,
           },
           { timeoutMs: 1000 },
         );
@@ -5245,6 +5287,7 @@ describe('ChannelBase', () => {
           createdBy: 'Alice',
           createdAt: '2026-06-30T01:00:00.000Z',
           consecutiveFailures: 0,
+          runCount: 0,
         });
 
         expect(bridge.newSession).toHaveBeenCalledTimes(2);
@@ -5291,6 +5334,7 @@ describe('ChannelBase', () => {
         createdBy: 'Alice',
         createdAt: '2026-06-30T01:00:00.000Z',
         consecutiveFailures: 0,
+        runCount: 0,
       });
       await vi.waitFor(() => {
         expect(bridge.prompt).toHaveBeenCalledOnce();
@@ -5298,7 +5342,7 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '/cancel', senderId: 'alice' }));
       resolveLoopPrompt('late loop response');
-      await loopRun;
+      await expect(loopRun).rejects.toThrow('loop cancelled before delivery');
 
       expect(ch.proactive).toEqual([]);
     });

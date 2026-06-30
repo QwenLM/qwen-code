@@ -16,6 +16,7 @@ describe('ChannelLoopStore', () => {
       senderId: 'alice',
       chatId: 'chat-1',
       threadId: 'thread-1',
+      isGroup: false,
     },
     cwd: '/repo',
     cron: '0 9 * * *',
@@ -81,7 +82,7 @@ describe('ChannelLoopStore', () => {
     ).resolves.toEqual([]);
   });
 
-  it('matches group targets across different senders in the same chat', async () => {
+  it('keeps group targets isolated by sender', async () => {
     const created = await store.create({
       ...input,
       target: { ...input.target, isGroup: true },
@@ -91,6 +92,12 @@ describe('ChannelLoopStore', () => {
       store.listForTarget('feishu-main', {
         ...input.target,
         senderId: 'bob',
+        isGroup: true,
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      store.listForTarget('feishu-main', {
+        ...input.target,
         isGroup: true,
       }),
     ).resolves.toEqual([created]);
@@ -131,7 +138,7 @@ describe('ChannelLoopStore', () => {
     ).resolves.toHaveLength(1);
   });
 
-  it('matches legacy DM targets that omit isGroup', async () => {
+  it('does not match legacy targets that omit isGroup', async () => {
     await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
     await fs.writeFile(
       path.join(tmpDir, 'channels', 'loops.json'),
@@ -153,12 +160,12 @@ describe('ChannelLoopStore', () => {
       'utf8',
     );
 
+    await expect(store.list()).resolves.toMatchObject([
+      { id: 'old-job', target: { isGroup: undefined } },
+    ]);
     await expect(
-      store.listForTarget('feishu-main', {
-        ...input.target,
-        isGroup: false,
-      }),
-    ).resolves.toMatchObject([{ id: 'old-job' }]);
+      store.listForTarget('feishu-main', input.target),
+    ).resolves.toEqual([]);
   });
 
   it('keeps generated ids unique when the id factory collides', async () => {
@@ -205,7 +212,11 @@ describe('ChannelLoopStore', () => {
 
   it('refuses to treat corrupt JSON as an empty loop', async () => {
     await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
-    await fs.writeFile(path.join(tmpDir, 'channels', 'loops.json'), '{', 'utf8');
+    await fs.writeFile(
+      path.join(tmpDir, 'channels', 'loops.json'),
+      '{',
+      'utf8',
+    );
 
     await expect(store.list()).rejects.toThrow(/Malformed JSON/);
   });
