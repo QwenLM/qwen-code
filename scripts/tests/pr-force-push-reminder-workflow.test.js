@@ -38,14 +38,12 @@ describe('pr force-push reminder workflow', () => {
     expect(workflow).toContain("pull-requests: 'write'");
   });
 
-  it('serializes per-PR runs without cancelling in-flight reminders', () => {
-    expect(workflow).toContain(
-      "group: 'pr-force-push-reminder-${{ github.event.pull_request.number }}'",
-    );
-    // cancel-in-progress: true would let a normal push cancel an in-flight run
-    // that already detected a force-push, silently dropping the reminder.
-    expect(workflow).toContain('cancel-in-progress: false');
-    expect(workflow).not.toContain('cancel-in-progress: true');
+  it('uses no concurrency group so no push event is ever dropped', () => {
+    // GitHub keeps at most one pending run per concurrency group, so a group
+    // could cancel a still-pending force-push run before it posts. Idempotency
+    // comes from the marker instead, so there must be no concurrency block.
+    expect(workflow).not.toContain('concurrency:');
+    expect(workflow).not.toContain('cancel-in-progress');
   });
 
   it('bounds the job and pins the github-script action by SHA', () => {
