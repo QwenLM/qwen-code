@@ -21,8 +21,10 @@ import {
 // `sendPermissionVoteError` uses, so `instanceof` matches the class the bridge
 // actually throws (the core re-export is a distinct identity at runtime).
 import {
+  CancelSentinelCollisionError,
   InvalidPermissionOptionError,
   PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
 } from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
 import {
@@ -310,14 +312,19 @@ function parsePermissionResponse(
     }
   }
 
-  // Whitelist only the fields the bridge contract defines — `outcome` and the
-  // ACP-reserved `_meta` passthrough — rather than forwarding every remaining
-  // client key. The previous copy-all let a client inject arbitrary top-level
-  // args (e.g. `force`, `role`) into the server-side bridge call; harmless
-  // today since the bridge reads only `outcome`, but a needless client-controlled
-  // surface on a server API argument.
-  const response: Record<string, unknown> = { outcome };
-  if ('_meta' in params) {
+  // Whitelist only the fields the bridge contract defines — a rebuilt `outcome`
+  // carrying just its validated keys, plus the ACP-reserved `_meta` passthrough
+  // — rather than forwarding client-supplied keys. The previous copy-all let a
+  // client inject arbitrary top-level args AND extra `outcome` sub-fields (e.g.
+  // `{ outcome: { outcome: 'selected', optionId: 'allow', force: true } }`) into
+  // the server-side bridge call; harmless today since the bridge reads only the
+  // discriminant + optionId, but a needless client-controlled surface.
+  const cleanOutcome =
+    outcome['outcome'] === 'cancelled'
+      ? { outcome: 'cancelled' as const }
+      : { outcome: 'selected' as const, optionId: outcome['optionId'] };
+  const response: Record<string, unknown> = { outcome: cleanOutcome };
+  if (isObject(params['_meta'])) {
     response['_meta'] = params['_meta'];
   }
   return response as PermissionResponse;
@@ -1215,7 +1222,59 @@ export class AcpDispatcher {
               }
               return;
             }
-            // Anything else keeps the outer dispatcher catch's mapping.
+            if (err instanceof PermissionPolicyNotImplementedError) {
+              // Operator's settings name a policy whose mediator hasn't landed
+              // in this build. 501 (not 500) so the SDK can say "daemon older
+              // than your settings expect; upgrade".
+              writeStderrLine(
+                `qwen serve: /acp session/permission policy not implemented (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INTERNAL_ERROR, err.message, {
+                    httpStatus: 501,
+                    code: 'permission_policy_not_implemented',
+                    policy: err.policy,
+                  }),
+                );
+              }
+              return;
+            }
+            if (err instanceof CancelSentinelCollisionError) {
+              // Agent/daemon contract violation (agent's option set includes
+              // the cancel sentinel), not a client mistake — 500 with a stable
+              // code so the SDK can distinguish it from unrelated internals.
+              writeStderrLine(
+                `qwen serve: /acp session/permission cancel-sentinel collision (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INTERNAL_ERROR, err.message, {
+                    httpStatus: 500,
+                    code: 'cancel_sentinel_collision',
+                    requestId: err.requestId,
+                    sentinel: err.sentinel,
+                  }),
+                );
+              }
+              return;
+            }
+            // Truly unexpected bridge/sessionCtx failure: the mediator may be
+            // left blocking the agent's prompt. Mirror the legacy
+            // `resolveClientResponse` path — cancel as a fallback (dropping the
+            // entry only if the cancel landed, else keep it for teardown to
+            // retry) — then rethrow so the outer dispatcher catch maps the
+            // error for the wire.
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote failed (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(errMsg(err))}`,
+            );
+            const cancelled = this.cancelAbandonedPermission(
+              { sessionId, bridgeRequestId: requestId },
+              pendingRef?.conn.sessions.get(sessionId)?.clientId,
+            );
+            if (cancelled && pendingRef) {
+              this.dropResolvedPermission(pendingRef.conn, pendingRef.id);
+            }
             throw err;
           }
           if (!accepted) {
