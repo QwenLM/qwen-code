@@ -23,6 +23,8 @@ export interface ChannelLoopSchedulerOptions {
   loopTimeoutMs?: number;
 }
 
+export class ChannelLoopSkippedError extends Error {}
+
 export class ChannelLoopScheduler {
   private readonly store: Pick<ChannelLoopStore, 'list' | 'update' | 'disable'>;
   private readonly channels: ReadonlyMap<string, ChannelLoopRunner>;
@@ -150,6 +152,7 @@ export class ChannelLoopScheduler {
     try {
       await this.store.update(latestJob.id, {
         runningSince: now.toISOString(),
+        lastFiredAt: now.toISOString(),
       });
       if (this.generation !== generation) {
         await this.clearRunningSince(latestJob.id);
@@ -166,6 +169,10 @@ export class ChannelLoopScheduler {
         },
       });
     } catch (err) {
+      if (err instanceof ChannelLoopSkippedError) {
+        await this.clearRunningSince(latestJob.id);
+        return;
+      }
       const currentJob = await this.findJob(latestJob.id);
       if (this.generation !== generation || !currentJob?.enabled) {
         await this.clearRunningSince(latestJob.id);
@@ -203,6 +210,7 @@ export class ChannelLoopScheduler {
       process.stderr.write(
         `[scheduler] loop ${latestJob.id} succeeded but status persist failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
+      await this.clearRunningSince(latestJob.id);
     }
   }
 

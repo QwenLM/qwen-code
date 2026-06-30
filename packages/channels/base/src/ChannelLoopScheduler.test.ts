@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
+import {
+  ChannelLoopScheduler,
+  ChannelLoopSkippedError,
+} from './ChannelLoopScheduler.js';
 import type { ChannelLoop, ChannelLoopStore } from './ChannelLoopStore.js';
 
 describe('ChannelLoopScheduler', () => {
@@ -264,6 +267,7 @@ describe('ChannelLoopScheduler', () => {
     await vi.waitFor(() => expect(runLoopPrompt).toHaveBeenCalledOnce());
     expect(store.update).toHaveBeenNthCalledWith(1, 'job-1', {
       runningSince: '2026-06-30T01:05:30.000Z',
+      lastFiredAt: '2026-06-30T01:05:30.000Z',
     });
 
     finish('done summary');
@@ -429,12 +433,35 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledTimes(2);
+    expect(store.update).toHaveBeenCalledTimes(3);
     expect(store.disable).not.toHaveBeenCalled();
+    expect(store.update).toHaveBeenCalledWith('job-1', {
+      runningSince: undefined,
+    });
     expect(writeSpy).toHaveBeenCalledWith(
       expect.stringContaining('succeeded but status persist failed'),
     );
     writeSpy.mockRestore();
+  });
+
+  it('does not record skipped loop turns as job failures', async () => {
+    runLoopPrompt.mockRejectedValue(new ChannelLoopSkippedError('user steer'));
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    expect(store.update).toHaveBeenCalledWith('job-1', {
+      runningSince: undefined,
+    });
+    expect(store.update).not.toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({ lastStatus: 'error' }),
+    );
   });
 
   it('rechecks that a job is still enabled before firing', async () => {

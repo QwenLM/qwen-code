@@ -194,14 +194,17 @@ export class ChannelLoopStore {
         `Expected a JSON array in ${this.filePath}; fix or delete the file.`,
       );
     }
+    const jobs: ChannelLoop[] = [];
     for (const [index, value] of parsed.entries()) {
       if (!isChannelLoop(value)) {
-        throw new Error(
-          `Invalid channel loop at index ${index} in ${this.filePath}.`,
+        process.stderr.write(
+          `Invalid channel loop at index ${index} in ${this.filePath}.\n`,
         );
+        continue;
       }
+      jobs.push(normalizeJob(value));
     }
-    return parsed.map(normalizeJob);
+    return jobs;
   }
 
   private async writeJobs(jobs: ChannelLoop[]): Promise<void> {

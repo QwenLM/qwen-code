@@ -24,6 +24,7 @@ import type {
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
+import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -286,12 +287,14 @@ export abstract class ChannelBase {
         process.stderr.write(
           `[${this.name}] dropped loop ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
         );
-        throw new Error(
+        throw new ChannelLoopSkippedError(
           'loop dropped because session was cleared before it ran',
         );
       }
       if (options.shouldContinue && !(await options.shouldContinue())) {
-        throw new Error('loop dropped because it is no longer enabled');
+        throw new ChannelLoopSkippedError(
+          'loop dropped because it is no longer enabled',
+        );
       }
 
       let doneResolve: () => void = () => {};
@@ -303,6 +306,7 @@ export abstract class ChannelBase {
         done,
         resolve: doneResolve,
         chatId: job.target.chatId,
+        messageId: job.id,
       };
       this.activePrompts.set(sessionId, promptState);
       this.onPromptStart(job.target.chatId, sessionId);
@@ -328,13 +332,19 @@ export abstract class ChannelBase {
           promptState.cancelled = await promptState.cancelRequested;
         }
         if (promptState.cancelled) {
-          throw new Error('loop cancelled before delivery');
+          throw new ChannelLoopSkippedError('loop cancelled before delivery');
         }
         if (options.shouldContinue && !(await options.shouldContinue())) {
-          throw new Error('loop dropped before delivery');
+          throw new ChannelLoopSkippedError('loop dropped before delivery');
         }
         if (response) {
-          await this.pushProactive(job.target, response);
+          try {
+            await this.pushProactive(job.target, response);
+          } catch (err) {
+            process.stderr.write(
+              `[${this.name}] failed to deliver loop ${job.id} proactively: ${err instanceof Error ? err.message : err}\n`,
+            );
+          }
         }
         return response;
       } finally {

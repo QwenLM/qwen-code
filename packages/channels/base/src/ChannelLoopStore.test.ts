@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChannelLoopStore } from './ChannelLoopStore.js';
 import type { ChannelLoopInput } from './ChannelLoopStore.js';
 
@@ -232,15 +232,32 @@ describe('ChannelLoopStore', () => {
     await expect(store.list()).rejects.toThrow(/Expected a JSON array/);
   });
 
-  it('refuses to load invalid loop entries', async () => {
+  it('skips invalid loop entries while preserving valid loops', async () => {
     await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     await fs.writeFile(
       path.join(tmpDir, 'channels', 'loops.json'),
-      JSON.stringify([{}]),
+      JSON.stringify([
+        {},
+        {
+          ...input,
+          id: 'job-1',
+          enabled: true,
+          createdAt: '2026-06-30T01:02:03.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        },
+      ]),
       'utf8',
     );
 
-    await expect(store.list()).rejects.toThrow(/Invalid channel loop/);
+    await expect(store.list()).resolves.toMatchObject([{ id: 'job-1' }]);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid channel loop at index 0'),
+    );
+    stderr.mockRestore();
   });
 
   it('loads jobs created before lifecycle fields existed', async () => {
