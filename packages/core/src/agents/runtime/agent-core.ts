@@ -91,6 +91,11 @@ import {
   runWithTeammateIdentity,
 } from '../team/identity.js';
 import type { TeammateIdentity } from '../team/types.js';
+import {
+  getSubagentPlanToolUnavailableMessage,
+  isSubagentPlanLifecycleTool,
+  SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+} from './subagent-plan-tool-policy.js';
 
 /**
  * Result of a single reasoning loop invocation.
@@ -109,6 +114,8 @@ import type { TeammateIdentity } from '../team/types.js';
  *   non-team Agent subagent has no teammate identity, so isTeammate()
  *   returns false and these tools would treat it as the leader — letting
  *   it delete or rewrite the active team.
+ * - Plan lifecycle tools are owned by the caller/main session. A subagent
+ *   should return its plan to the caller instead of entering or exiting mode.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -122,6 +129,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.TASK_CREATE,
   ToolNames.TASK_UPDATE,
   ToolNames.TASK_LIST,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session — a subagent must
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
@@ -136,6 +144,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * Tools excluded from teammates. Teammates need send_message and the
  * task_* coordination tools to do their job, but they must not be able
  * to create or destroy the team itself — only the leader can do that.
+ * Plan lifecycle tools remain caller-owned for teammates too.
  */
 const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -145,6 +154,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.TASK_STOP,
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
@@ -469,10 +479,6 @@ export class AgentCore {
     const excludedFromSubagents = isTeammate()
       ? EXCLUDED_TOOLS_FOR_TEAMMATES
       : EXCLUDED_TOOLS_FOR_SUBAGENTS;
-    // When a subagent has an explicit tools list (not wildcard), only the
-    // recursive-spawn guard (AgentTool) is enforced.
-    const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
-
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
         (t): t is string => typeof t === 'string',
@@ -509,7 +515,7 @@ export class AgentCore {
       // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
       toolsList.push(
         ...onlyInlineDecls.filter(
-          (d) => !(d.name && recursionGuardOnly.has(d.name)),
+          (d) => !(d.name && excludedFromSubagents.has(d.name)),
         ),
       );
     } else {
@@ -1205,7 +1211,9 @@ export class AgentCore {
       const args = (fc.args ?? {}) as Record<string, unknown>;
 
       if (!allowedToolNames.has(fc.name)) {
-        const errorMessage = `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+        const errorMessage = isSubagentPlanLifecycleTool(toolName)
+          ? getSubagentPlanToolUnavailableMessage(toolName)
+          : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
         const functionResponsePart = {
           functionResponse: {
             id: callId,

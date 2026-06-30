@@ -13,6 +13,10 @@ import { ApprovalMode } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getSubagentPlanToolUnavailableMessage,
+  isPlanLifecycleToolUnavailableInSubagent,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 
 const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
 
@@ -64,6 +68,16 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.ENTER_PLAN_MODE)) {
+      const message = getSubagentPlanToolUnavailableMessage(
+        ToolNames.ENTER_PLAN_MODE,
+      );
+      return {
+        llmContent: message,
+        returnDisplay: message,
+      };
+    }
+
     // In headless (non-interactive) mode without ACP support, the gate
     // exit paths require user interaction that cannot be fulfilled.
     const isAcpMode =

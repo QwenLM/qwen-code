@@ -1156,13 +1156,14 @@ describe('createProductionDispatch', () => {
     });
   });
 
-  // T11: disallow SendMessage / ExitPlanMode to mirror upstream Tg8.
-  it('disallows SendMessage and ExitPlanMode for workflow subagents', async () => {
+  // T11: disallow SendMessage plus plan lifecycle tools to mirror upstream Tg8.
+  it('disallows SendMessage and plan lifecycle tools for workflow subagents', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
       'send_message',
+      'enter_plan_mode',
       'exit_plan_mode',
     ]);
   });
@@ -1932,9 +1933,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(result).toBe('explore-output');
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
-    // Workflow floor [SendMessage, ExitPlanMode] must be unioned in.
+    // Workflow floor [SendMessage, EnterPlanMode, ExitPlanMode] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
-      expect.arrayContaining(['send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'send_message',
+        'enter_plan_mode',
+        'exit_plan_mode',
+      ]),
     );
   });
 
@@ -2008,9 +2013,14 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     await dispatch('hi', { agentType: 'Permissive' });
     const disallowed = calls[0].config.disallowedTools ?? [];
-    // Union: Foo (from agentType) + send_message + exit_plan_mode (floor).
+    // Union: Foo (from agentType) + send_message + plan lifecycle floor.
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'send_message',
+        'enter_plan_mode',
+        'exit_plan_mode',
+      ]),
     );
   });
 
@@ -2404,7 +2414,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     });
     const disallowed = calls[0].config.disallowedTools ?? [];
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'send_message',
+        'enter_plan_mode',
+        'exit_plan_mode',
+      ]),
     );
   });
 

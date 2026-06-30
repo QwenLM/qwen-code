@@ -60,6 +60,7 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -5991,6 +5992,52 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(completedCalls[0].response.resultDisplay).toBe(
         'Plan mode blocked a non-read-only tool call.',
       );
+      expect(
+        JSON.stringify(completedCalls[0].response.responseParts),
+      ).toContain('exit_plan_mode tool');
+    }
+  });
+
+  it('should tell subagents to return the plan directly when plan mode blocks a tool', async () => {
+    const editTool = new MockTool({
+      name: 'write_file',
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      editTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    );
+
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'write_file',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-subagent-blocked',
+    };
+
+    await runWithAgentContext('agent-1', () =>
+      scheduler.schedule([request], abortController.signal),
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    if (completedCalls[0].status === 'error') {
+      const responseText = JSON.stringify(
+        completedCalls[0].response.responseParts,
+      );
+      expect(responseText).toContain('Present your plan directly');
+      expect(responseText).not.toContain('exit_plan_mode tool');
     }
   });
 

@@ -26,6 +26,10 @@ import {
 } from '../plan-gate/planApprovalGate.js';
 import type { EvidenceBundle } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getSubagentPlanToolUnavailableMessage,
+  isPlanLifecycleToolUnavailableInSubagent,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 
 const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
@@ -118,6 +122,10 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
    * (issue #5574).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
+      return 'allow';
+    }
+
     const prePlanMode = this.config.getPrePlanMode();
     const gateState = this.config.getPlanGateState();
     if (
@@ -195,6 +203,16 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
+      const message = getSubagentPlanToolUnavailableMessage(
+        ToolNames.EXIT_PLAN_MODE,
+      );
+      return {
+        llmContent: message,
+        returnDisplay: message,
+      };
+    }
+
     const { plan, originalRequest, researchSummary, resolutionSummary } =
       this.params;
     const prePlanMode = this.config.getPrePlanMode();

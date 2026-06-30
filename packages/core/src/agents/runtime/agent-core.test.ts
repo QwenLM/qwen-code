@@ -33,6 +33,7 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import { ToolNames } from '../../tools/tool-names.js';
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the
@@ -307,13 +308,18 @@ describe('AgentCore.prepareTools', () => {
   ): {
     core: AgentCore;
     getFunctionDeclarationsSpy: ReturnType<typeof vi.fn>;
+    getFunctionDeclarationsFilteredSpy: ReturnType<typeof vi.fn>;
   } {
     const getFunctionDeclarationsSpy = vi.fn().mockReturnValue(fnDeclarations);
+    const getFunctionDeclarationsFilteredSpy = vi.fn((names: string[]) =>
+      fnDeclarations.filter((d) => d.name && names.includes(d.name)),
+    );
     const config = {
+      getDebugLogger: vi.fn().mockReturnValue({ debug: vi.fn() }),
       getToolRegistry: vi.fn().mockReturnValue({
         warmAll: vi.fn().mockResolvedValue(undefined),
         getFunctionDeclarations: getFunctionDeclarationsSpy,
-        getFunctionDeclarationsFiltered: vi.fn().mockReturnValue([]),
+        getFunctionDeclarationsFiltered: getFunctionDeclarationsFilteredSpy,
       }),
     } as unknown as Config;
 
@@ -325,7 +331,11 @@ describe('AgentCore.prepareTools', () => {
       { max_turns: 1 },
       toolConfig,
     );
-    return { core, getFunctionDeclarationsSpy };
+    return {
+      core,
+      getFunctionDeclarationsSpy,
+      getFunctionDeclarationsFilteredSpy,
+    };
   }
 
   it('wildcard tools:["*"] inherits deferred tools (passes includeDeferred: true)', async () => {
@@ -358,17 +368,26 @@ describe('AgentCore.prepareTools', () => {
   it('absent toolConfig also inherits deferred tools (default = wildcard)', async () => {
     const fnDecls: FunctionDeclaration[] = [
       { name: 'lsp', description: 'language server' } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
     ];
     const { core, getFunctionDeclarationsSpy } = buildAgentForTools(
       undefined,
       fnDecls,
     );
 
-    await core.prepareTools();
+    const tools = await core.prepareTools();
 
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith({
       includeDeferred: true,
     });
+    expect(tools.map((t) => t.name)).toEqual(['lsp']);
   });
 
   it('explicit tools list does NOT use the wildcard inherit path', async () => {
@@ -385,4 +404,141 @@ describe('AgentCore.prepareTools', () => {
 
     expect(getFunctionDeclarationsSpy).not.toHaveBeenCalled();
   });
+
+  it('excludes plan lifecycle tools from wildcard/default subagent tools', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      { name: 'core_tool', description: 'core' } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    const tools = await core.prepareTools();
+
+    expect(tools.map((t) => t.name)).toEqual(['core_tool']);
+  });
+
+  it('does not re-enable plan lifecycle tools via explicit tool names', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      { name: ToolNames.READ_FILE, description: 'read' } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
+    ];
+    const { core, getFunctionDeclarationsFilteredSpy } = buildAgentForTools(
+      {
+        tools: [
+          ToolNames.READ_FILE,
+          ToolNames.ENTER_PLAN_MODE,
+          ToolNames.EXIT_PLAN_MODE,
+        ],
+      },
+      fnDecls,
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(getFunctionDeclarationsFilteredSpy).toHaveBeenCalledWith([
+      ToolNames.READ_FILE,
+    ]);
+    expect(tools.map((t) => t.name)).toEqual([ToolNames.READ_FILE]);
+  });
+
+  it('filters inline plan lifecycle declarations too', async () => {
+    const inlineSafe = {
+      name: 'inline_safe',
+      description: 'safe inline tool',
+    } as FunctionDeclaration;
+    const { core } = buildAgentForTools(
+      {
+        tools: [
+          { name: ToolNames.ENTER_PLAN_MODE } as FunctionDeclaration,
+          { name: ToolNames.EXIT_PLAN_MODE } as FunctionDeclaration,
+          inlineSafe,
+        ],
+      },
+      [],
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(tools).toEqual([inlineSafe]);
+  });
+
+  it('keeps teammate coordination tools but excludes plan lifecycle tools', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      {
+        name: ToolNames.SEND_MESSAGE,
+        description: 'send message',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.TASK_UPDATE,
+        description: 'task update',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    let tools: FunctionDeclaration[] = [];
+    await runWithTeammateIdentity(
+      {
+        agentId: 'agent@test',
+        agentName: 'agent',
+        teamName: 'test',
+        isTeamLead: false,
+      },
+      async () => {
+        tools = await core.prepareTools();
+      },
+    );
+
+    expect(tools.map((t) => t.name)).toEqual([
+      ToolNames.SEND_MESSAGE,
+      ToolNames.TASK_UPDATE,
+    ]);
+  });
+
+  it.each([ToolNames.ENTER_PLAN_MODE, ToolNames.EXIT_PLAN_MODE])(
+    'returns a dedicated message when filtered %s is called directly',
+    async (toolName) => {
+      const { core } = buildAgentForTools(undefined, []);
+
+      const result = await core.processFunctionCalls(
+        [
+          {
+            name: toolName,
+            args: { plan: 'Plan from filtered tool' },
+            id: 'call-1',
+          },
+        ],
+        new AbortController(),
+        'prompt-filtered-plan-tool',
+        1,
+        [{ name: ToolNames.READ_FILE } as FunctionDeclaration],
+      );
+
+      const response = result.messages[0]?.parts?.[0]?.functionResponse
+        ?.response as { error?: string } | undefined;
+      expect(response?.error).toContain('not available inside subagents');
+      expect(response?.error).toContain('return your plan');
+    },
+  );
 });
