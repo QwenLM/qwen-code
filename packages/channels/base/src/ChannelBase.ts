@@ -1,5 +1,11 @@
 import { basename } from 'node:path';
-import type { ChannelConfig, DispatchMode, Envelope } from './types.js';
+import type {
+  ChannelConfig,
+  ChannelMemoryCallbacks,
+  ChannelMemoryTarget,
+  DispatchMode,
+  Envelope,
+} from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
@@ -31,6 +37,7 @@ export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  channelMemory?: ChannelMemoryCallbacks;
 }
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
@@ -92,6 +99,7 @@ export abstract class ChannelBase {
   protected name: string;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
+  private readonly channelMemory?: ChannelMemoryCallbacks;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
@@ -121,6 +129,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
+    this.channelMemory = options?.channelMemory;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
 
@@ -462,6 +471,76 @@ export abstract class ChannelBase {
       return true;
     });
 
+    this.registerCommand('remember-channel', async (envelope, args) => {
+      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      if (args.trim() === '') {
+        await this.sendMessage(
+          envelope.chatId,
+          'Usage: /remember-channel <text>',
+        );
+        return true;
+      }
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) {
+        return true;
+      }
+      await channelMemory.appendChannelMemory(
+        this.channelMemoryTarget(envelope),
+        args.trim(),
+      );
+      this.clearCurrentInstruction(envelope);
+      await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+      return true;
+    });
+
+    this.registerCommand('channel-memory', async (envelope) => {
+      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) {
+        return true;
+      }
+      const text = (
+        await channelMemory.readChannelMemory(
+          this.channelMemoryTarget(envelope),
+        )
+      ).trim();
+      await this.sendMessage(
+        envelope.chatId,
+        text === '' ? 'No channel memory saved.' : text,
+      );
+      return true;
+    });
+
+    this.registerCommand('forget-channel', async (envelope, args) => {
+      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      if (args.toLowerCase() !== 'confirm') {
+        await this.sendMessage(
+          envelope.chatId,
+          'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
+        );
+        return true;
+      }
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) {
+        return true;
+      }
+      const result = await channelMemory.clearChannelMemory(
+        this.channelMemoryTarget(envelope),
+      );
+      this.clearCurrentInstruction(envelope);
+      await this.sendMessage(
+        envelope.chatId,
+        result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
+      );
+      return true;
+    });
+
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
@@ -471,6 +550,9 @@ export abstract class ChannelBase {
           : '/clear — Clear your session (aliases: /reset, /new)',
         '/who — Show current session & workspace',
         '/status — Show session info',
+        '/remember-channel <text> — Save memory for this chat',
+        '/channel-memory — Show memory for this chat',
+        '/forget-channel confirm — Clear memory for this chat',
       ];
 
       // Platform-specific commands (registered by adapters, not shared ones)
@@ -481,6 +563,9 @@ export abstract class ChannelBase {
         'new',
         'who',
         'status',
+        'remember-channel',
+        'channel-memory',
+        'forget-channel',
       ]);
       const platformCmds = [...this.commands.keys()].filter(
         (c) => !sharedCmds.has(c),
@@ -555,6 +640,59 @@ export abstract class ChannelBase {
     return sessionId && this.activePrompts.has(sessionId)
       ? sessionId
       : undefined;
+  }
+
+  private channelMemoryTarget(envelope: Envelope): ChannelMemoryTarget {
+    return {
+      channelName: this.name,
+      chatId: envelope.chatId,
+      threadId: envelope.threadId,
+    };
+  }
+
+  private isAuthorizedForChannelMemory(envelope: Envelope): boolean {
+    return (
+      this.config.allowedUsers.length > 0 &&
+      this.config.allowedUsers.includes(envelope.senderId)
+    );
+  }
+
+  private async ensureChannelMemoryAuthorized(
+    envelope: Envelope,
+  ): Promise<boolean> {
+    if (!this.isAuthorizedForChannelMemory(envelope)) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Only authorized members can manage channel memory.',
+      );
+      return false;
+    }
+    return true;
+  }
+
+  private async getChannelMemory(
+    envelope: Envelope,
+  ): Promise<ChannelMemoryCallbacks | undefined> {
+    if (!this.channelMemory) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Channel memory is not configured for this channel.',
+      );
+      return undefined;
+    }
+    return this.channelMemory;
+  }
+
+  private clearCurrentInstruction(envelope: Envelope): void {
+    const sessionId = this.router.getSession(
+      this.name,
+      envelope.senderId,
+      envelope.chatId,
+      envelope.threadId,
+    );
+    if (sessionId) {
+      this.instructedSessions.delete(sessionId);
+    }
   }
 
   /**
