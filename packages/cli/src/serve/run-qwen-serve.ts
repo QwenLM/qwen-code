@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { X509Certificate } from 'node:crypto';
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
 import * as https from 'node:https';
@@ -1179,6 +1180,26 @@ export async function runQwenServe(
       throw new Error(
         `Failed to read --tls-key "${opts.tlsKey}": ` +
           `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // Fail loud at boot on an expired (or unparseable) certificate. Node's
+    // https.createServer happily starts with an expired cert, then every TLS
+    // handshake is rejected client-side (NET::ERR_CERT_DATE_INVALID) while
+    // /health stays green — a silent outage that's hard to diagnose. Surface
+    // it here with an actionable message instead.
+    let x509: X509Certificate;
+    try {
+      x509 = new X509Certificate(cert);
+    } catch (err) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" is not a valid certificate: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (new Date(x509.validTo).getTime() < Date.now()) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" expired on ${x509.validTo}. ` +
+          `Renew the certificate and restart.`,
       );
     }
     tlsOptions = { cert, key };
@@ -2491,11 +2512,29 @@ export async function runQwenServe(
         );
       }
     };
-    const server: Server = tlsOptions
-      ? https
-          .createServer(tlsOptions, app)
-          .listen(opts.port, listenHostname, onListening)
-      : app.listen(opts.port, listenHostname, onListening);
+    let server: Server;
+    if (tlsOptions) {
+      let httpsServer: https.Server;
+      try {
+        httpsServer = https.createServer(tlsOptions, app);
+      } catch (err) {
+        // createSecureContext throws a raw OpenSSL string (e.g.
+        // "error:0B080074:...key values mismatch") when cert/key don't pair.
+        // Wrap it so the operator gets the same actionable framing as the
+        // --tls-cert/--tls-key read errors above.
+        reject(
+          new Error(
+            `--tls-cert "${opts.tlsCert}" and --tls-key "${opts.tlsKey}" ` +
+              `could not be loaded (do they match?): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+        return;
+      }
+      server = httpsServer.listen(opts.port, listenHostname, onListening);
+    } else {
+      server = app.listen(opts.port, listenHostname, onListening);
+    }
     server.once('error', reject);
   });
 }
