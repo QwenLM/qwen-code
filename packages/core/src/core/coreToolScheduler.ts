@@ -788,16 +788,20 @@ function batchResponseOutputSize(call: CompletedToolCall): number {
 
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
+// NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
+// LLM-facing prompt directive (injected into the model prompt, not rendered in
+// the TUI). The width-1 glyph rationale used elsewhere in this change does not
+// apply here — these are not terminal strings to "fix" for column width.
 /** Directive injected when a tool call repeatedly fails validation. */
 const RETRY_LOOP_STOP_DIRECTIVE =
-  '\n\n⚠️ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
+  '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
   'STOP retrying the same approach. Re-examine the tool schema and parameter requirements, then try a ' +
   'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
   'instead of retrying.';
 
 /** Directive injected when a truncated file-modifying call repeats. */
 const TRUNCATION_RETRY_LOOP_DIRECTIVE =
-  '\n\n⚠️ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
+  '\n\n⚠ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
   'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
   'or explain to the user that the content is too large to write safely in one call.';
 

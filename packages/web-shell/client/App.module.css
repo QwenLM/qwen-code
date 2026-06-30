@@ -49,6 +49,81 @@
   overflow: hidden;
 }
 
+.mobileDrawer {
+  display: contents;
+}
+
+.mobileBackdrop {
+  display: none;
+}
+
+.hamburgerButton {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+}
+
+.hamburgerButton:hover {
+  background: var(--accent);
+}
+
+.hamburgerButton svg {
+  width: 20px;
+  height: 20px;
+}
+
+@media (max-width: 760px) {
+  .mobileDrawer {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 50;
+    pointer-events: none;
+    visibility: hidden;
+    /* Keep the panel visible until the backdrop finishes fading out so they
+       disappear together instead of the panel vanishing a frame early. */
+    transition: visibility 0s linear 200ms;
+  }
+
+  .mobileDrawerOpen {
+    visibility: visible;
+    pointer-events: auto;
+    /* Show immediately on open; only the close path needs the delay above. */
+    transition-delay: 0s;
+  }
+
+  .mobileBackdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms ease;
+  }
+
+  .mobileDrawerOpen .mobileBackdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .hamburgerButton {
+    display: flex;
+  }
+}
+
 .appChatEmpty.appWithSidebar {
   justify-content: flex-start;
   overflow: hidden;
@@ -57,6 +132,14 @@
 .appChatEmpty .chatPane {
   justify-content: center;
   overflow-y: auto;
+}
+
+@media (max-width: 760px) {
+  .appChatEmpty .hamburgerButton {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
 }
 
 .app,

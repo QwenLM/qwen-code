@@ -498,7 +498,7 @@ export default {
   'Open in editor': '在编辑器中打开',
   'Edit tools': '编辑工具',
   'Edit color': '编辑颜色',
-  '❌ Error:': '❌ 错误:',
+  '✗ Error:': '✗ 错误:',
   'Are you sure you want to delete agent "{{name}}"?':
     '您确定要删除智能体 "{{name}}" 吗？',
   // ============================================================================
@@ -506,12 +506,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': '项目级 (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': '用户级 (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ 子智能体创建成功！',
+  '✓ Subagent Created Successfully!': '✓ 子智能体创建成功！',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     '子智能体 "{{name}}" 已保存到 {{level}} 级别。',
   'Name: ': '名称: ',
   'Location: ': '位置: ',
-  '❌ Error saving subagent:': '❌ 保存子智能体时出错:',
+  '✗ Error saving subagent:': '✗ 保存子智能体时出错:',
   'Warnings:': '警告:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     '名称 "{{name}}" 在 {{level}} 级别已存在 - 将覆盖现有子智能体',
@@ -1500,9 +1500,9 @@ export default {
   'Choose how to proceed with your session:': '选择如何继续您的会话：',
   'Start new chat session': '开始新的聊天会话',
   'Continue previous conversation': '继续之前的对话',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 欢迎回来！（最后更新：{{timeAgo}}）',
-  '🎯 Overall Goal:': '🎯 总体目标：',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    '欢迎回来！（最后更新：{{timeAgo}}）',
+  'Overall Goal:': '总体目标：',
   'Connect a Provider': '连接服务商',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '必须连接一个服务商才能继续。再次按 Ctrl+C 退出',
@@ -1684,8 +1684,8 @@ export default {
   // MCP Status
   // ============================================================================
   'No MCP servers configured.': '未配置 MCP servers',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers 正在启动（{{count}} 个正在初始化）...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers 正在启动（{{count}} 个正在初始化）...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     '注意：首次启动可能需要更长时间。工具可用性将自动更新',
   'Configured MCP servers:': '已配置的 MCP servers：',
@@ -1708,7 +1708,7 @@ export default {
   'Prompts:': '提示：',
   'Resources:': '资源：',
   Blocked: '已阻止',
-  '💡 Tips:': '💡 提示：',
+  '★ Tips:': '★ 提示：',
   Use: '使用',
   'to show server and tool descriptions': '显示服务器和工具描述',
   'to show tool parameter schemas': '显示 tool parameter schemas',
@@ -2047,7 +2047,7 @@ export default {
   'Enter your Coding Plan API key: ': '请输入您的 Coding Plan API Key：',
   'Select authentication method:': '选择认证方式：',
   '\n=== Authentication Status ===\n': '\n=== 认证状态 ===\n',
-  '⚠️  No authentication method configured.\n': '⚠️  未配置认证方式。\n',
+  '⚠  No authentication method configured.\n': '⚠  未配置认证方式。\n',
   'Run one of the following commands to get started:\n':
     '运行以下命令之一开始配置：\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -2068,8 +2068,8 @@ export default {
   '  Current Model: {{model}}': '  当前模型：{{model}}',
   '  Config Version: {{version}}': '  配置版本：{{version}}',
   '  Status: API key configured\n': '  状态：API Key 已配置\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  认证方式：阿里云百炼 Coding Plan（不完整）',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  认证方式：阿里云百炼 Coding Plan（不完整）',
   '  Issue: API key not found in environment or settings\n':
     '  问题：在环境变量或设置中未找到 API Key\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':

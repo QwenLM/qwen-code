@@ -90,6 +90,7 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
+import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
@@ -795,6 +796,63 @@ export function App({
   const [sidebarSwitchingSessionId, setSidebarSwitchingSessionId] = useState<
     string | null
   >(null);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
+
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 760px)');
+    const handler = (e: MediaQueryListEvent) => {
+      if (!e.matches) setMobileDrawerOpen(false);
+    };
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // A pending tool/permission approval owns Escape (it rejects the call),
+      // so don't let the drawer swallow it while a prompt is visible.
+      if (pendingApprovalRef.current) return;
+      const target = e.target as HTMLElement | null;
+      // Only let an editable element keep Escape for itself when it lives
+      // outside the drawer; the drawer's own search input should still close
+      // the drawer on the first Escape.
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-mobile-drawer]')
+      ) {
+        return;
+      }
+      e.stopPropagation();
+      e.preventDefault();
+      closeMobileDrawer();
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const preventScroll = (e: TouchEvent) => {
+      // Allow native scrolling inside the drawer panel (e.g. the session list).
+      // The dim backdrop also lives under [data-mobile-drawer], so exclude it:
+      // a touchmove starting on the backdrop must still be blocked, otherwise
+      // iOS Safari scrolls the page behind the open drawer.
+      const el = e.target as HTMLElement | null;
+      if (
+        el?.closest('[data-mobile-drawer]') &&
+        !el.closest(`.${styles.mobileBackdrop}`)
+      ) {
+        return;
+      }
+      e.preventDefault();
+    };
+    document.addEventListener('touchmove', preventScroll, { passive: false });
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.removeEventListener('touchmove', preventScroll);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [mobileDrawerOpen, closeMobileDrawer]);
   const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
     setSidebarCollapsed(collapsed);
     writeSidebarCollapsed(collapsed);
@@ -1870,6 +1928,9 @@ export function App({
   }, [branchCurrentSession]);
 
   const createNewSession = useCallback(async () => {
+    // Close the drawer before awaiting so a failed createSession() doesn't leave
+    // it stuck open with the page scroll still locked, matching loadSidebarSession.
+    closeMobileDrawer();
     try {
       const session = await (
         sessionActions as typeof sessionActions & SessionActionsWithCreate
@@ -1888,11 +1949,15 @@ export function App({
       reportError(error, 'Failed to create a new session');
       return false;
     }
-  }, [onSessionIdChange, reportError, sessionActions]);
+  }, [closeMobileDrawer, onSessionIdChange, reportError, sessionActions]);
 
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
       setSidebarSwitchingSessionId(sessionId);
+      // Close the drawer before awaiting the load so it doesn't linger over the
+      // old transcript while the new session streams in, matching the other
+      // session-switch paths (/resume, ResumeDialog).
+      closeMobileDrawer();
       try {
         await sessionActions.loadSession(sessionId, {
           deferTranscriptReset: true,
@@ -1904,7 +1969,7 @@ export function App({
         throw error;
       }
     },
-    [sessionActions],
+    [closeMobileDrawer, sessionActions],
   );
 
   useEffect(() => {
@@ -2633,10 +2698,12 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
+              closeMobileDrawer();
               sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
             } else {
+              closeMobileDrawer();
               setShowResumeDialog(true);
             }
             return true;
@@ -2819,6 +2886,7 @@ export function App({
       enqueuePrompt,
       echoOrDeferLocalCommand,
       branchCurrentSession,
+      closeMobileDrawer,
       createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
@@ -3216,6 +3284,7 @@ export function App({
             >
               <ResumeDialog
                 onSelect={(sessionId) => {
+                  closeMobileDrawer();
                   sessionActions
                     .loadSession(sessionId)
                     .catch((error: unknown) => {
@@ -3488,16 +3557,62 @@ export function App({
 
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
-              <WebShellSidebar
-                collapsed={sidebarCollapsed}
-                onCollapsedChange={handleSidebarCollapsedChange}
-                onOpenSettings={() => setShowSettingsDialog(true)}
-                onNewSession={createNewSession}
-                onLoadSession={loadSidebarSession}
-                onError={reportError}
-              />
+              <div
+                data-mobile-drawer=""
+                {...(mobileDrawerOpen
+                  ? { role: 'dialog', 'aria-modal': 'true' as const }
+                  : {})}
+                aria-label={t('sidebar.label')}
+                className={[
+                  styles.mobileDrawer,
+                  mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                <div
+                  className={styles.mobileBackdrop}
+                  onClick={closeMobileDrawer}
+                  aria-hidden="true"
+                />
+                <WebShellSidebar
+                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
+                  onCollapsedChange={handleSidebarCollapsedChange}
+                  onOpenSettings={() => {
+                    closeMobileDrawer();
+                    setShowSettingsDialog(true);
+                  }}
+                  onNewSession={createNewSession}
+                  onLoadSession={loadSidebarSession}
+                  onError={reportError}
+                  mobileOpen={mobileDrawerOpen}
+                />
+              </div>
             )}
             <div className={styles.chatPane}>
+              {sidebarOptions.enabled && (
+                <button
+                  type="button"
+                  className={styles.hamburgerButton}
+                  onClick={() => setMobileDrawerOpen((open) => !open)}
+                  aria-label={t('sidebar.toggleMenu')}
+                  aria-expanded={mobileDrawerOpen}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <line x1="3" y1="6" x2="21" y2="6" />
+                    <line x1="3" y1="12" x2="21" y2="12" />
+                    <line x1="3" y1="18" x2="21" y2="18" />
+                  </svg>
+                </button>
+              )}
               <WebShellCustomizationProvider value={customization}>
                 <CompactModeContext.Provider value={compactMode}>
                   <TodoContextsProvider
