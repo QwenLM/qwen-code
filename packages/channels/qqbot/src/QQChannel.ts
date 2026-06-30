@@ -83,6 +83,8 @@ export class QQChannel extends ChannelBase {
   private readonly maxReconnectAttempts: number = 20;
   /** QQ Bot session_id from READY, used for RESUME on reconnect. */
   private sessionId: string = '';
+  /** Bot's own QQ OPENID, extracted from gateway READY event. */
+  private botOpenId: string = '';
   /** Whether this connection attempt should try RESUME first. */
   private tryResume: boolean = false;
   private readonly qqConfig: QQChannelConfig;
@@ -235,7 +237,7 @@ export class QQChannel extends ChannelBase {
           '## @提及格式',
           '',
           '消息内容中的 <@OPENID> 标签代表群成员的 QQ 标识。',
-          '当其他群成员 @你（机器人）时，消息内容中会出现 <@你的BotOPENID> 标签，这代表该消息是 @给你的。',
+          '当其他群成员 @你（机器人）时，消息内容中会出现 <@你的BotOPENID> 标签，这代表该消息是 @给你的。机器人自己的 OPENID 将在连接建立后告知。',
           '你可以在回复中使用 <@OPENID> 格式来 @提及特定的群成员。',
           '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
         );
@@ -1056,12 +1058,23 @@ export class QQChannel extends ChannelBase {
             ((msg['d'] as Record<string, unknown> | undefined)?.[
               'session_id'
             ] as string) || '';
+          // Extract bot's own OPENID from READY payload
+          const readyUser = (msg['d'] as Record<string, unknown> | undefined)?.[
+            'user'
+          ] as { id?: string } | undefined;
+          if (readyUser?.id) {
+            this.botOpenId = readyUser.id;
+          }
           this.tryResume = true;
           if (this.readyTimeout) {
             clearTimeout(this.readyTimeout);
             this.readyTimeout = null;
           }
           this.connectReject = null;
+          // Propagate bot OPENID to the model's system instructions
+          if (this.botOpenId && this.qqConfig.allowMention !== false) {
+            this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+          }
           this.startHeartbeat();
           if (this.coldStart) {
             this.restoreGlobalSessions();
