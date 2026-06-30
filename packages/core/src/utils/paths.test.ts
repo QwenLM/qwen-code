@@ -958,6 +958,12 @@ describe('expandHomeDir', () => {
     expect(expandHomeDir('~\\documents')).toBe(path.join(homeDir, 'documents'));
   });
 
+  it('should preserve trailing separators in Windows-style tilde paths', () => {
+    expect(expandHomeDir('~\\documents\\')).toBe(
+      path.normalize(path.join(homeDir, 'documents') + path.sep),
+    );
+  });
+
   it('should handle mixed separators in Windows-style tilde paths', () => {
     expect(expandHomeDir('~\\foo/bar\\baz')).toBe(
       path.join(homeDir, 'foo', 'bar', 'baz'),
@@ -982,6 +988,21 @@ describe('expandHomeDir', () => {
   it('should expand %userprofile%\\path to home directory path', () => {
     const result = expandHomeDir('%userprofile%\\documents');
     expect(result).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should expand %USERPROFILE%/path with forward-slash separator', () => {
+    expect(expandHomeDir('%USERPROFILE%/documents')).toBe(
+      path.join(homeDir, 'documents'),
+    );
+  });
+
+  it('should preserve trailing separators for %USERPROFILE% paths', () => {
+    expect(expandHomeDir('%USERPROFILE%/')).toBe(
+      path.normalize(homeDir + path.sep),
+    );
+    expect(expandHomeDir('%USERPROFILE%\\documents\\')).toBe(
+      path.normalize(path.join(homeDir, 'documents') + path.sep),
+    );
   });
 
   it('should preserve legacy %USERPROFILE% prefix semantics without a separator', () => {

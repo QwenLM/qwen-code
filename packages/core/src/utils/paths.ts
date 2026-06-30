@@ -98,13 +98,13 @@ function expandTilde(p: string): string {
     return path.join(os.homedir(), p.substring(2));
   }
   if (p.startsWith('~\\')) {
-    return path.join(
+    const rest = p.substring(2);
+    const hasTrailingSep = rest.endsWith('/') || rest.endsWith('\\');
+    const expandedPath = path.join(
       os.homedir(),
-      ...p
-        .substring(2)
-        .split(/[/\\]+/)
-        .filter(Boolean),
+      ...rest.split(/[/\\]+/).filter(Boolean),
     );
+    return hasTrailingSep ? expandedPath + path.sep : expandedPath;
   }
   return p;
 }
@@ -124,17 +124,23 @@ export function expandHomeDir(p: string): string {
     return path.normalize(os.homedir());
   }
   if (
+    lowerPath === `${userProfilePrefix}/` ||
+    lowerPath === `${userProfilePrefix}\\`
+  ) {
+    return path.normalize(os.homedir() + path.sep);
+  }
+  if (
     lowerPath.startsWith(`${userProfilePrefix}/`) ||
     lowerPath.startsWith(`${userProfilePrefix}\\`)
   ) {
+    const rest = p.substring(userProfilePrefix.length + 1);
+    const hasTrailingSep = rest.endsWith('/') || rest.endsWith('\\');
+    const expandedPath = path.join(
+      os.homedir(),
+      ...rest.split(/[/\\]+/).filter(Boolean),
+    );
     return path.normalize(
-      path.join(
-        os.homedir(),
-        ...p
-          .substring(userProfilePrefix.length + 1)
-          .split(/[/\\]+/)
-          .filter(Boolean),
-      ),
+      hasTrailingSep ? expandedPath + path.sep : expandedPath,
     );
   }
   if (lowerPath.startsWith(userProfilePrefix)) {
