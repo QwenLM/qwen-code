@@ -45,6 +45,7 @@ import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
+import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -160,8 +161,7 @@ const WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
  */
 const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.SEND_MESSAGE,
-  ToolNames.ENTER_PLAN_MODE,
-  ToolNames.EXIT_PLAN_MODE,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
 ];
 
 /**

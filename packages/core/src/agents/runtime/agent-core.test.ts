@@ -455,7 +455,7 @@ describe('AgentCore.prepareTools', () => {
     expect(tools.map((t) => t.name)).toEqual([ToolNames.READ_FILE]);
   });
 
-  it('filters inline plan lifecycle declarations too', async () => {
+  it('filters inline declarations using the full subagent exclusion floor', async () => {
     const inlineSafe = {
       name: 'inline_safe',
       description: 'safe inline tool',
@@ -463,6 +463,8 @@ describe('AgentCore.prepareTools', () => {
     const { core } = buildAgentForTools(
       {
         tools: [
+          { name: ToolNames.SEND_MESSAGE } as FunctionDeclaration,
+          { name: ToolNames.TASK_UPDATE } as FunctionDeclaration,
           { name: ToolNames.ENTER_PLAN_MODE } as FunctionDeclaration,
           { name: ToolNames.EXIT_PLAN_MODE } as FunctionDeclaration,
           inlineSafe,
@@ -521,18 +523,22 @@ describe('AgentCore.prepareTools', () => {
     async (toolName) => {
       const { core } = buildAgentForTools(undefined, []);
 
-      const result = await core.processFunctionCalls(
-        [
-          {
-            name: toolName,
-            args: { plan: 'Plan from filtered tool' },
-            id: 'call-1',
-          },
-        ],
-        new AbortController(),
-        'prompt-filtered-plan-tool',
-        1,
-        [{ name: ToolNames.READ_FILE } as FunctionDeclaration],
+      const result = await runWithAgentContext('test-subagent', () =>
+        core.runInAgentFrames(() =>
+          core.processFunctionCalls(
+            [
+              {
+                name: toolName,
+                args: { plan: 'Plan from filtered tool' },
+                id: 'call-1',
+              },
+            ],
+            new AbortController(),
+            'prompt-filtered-plan-tool',
+            1,
+            [{ name: ToolNames.READ_FILE } as FunctionDeclaration],
+          ),
+        ),
       );
 
       const response = result.messages[0]?.parts?.[0]?.functionResponse

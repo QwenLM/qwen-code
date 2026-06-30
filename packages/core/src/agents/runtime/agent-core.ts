@@ -93,7 +93,7 @@ import {
 import type { TeammateIdentity } from '../team/types.js';
 import {
   getSubagentPlanToolUnavailableMessage,
-  isSubagentPlanLifecycleTool,
+  isPlanLifecycleToolUnavailableInSubagent,
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
 } from './subagent-plan-tool-policy.js';
 
@@ -1211,7 +1211,7 @@ export class AgentCore {
       const args = (fc.args ?? {}) as Record<string, unknown>;
 
       if (!allowedToolNames.has(fc.name)) {
-        const errorMessage = isSubagentPlanLifecycleTool(toolName)
+        const errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
           ? getSubagentPlanToolUnavailableMessage(toolName)
           : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
         const functionResponsePart = {
