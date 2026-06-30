@@ -9868,6 +9868,49 @@ describe('createServeApp', () => {
       expect(archiveRes.body.archived).toEqual([sid]);
     });
 
+    it('returns session_archiving for pending prompt removal while archive is in flight', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
+      await writeSession(sid);
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          closeStarted();
+          await closeReleasedPromise;
+        },
+        removePendingPromptImpl: () => {
+          throw new Error('removePendingPrompt should not be called');
+        },
+      });
+      const app = createArchiveApp(bridge);
+      const archivePromise = request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] })
+        .then((res) => res);
+      await closeStartedPromise;
+
+      const removeRes = await request(app)
+        .delete(`/session/${sid}/pending-prompts/p-1`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(removeRes.status).toBe(409);
+      expect(removeRes.body).toMatchObject({
+        code: 'session_archiving',
+        sessionId: sid,
+      });
+
+      releaseClose();
+      const archiveRes = await archivePromise;
+      expect(archiveRes.status).toBe(200);
+      expect(archiveRes.body.archived).toEqual([sid]);
+    });
+
     it('returns session_archiving for archive while load is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
       await writeSession(sid);

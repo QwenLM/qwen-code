@@ -813,6 +813,16 @@ export class AcpDispatcher {
     return false;
   }
 
+  private requireMutableOwned(
+    conn: AcpConnection,
+    sessionId: string,
+    id: JsonRpcId | undefined,
+  ): boolean {
+    if (!this.requireOwned(conn, sessionId, id)) return false;
+    this.archiveCoordinator.assertNotTransitioning(sessionId);
+    return true;
+  }
+
   private findPendingClientRequest(
     conn: AcpConnection,
     id: string,
@@ -1185,8 +1195,7 @@ export class AcpDispatcher {
             }
             return;
           }
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const ctx = this.sessionCtx(conn, sessionId, loopback);
           const result = await this.bridge.branchSession(
             sessionId,
@@ -1216,8 +1225,7 @@ export class AcpDispatcher {
 
         case 'session/cancel': {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           // Abort our local in-flight prompt controller too — cancelSession
           // tells the agent to wind down, but the HTTP-side `sendPrompt`
           // await must also be released so the session FIFO unblocks.
@@ -1239,8 +1247,7 @@ export class AcpDispatcher {
 
         case 'session/prompt': {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           validatePrompt(params);
           await this.handlePrompt(conn, sessionId, id, params, loopback);
           return;
@@ -1542,8 +1549,7 @@ export class AcpDispatcher {
         // setters. Replaces the old vendor `_qwen/session/set_model`.
         case 'session/set_config_option': {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const configId = String(params['configId'] ?? '');
           const rawValue = params['value'];
           const ctx = this.sessionCtx(conn, sessionId, loopback);
@@ -1625,8 +1631,7 @@ export class AcpDispatcher {
               );
             return;
           }
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const modeId = String(params['modeId'] ?? '');
           if (!modeId || !APPROVAL_MODES.includes(modeId as ApprovalMode)) {
             if (id !== undefined) {
@@ -1667,8 +1672,7 @@ export class AcpDispatcher {
               );
             return;
           }
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const modelId = String(params['modelId'] ?? '');
           if (!modelId) {
             if (id !== undefined) {
@@ -1694,8 +1698,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/heartbeat`: {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const result = this.bridge.recordHeartbeat(
             sessionId,
             this.sessionCtx(conn, sessionId, loopback),
@@ -1728,8 +1731,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/update_metadata`: {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const metadata = isObject(params['metadata'])
             ? (params['metadata'] as Record<string, unknown>)
             : {};
@@ -2119,8 +2121,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/recap`: {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const result = await this.bridge.generateSessionRecap(
             sessionId,
             this.sessionCtx(conn, sessionId, loopback),
@@ -2131,8 +2132,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/btw`: {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const rawQ = params['question'];
           if (
             typeof rawQ !== 'string' ||
@@ -2167,8 +2167,7 @@ export class AcpDispatcher {
             }
             return;
           }
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const binding = conn.sessions.get(sessionId);
           const clientId = binding?.clientId;
           if (!clientId) {
@@ -2210,8 +2209,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/detach`: {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          if (!this.requireMutableOwned(conn, sessionId, id)) return;
           const ctx = this.sessionCtx(conn, sessionId, loopback);
           await this.bridge.detachClient(sessionId, ctx.clientId);
           this.replyConn(conn, id, { ok: true });
