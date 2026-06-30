@@ -635,6 +635,8 @@
 
   .sidebar.mobileOpen {
     display: flex;
+    width: var(--web-shell-sidebar-width, 260px);
+    min-width: var(--web-shell-sidebar-width, 260px);
   }
 
   .resizeHandle {

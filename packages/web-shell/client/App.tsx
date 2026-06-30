@@ -923,7 +923,15 @@ export function App({
     if (!mobileDrawerOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        e.stopPropagation();
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
         closeMobileDrawer();
       }
     };
@@ -2950,6 +2958,7 @@ export function App({
                 reportError(error, 'Failed to load session');
               });
             } else {
+              closeMobileDrawer();
               setShowResumeDialog(true);
             }
             return true;
@@ -3827,8 +3836,9 @@ export function App({
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
               <div
-                role="dialog"
-                aria-modal="true"
+                {...(mobileDrawerOpen
+                  ? { role: 'dialog', 'aria-modal': 'true' as const }
+                  : {})}
                 aria-label={t('sidebar.label')}
                 className={[
                   styles.mobileDrawer,
@@ -3843,7 +3853,7 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
-                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
+                  collapsed={sidebarCollapsed}
                   onCollapsedChange={handleSidebarCollapsedChange}
                   onOpenSettings={() => {
                     closeMobileDrawer();

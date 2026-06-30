@@ -114,11 +114,6 @@
     pointer-events: auto;
   }
 
-  .mobileDrawer :global(.sidebar) {
-    position: relative;
-    z-index: 1;
-  }
-
   .hamburgerButton {
     display: flex;
   }
@@ -132,6 +127,14 @@
 .appChatEmpty .chatPane {
   justify-content: center;
   overflow-y: auto;
+}
+
+@media (max-width: 760px) {
+  .appChatEmpty .hamburgerButton {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
 }
 
 .app,
