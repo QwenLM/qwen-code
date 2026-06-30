@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SessionService } from '@qwen-code/qwen-code-core';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Storage, type SessionService } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   SessionArchivedError,
@@ -28,6 +30,8 @@ export interface DaemonUnarchiveSessionsResult {
   notFound: string[];
   errors: Array<{ sessionId: string; error: unknown }>;
 }
+
+const SESSION_JSONL_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();
@@ -88,17 +92,40 @@ export class SessionArchiveCoordinator {
   }
 }
 
-export async function assertSessionLoadable(
-  sessionService: SessionService,
+export function assertSessionLoadable(
+  workspaceCwd: string,
   sessionId: string,
-): Promise<void> {
-  const location = await sessionService.getSessionLocation(sessionId);
+): void {
+  const location = getSessionLocationByPath(workspaceCwd, sessionId);
   if (location === 'archived') {
     throw new SessionArchivedError(sessionId);
   }
   if (location === 'conflict') {
     throw new SessionConflictError(sessionId);
   }
+}
+
+function getSessionLocationByPath(
+  workspaceCwd: string,
+  sessionId: string,
+): 'active' | 'archived' | 'conflict' | undefined {
+  if (!SESSION_JSONL_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+    return undefined;
+  }
+
+  const chatsDir = path.join(
+    new Storage(workspaceCwd).getProjectDir(),
+    'chats',
+  );
+  const active = fs.existsSync(path.join(chatsDir, `${sessionId}.jsonl`));
+  const archived = fs.existsSync(
+    path.join(chatsDir, 'archive', `${sessionId}.jsonl`),
+  );
+
+  if (active && archived) return 'conflict';
+  if (active) return 'active';
+  if (archived) return 'archived';
+  return undefined;
 }
 
 function isSessionNotFoundError(err: unknown): boolean {

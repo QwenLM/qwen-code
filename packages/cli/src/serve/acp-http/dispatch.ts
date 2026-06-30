@@ -878,7 +878,7 @@ export class AcpDispatcher {
           const restored = await this.archiveCoordinator.runSharedMany(
             [sessionId],
             async () => {
-              await assertSessionLoadable(new SessionService(cwd), sessionId);
+              assertSessionLoadable(cwd, sessionId);
               return method === 'session/load'
                 ? await this.bridge.loadSession({
                     sessionId,
