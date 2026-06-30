@@ -85,6 +85,9 @@ export class QQChannel extends ChannelBase {
   private sessionId: string = '';
   /** Bot's own QQ OPENID, extracted from gateway READY event. */
   private botOpenId: string = '';
+  /** Set to true after first READY + session restore completes. Guards
+   *  against stale textChunk events during startup reconnection. */
+  private _ready = false;
   /** Whether this connection attempt should try RESUME first. */
   private tryResume: boolean = false;
   private readonly qqConfig: QQChannelConfig;
@@ -203,8 +206,11 @@ export class QQChannel extends ChannelBase {
     // We use setImmediate to let ChannelBase's prompt listener set up
     // streamState first — if streamState has the sessionId, it's a
     // normal prompt and we skip.
+    // During session restore (startup), textChunk events from replayed
+    // old sessions are silently ignored to prevent stale output.
     this._cronTextHandler = (sessionId: string, text: string) => {
       setImmediate(() => {
+        if (!this._ready) return; // during session restore — ignore
         if (this.streamState.has(sessionId)) return; // prompt path handles it
 
         let entry = this.cronBuffer.get(sessionId);
@@ -1139,6 +1145,7 @@ export class QQChannel extends ChannelBase {
                 );
                 this.coldStart = false;
                 onReady();
+                this._ready = true;
               })
               .catch((err: unknown) => {
                 process.stderr.write(
@@ -1146,12 +1153,14 @@ export class QQChannel extends ChannelBase {
                 );
                 this.coldStart = false;
                 onReady();
+                this._ready = true;
               });
           } else {
             process.stderr.write(
               `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
             );
             onReady();
+            this._ready = true;
           }
         } else if (t === 'C2C_MESSAGE_CREATE') {
           this.handleC2C(msg['d'] as unknown as QQMessageEvent);
