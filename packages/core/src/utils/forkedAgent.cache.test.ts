@@ -86,6 +86,13 @@ describe('CacheSafeParams', () => {
         functionDeclarations: unknown[];
       }>;
       expect(savedTools[0].functionDeclarations).toHaveLength(1);
+
+      savedTools[0].functionDeclarations.push({ name: 'tool3' });
+      const rereadParams = getCacheSafeParams();
+      const rereadTools = rereadParams!.generationConfig.tools as Array<{
+        functionDeclarations: unknown[];
+      }>;
+      expect(rereadTools[0].functionDeclarations).toHaveLength(1);
     });
 
     it('copies history containers without cloning part payloads', () => {

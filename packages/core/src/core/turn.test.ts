@@ -15,7 +15,12 @@ import {
   GeminiEventType,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
-import type { GenerateContentResponse, Part, Content } from '@google/genai';
+import type {
+  GenerateContentResponse,
+  Part,
+  Content,
+  PartListUnion,
+} from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
@@ -497,7 +502,7 @@ describe('Turn', () => {
       expect(events[0]?.type).toBe(GeminiEventType.Error);
       expect(mockGetHistory).not.toHaveBeenCalled();
       expect(mockGetHistoryLength).toHaveBeenCalled();
-      expect(mockGetHistoryTailShallow).toHaveBeenCalledWith(8);
+      expect(mockGetHistoryTailShallow).toHaveBeenCalledWith(8, true);
       const reportedContext = vi.mocked(reportError).mock.calls[0]?.[2];
       expect(JSON.stringify(reportedContext)).not.toContain(largeText);
       expect(reportError).toHaveBeenCalledWith(
@@ -525,6 +530,45 @@ describe('Turn', () => {
           },
           request: {
             partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+      );
+    });
+
+    it('should report API errors when request parts include strings', async () => {
+      const error = new Error('API Error');
+      const reqParts: PartListUnion = ['Trigger ', { text: 'error' }];
+      const diagnosticFailure: unknown = 'history is unavailable';
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistoryLength.mockImplementation(() => {
+        throw diagnosticFailure;
+      });
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause: 'history is unavailable',
+          },
+          request: {
+            partCount: 2,
             functionCalls: [],
             functionResponses: [],
             textPreview: 'Trigger error',

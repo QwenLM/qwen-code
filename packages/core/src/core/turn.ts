@@ -148,10 +148,16 @@ function summarizeParts(parts: Part[]): {
     functionResponses: parts
       .map((part) => part.functionResponse?.name)
       .filter((name): name is string => typeof name === 'string'),
-    textPreview: parts
-      .map((part) => (typeof part.text === 'string' ? part.text : ''))
-      .join('')
-      .slice(0, ERROR_REPORT_TEXT_PREVIEW_CHARS),
+    textPreview: (() => {
+      let textPreview = '';
+      for (const part of parts) {
+        if (typeof part.text !== 'string') continue;
+        const remaining = ERROR_REPORT_TEXT_PREVIEW_CHARS - textPreview.length;
+        if (remaining <= 0) break;
+        textPreview += part.text.slice(0, remaining);
+      }
+      return textPreview;
+    })(),
   };
 }
 
@@ -168,7 +174,10 @@ function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
     history: {
       rawLength: chat.getHistoryLength(),
       tail: chat
-        .getHistoryTailShallow(ERROR_REPORT_HISTORY_TAIL_COUNT)
+        .getHistoryTailShallow(
+          ERROR_REPORT_HISTORY_TAIL_COUNT,
+          /* curated */ true,
+        )
         .map(summarizeHistoryEntry),
     },
     request: summarizeParts(requestParts),
@@ -312,7 +321,9 @@ export enum CompressionStatus {
  * limit". Undefined on NOOP / failure paths and for callers that don't set it.
  */
 export type CompactionTriggerReason =
-  'token_limit' | 'image_overflow' | 'manual';
+  | 'token_limit'
+  | 'image_overflow'
+  | 'manual';
 
 export interface ChatCompressionInfo {
   originalTokenCount: number;
