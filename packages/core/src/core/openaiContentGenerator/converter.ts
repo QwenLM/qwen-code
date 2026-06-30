@@ -1259,7 +1259,13 @@ export function convertOpenAIChunkToGemini(
     if (hasThoughtPart(contentParts)) {
       requestContext.hasTaggedThinkingThought = true;
       requestContext.pendingReasoningText = undefined;
+      debugLogger.debug(
+        'convertOpenAIChunkToGemini: tagged thinking content emitted a thought; dropping buffered reasoning',
+      );
       if (requestContext.pendingContentParts?.length) {
+        debugLogger.debug(
+          `convertOpenAIChunkToGemini: flushing ${requestContext.pendingContentParts.length} buffered content part(s) before tagged content`,
+        );
         parts.push(...requestContext.pendingContentParts);
         requestContext.pendingContentParts = undefined;
       }
@@ -1289,6 +1295,9 @@ export function convertOpenAIChunkToGemini(
       ) {
         requestContext.pendingReasoningText =
           (requestContext.pendingReasoningText ?? '') + normalizedReasoningText;
+        debugLogger.debug(
+          `convertOpenAIChunkToGemini: buffered reasoning text (${requestContext.pendingReasoningText.length} chars) for tagged stream`,
+        );
       }
     }
 
@@ -1302,6 +1311,9 @@ export function convertOpenAIChunkToGemini(
         ...(requestContext.pendingContentParts ?? []),
         ...contentParts,
       ];
+      debugLogger.debug(
+        `convertOpenAIChunkToGemini: buffered ${contentParts.length} content part(s) behind pending reasoning`,
+      );
       contentParts = [];
     }
 
@@ -1311,14 +1323,20 @@ export function convertOpenAIChunkToGemini(
       !requestContext.hasTaggedThinkingThought &&
       requestContext.pendingReasoningText
     ) {
+      debugLogger.debug(
+        'convertOpenAIChunkToGemini: flushing buffered reasoning for tagged stream with no tagged thought',
+      );
       parts.push({ text: requestContext.pendingReasoningText, thought: true });
       requestContext.pendingReasoningText = undefined;
     }
-    parts.push(...contentParts);
     if (choice.finish_reason && requestContext.pendingContentParts?.length) {
+      debugLogger.debug(
+        `convertOpenAIChunkToGemini: flushing ${requestContext.pendingContentParts.length} buffered content part(s) on stream finish`,
+      );
       parts.push(...requestContext.pendingContentParts);
       requestContext.pendingContentParts = undefined;
     }
+    parts.push(...contentParts);
 
     // Handle tool calls using the stream-local parser
     if (choice.delta?.tool_calls) {

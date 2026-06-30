@@ -4115,6 +4115,50 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('should suppress late reasoning_content after streaming tagged thinking content', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-late-reasoning-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: '<think>tagged reasoning</think>' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const secondChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-late-reasoning-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'late reasoning' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'tagged reasoning', thought: true },
+      ]);
+      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([]);
+    });
+
     it('should suppress buffered reasoning_content when later streaming content has tagged thinking', () => {
       const context = withTaggedThinkingStreamParser();
 
@@ -4176,6 +4220,55 @@ describe('OpenAIContentConverter', () => {
       ]);
       expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
         { text: 'final answer' },
+      ]);
+    });
+
+    it('should flush buffered content before current content when reasoning flushes on finish', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-content-order-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_content: 'step 1',
+                content: 'hello ',
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-content-order-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'world' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
+        { text: 'hello ' },
+        { text: 'world' },
       ]);
     });
 
