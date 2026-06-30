@@ -2311,7 +2311,8 @@ export async function runQwenServe(
             onExit: (snapshot) => {
               daemonLog.warn(
                 `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
-                  `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'})`,
+                  `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
+                  `error=${snapshot.error ?? 'none'})`,
               );
               removeCurrentServePidfile();
             },

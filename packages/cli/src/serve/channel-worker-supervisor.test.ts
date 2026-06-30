@@ -216,6 +216,30 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('preserves the pre-ready error when the worker exits after an error', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('error', new Error('spawn error'));
+    child.emit('exit', 1, null);
+
+    await expect(started).rejects.toThrow('spawn error');
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'failed',
+      exitCode: 1,
+      signal: null,
+      error: 'spawn error',
+    });
+  });
+
   it('does not signal a spawn failure that never produced a process pid', async () => {
     const child = new FakeChild();
     child.pid = undefined;
@@ -391,6 +415,45 @@ describe('createChannelWorkerSupervisor', () => {
     child.emit('exit', 1, null);
 
     expect(onExit).toHaveBeenCalledTimes(1);
+    expect(onExit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: 'exited',
+        exitCode: 1,
+        signal: null,
+        error: 'ipc failed',
+      }),
+    );
+  });
+
+  it('ignores a late error after a ready worker exit is already recorded', async () => {
+    const child = new FakeChild();
+    const onExit = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onExit,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+    child.emit('exit', 7, null);
+    child.emit('error', new Error('late ipc failed'));
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'exited',
+      exitCode: 7,
+      signal: null,
+    });
   });
 
   it('can still stop a ready worker after an error without exit', async () => {

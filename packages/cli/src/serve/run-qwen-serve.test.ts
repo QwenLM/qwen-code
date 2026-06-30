@@ -2214,6 +2214,7 @@ describe('runQwenServe channel worker supervisor', () => {
         state: 'exited',
         exitCode: 1,
         signal: null,
+        error: 'ipc failed',
       });
       onExit?.(snapshot);
       const res = await fetch(`${handle.url}/daemon/status`);
@@ -2226,7 +2227,7 @@ describe('runQwenServe channel worker supervisor', () => {
           expect.objectContaining({
             code: 'channel_worker_exited',
             severity: 'warning',
-            message: 'Channel worker is exited (pid=1234, code=1).',
+            message: 'Channel worker is exited (pid=1234, code=1): ipc failed.',
           }),
         ]),
         runtime: {
@@ -2236,6 +2237,7 @@ describe('runQwenServe channel worker supervisor', () => {
             pid: 1234,
             channels: ['telegram'],
             exitCode: 1,
+            error: 'ipc failed',
           },
         },
       });

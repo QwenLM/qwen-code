@@ -274,19 +274,19 @@ export function createChannelWorkerSupervisor(
             state,
             code,
             signal,
-            ready ? undefined : (snapshot.error ?? message),
+            snapshot.error ?? (ready ? undefined : message),
           );
           if (ready && !stopping && !exitNotified) {
             exitNotified = true;
             notifyExit(opts.onExit, snapshotCopy());
           }
           if (!settled) {
-            failBeforeReady(new Error(message));
+            failBeforeReady(new Error(snapshot.error ?? message));
           }
           child = undefined;
         }
         function settleError(err: Error) {
-          if (settled && !ready && child === undefined) return;
+          if (settled && child === undefined) return;
           const observedExit = child?.pid === undefined;
           if (observedExit) {
             setExited(ready ? 'exited' : 'failed', null, null, err.message);
