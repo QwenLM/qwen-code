@@ -156,6 +156,7 @@ jobs:
       REPO: '${{ github.repository }}'
       WORKDIR: '/tmp/autofix'
       BUG_LABEL: 'type/bug'
+      EVENT_NAME: '${{ github.event_name }}'
       READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
       # Tier-2 age window (days): skip bugs newer than MIN (give triage/dedup
@@ -215,7 +216,7 @@ jobs:
             elif [[ "$(jq -r '.state // ""' "${forced_issue_json}")" != 'OPEN' ]]; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} is not open; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
-            elif ! jq -e --arg bug "${BUG_LABEL}" --arg ready "${READY_FOR_AGENT_LABEL}" \
+            elif [[ "${EVENT_NAME}" != 'workflow_dispatch' ]] && ! jq -e --arg bug "${BUG_LABEL}" --arg ready "${READY_FOR_AGENT_LABEL}" \
               '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))' \
               "${forced_issue_json}" > /dev/null; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} is missing ${BUG_LABEL} or ${READY_FOR_AGENT_LABEL}; skipping."

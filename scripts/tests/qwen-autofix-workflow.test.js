@@ -77,6 +77,9 @@ describe('qwen-autofix workflow', () => {
       '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))',
     );
     expect(workflow).toContain(
+      '[[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e',
+    );
+    expect(workflow).toContain(
       'is missing ${BUG_LABEL} or ${READY_FOR_AGENT_LABEL}; skipping.',
     );
     expect(workflow).not.toContain(
