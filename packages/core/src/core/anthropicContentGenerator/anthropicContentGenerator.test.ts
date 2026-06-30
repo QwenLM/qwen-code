@@ -1315,6 +1315,45 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    // DeepSeek's anthropic-compatible output_config.effort accepts only
+    // high/max, so low/medium must lift to high (mirroring the DeepSeek OpenAI
+    // adapter) instead of passing through verbatim, which the endpoint 400s on.
+    it("lifts effort: 'low'/'medium' to 'high' on the DeepSeek anthropic path", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      for (const effort of ['low', 'medium'] as const) {
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'deepseek-v4-pro',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'deepseek-v4-pro',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.deepseek.com/anthropic',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+            reasoning: { effort },
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ output_config: { effort: 'high' } }),
+        );
+      }
+    });
+
     it("still clamps effort: 'max' when model name says 'deepseek' but hostname is api.anthropic.com", async () => {
       // The broader `isDeepSeekAnthropicProvider` falls back to model-name
       // matching to cover sglang/vllm self-hosted DeepSeek deployments,
@@ -1696,6 +1735,16 @@ describe('AnthropicContentGenerator', () => {
 
       it('keeps the budget_tokens config for older 4.x models (e.g. claude-opus-4-5)', async () => {
         expect(await thinkingFor('claude-opus-4-5')).toEqual({
+          type: 'enabled',
+          budget_tokens: 32_000,
+        });
+      });
+
+      it('keeps the budget path for dated Opus 4.0 (claude-opus-4-20250514, date suffix is not a minor)', async () => {
+        // Regression: the 8-digit date suffix must not be parsed as the minor
+        // version. Opus 4.0 lacks adaptive thinking, so it must fall to the
+        // budget path rather than emitting `{ type: 'adaptive' }` (server 400).
+        expect(await thinkingFor('claude-opus-4-20250514')).toEqual({
           type: 'enabled',
           budget_tokens: 32_000,
         });

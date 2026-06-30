@@ -730,9 +730,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return undefined;
     }
     if (isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
-      // DeepSeek's anthropic-compatible output_config.effort accepts high/max;
-      // its docs group xhigh → max. Other tiers pass through unchanged.
-      return effort === 'xhigh' ? 'max' : effort;
+      // DeepSeek's anthropic-compatible output_config.effort accepts only
+      // high/max. Mirror the DeepSeek OpenAI adapter (deepseek.ts): low/medium
+      // lift to high and xhigh groups to max, so a low/medium request is not
+      // passed through verbatim (which the endpoint would 400 on).
+      return effort === 'xhigh' || effort === 'max' ? 'max' : 'high';
     }
     // Real Anthropic: clamp the requested tier to what this model actually
     // accepts. Opus 4.7/4.8 and the 5.x families take xhigh/max natively;
@@ -770,10 +772,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
    */
   private modelSupportsAdaptiveThinking(): boolean {
     const model = (this.contentGeneratorConfig.model || '').toLowerCase();
-    const match = model.match(/claude-(?:opus|sonnet|haiku)-(\d+)-(\d+)/);
+    // Mirror anthropicSupportedEffortTiers: capture an optional 1–2 digit minor
+    // with a trailing (?!\d) guard so an 8-digit date suffix
+    // (claude-opus-4-20250514 = Opus 4.0) is not mis-parsed as a giant minor
+    // version and wrongly granted adaptive thinking (server 400). Also covers
+    // the fable/mythos families and a bare major with no minor (claude-opus-5).
+    const match = model.match(
+      /claude-(?:opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?/,
+    );
     if (!match) return false;
     const major = Number.parseInt(match[1], 10);
-    const minor = Number.parseInt(match[2], 10);
+    const minor = match[2] ? Number.parseInt(match[2], 10) : 0;
     return major > 4 || (major === 4 && minor >= 6);
   }
 
