@@ -660,7 +660,7 @@ export const editableCompartment = new Compartment();
 export const placeholderCompartment = new Compartment();
 export const followupGhostCompartment = new Compartment();
 
-function getFollowupCompletion(
+export function getFollowupCompletion(
   text: string,
   suggestion: string | null | undefined,
 ): string | null {
@@ -754,7 +754,6 @@ export interface UseComposerCoreOptions {
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
-  onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -888,7 +887,6 @@ export function useComposerCore(
     slashCommandCategoryOrder,
     queuedMessages = [],
     onPopQueuedMessages,
-    onClearQueuedMessages,
     currentMode = 'default',
     onFocusFooter,
     dialogOpen = false,
@@ -925,8 +923,6 @@ export function useComposerCore(
   queuedMessagesRef.current = queuedMessages;
   const onPopQueuedMessagesRef = useRef(onPopQueuedMessages);
   onPopQueuedMessagesRef.current = onPopQueuedMessages;
-  const onClearQueuedMessagesRef = useRef(onClearQueuedMessages);
-  onClearQueuedMessagesRef.current = onClearQueuedMessages;
   const followupStateRef = useRef(followupState);
   followupStateRef.current = followupState;
   const onAcceptFollowupRef = useRef(onAcceptFollowup);
@@ -1085,11 +1081,23 @@ export function useComposerCore(
   // Update hasContent when tags or images change
   useEffect(() => {
     const view = viewRef.current;
-    const text = view?.state.doc.toString().trim() ?? '';
-    setHasContent(
-      text.length > 0 || composerTags.length > 0 || pastedImages.length > 0,
+    const text = view?.state.doc.toString() ?? '';
+    const followupCompletion = getFollowupCompletion(
+      text,
+      followupState?.isVisible ? followupState.suggestion : null,
     );
-  }, [composerTags, pastedImages]);
+    setHasContent(
+      text.trim().length > 0 ||
+        !!followupCompletion ||
+        composerTags.length > 0 ||
+        pastedImages.length > 0,
+    );
+  }, [
+    composerTags,
+    pastedImages,
+    followupState?.isVisible,
+    followupState?.suggestion,
+  ]);
 
   const promptHistory = useInputHistory();
   const shellHistory = useInputHistory('qwen-web-shell-command-history');
@@ -1278,7 +1286,13 @@ export function useComposerCore(
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
     ) => {
-      const rawText = (textOverride ?? view.state.doc.toString()).trim();
+      const editorText = view.state.doc.toString();
+      const followup = followupStateRef.current;
+      const followupCompletion =
+        textOverride === undefined && followup?.isVisible
+          ? getFollowupCompletion(editorText, followup.suggestion)
+          : null;
+      const rawText = (textOverride ?? followupCompletion ?? editorText).trim();
       const tags = tagsOverride ?? composerTagsRef.current;
       if (!rawText && tags.length === 0) return true;
       const text = expandLargePastePlaceholders(
@@ -1294,6 +1308,9 @@ export function useComposerCore(
       );
       if (accepted === false) return true;
       setSlashMenu(null);
+      if (followupCompletion) {
+        onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+      }
       onDismissFollowupRef.current?.();
       pendingPastesRef.current.clear();
       nextPasteIdRef.current = 1;
@@ -1318,6 +1335,7 @@ export function useComposerCore(
     const completionSources = [
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
+        () => workspaceActionsRef.current?.loadExtensionsStatus,
       ),
     ];
 
@@ -1440,8 +1458,10 @@ export function useComposerCore(
             setShellMode(false);
             return true;
           }
-          if (queuedMessagesRef.current.length === 0) return false;
-          return onClearQueuedMessagesRef.current?.() ?? false;
+          // Don't clear the queue on Escape — let it fall through to the
+          // window handler, where Escape cancels the in-flight turn (queued
+          // prompts are preserved and drain once it settles).
+          return false;
         },
       },
       {
@@ -1753,9 +1773,15 @@ export function useComposerCore(
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            const text = update.state.doc.toString().trim();
+            const text = update.state.doc.toString();
+            const followup = followupStateRef.current;
+            const followupCompletion = getFollowupCompletion(
+              text,
+              followup?.isVisible ? followup.suggestion : null,
+            );
             setHasContent(
-              text.length > 0 ||
+              text.trim().length > 0 ||
+                !!followupCompletion ||
                 composerTagsRef.current.length > 0 ||
                 pastedImagesRef.current.length > 0,
             );

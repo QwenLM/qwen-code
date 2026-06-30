@@ -17,7 +17,12 @@ import {
   Session,
 } from './Session.js';
 import type { Content, FunctionCall, Part } from '@google/genai';
-import type { ChatRecord, Config, GeminiChat } from '@qwen-code/qwen-code-core';
+import type {
+  ChatRecord,
+  Config,
+  Extension,
+  GeminiChat,
+} from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   AuthType,
@@ -486,6 +491,48 @@ describe('Session', () => {
       canUpdateOutput: false,
       isOutputMarkdown: true,
     };
+  }
+
+  function makeExtension(overrides: Partial<Extension> = {}): Extension {
+    return {
+      id: 'browser',
+      name: 'browser',
+      displayName: 'Browser',
+      version: '1.0.0',
+      isActive: true,
+      path: process.cwd(),
+      config: {
+        name: 'browser',
+        version: '1.0.0',
+        description: 'Browser automation',
+      },
+      mcpServers: {
+        'browser-mcp': {
+          command: 'node',
+        },
+      },
+      contextFiles: [],
+      skills: [
+        {
+          name: 'browser-skill',
+          description: 'Use browser tools',
+          path: 'skills/browser/SKILL.md',
+        },
+      ],
+      ...overrides,
+    } as Extension;
+  }
+
+  function firstSentMessage(): Part[] {
+    const call = vi.mocked(mockChat.sendMessageStream).mock.calls[0];
+    const request = call?.[1] as { message?: Part[] } | undefined;
+    return request?.message ?? [];
+  }
+
+  function textParts(parts: Part[]): string[] {
+    return parts.flatMap((part) =>
+      typeof part.text === 'string' ? [part.text] : [],
+    );
   }
 
   beforeEach(() => {
@@ -1991,6 +2038,54 @@ describe('Session', () => {
           ],
         },
       });
+    });
+
+    it('forwards command aliases as _meta.altNames (and omits the key when there are none)', async () => {
+      // A channel consumer only sees this wire snapshot, not the command registry,
+      // so aliases must travel in _meta (ACP's extension point) for it to recognize
+      // an aliased command. Omitted when absent so non-aliased entries stay
+      // byte-identical.
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'compress',
+          description: 'Compress context',
+          altNames: ['summarize'],
+          kind: CommandKind.BUILT_IN,
+        },
+        {
+          name: 'help',
+          description: 'Show help',
+          kind: CommandKind.BUILT_IN,
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              expect.objectContaining({
+                name: 'compress',
+                _meta: expect.objectContaining({ altNames: ['summarize'] }),
+              }),
+              expect.objectContaining({ name: 'help' }),
+            ],
+          }),
+        }),
+      );
+      // The alias-free command carries no altNames key.
+      const call = (
+        mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+      ).mock.calls.at(-1)![0] as {
+        update: {
+          availableCommands: Array<{ _meta?: Record<string, unknown> }>;
+        };
+      };
+      expect(call.update.availableCommands[1]._meta).not.toHaveProperty(
+        'altNames',
+      );
     });
 
     it('sets input for built-in commands with subCommands', async () => {
@@ -7641,6 +7736,101 @@ describe('Session', () => {
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('injects active extension context for @ext mentions', async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-ext-'));
+      const contextFile = path.join(tempDir, 'context.md');
+
+      try {
+        await fs.writeFile(contextFile, 'extension context file', 'utf8');
+        const extension = makeExtension({
+          path: tempDir,
+          contextFiles: [contextFile],
+        });
+        mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'Use @ext:browser now' }],
+        });
+
+        const message = firstSentMessage();
+        expect(message[0]).toEqual({ text: 'Use @ext:browser now' });
+        const sentText = textParts(message).join('\n');
+        expect(sentText).toContain(
+          '--- Extension: Browser (untrusted third-party content) ---',
+        );
+        expect(sentText).toContain('Browser automation');
+        expect(sentText).toContain(
+          '- Skills: browser-skill (invoke via /<skill-name>)',
+        );
+        expect(sentText).toContain('- MCP Servers: browser-mcp');
+        expect(sentText).toContain('extension context file');
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('dedupes repeated extension mentions and skips unknown mentions', async () => {
+      const extension = makeExtension();
+      mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'text',
+            text: 'Use @ext:browser and @ext:browser and @ext:missing',
+          },
+        ],
+      });
+
+      const sentText = textParts(firstSentMessage()).join('\n');
+      expect(sentText.match(/--- Extension: Browser/g)).toHaveLength(1);
+      expect(sentText).not.toContain('Extension: missing');
+    });
+
+    it('caps extension context files and skips files outside the extension', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-ext-cap-'),
+      );
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-ext-outside-'),
+      );
+      const bigFile = path.join(tempDir, 'big.md');
+      const outsideFile = path.join(outsideDir, 'secret.md');
+
+      try {
+        await fs.writeFile(bigFile, 'x'.repeat(60_000), 'utf8');
+        await fs.writeFile(outsideFile, 'do not inject this secret', 'utf8');
+        const extension = makeExtension({
+          path: tempDir,
+          contextFiles: [bigFile, outsideFile],
+        });
+        mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '@ext:browser' }],
+        });
+
+        const sentText = textParts(firstSentMessage()).join('\n');
+        expect(sentText).toContain('... (truncated)');
+        expect(sentText).not.toContain('do not inject this secret');
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.rm(outsideDir, { recursive: true, force: true });
       }
     });
 

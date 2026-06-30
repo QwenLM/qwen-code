@@ -419,6 +419,108 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('surfaces command aliases (altNames) carried in the wire snapshot', async () => {
+    // The producer carries aliases in _meta.altNames (ACP's extension point); a
+    // top-level altNames is also accepted for forward-compat. Both must be lifted
+    // onto the stored command so attribution can recognize an aliased command.
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: '/compress',
+              description: 'Compress context',
+              input: null,
+              _meta: { altNames: ['summarize'] },
+            },
+            {
+              name: '/auth',
+              description: 'Authenticate',
+              input: null,
+              altNames: ['login', 'connect'],
+            },
+            { name: '/help', description: 'Show help', input: null },
+          ],
+        },
+      },
+    });
+
+    await waitFor(() => {
+      const commands = bridge.getAvailableCommands('session-1');
+      expect(commands).toHaveLength(3);
+      expect(commands[0]).toMatchObject({
+        name: '/compress',
+        altNames: ['summarize'],
+      });
+      expect(commands[1]).toMatchObject({
+        name: '/auth',
+        altNames: ['login', 'connect'],
+      });
+      // A command with no aliases stays alias-free (the field is omitted).
+      expect(commands[2].altNames).toBeUndefined();
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('drops a command whose altNames is a malformed (non-array) wire value', async () => {
+    // isAvailableCommand validates altNames' SHAPE (not just `name`): a malformed
+    // payload — e.g. `altNames: 5` — would otherwise survive onto the command and
+    // throw at the downstream `altNames.some(...)` recognition site. The malformed
+    // entry is rejected; valid commands in the same snapshot are unaffected.
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            { name: '/bad', description: 'malformed', altNames: 5 },
+            { name: '/help', description: 'Show help', input: null },
+          ],
+        },
+      },
+    });
+
+    await waitFor(() => {
+      const commands = bridge.getAvailableCommands('session-1');
+      // Only the well-formed command survives; the malformed one is filtered out.
+      expect(commands).toHaveLength(1);
+      expect(commands[0]!.name).toBe('/help');
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
   it('routes permission responses back through the owning daemon session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

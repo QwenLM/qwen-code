@@ -103,7 +103,9 @@ function buildWorkspaceProvidersStatus(
       settings.providerProtocol,
     );
 
-    for (const model of modelsConfig.getAllConfiguredModels()) {
+    for (const model of modelsConfig
+      .getAllConfiguredModels()
+      .filter(isMainSelectableModel)) {
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);
       let provider = providers.get(authType);
@@ -196,6 +198,13 @@ function buildWorkspaceProvidersStatus(
       ],
     };
   }
+}
+
+function isMainSelectableModel(model: {
+  fastOnly?: boolean;
+  voiceOnly?: boolean;
+}): boolean {
+  return model.fastOnly !== true && model.voiceOnly !== true;
 }
 
 function matchesCurrentModel(

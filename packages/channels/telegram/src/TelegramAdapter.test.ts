@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TelegramChannel } from './TelegramAdapter.js';
 import type {
-  AcpBridge,
+  ChannelAgentBridge,
   ChannelConfig,
   Envelope,
 } from '@qwen-code/channel-base';
@@ -54,7 +54,7 @@ function createChannel(
   return new TestTelegramChannel(
     'telegram',
     { ...config, ...configOverrides },
-    {} as AcpBridge,
+    {} as ChannelAgentBridge,
     {
       router: router as never,
     },
