@@ -321,7 +321,9 @@ export enum CompressionStatus {
  * limit". Undefined on NOOP / failure paths and for callers that don't set it.
  */
 export type CompactionTriggerReason =
-  'token_limit' | 'image_overflow' | 'manual';
+  | 'token_limit'
+  | 'image_overflow'
+  | 'manual';
 
 export interface ChatCompressionInfo {
   originalTokenCount: number;
