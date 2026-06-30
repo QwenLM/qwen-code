@@ -68,12 +68,18 @@ const UNESCAPE_REGEX = (() => {
  * @returns The tildeified path.
  */
 export function tildeifyPath(filePath: string): string {
-  const homeDir = os.homedir();
-  if (filePath === homeDir) {
+  const rawHomeDir = os.homedir();
+  if (!rawHomeDir) {
+    return filePath;
+  }
+
+  const homeDir = path.normalize(rawHomeDir);
+  const normalizedPath = path.normalize(filePath);
+  if (normalizedPath === homeDir) {
     return '~';
   }
-  if (filePath.startsWith(`${homeDir}${path.sep}`)) {
-    return filePath.replace(homeDir, '~');
+  if (normalizedPath.startsWith(`${homeDir}${path.sep}`)) {
+    return normalizedPath.replace(homeDir, '~');
   }
   return filePath;
 }
