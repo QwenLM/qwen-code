@@ -23,7 +23,14 @@ import {
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
-import { RPC, error as rpcError, isRequest, parseInbound } from './json-rpc.js';
+import {
+  RPC,
+  error as rpcError,
+  isRequest,
+  logSafe,
+  parseInbound,
+} from './json-rpc.js';
+import { parseLastEventId } from '../sse-last-event-id.js';
 import {
   ClientMcpWsConnection,
   type ClientMcpServerProvider,
@@ -100,6 +107,16 @@ function extractUpgradeBearer(req: IncomingMessage): string | undefined {
  * `ownedSessions` + a `maxConnections` slot well before the 30-min idle TTL.
  */
 const CONN_GRACE_MS = 10_000;
+
+/**
+ * Grace window after a SESSION-scoped SSE stream closes at the transport level
+ * (proxy idle-close, network blip) without an explicit `session/close`. The
+ * binding — ownership, in-flight prompt, bridge-client — is kept alive so a
+ * reconnect within the window resumes via ring replay (§1.8) instead of being
+ * rejected (403) and re-spawning. Short enough to bound the runaway-prompt
+ * cost if the client never returns. Mirrors `CONN_GRACE_MS`.
+ */
+const SESSION_GRACE_MS = 10_000;
 
 const WS_EXEMPT_METHODS = new Set([
   '_qwen/session/heartbeat',
@@ -469,21 +486,38 @@ export function mountAcpHttp(
           // idle TTL. After the grace window, reap UNLESS a reconnect
           // re-attached the conn stream (clears the timer) OR a session
           // stream is still live (client is active — only the conn stream
-          // blipped, don't kill its sessions/prompts).
+          // blipped, don't kill its sessions/prompts) OR a session is itself
+          // mid-reconnect within its OWN grace window (`hasRecoverableSession`)
+          // — reaping then would 404 the imminent session resume and abort the
+          // in-flight prompt before SESSION_GRACE_MS promised.
           conn.clearGraceTimer();
-          conn.connGraceTimer = setTimeout(() => {
+          // Reap iff the grace has elapsed and this dead conn stream is still
+          // current with nothing live or mid-reconnect. Shared by the grace
+          // timer and the post-session-grace re-check (below) so a connection
+          // blocked from reaping by a then-recoverable session doesn't linger
+          // until the 30-min idle sweep after that session finally tears down.
+          const reapConnIfDead = () => {
             if (
               registry.get(connId) === conn &&
               conn.connStream === stream &&
-              !conn.hasLiveSessionStream()
+              conn.connGraceExpired &&
+              !conn.hasLiveSessionStream() &&
+              !conn.hasRecoverableSession()
             ) {
               writeStderrLine(
                 `qwen serve: /acp reaping connection ${connId.slice(0, 8)} (conn stream gone, no live session stream)`,
               );
               registry.delete(connId);
             }
+          };
+          conn.connGraceTimer = setTimeout(() => {
+            conn.connGraceExpired = true;
+            reapConnIfDead();
           }, CONN_GRACE_MS);
           conn.connGraceTimer.unref?.();
+          // When a session's reclaim grace expires it may have been the last
+          // thing blocking this reap; re-evaluate then too.
+          conn.onSessionGraceExpired = reapConnIfDead;
         },
         () => conn.touch(),
       );
@@ -508,46 +542,84 @@ export function mountAcpHttp(
     const stream = new SseStream(
       res,
       () => {
-        // Stream closed (tab close / network drop / crash): stop the event
-        // pump AND abort any in-flight prompt for this session — otherwise
-        // the agent keeps running (quota, FIFO) until idle TTL.
+        // Transport-level close (tab close / network drop / proxy idle-close):
+        // stop THIS stream's event pump only. The prompt + ownership are NOT
+        // torn down here — `detachSessionStream` (below) keeps them across a
+        // grace window so a reconnect can resume (§1.8). Only an expired grace,
+        // an explicit `session/close`, or connection teardown aborts the prompt.
         ac.abort();
-        // BUT only abort the prompt when THIS is still the session's live
-        // stream. A reconnect already installed a newer stream — the prompt
-        // must survive the old stream's close. CONTRACT: this identity guard
-        // pairs with `attachSessionStream`'s install-before-close ordering
-        // (connection-registry.ts) — keep both in lockstep.
-        if (conn.sessions.get(sessionId)?.stream === stream) {
-          conn.sessions.get(sessionId)?.promptAbort?.abort();
-        }
       },
       () => conn.touch(),
     );
     // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
     // handshake precedes any buffered frames the attach flushes.
     stream.open();
-    conn.attachSessionStream(sessionId, stream, ac);
-    // Identity-guarded close: only tear down if THIS stream is still the
-    // session's current one (a reconnect between settle and this microtask
-    // would otherwise kill the fresh stream).
-    const closeIfCurrent = () => {
-      if (conn.sessions.get(sessionId)?.stream === stream) {
+    // Resume cursor: an EventSource/SSE client auto-resends the last `id:` it
+    // saw as `Last-Event-ID` on reconnect. Drives the EventBus ring replay so
+    // content frames produced during a mid-turn proxy gap are recovered (§1.8).
+    const lastEventId = parseLastEventId(
+      headerOf(req, 'last-event-id'),
+      '/acp ',
+    );
+    // Pass the resume cursor INTO attach: when resuming, attach skips flushing
+    // id-bearing buffered frames because the ring replay below redelivers every
+    // bus event after `lastEventId` exactly once — including any frame lost
+    // in-flight to the dead socket (whose id sits below the buffer's ids but
+    // above the client's cursor). Advancing the cursor past the buffer instead
+    // would silently drop that frame; flushing AND replaying would double-send.
+    // Id-less JSON-RPC replies are still flushed (they aren't ring events).
+    conn.attachSessionStream(sessionId, stream, ac, lastEventId);
+    // When the pump settles, branch on WHY:
+    //  • the transport closed the stream (proxy idle-close / tab close) →
+    //    DETACH with a grace window: keep ownership + the in-flight prompt so a
+    //    reconnect resumes (§1.8); full teardown only if no reconnect arrives.
+    //  • the pump ended while the stream is still open (subprocess done /
+    //    iterator error) → the stream is a zombie; full close now.
+    // Both are identity-guarded so a stale stream can't act on a newer one.
+    // INVARIANT (cross-file, mirrors the CONTRACT comment in
+    // `connection-registry.ts` `attachSessionStream`): the identity checks below
+    // (`conn.sessions.get(sessionId)?.stream === stream`) are load-bearing and
+    // depend on `attachSessionStream` installing the NEW stream BEFORE the old
+    // one's pump settles here. If a refactor closed the old stream first, this
+    // settling pump would see `stream !== current` and fall into the "superseded"
+    // no-op while the reclaim is mid-flight — skipping detach-with-grace and
+    // aborting the prompt instead of keeping it alive for reconnect. The
+    // identity guard, not a flag, is what keeps a stale close from tearing down a
+    // fresh reclaim. Covered by connection-registry.test.ts "detachSessionStream
+    // is a no-op for a stale stream after reclaim (identity guard)".
+    const onPumpSettled = () => {
+      if (stream.isClosed) {
+        // Transport-closed → detach-with-grace. detachSessionStream logs the
+        // detach breadcrumb itself (with the grace window).
+        conn.detachSessionStream(sessionId, stream, SESSION_GRACE_MS);
+      } else if (conn.sessions.get(sessionId)?.stream === stream) {
+        // Pump ended while the stream is still open (subprocess done / iterator
+        // error) → the stream is a zombie; full close now. Logged so the
+        // operator trail can tell this apart from a transport-close detach.
+        writeStderrLine(
+          `qwen serve: /acp session stream pump ended while open ` +
+            `(${logSafe(sessionId)}) — closing`,
+        );
         conn.closeSessionStream(sessionId);
+      } else {
+        // Guard mismatch: a stale stream's pump settled after a newer reclaim
+        // already took over. No-op, but log it so the trail isn't silent.
+        writeStderrLine(
+          `qwen serve: /acp session stream pump settled for a superseded ` +
+            `stream (${logSafe(sessionId)}) — no-op`,
+        );
       }
     };
-    void dispatcher.pumpSessionEvents(conn, sessionId, ac.signal).then(
-      // NORMAL completion (iterator returned `done` — subprocess ended): close
-      // so the stream isn't a zombie heartbeating with nothing left to deliver.
-      closeIfCurrent,
-      (err: unknown) => {
+    void dispatcher
+      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
+      .then(onPumpSettled, (err: unknown) => {
         writeStderrLine(
-          `qwen serve: /acp event pump error (${sessionId}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `qwen serve: /acp event pump error (${logSafe(sessionId)}, lastEventId=${
+            lastEventId ?? 'none'
+          }): ${logSafe(err instanceof Error ? err.message : String(err))}`,
         );
-        closeIfCurrent();
-      },
-    );
+        onPumpSettled();
+      });
   });
 
   // ── DELETE /acp ────────────────────────────────────────────────────
