@@ -987,6 +987,55 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('allows deferred runtime CORS preflight without auth or runtime startup', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-preflight-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret-token',
+        allowOrigins: ['http://localhost:5173'],
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const res = await fetch(`${handle.url}/session/foo/prompt`, {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'http://localhost:5173',
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'authorization,content-type',
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe(
+        'http://localhost:5173',
+      );
+      expect(res.headers.get('access-control-allow-methods')).toContain('POST');
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('does not start deferred runtime for unsupported bootstrap route methods', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-method-')),

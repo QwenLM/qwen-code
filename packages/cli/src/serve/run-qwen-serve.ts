@@ -1049,6 +1049,7 @@ function createDelegatingServeApp(
         !target &&
         options.waitForDeferredRuntimeRoutes === true &&
         !isBootstrapServeRoute(req) &&
+        !isCorsPreflightRequest(req) &&
         options.startRuntime &&
         options.runtimeReady
       ) {
@@ -1089,6 +1090,17 @@ function isBootstrapServeRoute(req: Request): boolean {
       ? req.path.slice(0, -1)
       : req.path;
   return BOOTSTRAP_SERVE_PATHS.has(path);
+}
+
+function isCorsPreflightRequest(req: Request): boolean {
+  return (
+    req.method === 'OPTIONS' &&
+    Boolean(req.headers.origin) &&
+    Boolean(
+      req.headers['access-control-request-method'] ||
+        req.headers['access-control-request-headers'],
+    )
+  );
 }
 
 function runSynchronousRequestGate(
