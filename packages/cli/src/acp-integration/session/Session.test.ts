@@ -2502,6 +2502,16 @@ describe('Session', () => {
             name: 'missing_tool',
             args: { value: 'three' },
           },
+          {
+            id: 'missing_4',
+            name: 'missing_tool',
+            args: { value: 'four' },
+          },
+          {
+            id: 'read_after_loop',
+            name: 'read_file',
+            args: { file_path: 'after-loop.ts' },
+          },
         ];
         const toolLoopState = {
           totalToolCalls: 0,
@@ -2531,7 +2541,16 @@ describe('Session', () => {
         );
 
         expect(result.loopDetected).toBe(true);
-        expect(mockToolRegistry.getTool).toHaveBeenCalledTimes(3);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'missing_1',
+          'missing_2',
+          'missing_3',
+          'missing_4',
+          'read_after_loop',
+        ]);
+        expect(result.parts[4].functionResponse?.response?.['error']).toEqual(
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
             'Stopping ACP turn after repeated tool parameter errors from missing_tool',
@@ -2595,6 +2614,11 @@ describe('Session', () => {
             args: { subagent_type: `bad_${index}` },
           }),
         );
+        functionCalls.push({
+          id: 'read_after_loop',
+          name: 'read_file',
+          args: { file_path: 'after-loop.ts' },
+        });
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrorCount: 0,
@@ -2629,6 +2653,15 @@ describe('Session', () => {
         ).toEqual([
           'Skipped because loop detection stopped the current turn before this tool call could run.',
           'Skipped because loop detection stopped the current turn before this tool call could run.',
+          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        ]);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_0',
+          'agent_1',
+          'agent_2',
+          'agent_3',
+          'agent_4',
+          'read_after_loop',
         ]);
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
