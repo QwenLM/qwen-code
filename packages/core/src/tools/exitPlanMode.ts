@@ -302,8 +302,10 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             };
           }
           case 'unavailable': {
-            // Gate is broken — stay in PLAN mode and ask the user for
-            // explicit approval before execution can proceed.
+            // Gate is broken — stay in PLAN mode but hand control to the user
+            // so the next exit_plan_mode call shows the normal confirmation
+            // dialog and requires explicit approval before execution.
+            gateState.gateMode = 'user_takeover';
             debugLogger.warn(
               `Gate unavailable, requiring user approval in PLAN mode: ${decision.reason}`,
             );
@@ -411,7 +413,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
   /**
    * Gate unavailable fallback — fail closed by staying in PLAN mode and
-   * requiring explicit user approval before execution can proceed.
+   * requiring explicit user approval before execution can proceed. The caller
+   * marks the gate as user_takeover first so the next exit_plan_mode call uses
+   * the normal confirmation dialog instead of re-running the automatic gate.
    */
   private fallbackToUserDecision(plan: string): ToolResult {
     // Save plan so it's on disk while the session remains in plan mode.

@@ -627,6 +627,7 @@ describe('ExitPlanModeTool', () => {
       // Should NOT set gate pending flags
       expect(gateState.needsUserPending).toBe(false);
       expect(gateState.capEscalationPending).toBe(false);
+      expect(gateState.gateMode).toBe('user_takeover');
       // Should stay in PLAN mode until the user explicitly approves.
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalledWith(
         ApprovalMode.DEFAULT,
@@ -673,6 +674,7 @@ describe('ExitPlanModeTool', () => {
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalledWith(
         ApprovalMode.DEFAULT,
       );
+      expect(gateState.gateMode).toBe('user_takeover');
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
     });
