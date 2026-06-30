@@ -17,16 +17,28 @@ function setup() {
   return { link, sent };
 }
 
+async function markAttached(
+  link: CdpReverseLink,
+  sent: CdpOutboundFrame[],
+): Promise<void> {
+  const p = link.attach();
+  const attachId = (sent.at(-1) as { id: number }).id;
+  link.handleInbound({ type: 'cdp_attached', id: attachId });
+  await p;
+}
+
 describe('CdpReverseLink (Plan C #5626)', () => {
   it('forwardToTab sends a cdp_command and resolves on the matching cdp_result', async () => {
     const { link, sent } = setup();
+    await markAttached(link, sent);
     const p = link.forwardToTab('Runtime.evaluate', { expression: '1+1' });
-    expect(sent[0]).toMatchObject({
+    await Promise.resolve();
+    expect(sent.at(-1)).toMatchObject({
       type: 'cdp_command',
       method: 'Runtime.evaluate',
       params: { expression: '1+1' },
     });
-    const id = (sent[0] as { id: number }).id;
+    const id = (sent.at(-1) as { id: number }).id;
     link.handleInbound({
       type: 'cdp_result',
       id,
@@ -38,8 +50,10 @@ describe('CdpReverseLink (Plan C #5626)', () => {
 
   it('rejects forwardToTab on a cdp_result error', async () => {
     const { link, sent } = setup();
+    await markAttached(link, sent);
     const p = link.forwardToTab('Page.captureScreenshot', undefined);
-    const id = (sent[0] as { id: number }).id;
+    await Promise.resolve();
+    const id = (sent.at(-1) as { id: number }).id;
     link.handleInbound({
       type: 'cdp_result',
       id,
@@ -104,7 +118,9 @@ describe('CdpReverseLink (Plan C #5626)', () => {
       const sent: CdpOutboundFrame[] = [];
       // Small per-command timeout so the timer fires under the fake clock.
       const link = new CdpReverseLink((f) => sent.push(f), 50);
+      await markAttached(link, sent);
       const p = link.forwardToTab('Page.navigate', { url: 'about:blank' });
+      await Promise.resolve();
       let err: unknown;
       p.catch((e) => {
         err = e;
@@ -127,22 +143,24 @@ describe('CdpReverseLink (Plan C #5626)', () => {
       const sent: CdpOutboundFrame[] = [];
       const log = vi.fn();
       const link = new CdpReverseLink((f) => sent.push(f), 50_000, log);
+      await markAttached(link, sent);
       const p = link.forwardToTab('Page.navigate', { url: 'about:blank' });
+      await Promise.resolve();
       p.catch(() => undefined);
 
       expect(log).toHaveBeenCalledWith(
-        'qwen serve: /cdp forwarded command id=1 method=Page.navigate to extension',
+        'qwen serve: /cdp forwarded command id=2 method=Page.navigate to extension',
       );
 
       await vi.advanceTimersByTimeAsync(30_000);
       expect(log).toHaveBeenCalledWith(
-        'qwen serve: /cdp still waiting for command id=1 method=Page.navigate after 30000ms',
+        'qwen serve: /cdp still waiting for command id=2 method=Page.navigate after 30000ms',
       );
 
       await vi.advanceTimersByTimeAsync(20_000);
       await expect(p).rejects.toMatchObject({
         message:
-          'CDP command id=1 method=Page.navigate timed out after 50000ms',
+          'CDP command id=2 method=Page.navigate timed out after 50000ms',
       });
     } finally {
       vi.useRealTimers();
@@ -194,20 +212,20 @@ describe('CdpReverseLink (Plan C #5626)', () => {
     }
   });
 
-  it('opens the gate after an attach timeout so forwardToTab does not hang', async () => {
+  it('rejects a lazy command when attach times out', async () => {
     vi.useFakeTimers();
     try {
       const sent: CdpOutboundFrame[] = [];
       const link = new CdpReverseLink((f) => sent.push(f), 50);
-      link.attach().catch(() => undefined); // times out below
-      // Command parked behind the (failing) attach gate.
       const cmdP = link.forwardToTab('Runtime.evaluate', undefined);
       cmdP.catch(() => undefined);
+      expect(sent[0]).toMatchObject({ type: 'cdp_attach' });
 
-      // Attach timer fires → attach settles (failure) → gate opens → the parked
-      // command is sent rather than hanging forever.
       await vi.advanceTimersByTimeAsync(50);
-      expect(sent.some((f) => f.type === 'cdp_command')).toBe(true);
+      await expect(cmdP).rejects.toMatchObject({
+        message: 'cdp_attach timed out',
+      });
+      expect(sent.some((f) => f.type === 'cdp_command')).toBe(false);
     } finally {
       vi.useRealTimers();
     }

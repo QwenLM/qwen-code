@@ -96,13 +96,62 @@ describe('attachCdpClient (Plan C #5626)', () => {
     expect(bridge.cdpBound).toBe(true); // untouched
   });
 
-  it('binds the bridge and kicks an attach', () => {
+  it('binds the bridge without attaching immediately', () => {
     const { bridge, sent } = makeBridge();
     const ws = new FakeWs();
     bind(ws, makeRegistry(bridge).registry);
     expect(bridge.cdpBound).toBe(true);
     expect(ws.closed).toBeNull();
-    expect(sent.some((f) => f.type === 'cdp_attach')).toBe(true);
+    expect(sent.some((f) => f.type === 'cdp_attach')).toBe(false);
+  });
+
+  it('lazy-attaches before forwarding the first page command', async () => {
+    const { bridge, sent } = makeBridge();
+    const ws = new FakeWs();
+    bind(ws, makeRegistry(bridge).registry);
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        id: 1,
+        method: 'Runtime.evaluate',
+        params: { expression: '1+1' },
+        sessionId: 'qwen-cdp-page-session',
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(sent[0]).toMatchObject({ type: 'cdp_attach' }),
+    );
+    expect(sent.some((f) => f.type === 'cdp_command')).toBe(false);
+
+    const attachId = (sent[0] as { id: number }).id;
+    bridge.routeInbound({
+      type: 'cdp_attached',
+      id: attachId,
+      url: 'https://example.com/',
+      title: 'Example',
+    });
+
+    await vi.waitFor(() =>
+      expect(sent.some((f) => f.type === 'cdp_command')).toBe(true),
+    );
+    const command = sent.find((f) => f.type === 'cdp_command') as
+      | { id: number }
+      | undefined;
+    expect(command).toMatchObject({ id: expect.any(Number) });
+    bridge.routeInbound({
+      type: 'cdp_result',
+      id: command?.id,
+      result: { result: { type: 'number', value: 2 } },
+    });
+
+    await vi.waitFor(() => expect(ws.sent).toHaveLength(1));
+    expect(JSON.parse(ws.sent[0] ?? '{}')).toMatchObject({
+      id: 1,
+      sessionId: 'qwen-cdp-page-session',
+      result: { result: { value: 2 } },
+    });
   });
 
   it('onExtensionGone closes the puppeteer socket without sending a release', () => {

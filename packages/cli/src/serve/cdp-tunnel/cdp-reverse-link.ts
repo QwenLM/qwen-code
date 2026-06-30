@@ -149,14 +149,10 @@ export class CdpReverseLink {
   private nextId = 1;
   private readonly pending = new Map<number, PendingCommand>();
   private disposed = false;
+  private attached = false;
+  private attachPromise: Promise<{ url?: string; title?: string }> | undefined;
   /** Resolver for the in-flight `cdp_attach` (if any). */
   private pendingAttach: { id: number; pending: PendingCommand } | undefined;
-  /**
-   * Opens once the initial `cdp_attach` settles (success OR failure).
-   * `forwardToTab` awaits this so page-domain commands never race the
-   * extension's async `chrome.debugger.attach`. Undefined until {@link attach}.
-   */
-  private attachGate: Promise<void> | undefined;
   /** Called when the extension reports the tab detached. */
   onDetach: ((reason: string) => void) | undefined;
 
@@ -183,12 +179,7 @@ export class CdpReverseLink {
     if (this.disposed) {
       throw { code: -32000, message: 'CDP tunnel closed' };
     }
-    // Ordering gate: wait for the initial attach to settle before forwarding
-    // page-domain commands, so a fast `Network.enable` doesn't reach the
-    // extension before `chrome.debugger.attach` finishes and fail "not attached".
-    if (this.attachGate) {
-      await this.attachGate;
-    }
+    await this.attach();
     return new Promise<unknown>((resolve, reject) => {
       if (this.disposed) {
         reject({ code: -32000, message: 'CDP tunnel closed' });
@@ -225,7 +216,9 @@ export class CdpReverseLink {
    * once the extension acks `cdp_attached` (or rejects on error/timeout).
    */
   attach(): Promise<{ url?: string; title?: string }> {
-    const result = new Promise<{ url?: string; title?: string }>(
+    if (this.attached) return Promise.resolve({});
+    if (this.attachPromise) return this.attachPromise;
+    this.attachPromise = new Promise<{ url?: string; title?: string }>(
       (resolve, reject) => {
         if (this.disposed) {
           reject({ code: -32000, message: 'CDP tunnel closed' });
@@ -254,13 +247,23 @@ export class CdpReverseLink {
           });
         }
       },
+    ).then(
+      (info) => {
+        this.attached = true;
+        this.emulator?.setTabInfo(info);
+        return info;
+      },
+      (err) => {
+        this.attached = false;
+        throw err;
+      },
     );
-    // Open the gate once the attach settles (success or failure).
-    this.attachGate = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+    void this.attachPromise
+      .finally(() => {
+        this.attachPromise = undefined;
+      })
+      .catch(() => {});
+    return this.attachPromise;
   }
 
   /**
@@ -322,6 +325,7 @@ export class CdpReverseLink {
     this.pendingAttach = undefined;
     clearTimeout(attach.pending.timer);
     if (frame.error) {
+      this.attached = false;
       attach.pending.reject({
         code: -32000,
         message: frame.error.message ?? 'cdp_attach failed',
@@ -334,6 +338,7 @@ export class CdpReverseLink {
   private handleDetach(frame: CdpDetachFrame): void {
     const reason =
       typeof frame.reason === 'string' ? frame.reason : 'tab detached';
+    this.attached = false;
     this.onDetach?.(reason);
   }
 
@@ -409,6 +414,8 @@ export class CdpReverseLink {
       this.pendingAttach.pending.reject({ code: -32000, message: reason });
       this.pendingAttach = undefined;
     }
+    this.attached = false;
+    this.attachPromise = undefined;
     this.emulator = undefined;
   }
 }
