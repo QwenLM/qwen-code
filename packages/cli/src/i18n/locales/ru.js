@@ -1905,8 +1905,6 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
-  'Press Ctrl+O to show full tool output':
-    'Нажмите Ctrl+O для показа полного вывода инструментов',
   'Switch to plan mode or exit plan mode':
     'Переключиться в режим плана или выйти из режима плана',
   'Exited plan mode. Previous approval mode restored.':

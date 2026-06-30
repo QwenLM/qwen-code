@@ -3450,6 +3450,119 @@ describe('AppContainer State Management', () => {
     });
   });
 
+  describe('Transcript (Ctrl+O) integration', () => {
+    // The frozen transcript (TranscriptView) renders its title row as the
+    // literal "Transcript"; the main view never does, so its presence in the
+    // rendered frame is a reliable open/closed signal.
+    const TRANSCRIPT_MARKER = 'Transcript';
+
+    const makeKey = (overrides: Partial<Key>): Key =>
+      ({
+        name: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+        ...overrides,
+      }) as Key;
+
+    // The global keypress handler owns Ctrl+O / the transcript close keys; it is
+    // the registered useKeypress handler whose body references TOGGLE_TRANSCRIPT.
+    const getGlobalKeypress = () =>
+      mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('TOGGLE_TRANSCRIPT'),
+        ) as ((key: Key) => void) | undefined;
+
+    const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
+
+    const renderApp = () =>
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+    it('Ctrl+O installs the TranscriptView in the rendered tree', () => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+      // Baseline: the marker also confirms the main view doesn't render it.
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress!(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
+
+    it.each([
+      ['Esc', makeKey({ name: 'escape', sequence: '\x1b' })],
+      ['q', makeKey({ name: 'q', sequence: 'q' })],
+      ['Ctrl+C', makeKey({ name: 'c', ctrl: true, sequence: '\x03' })],
+      ['Ctrl+D', makeKey({ name: 'd', ctrl: true, sequence: '\x04' })],
+    ])('%s while open removes the TranscriptView', (_label, closeKey) => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress(closeKey));
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+    });
+
+    it.each([
+      ['Ctrl+Q', makeKey({ name: 'q', ctrl: true, sequence: '\x11' })],
+      ['Alt+Q', makeKey({ name: 'q', meta: true, sequence: '\x1bq' })],
+      ['Shift+Q', makeKey({ name: 'q', shift: true, sequence: 'Q' })],
+    ])('%s does NOT close the transcript (bare-q modifier guard)', (_l, modQ) => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      act(() => handleKeypress(modQ));
+      // Only a bare `q` closes; modified variants stay swallowed but open.
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
+
+    it('swallows arbitrary keys while open and keeps the transcript open', () => {
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+      expect(() =>
+        act(() => handleKeypress(makeKey({ name: 'x', sequence: 'x' }))),
+      ).not.toThrow();
+      expect(lastFrame()).toContain(TRANSCRIPT_MARKER);
+    });
+
+    it('auto-closes when a blocking confirmation appears (anti-deadlock)', () => {
+      // A blocking prompt would be invisible behind the alt-screen transcript;
+      // the needsBlockingInput effect must close it on the same commit.
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'waiting_for_confirmation',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      const { lastFrame } = renderApp();
+      const handleKeypress = getGlobalKeypress()!;
+      act(() => handleKeypress(ctrlO));
+      // openTranscript sets the freeze, but the anti-deadlock effect tears it
+      // back down on the same commit, so it never stays visible.
+      expect(lastFrame()).not.toContain(TRANSCRIPT_MARKER);
+    });
+  });
+
   describe('Model Dialog Integration', () => {
     it('should provide isModelDialogOpen in the UIStateContext', () => {
       mockedUseModelCommand.mockReturnValue({

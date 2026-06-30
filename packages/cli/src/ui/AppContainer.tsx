@@ -2205,6 +2205,16 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
+  // Read history/pending through refs so `openTranscript` stays referentially
+  // stable. Both arrays change identity on every streaming tick; capturing them
+  // as deps would rebuild this callback — and, since `handleGlobalKeypress`
+  // lists it in its deps, the entire keypress-handler closure — on every render
+  // during active streaming. The callback only ever runs on a Ctrl+O press, so
+  // reading the latest values via refs at call time is sufficient.
+  const historyForTranscriptRef = useRef(historyManager.history);
+  historyForTranscriptRef.current = historyManager.history;
+  const pendingForTranscriptRef = useRef(pendingHistoryItems);
+  pendingForTranscriptRef.current = pendingHistoryItems;
   const openTranscript = useCallback(() => {
     // Clear any pending thinking viewer so it can't resurface as a stale popup
     // when the transcript closes (the transcript renders ahead of it).
@@ -2214,12 +2224,12 @@ export const AppContainer = (props: AppContainerProps) => {
       // transcript shows exactly what the main view shows. Items collapsed on
       // session resume (ui.history.collapseOnResume) are represented by their
       // collapse-summary row and must NOT be re-exposed in the Ctrl+O view.
-      committedItems: historyManager.history.filter(
+      committedItems: historyForTranscriptRef.current.filter(
         (item) => !item.display?.suppressOnRestore,
       ),
-      pendingItems: [...pendingHistoryItems],
+      pendingItems: [...pendingForTranscriptRef.current],
     });
-  }, [historyManager.history, pendingHistoryItems]);
+  }, []);
 
   // Build the transcript item list from the frozen snapshot only. Recomputes
   // on open/close (when `transcriptFreeze` flips), not on every streaming tick,
@@ -3419,7 +3429,11 @@ export const AppContainer = (props: AppContainerProps) => {
       if (isTranscriptOpenRef.current) {
         if (
           keyMatchers[Command.ESCAPE](key) ||
-          key.name === 'q' ||
+          // Bare `q` only — Ink reports Ctrl/Alt/Shift+Q as `{ name: 'q', … }`
+          // too (Alt arrives as `meta`), so guard every modifier to avoid those
+          // silently closing it (Shift+Q is the user typing a literal `Q`, not
+          // a close request).
+          (key.name === 'q' && !key.ctrl && !key.meta && !key.shift) ||
           keyMatchers[Command.QUIT](key) ||
           keyMatchers[Command.EXIT](key) ||
           keyMatchers[Command.TOGGLE_TRANSCRIPT](key)

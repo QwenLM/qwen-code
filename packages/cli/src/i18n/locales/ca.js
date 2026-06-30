@@ -1948,8 +1948,6 @@ export default {
     'El mode raw no està disponible. Executeu en un terminal interactiu.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Useu les fletxes ↑ ↓ per navegar, Enter per seleccionar, Ctrl+C per sortir)\n',
-  'Press Ctrl+O to show full tool output':
-    'Premeu Ctrl+O per mostrar la sortida completa de les eines',
   'Switch to plan mode or exit plan mode':
     'Canviar al mode de planificació o sortir del mode de planificació',
   'Exited plan mode. Previous approval mode restored.':

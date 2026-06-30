@@ -1443,7 +1443,6 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
   'to view transcript': 'トランスクリプトを表示',
-  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
   'Exited plan mode. Previous approval mode restored.':
