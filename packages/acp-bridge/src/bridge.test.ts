@@ -8236,10 +8236,12 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('cleans up bridge state when required agent close fails', async () => {
+    it('preserves bridge state when required agent close fails so retry can flush', async () => {
+      let failClose = true;
       const handle = makeChannel({
         extMethodImpl: (method) => {
-          if (method === 'qwen/control/session/close') {
+          if (method === 'qwen/control/session/close' && failClose) {
+            failClose = false;
             throw new Error('flush failed');
           }
           return {};
@@ -8256,13 +8258,23 @@ describe('createAcpSessionBridge', () => {
         }),
       ).rejects.toThrow();
 
-      expect(handle.agent.extMethodCalls).toEqual([
-        {
-          method: 'qwen/control/session/close',
-          params: { sessionId: session.sessionId, requireFlush: true },
-        },
-      ]);
-      expect(bridge.sessionCount).toBe(0);
+      expect(handle.agent.extMethodCalls).toHaveLength(1);
+      expect(handle.agent.extMethodCalls[0]).toEqual({
+        method: 'qwen/control/session/close',
+        params: { sessionId: session.sessionId, requireFlush: true },
+      });
+      expect(bridge.sessionCount).toBe(1);
+      expect(() =>
+        bridge.recordHeartbeat(session.sessionId, {
+          clientId: session.clientId,
+        }),
+      ).not.toThrow();
+
+      await bridge.closeSession(session.sessionId, undefined, {
+        requireAgentClose: true,
+      });
+
+      expect(handle.agent.extMethodCalls).toHaveLength(2);
       expect(() =>
         bridge.recordHeartbeat(session.sessionId, {
           clientId: session.clientId,

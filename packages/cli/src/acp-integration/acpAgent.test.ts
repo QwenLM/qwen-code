@@ -6157,7 +6157,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
-  it('cleans up the live session when strict session close flush fails', async () => {
+  it('keeps the live session when strict session close flush fails so retry can close it', async () => {
     const recording = makeRecordingService();
     recording.flush.mockRejectedValueOnce(new Error('flush failed'));
     const innerConfig = makeLiveSessionInnerConfig(recording);
@@ -6171,6 +6171,23 @@ describe('QwenAgent extMethod renameSession routing', () => {
         requireFlush: true,
       }),
     ).rejects.toThrow('flush failed');
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).toContain(liveSessionId);
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(recording.flush).toHaveBeenCalledTimes(2);
     expect(
       (
         agent as unknown as {

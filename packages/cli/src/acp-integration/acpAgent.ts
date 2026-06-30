@@ -2650,14 +2650,14 @@ class QwenAgent implements Agent {
       );
     }
 
+    if (flushError !== undefined && opts?.requireFlush === true) {
+      throw flushError;
+    }
+
     unregisterGoalHook(session.getConfig(), sessionId);
     this.mcpPool?.releaseSession(sessionId);
     uiTelemetryService.removeSession(sessionId);
     this.sessions.delete(sessionId);
-
-    if (flushError !== undefined && opts?.requireFlush === true) {
-      throw flushError;
-    }
   }
 
   disposeSessions(): void {

@@ -2523,15 +2523,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     }
     const requireAgentClose = closeOpts?.requireAgentClose === true;
+    if (requireAgentClose) {
+      await notifyAgentSessionClose(entry, ci, 'closeSession', {
+        throwOnFailure: true,
+        requireFlush: true,
+      });
+    }
     if (ci && ci.channel === entry.channel) {
       ci.sessionIds.delete(sessionId);
     }
-    // Synchronous teardown block — intentionally diverges from killSession:
-    // tombstone + event publish + bus close all run BEFORE
-    // notifyAgentSessionClose, so concurrent callers see
-    // byId.get(sessionId) === undefined and throw SessionNotFoundError,
-    // and late agent frames arriving during the RPC are dropped by the
-    // closed bus.
+    // For normal close, tombstone + event publish + bus close run before the
+    // best-effort agent notification. Strict archive close is different: the
+    // agent flush must succeed before bridge state is removed, so a failed
+    // archive close can be retried against the same live session.
     permissionMediator.forgetSession(sessionId);
     entry.pendingPermissionIds.clear();
     if (entry.promptActive) {
@@ -2566,17 +2570,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
     let agentCloseError: unknown;
-    try {
-      await notifyAgentSessionClose(
-        entry,
-        ci,
-        'closeSession',
-        requireAgentClose
-          ? { throwOnFailure: true, requireFlush: true }
-          : undefined,
-      );
-    } catch (err) {
-      agentCloseError = err;
+    if (!requireAgentClose) {
+      try {
+        await notifyAgentSessionClose(entry, ci, 'closeSession');
+      } catch (err) {
+        agentCloseError = err;
+      }
     }
     try {
       await telemetry.withSpan(
