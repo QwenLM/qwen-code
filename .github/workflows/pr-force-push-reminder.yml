@@ -50,6 +50,7 @@ jobs:
             // also skip known automation logins (mirrors qwen-autofix.yml's
             // KNOWN_BOTS). Only human contributors should be reminded.
             const sender = context.payload.sender;
+            // KEEP IN SYNC with KNOWN_BOTS in .github/workflows/qwen-autofix.yml.
             const KNOWN_AUTOMATION = new Set([
               'qwen-code-ci-bot',
               'qwen-code-dev-bot',
@@ -97,12 +98,18 @@ jobs:
             // Force-push confirmed. Post the reminder at most once per PR; the
             // hidden marker lets us detect a reminder we already left.
             const MARKER = '<!-- pr-force-push-reminder -->';
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              per_page: 100,
-            });
+            let comments;
+            try {
+              comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                per_page: 100,
+              });
+            } catch (err) {
+              core.error(`Failed to list comments on PR #${pr.number}: ${err.status} ${err.message}`);
+              throw err;
+            }
             // Only trust the marker on our own bot's comment — otherwise anyone
             // could permanently suppress reminders by pasting the marker string.
             if (
