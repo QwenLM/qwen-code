@@ -1620,6 +1620,43 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    it("clamps effort: 'max' to 'high' on claude-haiku-4-6 (haiku 4.x lacks max)", async () => {
+      // The `max` tier on 4.x is documented as opus/sonnet only; the family
+      // guard keeps haiku 4.x off `max` (which would 400) even though it is
+      // >= 4.6. (5.x haiku still gets max via the major>=5 branch.)
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-haiku-4-6',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-haiku-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
+      );
+    });
+
     it("preserves explicit budget_tokens even when effort: 'max' is clamped", async () => {
       // User-supplied budget_tokens is an escape hatch: it bypasses the
       // effort-based ladder unconditionally, including the 'max' clamp.

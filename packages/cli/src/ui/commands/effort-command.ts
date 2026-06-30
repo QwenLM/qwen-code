@@ -103,6 +103,21 @@ export const effortCommand: SlashCommand = {
       tier,
     );
 
+    // `setReasoningEffort` is a no-op when thinking is explicitly disabled
+    // (`reasoning: false`), so effort cannot silently re-enable it. The tier is
+    // still persisted for future sessions, but report that it won't take effect
+    // yet instead of a misleading success message.
+    if (config.getReasoningEffort() !== tier) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
+          { tier },
+        ),
+      };
+    }
+
     return {
       type: 'message',
       messageType: 'info',

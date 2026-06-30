@@ -230,14 +230,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         preserve_thinking: true,
         ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
       };
-      return {
+      const visionResult: Record<string, unknown> = {
         ...requestWithTokenLimits,
         messages,
         ...(tools ? { tools } : {}),
         ...(this.buildMetadata(userPromptId) || {}),
         ...dashscopeExtras,
+      };
+      // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
+      // `reasoning` object the pipeline injects from /effort. Drop it so we
+      // don't ship two competing knobs (mirrors deepseek.ts / zai.ts). User
+      // extra_body still wins (merged last).
+      if (enableThinkingFromEffort && 'reasoning' in visionResult) {
+        delete visionResult['reasoning'];
+      }
+      return {
+        ...visionResult,
         ...(extraBody ? extraBody : {}),
-      } as OpenAI.Chat.ChatCompletionCreateParams;
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
     }
 
     // DashScope-exclusive fields not present in the OpenAI SDK types; user
@@ -246,14 +256,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       preserve_thinking: true,
       ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
     };
-    return {
+    const result: Record<string, unknown> = {
       ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
       ...dashscopeExtras,
+    };
+    // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
+    // `reasoning` object the pipeline injects from /effort. Drop it so we don't
+    // ship two competing knobs (mirrors deepseek.ts / zai.ts). User extra_body
+    // still wins (merged last).
+    if (enableThinkingFromEffort && 'reasoning' in result) {
+      delete result['reasoning'];
+    }
+    return {
+      ...result,
       ...(extraBody ? extraBody : {}),
-    } as OpenAI.Chat.ChatCompletionCreateParams;
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
   /**

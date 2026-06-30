@@ -587,6 +587,52 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['enable_thinking']).toBe(true);
     });
 
+    it('strips the pipeline-injected nested reasoning when enable_thinking is added on a qwen model', () => {
+      // The pipeline injects a nested `reasoning: { effort }` object for
+      // OpenAI-compatible endpoints. qwen drives thinking via `enable_thinking`,
+      // so shipping both would send two competing knobs — the nested form must
+      // be dropped (mirrors deepseek.ts / zai.ts).
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['reasoning']).toBeUndefined();
+    });
+
+    it('keeps the nested reasoning for a non-qwen wire model (no enable_thinking, no strip)', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-4.6',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        model: 'glm-4.6',
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['reasoning']).toEqual({ effort: 'high' });
+    });
+
     it('omits enable_thinking when no reasoning effort is set', () => {
       const result = provider.buildRequest(
         { ...baseRequest },

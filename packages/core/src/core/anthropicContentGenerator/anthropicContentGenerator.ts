@@ -133,8 +133,13 @@ function anthropicSupportedEffortTiers(model: string): ReasoningEffort[] {
   if (major >= 5 || (family === 'opus' && atLeast(4, 7))) {
     tiers.push('xhigh');
   }
-  // max: 4.6+ (opus/sonnet) and all 5.x families.
-  if (major >= 5 || atLeast(4, 6)) {
+  // max: 4.6+ (opus/sonnet only) and all 5.x families. The 4.x branch is
+  // family-guarded to match the documented support above — haiku 4.x never
+  // gains `max` (a server 400), while every 5.x family still does via major>=5.
+  if (
+    major >= 5 ||
+    ((family === 'opus' || family === 'sonnet') && atLeast(4, 6))
+  ) {
     tiers.push('max');
   }
   return tiers;

@@ -22,8 +22,13 @@ describe('effortCommand', () => {
   let context: CommandContext;
 
   beforeEach(() => {
-    setReasoningEffort = vi.fn();
-    getReasoningEffort = vi.fn().mockReturnValue(undefined);
+    // Stateful by default so the read-back in the success path mirrors the real
+    // Config: setReasoningEffort lands the tier, getReasoningEffort reflects it.
+    let currentEffort: string | undefined;
+    setReasoningEffort = vi.fn((effort?: string) => {
+      currentEffort = effort;
+    });
+    getReasoningEffort = vi.fn(() => currentEffort);
     setValue = vi.fn();
     context = createMockCommandContext({
       services: {
@@ -67,6 +72,26 @@ describe('effortCommand', () => {
       'high',
     );
     expect(res).toMatchObject({ messageType: 'info' });
+  });
+
+  it('reports thinking is disabled when setReasoningEffort is a no-op', async () => {
+    // Simulate `reasoning: false`: setReasoningEffort no-ops, so the tier never
+    // lands. The command must still persist it but report it has not taken
+    // effect rather than a misleading "Reasoning effort: high".
+    setReasoningEffort.mockImplementation(() => {});
+    getReasoningEffort.mockReturnValue(undefined);
+    const res = await effortCommand.action!(context, 'high');
+    expect(setReasoningEffort).toHaveBeenCalledWith('high');
+    // Still persisted for future sessions.
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      'high',
+    );
+    expect(res).toMatchObject({ messageType: 'info' });
+    expect((res as { content: string }).content).toContain(
+      'thinking is currently disabled',
+    );
   });
 
   it('normalizes aliases such as x-high', async () => {
