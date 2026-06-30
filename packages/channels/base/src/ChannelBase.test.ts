@@ -759,6 +759,46 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('daily summary');
     });
 
+    it('/schedule list shows invalid cron when next fire formatting fails', async () => {
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(async () => [
+              {
+                id: 'job-1',
+                channelName: 'test-chan',
+                target: {
+                  channelName: 'test-chan',
+                  senderId: 'user1',
+                  chatId: 'chat1',
+                },
+                cwd: '/tmp',
+                cron: 'bad cron',
+                prompt: 'post summary',
+                recurring: true,
+                enabled: true,
+                createdBy: 'User 1',
+                createdAt: '2026-06-30T01:02:03.000Z',
+                consecutiveFailures: 0,
+                runCount: 0,
+              },
+            ]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+            nextFireTime: vi.fn(() => {
+              throw new Error('invalid cron');
+            }),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/schedule list' }));
+
+      expect(ch.sent[0]!.text).toContain('next=invalid cron');
+    });
+
     it('/schedule inspect shows lifecycle details for a current-target job', async () => {
       const ch = createChannel(
         {},

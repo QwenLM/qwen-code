@@ -207,9 +207,10 @@ export class ChannelCronStore {
 }
 
 function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
+  const sameGroupChat = a.isGroup === true && b.isGroup === true;
   return (
     a.channelName === b.channelName &&
-    a.senderId === b.senderId &&
+    (sameGroupChat || a.senderId === b.senderId) &&
     a.chatId === b.chatId &&
     a.threadId === b.threadId &&
     a.isGroup === b.isGroup

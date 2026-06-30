@@ -80,6 +80,21 @@ describe('ChannelCronStore', () => {
     ).resolves.toEqual([]);
   });
 
+  it('matches group targets across different senders in the same chat', async () => {
+    const created = await store.create({
+      ...input,
+      target: { ...input.target, isGroup: true },
+    });
+
+    await expect(
+      store.listForTarget('feishu-main', {
+        ...input.target,
+        senderId: 'bob',
+        isGroup: true,
+      }),
+    ).resolves.toEqual([created]);
+  });
+
   it('creates for a target without counting disabled jobs against the cap', async () => {
     const disabled = await store.create(input);
     await store.disable(disabled.id);

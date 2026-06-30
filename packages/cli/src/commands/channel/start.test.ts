@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { ChannelBaseOptions } from '@qwen-code/channel-base';
 
 const mockSetGlobalDispatcher = vi.hoisted(() => vi.fn());
 const mockProxyAgent = vi.hoisted(() =>
@@ -254,6 +255,29 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('rejects cron expressions that cannot fire', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    expect(() =>
+      options?.scheduleController?.validateCron('0 0 31 2 *'),
+    ).toThrow();
+  });
+
   it('starts a standalone AcpBridge before creating the channel', async () => {
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
@@ -450,5 +474,44 @@ describe('startCommand.handler', () => {
       bridge,
       expect.objectContaining({ router }),
     );
+  });
+
+  it('starts the scheduler with connected channels only', async () => {
+    const channels = {
+      first: { type: 'telegram' },
+      second: { type: 'telegram' },
+    };
+    const firstChannel = {
+      ...mockChannel,
+      connect: vi.fn().mockRejectedValue(new Error('first down')),
+    };
+    const secondChannel = {
+      ...mockChannel,
+      connect: vi.fn().mockResolvedValue(undefined),
+    };
+    mockCreateChannel.mockImplementation((name: string) =>
+      name === 'first' ? firstChannel : secondChannel,
+    );
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockImplementation(async (name: string) => ({
+      ...mockParsedChannelConfig,
+      cwd: `/tmp/${name}`,
+      model: 'shared-model',
+    }));
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      await invokeStartHandler({});
+    } finally {
+      processOnSpy.mockRestore();
+    }
+
+    const schedulerOptions = mockChannelCronScheduler.mock.calls[0]?.[0] as
+      | { channels: Map<string, unknown> }
+      | undefined;
+    expect([...schedulerOptions!.channels.keys()]).toEqual(['second']);
+    expect(mockChannelCronSchedulerStart).toHaveBeenCalledOnce();
   });
 });

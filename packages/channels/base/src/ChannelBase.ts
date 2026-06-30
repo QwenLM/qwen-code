@@ -1030,7 +1030,13 @@ export abstract class ChannelBase {
   }
 
   private formatNextFireTime(job: ChannelCronJob): string {
-    return this.scheduleController?.nextFireTime?.(job).toISOString() ?? 'n/a';
+    try {
+      return (
+        this.scheduleController?.nextFireTime?.(job).toISOString() ?? 'n/a'
+      );
+    } catch {
+      return 'invalid cron';
+    }
   }
 
   private async handleScheduleCancel(
