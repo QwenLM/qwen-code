@@ -2034,6 +2034,19 @@ const SETTINGS_SCHEMA = {
             showInDialog: false,
             mergeStrategy: MergeStrategy.UNION,
           },
+          classifyAllShell: {
+            type: 'boolean',
+            label: 'Classify All Shell Commands',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Route ALL shell commands through the auto-mode classifier, ' +
+              'including read-only commands that would otherwise be ' +
+              'auto-approved. Provides defense-in-depth for production ' +
+              'environments.',
+            showInDialog: false,
+          },
         },
       },
     },
