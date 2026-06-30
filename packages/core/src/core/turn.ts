@@ -151,7 +151,7 @@ function summarizeParts(parts: Part[]): {
     textPreview: (() => {
       let textPreview = '';
       for (const part of parts) {
-        if (typeof part.text !== 'string') continue;
+        if (typeof part.text !== 'string' || part.thought) continue;
         const remaining = ERROR_REPORT_TEXT_PREVIEW_CHARS - textPreview.length;
         if (remaining <= 0) break;
         textPreview += part.text.slice(0, remaining);
@@ -321,9 +321,7 @@ export enum CompressionStatus {
  * limit". Undefined on NOOP / failure paths and for callers that don't set it.
  */
 export type CompactionTriggerReason =
-  | 'token_limit'
-  | 'image_overflow'
-  | 'manual';
+  'token_limit' | 'image_overflow' | 'manual';
 
 export interface ChatCompressionInfo {
   originalTokenCount: number;

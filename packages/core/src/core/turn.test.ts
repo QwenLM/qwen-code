@@ -483,6 +483,7 @@ describe('Turn', () => {
         {
           role: 'model',
           parts: [
+            { thought: true, text: 'internal reasoning' },
             { functionCall: { name: 'readFile', args: {} } },
             { text: largeText },
           ],
@@ -505,6 +506,9 @@ describe('Turn', () => {
       expect(mockGetHistoryTailShallow).toHaveBeenCalledWith(8, true);
       const reportedContext = vi.mocked(reportError).mock.calls[0]?.[2];
       expect(JSON.stringify(reportedContext)).not.toContain(largeText);
+      expect(JSON.stringify(reportedContext)).not.toContain(
+        'internal reasoning',
+      );
       expect(reportError).toHaveBeenCalledWith(
         error,
         'Error when talking to API',
@@ -521,7 +525,7 @@ describe('Turn', () => {
               },
               {
                 role: 'model',
-                partCount: 2,
+                partCount: 3,
                 functionCalls: ['readFile'],
                 functionResponses: [],
                 textPreview: largeText.slice(0, 200),
