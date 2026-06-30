@@ -261,11 +261,11 @@ describe('handleC2C', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.isGroup).toBe(false);
-    expect(env.isMentioned).toBe(true);
-    expect(env.senderId).toBe('user-openid-1');
-    expect(env.chatId).toBe('user-openid-1');
-    expect(env.text).toBe('[atMention=true] [Alice]: 你好，帮我查一下天气');
+    expect(env['isGroup']).toBe(false);
+    expect(env['isMentioned']).toBe(true);
+    expect(env['senderId']).toBe('user-openid-1');
+    expect(env['chatId']).toBe('user-openid-1');
+    expect(env['text']).toBe('[atMention=true] [Alice]: 你好，帮我查一下天气');
   });
 
   it('斜杠命令不包装 atMention', async () => {
@@ -274,7 +274,7 @@ describe('handleC2C', () => {
     pvt['handleC2C'](makeC2CEvent({ content: '/help' }));
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.text).toBe('/help');
+    expect(env['text']).toBe('/help');
   });
 
   it('空消息（纯图片/贴纸）不触发 handleInbound', async () => {
@@ -306,7 +306,17 @@ describe('handleC2C', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.text).toBe('[atMention=true] [GM  Eve]: hello');
+    expect(env['text']).toBe('[atMention=true] [GM  Eve]: hello');
+  });
+
+  it('missing author 时不触发 handleInbound', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({ author: undefined } as Partial<QQMessageEvent>),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 });
 
@@ -365,12 +375,12 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.isGroup).toBe(true);
-    expect(env.isMentioned).toBe(true);
-    expect(env.isReplyToBot).toBe(true);
-    expect(env.chatId).toBe('group-openid-1');
+    expect(env['isGroup']).toBe(true);
+    expect(env['isMentioned']).toBe(true);
+    expect(env['isReplyToBot']).toBe(true);
+    expect(env['chatId']).toBe('group-openid-1');
     // allowMention defaults to true — raw content (with <@OPENID> tags) is preserved
-    expect(env.text).toBe(
+    expect(env['text']).toBe(
       '[atMention=true] [Bob(member-o…)]: <@OPENID_BOT> 你好',
     );
   });
@@ -392,7 +402,7 @@ describe('handleGroup', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.text).toBe('[atMention=true] [Bob(member-o…)]: 帮我翻译这段');
+    expect(env['text']).toBe('[atMention=true] [Bob(member-o…)]: 帮我翻译这段');
   });
 
   it('清理 <@OPENID> 标签后的空消息不触发', async () => {
@@ -420,7 +430,7 @@ describe('handleGroup', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.text).toBe('/status');
+    expect(env['text']).toBe('/status');
   });
 
   it('重复消息不触发', async () => {
@@ -466,14 +476,37 @@ describe('handleGroup', () => {
 
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.isMentioned).toBe(false);
-    expect(env.isReplyToBot).toBe(false);
-    expect(env.text).toContain('[atMention=false]');
-    expect(env.text).toContain('大家看看');
-    expect(env.alreadyPrefixed).toBe(true);
+    expect(env['isMentioned']).toBe(false);
+    expect(env['isReplyToBot']).toBe(false);
+    expect(env['text']).toContain('[atMention=false]');
+    expect(env['text']).toContain('大家看看');
+    expect(env['alreadyPrefixed']).toBe(true);
 
     // replyMsgId should NOT have been updated
     expect(replyMsgId.get('group-openid-1')!.msgId).toBe('old-msg');
+  });
+
+  it('groupActiveMsgEnabled=false 时不触发 handleInbound', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
+      'groupActiveMsgEnabled'
+    ] as Map<string, boolean>;
+    groupActiveMsgEnabled.set('group-openid-1', false);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 });
 
@@ -506,8 +539,8 @@ describe('handleGroupAll', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.isGroup).toBe(true);
-    expect(env.text).toContain('[atMention=false]');
+    expect(env['isGroup']).toBe(true);
+    expect(env['text']).toContain('[atMention=false]');
   });
 
   it('policy=keyword 时只有匹配关键词才触发', async () => {
@@ -597,10 +630,10 @@ describe('handleGroupAll', () => {
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     // slash commands use cleanText (no atMention wrapper)
-    expect(env.text).toBe('/help');
+    expect(env['text']).toBe('/help');
   });
 
-  it('bot 消息带 [bot] 标记传递给 handleInbound', async () => {
+  it('bot 消息被静默丢弃（isBot guard）', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroupAll'](
@@ -610,10 +643,7 @@ describe('handleGroupAll', () => {
       }),
     );
     await vi.advanceTimersByTimeAsync(600);
-    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
-    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.text).toContain('[bot]');
-    expect(env.text).toContain('bot-1…');
+    expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
   it('groupActiveMsgEnabled=false 时被阻断', async () => {
@@ -647,7 +677,7 @@ describe('handleGroupAll', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env.text).toBe(
+    expect(env['text']).toBe(
       '[atMention=false] [Charlie(member-o…)]: hello world',
     );
   });

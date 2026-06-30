@@ -184,7 +184,7 @@ export class QQChannel extends ChannelBase {
     super(name, config, bridge, {
       ...options,
       router,
-      registerBridgeEvents: options?.registerBridgeEvents ?? true,
+      registerBridgeEvents: options?.registerBridgeEvents ?? !options?.router,
     });
     this.qqConfig = config as unknown as QQChannelConfig;
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
@@ -236,7 +236,9 @@ export class QQChannel extends ChannelBase {
           if (toFlush) {
             const target = this.router.getTarget(sessionId);
             if (target) {
-              this.sendMessage(target.chatId, toFlush).catch(() => {});
+              this.sendMessage(target.chatId, toFlush).catch((err) => {
+                process.stderr.write(`[QQ:${this.name}] Cron flush send error: ${err}\n`);
+              });
             }
           }
           this.cronBuffer.delete(sessionId);
@@ -395,12 +397,21 @@ export class QQChannel extends ChannelBase {
             { content: text, msg_type: 0 },
           );
           if (activeResp.ok) {
+            if (msgId) this.msgSeqMap.set(msgId, nextSeq - 1);
             if (msgId) this.saveQQState();
             return;
           }
           process.stderr.write(
             `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status}: ${(await activeResp.text().catch(() => '')).slice(0, 100)})\n`,
           );
+          // Active retry failed — don't retry passive plain-text if rate limited
+          if (activeResp.status === 429) {
+            if (msgId) {
+              this.msgSeqMap.set(msgId, nextSeq - 1);
+              this.saveQQState();
+            }
+            return;
+          }
         }
         if (msgId) this.saveQQState();
         return;
@@ -412,7 +423,10 @@ export class QQChannel extends ChannelBase {
       }
       if (msgId) this.saveQQState();
     } catch (e) {
-      if (msgId) this.msgSeqMap.set(msgId, nextSeq - 1);
+      if (msgId) {
+        this.msgSeqMap.set(msgId, nextSeq - 1);
+        this.saveQQState();
+      }
       process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
     }
   }
@@ -1115,24 +1129,24 @@ export class QQChannel extends ChannelBase {
                 process.stderr.write(
                   `[QQ:${this.name}] Ready (${count} sessions)\n`,
                 );
+                this._ready = true;
                 this.coldStart = false;
                 onReady();
-                this._ready = true;
               })
               .catch((err: unknown) => {
                 process.stderr.write(
                   `[QQ:${this.name}] restoreSessions failed: ${err instanceof Error ? err.message : String(err)}\n`,
                 );
+                this._ready = true;
                 this.coldStart = false;
                 onReady();
-                this._ready = true;
               });
           } else {
             process.stderr.write(
               `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
             );
-            onReady();
             this._ready = true;
+            onReady();
           }
         } else if (t === 'C2C_MESSAGE_CREATE') {
           this.handleC2C(msg['d'] as unknown as QQMessageEvent);
@@ -1457,9 +1471,14 @@ export class QQChannel extends ChannelBase {
     if (isAtBot && !this.botOpenId) {
       const selfMention = event.mentions?.find((m) => m.is_you);
       if (selfMention?.id) {
-        this.botOpenId = selfMention.id;
-        if (this.qqConfig.allowMention !== false) {
-          this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+        if (!/^[A-F0-9]{32}$/i.test(selfMention.id)) {
+          process.stderr.write(`[QQ:${this.name}] Invalid botOpenId format: ${selfMention.id}\n`);
+          this.botOpenId = '';
+        } else {
+          this.botOpenId = selfMention.id;
+          if (this.qqConfig.allowMention !== false) {
+            this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+          }
         }
       }
     }
@@ -1598,6 +1617,15 @@ export class QQChannel extends ChannelBase {
     const isBot = event.author.bot === true;
     const botTag = isBot ? '[bot] ' : '';
 
+    // Guard: drop messages from other bots (including our own) to
+    // prevent infinite self-reply loops.
+    if (isBot) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group all-message dropped: bot message from ${event.author.id}\n`,
+      );
+      return;
+    }
+
     const content = event.content?.trim() ?? '';
     // Compute cleanText early so keyword matching and text construction
     // both use the sanitized content (without <@OPENID> tags).
@@ -1640,9 +1668,14 @@ export class QQChannel extends ChannelBase {
     if (isAtBot && !this.botOpenId) {
       const selfMention = event.mentions?.find((m) => m.is_you);
       if (selfMention?.id) {
-        this.botOpenId = selfMention.id;
-        if (this.qqConfig.allowMention !== false) {
-          this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+        if (!/^[A-F0-9]{32}$/i.test(selfMention.id)) {
+          process.stderr.write(`[QQ:${this.name}] Invalid botOpenId format: ${selfMention.id}\n`);
+          this.botOpenId = '';
+        } else {
+          this.botOpenId = selfMention.id;
+          if (this.qqConfig.allowMention !== false) {
+            this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+          }
         }
       }
     }

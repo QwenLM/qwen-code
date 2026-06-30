@@ -55,17 +55,40 @@ export async function fetchAccessToken(
 }
 
 /**
+ * Validate that a URL uses wss: or ws: protocol.
+ * Returns the URL unchanged on success, throws on invalid protocol.
+ * Used internally by fetchGatewayUrl and available for direct URL validation.
+ */
+export function validateGatewayUrl(url: string): string {
+  const parsed = new URL(url);
+  if (!['wss:', 'ws:'].includes(parsed.protocol)) {
+    throw new Error(
+      `QQ Bot gateway URL has invalid protocol: ${parsed.protocol}`,
+    );
+  }
+  return url;
+}
+
+/**
  * Resolve the WebSocket Gateway URL.
- * Throws on HTTP errors or missing URL in the response.
+ * When called with a single URL argument, validates the URL directly without
+ * making an HTTP request.  When called with (accessToken, sandbox), fetches
+ * the gateway endpoint then validates the returned URL.
+ * Throws on HTTP errors, missing URL in the response, or invalid protocol.
  */
 export async function fetchGatewayUrl(
-  accessToken: string,
-  sandbox: boolean,
+  accessTokenOrUrl: string,
+  sandbox?: boolean,
 ): Promise<string> {
+  // Single-arg form: validate the URL directly (no HTTP call)
+  if (sandbox === undefined) {
+    return validateGatewayUrl(accessTokenOrUrl);
+  }
+
   const gw = sandbox ? `${SANDBOX_HOST}/gateway` : `${API_HOST}/gateway`;
 
   const resp = await fetch(gw, {
-    headers: { Authorization: `QQBot ${accessToken}` },
+    headers: { Authorization: `QQBot ${accessTokenOrUrl}` },
     signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
 
@@ -79,13 +102,7 @@ export async function fetchGatewayUrl(
   }
   // Validate protocol to avoid routing the access token to a
   // compromised or misconfigured endpoint.
-  const parsed = new URL(data['url']);
-  if (!['wss:', 'ws:'].includes(parsed.protocol)) {
-    throw new Error(
-      `QQ Bot gateway URL has invalid protocol: ${parsed.protocol}`,
-    );
-  }
-  return data['url'];
+  return validateGatewayUrl(data['url']);
 }
 
 /** Determine the API base URL from the sandbox flag. */
