@@ -380,6 +380,28 @@ export function SettingsDialog({
     return () => clearInterval(id);
   }, [editingKey]);
 
+  // Scope mode applies only to the Settings tab. If the active tab changes
+  // while the scope selector is open, collapse back to the settings list so a
+  // stale <ScopeSelector> can't render while the keypress router (which routes
+  // by activeTab/focusZone) treats the tab as a data view.
+  useEffect(() => {
+    if (activeTab !== 'settings') {
+      setMode('settings');
+    }
+  }, [activeTab]);
+
+  // An in-progress edit only makes sense in the settings list (Settings tab,
+  // settings mode). If the user leaves that context — e.g. Tab into scope mode
+  // while editing, or switches tabs — discard the edit buffer so the keystrokes
+  // it captured can't resurface and later be committed against the wrong field.
+  useEffect(() => {
+    if (editingKey && (activeTab !== 'settings' || mode !== 'settings')) {
+      setEditingKey(null);
+      setEditBuffer('');
+      setEditCursorPos(0);
+    }
+  }, [editingKey, activeTab, mode]);
+
   // Keep the selection valid as the search query narrows the list.
   useEffect(() => {
     setActiveSettingIndex(0);
@@ -614,9 +636,10 @@ export function SettingsDialog({
 
       // While the top tab bar has focus, keys only drive tab switching.
       if (focusZone === 'tabs') {
-        if (name === 'left') {
+        if (name === 'left' || (name === 'tab' && key.shift)) {
           cycleTab(-1);
-        } else if (name === 'right' || name === 'tab') {
+        } else if (name === 'right' || (name === 'tab' && !key.shift)) {
+          // Shift+Tab cycles backwards, matching the embedded Stats sub-tabs.
           cycleTab(1);
         } else if (name === 'down' || name === 'return') {
           // Move down into the tab's content: the search box on the Settings
@@ -653,13 +676,14 @@ export function SettingsDialog({
         } else if (name === 'down' || name === 'return') {
           setFocusZone('list');
         } else if (name === 'tab') {
-          setMode((prev) => {
-            const next = prev === 'settings' ? 'scope' : 'settings';
-            // Move focus out of the search box so the search-zone handler
-            // stops intercepting keys while the ScopeSelector is focused.
-            if (next === 'scope') setFocusZone('list');
-            return next;
-          });
+          // Keep the state updater pure: compute the next mode from the current
+          // render's value and apply both setters as side effects here, rather
+          // than calling setFocusZone from inside the setMode updater.
+          const nextMode = mode === 'settings' ? 'scope' : 'settings';
+          setMode(nextMode);
+          // Move focus out of the search box so the search-zone handler stops
+          // intercepting keys while the ScopeSelector is focused.
+          if (nextMode === 'scope') setFocusZone('list');
         } else if (name === 'escape') {
           if (searchQuery) {
             setSearchQuery('');
@@ -999,7 +1023,12 @@ export function SettingsDialog({
           setSearchQuery((q) => q + key.sequence);
         }
       }
-      if (showRestartPrompt && name === 'r') {
+      if (showRestartPrompt && mode === 'settings' && name === 'r') {
+        // Guard on settings mode: this handler sits after the editing block but
+        // outside the `mode === 'settings'` guard, so without this check `r`
+        // would trigger a restart/exit while the ScopeSelector is open (it does
+        // not handle `r`). activeTab === 'settings' is already guaranteed by the
+        // non-settings-tab early returns above.
         // Only save settings that require restart (non-restart settings were already saved immediately)
         const restartRequiredSettings =
           getRestartRequiredFromModified(modifiedSettings);
@@ -1070,6 +1099,7 @@ export function SettingsDialog({
             <StatsDialog
               onClose={() => onSelect(undefined, selectedScope)}
               isFocused={focusZone === 'list'}
+              // Outer Box: border (2) + padding (2) = 4 columns of chrome.
               width={width ? width - 4 : undefined}
               availableHeight={
                 availableTerminalHeight != null
