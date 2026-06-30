@@ -26,6 +26,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
@@ -737,6 +738,108 @@ describe('useGeminiStream', () => {
         expect.any(Number),
       );
     });
+  });
+
+  it('expands autonomous loop wakeup sentinels before queuing them', async () => {
+    let schedulerCallback:
+      | ((job: { prompt: string; cronExpr?: string; missed?: boolean }) => void)
+      | null = null;
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            prompt: string;
+            cronExpr?: string;
+            missed?: boolean;
+          }) => void,
+        ) => {
+          schedulerCallback = callback;
+          callback({
+            prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+            cronExpr: '@wakeup',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: 'Loop: Autonomous loop tick' },
+        expect.any(Number),
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    const sent = String(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('# Autonomous loop check');
+    expect(sent).toContain('# Autonomous loop tick (dynamic pacing)');
+    expect(sent).not.toBe(AUTONOMOUS_SENTINEL_DYNAMIC);
+    expect(sent).toContain(
+      `prompt set to the literal sentinel \`${AUTONOMOUS_SENTINEL_DYNAMIC}\``,
+    );
+
+    await waitFor(() => {
+      expect(schedulerCallback).not.toBeNull();
+    });
+    await act(async () => {
+      schedulerCallback?.({
+        prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+        cronExpr: '@wakeup',
+      });
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    const secondSent = String(mockSendMessageStream.mock.calls[1][0]);
+    expect(secondSent).not.toContain('# Autonomous loop check');
+    expect(secondSent).toContain('# Autonomous loop tick (dynamic pacing)');
+  });
+
+  it('skips missed autonomous loop wakeup sentinels', async () => {
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            prompt: string;
+            cronExpr?: string;
+            missed?: boolean;
+          }) => void,
+        ) => {
+          callback({
+            prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+            cronExpr: '@wakeup',
+            missed: true,
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(scheduler.start).toHaveBeenCalled();
+    });
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: 'notification', text: 'Missed: Autonomous loop tick' },
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
   it('renders teammate reports as a compact notification, not a raw envelope bubble', async () => {
@@ -3328,8 +3431,11 @@ describe('useGeminiStream', () => {
       await submitPromise;
     });
 
+    const staleCompletedOnComplete = staleOnComplete as
+      | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
+      | null;
     await act(async () => {
-      await staleOnComplete?.([fastToolAfterCancel]);
+      await staleCompletedOnComplete?.([fastToolAfterCancel]);
     });
 
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
