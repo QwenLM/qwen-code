@@ -439,6 +439,8 @@ function rpcErrorFrame(id: JsonRpcId, err: unknown) {
   return error(id, code, message, data);
 }
 
+const defaultArchiveCoordinator = new SessionArchiveCoordinator();
+
 /**
  * The ACP protocol version this transport speaks (ACP stable = 1).
  */
@@ -460,7 +462,7 @@ export class AcpDispatcher {
     private readonly fsFactory?: WorkspaceFileSystemFactory,
     private readonly deviceFlowRegistry?: DeviceFlowRegistry,
     private readonly sessionShellCommandEnabled: boolean = false,
-    private readonly archiveCoordinator: SessionArchiveCoordinator = new SessionArchiveCoordinator(),
+    private readonly archiveCoordinator: SessionArchiveCoordinator = defaultArchiveCoordinator,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }

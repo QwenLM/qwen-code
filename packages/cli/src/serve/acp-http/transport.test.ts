@@ -23,7 +23,7 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionService } from '@qwen-code/qwen-code-core';
+import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -1635,6 +1635,65 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.id).toBe(21);
     expect(frame.result.resumed).toBe(true);
   });
+
+  it.each(['session/load', 'session/resume'])(
+    '%s rejects archived sessions',
+    async (method) => {
+      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      const runtimeDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-archive-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      const sessionId = '550e8400-e29b-41d4-a716-446655440123';
+      try {
+        const chatsDir = path.join(
+          new Storage('/ws').getProjectDir(),
+          'chats',
+          'archive',
+        );
+        await fs.mkdir(chatsDir, { recursive: true });
+        await fs.writeFile(
+          path.join(chatsDir, `${sessionId}.jsonl`),
+          `${JSON.stringify({
+            uuid: `${sessionId}-user-1`,
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-06-30T00:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'archived' }] },
+            cwd: '/ws',
+          })}\n`,
+          'utf8',
+        );
+
+        const connId = await initialize();
+        const connStream = await openStream(connId);
+        const got = takeFrames(connStream, 1);
+        await new Promise((r) => setTimeout(r, 50));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 211,
+          method,
+          params: { sessionId },
+        });
+
+        const [frame] = (await got) as Array<{
+          id: number;
+          error: { code: number; data?: { errorKind?: string } };
+        }>;
+        expect(frame.id).toBe(211);
+        expect(frame.error.code).toBe(-32603);
+        expect(frame.error.data?.errorKind).toBe('session_archived');
+      } finally {
+        if (previousRuntimeDir === undefined) {
+          delete process.env['QWEN_RUNTIME_DIR'];
+        } else {
+          process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+        }
+        await fs.rm(runtimeDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('session/close reaches the bridge + replies on the conn stream', async () => {
     const connId = await initialize();

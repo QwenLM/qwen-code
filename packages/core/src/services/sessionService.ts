@@ -1076,7 +1076,7 @@ export class SessionService {
               fs.renameSync(archivedSidecar, activeSidecar);
             } catch (rollbackError) {
               debugLogger.warn(
-                `archiveSessions: failed to roll back worktree sidecar for ${sessionId}: ${rollbackError}`,
+                `archiveSessions: failed to roll back worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${rollbackError}`,
               );
             }
           }
@@ -1144,7 +1144,7 @@ export class SessionService {
               fs.renameSync(activeSidecar, archivedSidecar);
             } catch (rollbackError) {
               debugLogger.warn(
-                `unarchiveSessions: failed to roll back worktree sidecar for ${sessionId}: ${rollbackError}`,
+                `unarchiveSessions: failed to roll back worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${rollbackError}`,
               );
             }
           }

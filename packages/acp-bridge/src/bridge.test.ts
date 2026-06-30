@@ -8236,7 +8236,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('keeps session live when required agent close fails', async () => {
+    it('cleans up bridge state when required agent close fails', async () => {
       const handle = makeChannel({
         extMethodImpl: (method) => {
           if (method === 'qwen/control/session/close') {
@@ -8262,12 +8262,12 @@ describe('createAcpSessionBridge', () => {
           params: { sessionId: session.sessionId, requireFlush: true },
         },
       ]);
-      expect(bridge.sessionCount).toBe(1);
-      expect(
+      expect(bridge.sessionCount).toBe(0);
+      expect(() =>
         bridge.recordHeartbeat(session.sessionId, {
           clientId: session.clientId,
         }),
-      ).toMatchObject({ sessionId: session.sessionId });
+      ).toThrow(SessionNotFoundError);
 
       await bridge.shutdown();
     });

@@ -1159,7 +1159,7 @@ describe('SessionService', () => {
   });
 
   describe('unarchiveSessions', () => {
-    it('should move archived sessions back to the active directory', async () => {
+    const mockArchivedSessionOnly = () => {
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
           if (filePath.includes('/chats/archive/')) return [recordA1];
@@ -1168,6 +1168,26 @@ describe('SessionService', () => {
           throw error;
         },
       );
+    };
+
+    const mockArchivedWorktreeSidecarOnly = () => {
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.endsWith(`/chats/${sessionIdA}.jsonl`)) {
+          return false;
+        }
+        if (value.endsWith(`/chats/archive/${sessionIdA}.worktree.json`)) {
+          return true;
+        }
+        if (value.endsWith(`/chats/${sessionIdA}.worktree.json`)) {
+          return false;
+        }
+        return false;
+      });
+    };
+
+    it('should move archived sessions back to the active directory', async () => {
+      mockArchivedSessionOnly();
 
       const result = await sessionService.unarchiveSessions([sessionIdA]);
 
@@ -1178,6 +1198,104 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should report not found when neither active nor archived file exists', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(async () => {
+        const error = new Error('ENOENT') as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.alreadyActive).toEqual([]);
+      expect(result.notFound).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should report already active sessions without moving them', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.alreadyActive).toEqual([sessionIdA]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should not move JSONL when unarchiving worktree sidecar fails', async () => {
+      mockArchivedSessionOnly();
+      mockArchivedWorktreeSidecarOnly();
+      const sidecarError = new Error('sidecar move failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (sourcePath.toString().endsWith('.worktree.json')) {
+          throw sidecarError;
+        }
+        return undefined;
+      });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: sidecarError },
+      ]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should roll back worktree sidecar when unarchiving JSONL fails', async () => {
+      mockArchivedSessionOnly();
+      mockArchivedWorktreeSidecarOnly();
+      const jsonlError = new Error('jsonl move failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (
+          sourcePath.toString().endsWith('.jsonl') &&
+          sourcePath.toString().includes('/chats/archive/')
+        ) {
+          throw jsonlError;
+        }
+        return undefined;
+      });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: jsonlError },
+      ]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
       );
     });
 
@@ -1428,6 +1546,16 @@ describe('SessionService', () => {
 
       expect(count).toBe(0);
       expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getSessionLocation', () => {
+    it('should report conflict when active and archived files both exist', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      await expect(sessionService.getSessionLocation(sessionIdA)).resolves.toBe(
+        'conflict',
+      );
     });
   });
 

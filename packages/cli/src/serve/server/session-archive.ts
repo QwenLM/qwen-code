@@ -11,6 +11,7 @@ import {
   SessionArchivingError,
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -72,6 +73,16 @@ function isSessionNotFoundError(err: unknown): boolean {
   );
 }
 
+function logSessionArchiveResult(
+  action: 'archive' | 'unarchive',
+  counts: Record<string, number>,
+): void {
+  const details = Object.entries(counts)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ');
+  writeStderrLine(`qwen serve: sessions ${action} result ${details}`);
+}
+
 export async function archiveDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
@@ -87,6 +98,9 @@ export async function archiveDaemonSessions(params: {
   await coordinator.runExclusiveMany(sessionIds, async () => {
     for (const sessionId of sessionIds) {
       try {
+        // Close+flush before moving JSONL: live writers keep the active path.
+        // If the later move fails, the active JSONL remains and a retry treats
+        // SessionNotFound as the recoverable "already closed" state.
         try {
           await bridge.closeSession(sessionId, undefined, {
             requireAgentClose: true,
@@ -105,6 +119,14 @@ export async function archiveDaemonSessions(params: {
         errors.push({ sessionId, error: err });
       }
     }
+  });
+
+  logSessionArchiveResult('archive', {
+    requested: sessionIds.length,
+    archived: archived.length,
+    alreadyArchived: alreadyArchived.length,
+    notFound: notFound.length,
+    errors: errors.length,
   });
 
   return { archived, alreadyArchived, notFound, errors };
@@ -133,6 +155,14 @@ export async function unarchiveDaemonSessions(params: {
         errors.push({ sessionId, error: err });
       }
     }
+  });
+
+  logSessionArchiveResult('unarchive', {
+    requested: sessionIds.length,
+    unarchived: unarchived.length,
+    alreadyActive: alreadyActive.length,
+    notFound: notFound.length,
+    errors: errors.length,
   });
 
   return { unarchived, alreadyActive, notFound, errors };
