@@ -982,12 +982,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     idleTimer.unref();
   }
 
-  function hasNoChannelWork(ci: ChannelInfo): boolean {
+  function hasNoChannelWork(
+    ci: ChannelInfo,
+    opts?: { ignoreCurrentSpawn?: boolean },
+  ): boolean {
+    const inFlightSpawnCount = inFlightSpawns.size;
     return (
       ci.sessionIds.size === 0 &&
       ci.pendingRestoreIds.size === 0 &&
       ci.workspaceControlInFlight === 0 &&
-      inFlightSpawns.size === 0
+      (inFlightSpawnCount === 0 ||
+        (opts?.ignoreCurrentSpawn === true && inFlightSpawnCount === 1))
     );
   }
 
@@ -1567,7 +1572,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Only reap when this newSession was the channel's first/only
       // attempt — a populated channel keeps running for its other
       // live sessions.
-      if (hasNoChannelWork(ci)) {
+      if (hasNoChannelWork(ci, { ignoreCurrentSpawn: true })) {
         // Mark dying SYNCHRONOUSLY so a concurrent `spawnOrAttach`
         // calling `ensureChannel()` between this point and the
         // `channel.exited` cleanup spawns a fresh channel instead of
