@@ -2605,11 +2605,12 @@ describe('Session', () => {
 
       it('stops an ACP prompt after exceeding the daemon tool-call cap', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-        const functionCalls = Array.from({ length: 101 }, (_, index) => ({
+        const functionCalls = Array.from({ length: 102 }, (_, index) => ({
           id: `read_${index}`,
           name: 'read_file',
           args: { file_path: `file_${index}.ts` },
         }));
+        functionCalls[101].id = 'read_0';
         mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
           createStreamWithChunks([
             {
@@ -2645,9 +2646,21 @@ describe('Session', () => {
             }),
           ]),
         });
+        const preservedResponses = vi
+          .mocked(mockChat.addHistory)
+          .mock.calls.flatMap(([content]) => content.parts ?? [])
+          .filter((part) => part.functionResponse)
+          .map((part) => part.functionResponse?.id);
+        expect(preservedResponses).toHaveLength(101);
+        expect(new Set(preservedResponses).size).toBe(101);
+        expect(
+          mockChatRecordingService.recordToolResult.mock.calls.map(
+            ([parts]) => parts[0]?.functionResponse?.id,
+          ),
+        ).toEqual(preservedResponses);
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
-            'Stopping ACP turn after 101 tool calls in one turn.',
+            'Stopping ACP turn after 102 tool calls in one turn.',
           ),
         );
       });

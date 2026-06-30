@@ -282,6 +282,8 @@ function recordDaemonInvalidToolParams(
 ): boolean {
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
+  // Intentionally bucket by tool name only: repeated parameter errors for the
+  // same tool mean the model is stuck on that tool's schema.
   const key = toolName;
   const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
   loopState.invalidToolParamErrors.set(key, count);
@@ -3759,6 +3761,46 @@ export class Session implements SessionContext {
     functionCalls: FunctionCall[],
     toolLoopState?: DaemonToolLoopState,
   ): Promise<RunToolResult> {
+    const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
+    let skippedToolCallCounter = 0;
+    const recordSkippedToolCall = async (
+      fc: FunctionCall,
+      message = PERMISSION_CANCEL_SKIP_MESSAGE,
+      emitStart = true,
+    ): Promise<Part> => {
+      const toolName = fc.name ?? 'unknown_tool';
+      const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
+      const part: Part = {
+        functionResponse: {
+          id: callId,
+          name: toolName,
+          response: { error: message },
+        },
+      };
+      const error = new Error(message);
+      try {
+        this.config.getChatRecordingService()?.recordToolResult([part], {
+          callId,
+          status: 'error',
+          resultDisplay: undefined,
+          error,
+          errorType: undefined,
+        });
+        if (emitStart) {
+          await this.toolCallEmitter.emitStart({
+            callId,
+            toolName,
+            args: (fc.args ?? {}) as Record<string, unknown>,
+            status: 'pending',
+          });
+        }
+        await this.toolCallEmitter.emitError(callId, toolName, error);
+      } catch (recordError) {
+        debugLogger.error('Failed to record skipped tool call:', recordError);
+      }
+      return part;
+    };
+
     if (
       recordDaemonToolCalls(
         this.config,
@@ -3768,19 +3810,16 @@ export class Session implements SessionContext {
       )
     ) {
       return {
-        parts: functionCalls.map((fc) => ({
-          functionResponse: {
-            id: fc.id ?? `${fc.name}-${Date.now()}`,
-            name: fc.name ?? 'unknown_tool',
-            response: { error: LOOP_DETECTED_SKIP_MESSAGE },
-          },
-        })),
+        parts: await Promise.all(
+          dedupedFunctionCalls.map((fc) =>
+            recordSkippedToolCall(fc, LOOP_DETECTED_SKIP_MESSAGE, false),
+          ),
+        ),
         stopAfterPermissionCancel: false,
         loopDetected: true,
       };
     }
 
-    const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
     type ExecutableBatch = {
       kind: 'execute';
       concurrent: boolean;
@@ -3905,42 +3944,6 @@ export class Session implements SessionContext {
       }
     }
 
-    let skippedToolCallCounter = 0;
-    const recordSkippedToolCall = async (
-      fc: FunctionCall,
-      message = PERMISSION_CANCEL_SKIP_MESSAGE,
-    ): Promise<Part> => {
-      const toolName = fc.name ?? 'unknown_tool';
-      const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
-      const part: Part = {
-        functionResponse: {
-          id: callId,
-          name: toolName,
-          response: { error: message },
-        },
-      };
-      const error = new Error(message);
-      try {
-        this.config.getChatRecordingService()?.recordToolResult([part], {
-          callId,
-          status: 'error',
-          resultDisplay: undefined,
-          error,
-          errorType: undefined,
-        });
-        await this.toolCallEmitter.emitStart({
-          callId,
-          toolName,
-          args: (fc.args ?? {}) as Record<string, unknown>,
-          status: 'pending',
-        });
-        await this.toolCallEmitter.emitError(callId, toolName, error);
-      } catch (recordError) {
-        debugLogger.error('Failed to record skipped tool call:', recordError);
-      }
-      return part;
-    };
-
     const appendSkippedAfter = async (
       parts: Part[],
       fc: FunctionCall,
@@ -4003,12 +4006,20 @@ export class Session implements SessionContext {
       ) {
         startIndex = DAEMON_INVALID_TOOL_PARAMS_THRESHOLD;
         for (let i = 0; i < startIndex; i++) {
+          if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
+            results[i] = {
+              parts: [await recordSkippedToolCall(calls[i])],
+              stopAfterPermissionCancel: false,
+            };
+            continue;
+          }
           const r = await this.runTool(
             runAbortSignal,
             promptId,
             calls[i],
             onStopAfterPermissionCancel,
             toolLoopState,
+            recordSkippedToolCall,
           );
           results[i] = r;
           if (r.loopDetected) {
@@ -4040,6 +4051,7 @@ export class Session implements SessionContext {
           calls[idx],
           onStopAfterPermissionCancel,
           toolLoopState,
+          recordSkippedToolCall,
         )
           .then((r) => {
             results[idx] = r;
@@ -4145,6 +4157,7 @@ export class Session implements SessionContext {
             fc,
             undefined,
             toolLoopState,
+            recordSkippedToolCall,
           );
           parts.push(...r.parts);
           if (r.loopDetected) {
@@ -4214,19 +4227,26 @@ export class Session implements SessionContext {
     fc: FunctionCall,
     onStopAfterPermissionCancel?: () => void,
     toolLoopState?: DaemonToolLoopState,
+    recordSkippedToolCall?: (
+      fc: FunctionCall,
+      message?: string,
+      emitStart?: boolean,
+    ) => Promise<Part>,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
-          {
-            functionResponse: {
-              id: callId,
-              name: fc.name ?? 'unknown_tool',
-              response: { error: LOOP_DETECTED_SKIP_MESSAGE },
-            },
-          },
+          recordSkippedToolCall
+            ? await recordSkippedToolCall(fc, LOOP_DETECTED_SKIP_MESSAGE, false)
+            : {
+                functionResponse: {
+                  id: callId,
+                  name: fc.name ?? 'unknown_tool',
+                  response: { error: LOOP_DETECTED_SKIP_MESSAGE },
+                },
+              },
         ],
         stopAfterPermissionCancel: false,
         loopDetected: true,
