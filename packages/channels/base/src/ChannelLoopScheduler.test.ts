@@ -386,9 +386,7 @@ describe('ChannelLoopScheduler', () => {
     });
     const writeSpy = vi
       .spyOn(process.stderr, 'write')
-      .mockImplementation(() => {
-        return true;
-      });
+      .mockImplementation(() => true);
     const scheduler = new ChannelLoopScheduler({
       store,
       channels: new Map([['feishu-main', { runLoopPrompt }]]),
