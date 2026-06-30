@@ -278,6 +278,11 @@
               "description": "Whether to collapse history by default when resuming a session.",
               "type": "boolean",
               "default": false
+            },
+            "collapsePreviewCount": {
+              "description": "Number of most recent user turns to keep visible when collapsing history on resume. 0 collapses all restored history by default; -1 shows all restored history.",
+              "type": "number",
+              "default": 0
             }
           }
         },
