@@ -21,6 +21,7 @@ import {
   useWebShellCustomization,
   type WebShellComposerInput,
   type WebShellComposerTag,
+  type WebShellAtProvider,
 } from '../customization';
 import {
   useComposerCore,
@@ -30,6 +31,7 @@ import {
   getComposerTagLabel,
   getComposerTagValue,
 } from '../hooks/useComposerCore';
+import { AtMentionPanel } from './AtMentionPanel';
 import { ModeIcon } from './ModeIcon';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
@@ -91,6 +93,7 @@ interface ChatEditorProps {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  atProviders?: readonly WebShellAtProvider[];
 }
 
 const CHAT_EDITOR_THEME = {
@@ -902,6 +905,7 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      atProviders,
     } = props;
 
     const core = useComposerCore({
@@ -924,6 +928,7 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      atProviders,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
@@ -942,11 +947,14 @@ export const ChatEditor = memo(
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
+    const atPanelRef = useRef<HTMLDivElement>(null);
     const modeBtnRef = useRef<HTMLButtonElement>(null);
     const modelBtnRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
+    const atMenu = core.atMenu;
+    const closeAtMenu = core.closeAtMenu;
     const editorViewRef = core.viewRef;
 
     useEffect(() => {
@@ -963,7 +971,7 @@ export const ChatEditor = memo(
     }, [showQuickActions]);
 
     useEffect(() => {
-      if (!slashMenu) return;
+      if (!slashMenu && !atMenu) return;
       const onPointerOutside = (event: Event) => {
         const target = event.target;
         const container = containerRef.current;
@@ -971,9 +979,11 @@ export const ChatEditor = memo(
           target instanceof Node &&
           container &&
           !container.contains(target) &&
-          !slashPanelRef.current?.contains(target)
+          !slashPanelRef.current?.contains(target) &&
+          !atPanelRef.current?.contains(target)
         ) {
           closeSlashMenu();
+          closeAtMenu();
         }
       };
       window.addEventListener('mousedown', onPointerOutside);
@@ -982,7 +992,7 @@ export const ChatEditor = memo(
         window.removeEventListener('mousedown', onPointerOutside);
         window.removeEventListener('touchstart', onPointerOutside);
       };
-    }, [slashMenu, closeSlashMenu]);
+    }, [atMenu, slashMenu, closeAtMenu, closeSlashMenu]);
 
     useEffect(() => {
       const glowRoot = containerRef.current;
@@ -1394,6 +1404,23 @@ export const ChatEditor = memo(
                 panelRef={slashPanelRef}
                 onSelect={core.selectSlashCompletion}
                 onAccept={core.acceptSlashCompletion}
+              />
+            )}
+            {core.atMenu && (
+              <AtMentionPanel
+                menu={core.atMenu}
+                anchorRef={containerRef}
+                panelRef={atPanelRef}
+                onSelect={core.selectAtCompletion}
+                onAccept={core.acceptAtCompletion}
+                onBack={() => {
+                  const result = core.backAtCategories();
+                  if (result === 'categories') {
+                    window.setTimeout(() => core.focus(), 0);
+                  }
+                  return Boolean(result);
+                }}
+                onSearch={core.updateAtSearch}
               />
             )}
             <div className={styles.editorArea}>

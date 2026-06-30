@@ -44,8 +44,8 @@ import {
   DEFAULT_COMMAND_CATEGORY_ORDER,
   type CommandDisplayCategoryOrder,
 } from '../utils/commandDisplay';
-import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
+import { useAtMentionMenu, type AtMentionMenuState } from './useAtMentionMenu';
 import { useI18n } from '../i18n';
 import {
   inputHighlight,
@@ -58,6 +58,7 @@ import type {
   WebShellComposerTag,
   WebShellComposerTagOptions,
   WebShellComposerTextOptions,
+  WebShellAtProvider,
 } from '../customization';
 
 // ---- Large paste handling (shared utilities) ----
@@ -765,6 +766,7 @@ export interface UseComposerCoreOptions {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  atProviders?: readonly WebShellAtProvider[];
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -873,6 +875,13 @@ export interface UseComposerCoreReturn {
   closeSlashMenu: () => void;
   selectSlashCompletion: (index: number) => boolean;
   acceptSlashCompletion: (index?: number) => boolean;
+  atMenu: AtMentionMenuState | null;
+  closeAtMenu: () => void;
+  selectAtCompletion: (index: number) => boolean;
+  acceptAtCompletion: (index?: number) => boolean;
+  enterAtCategory: (index?: number) => boolean;
+  backAtCategories: () => false | 'items' | 'categories';
+  updateAtSearch: (query: string) => boolean;
 }
 
 export function useComposerCore(
@@ -898,6 +907,7 @@ export function useComposerCore(
     sessionName,
     composerInput,
     composerInputVersion,
+    atProviders,
     editorTheme,
   } = options;
 
@@ -940,6 +950,15 @@ export function useComposerCore(
   const [shellMode, setShellMode] = useState(false);
   const shellModeRef = useRef(shellMode);
   shellModeRef.current = shellMode;
+  const atMenu = useAtMentionMenu({
+    viewRef,
+    disabledRef,
+    shellModeRef,
+    workspaceActionsRef,
+    providers: atProviders,
+  });
+  const closeAtMenu = atMenu.close;
+  const refreshAtMenuForView = atMenu.refreshForView;
   const toggleShellMode = useCallback(() => {
     if (followupStateRef.current?.isVisible) {
       onDismissFollowupRef.current?.();
@@ -1018,6 +1037,7 @@ export function useComposerCore(
         setSlashMenu(null);
         return;
       }
+      closeAtMenu();
       const currentIndex =
         preferredIndex ?? slashMenuRef.current?.selectedIndex ?? 0;
       const selectedIndex = Math.max(
@@ -1026,7 +1046,7 @@ export function useComposerCore(
       );
       setSlashMenu({ ...result, selectedIndex });
     },
-    [setSlashMenu],
+    [closeAtMenu, setSlashMenu],
   );
 
   const closeSlashMenu = useCallback(() => {
@@ -1154,6 +1174,7 @@ export function useComposerCore(
     const view = viewRef.current;
     if (!view) return;
     closeSlashMenu();
+    closeAtMenu();
     const query = view.state.doc.toString();
     searchDraftRef.current = query;
     setSearchMode(true);
@@ -1165,7 +1186,7 @@ export function useComposerCore(
     setSearchActiveIndex(0);
     history.resetSearch();
     setTimeout(() => searchInputRef.current?.focus(), 0);
-  }, [closeSlashMenu, getSearchMatches]);
+  }, [closeAtMenu, closeSlashMenu, getSearchMatches]);
   const openHistorySearchRef = useRef(openHistorySearch);
   openHistorySearchRef.current = openHistorySearch;
 
@@ -1334,13 +1355,6 @@ export function useComposerCore(
     };
     submitTextRef.current = submitText;
 
-    const completionSources = [
-      createAtCompletionSource(
-        () => workspaceActionsRef.current?.globWorkspace,
-        () => workspaceActionsRef.current?.loadExtensionsStatus,
-      ),
-    ];
-
     const insertNewline = (view: EditorView) => {
       view.dispatch(view.state.replaceSelection('\n'));
       return true;
@@ -1417,6 +1431,9 @@ export function useComposerCore(
       {
         key: 'Enter',
         run: (view) => {
+          if (atMenu.accept()) {
+            return true;
+          }
           if (slashMenuRef.current) {
             return acceptSlashCompletion();
           }
@@ -1452,6 +1469,9 @@ export function useComposerCore(
       {
         key: 'Escape',
         run: () => {
+          if (atMenu.closeIfOpen()) {
+            return true;
+          }
           if (slashMenuRef.current) {
             closeSlashMenu();
             return true;
@@ -1490,6 +1510,7 @@ export function useComposerCore(
           // auto-opened menu is closed. (Gate uses historyBrowseActiveRef, not
           // the sticky history.isNavigating — see its declaration.)
           if (!isBrowsingHistory) {
+            if (atMenu.moveSelection('up')) return true;
             if (moveSlashCompletionSelection('up')) return true;
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(false)(view);
@@ -1497,6 +1518,7 @@ export function useComposerCore(
           } else {
             closeCompletion(view);
             closeSlashMenu();
+            atMenu.close();
           }
           const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
           if (multilineBoundary === 'handled') return true;
@@ -1539,6 +1561,7 @@ export function useComposerCore(
           // the slash menu and native completion only capture arrows once the
           // user is no longer paging through history.
           if (!isBrowsingHistory) {
+            if (atMenu.moveSelection('down')) return true;
             if (moveSlashCompletionSelection('down')) return true;
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(true)(view);
@@ -1546,6 +1569,7 @@ export function useComposerCore(
           } else {
             closeCompletion(view);
             closeSlashMenu();
+            atMenu.close();
           }
           const multilineBoundary = handleMultilineHistoryBoundary(
             view,
@@ -1585,6 +1609,9 @@ export function useComposerCore(
       {
         key: 'Tab',
         run: (view) => {
+          if (atMenu.accept()) {
+            return true;
+          }
           if (acceptFollowupIntoEditor(view, 'tab')) {
             return true;
           }
@@ -1671,6 +1698,13 @@ export function useComposerCore(
       }
       if (update.docChanged || update.selectionSet) {
         refreshSlashMenuForView(update.view);
+        // Match slash command behavior: history-recalled text like "@foo"
+        // should stay as plain recalled input until the user edits it.
+        if (historyBrowseActiveRef.current) {
+          closeAtMenu();
+        } else {
+          refreshAtMenuForView(update.view, { userEdited });
+        }
       }
     });
 
@@ -1715,7 +1749,7 @@ export function useComposerCore(
         history(),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         autocompletion({
-          override: completionSources,
+          override: [],
           activateOnTyping: true,
           icons: false,
           optionClass: (completion) =>
@@ -1975,11 +2009,12 @@ export function useComposerCore(
     if (!view) return;
     if (dialogOpen) {
       closeSlashMenu();
+      closeAtMenu();
       view.contentDOM.blur();
     } else {
       view.focus();
     }
-  }, [dialogOpen, closeSlashMenu]);
+  }, [closeAtMenu, dialogOpen, closeSlashMenu]);
 
   // Global keydown handler for focus-stealing
   useEffect(() => {
@@ -2076,7 +2111,8 @@ export function useComposerCore(
         window.setTimeout(() => {
           const nextView = viewRef.current;
           if (nextView && nextView.hasFocus) {
-            startCompletion(nextView);
+            closeSlashMenu();
+            refreshAtMenuForView(nextView);
           }
         }, 0);
       }
@@ -2084,7 +2120,14 @@ export function useComposerCore(
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchMode, dialogOpen, refreshSlashMenuForView, toggleShellMode]);
+  }, [
+    refreshAtMenuForView,
+    closeSlashMenu,
+    searchMode,
+    dialogOpen,
+    refreshSlashMenuForView,
+    toggleShellMode,
+  ]);
 
   // ---- Imperative methods ----
 
@@ -2165,12 +2208,13 @@ export function useComposerCore(
         window.setTimeout(() => {
           const nextView = viewRef.current;
           if (nextView && nextView.hasFocus) {
-            startCompletion(nextView);
+            closeSlashMenu();
+            refreshAtMenuForView(nextView);
           }
         }, 0);
       }
     },
-    [refreshSlashMenuForView],
+    [closeSlashMenu, refreshAtMenuForView, refreshSlashMenuForView],
   );
 
   const getText = useCallback(() => {
@@ -2640,5 +2684,12 @@ export function useComposerCore(
     closeSlashMenu,
     selectSlashCompletion,
     acceptSlashCompletion,
+    atMenu: atMenu.state,
+    closeAtMenu: atMenu.close,
+    selectAtCompletion: atMenu.select,
+    acceptAtCompletion: atMenu.accept,
+    enterAtCategory: atMenu.enterCategory,
+    backAtCategories: atMenu.backToCategories,
+    updateAtSearch: atMenu.updateSearch,
   };
 }

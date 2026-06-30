@@ -27,6 +27,8 @@ export type {
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,
+  WebShellAtItem,
+  WebShellAtProvider,
   WebShellTaskInfo,
   WebShellAgentTask,
   WebShellShellTask,

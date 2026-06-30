@@ -164,6 +164,7 @@ import {
   type LoadingPhrasesResolver,
   type MarkdownTableMode,
   type WebShellTaskInfo,
+  type WebShellAtProvider,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -353,6 +354,8 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Additional @ mention categories shown alongside built-in files/extensions. */
+  atProviders?: readonly WebShellAtProvider[];
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
@@ -744,6 +747,7 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  atProviders,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -3884,6 +3888,7 @@ export function App({
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
+                      atProviders={atProviders}
                       queuedMessages={queuedTexts}
                       onFocusFooter={handleFocusTaskPill}
                       onPopQueuedMessages={editLastQueuedPrompt}
