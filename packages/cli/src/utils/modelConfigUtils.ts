@@ -9,6 +9,7 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
+  normalizeReasoningEffort,
   resolveModelConfig,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
@@ -415,6 +416,20 @@ export function resolveCliGenerationConfig(
     enableOpenAILogging,
     openAILoggingDir,
   };
+
+  // Apply the global reasoning-effort preference (settings.model.reasoningEffort,
+  // set via /effort) onto the unified reasoning config. Skip when thinking is
+  // explicitly disabled (reasoning === false) so effort never silently
+  // re-enables it; provider adapters clamp the tier to the active model.
+  const reasoningEffort = normalizeReasoningEffort(
+    settings.model?.reasoningEffort,
+  );
+  if (reasoningEffort && generationConfig.reasoning !== false) {
+    generationConfig.reasoning = {
+      ...(generationConfig.reasoning ?? {}),
+      effort: reasoningEffort,
+    };
+  }
 
   return {
     model: resolved.config.model || '',

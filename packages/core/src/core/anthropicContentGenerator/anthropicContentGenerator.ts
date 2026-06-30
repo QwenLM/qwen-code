@@ -20,6 +20,10 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
+import {
+  clampReasoningEffort,
+  type ReasoningEffort,
+} from '../reasoning-effort.js';
 type Message = Anthropic.Message;
 type MessageCreateParamsNonStreaming =
   Anthropic.MessageCreateParamsNonStreaming;
@@ -89,6 +93,44 @@ function isDeepSeekAnthropicProvider(
 }
 
 /**
+ * The reasoning-effort tiers a real Anthropic model accepts on
+ * `output_config.effort`. Every effort-capable model takes low/medium/high; the
+ * extra-strong tiers are gated by model version per the Anthropic docs
+ * (https://platform.claude.com/docs/en/build-with-claude/effort):
+ *   - `max`:   Opus/Sonnet 4.6+ and every 5.x family (Fable 5, Mythos 5, …).
+ *   - `xhigh`: Opus 4.7+ and every 5.x family (NOT Sonnet 4.6 / Opus 4.6).
+ *
+ * The version regex is unanchored so reseller-prefixed ids (`bedrock/…`,
+ * `vertex_ai/…`) match. Unknown/unversioned ids fall back to low/medium/high so
+ * we never send a tier the server might 400 on. Effort levels above what the
+ * model supports are clamped by the caller via clampReasoningEffort.
+ */
+function anthropicSupportedEffortTiers(model: string): ReasoningEffort[] {
+  const tiers: ReasoningEffort[] = ['low', 'medium', 'high'];
+  const match = model
+    .toLowerCase()
+    .match(/claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?/);
+  if (!match) {
+    return tiers;
+  }
+  const family = match[1];
+  const major = Number.parseInt(match[2], 10);
+  const minor = match[3] ? Number.parseInt(match[3], 10) : 0;
+  const atLeast = (maj: number, min: number) =>
+    major > maj || (major === maj && minor >= min);
+
+  // xhigh: Opus 4.7+ and all 5.x families.
+  if (major >= 5 || (family === 'opus' && atLeast(4, 7))) {
+    tiers.push('xhigh');
+  }
+  // max: 4.6+ (opus/sonnet) and all 5.x families.
+  if (major >= 5 || atLeast(4, 6)) {
+    tiers.push('max');
+  }
+  return tiers;
+}
+
+/**
  * Resolve the baseURL the Anthropic SDK will actually use, mirroring the
  * SDK's own destructuring-default order: explicit config first, then
  * `ANTHROPIC_BASE_URL` env, then the SDK default. Returns the SDK default
@@ -153,10 +195,11 @@ type AnthropicThinkingParam =
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
-  // Anthropic beta feature: output_config.effort (requires beta header effort-2025-11-24)
-  // This is not yet represented in the official SDK types we depend on. The
-  // 'max' tier is a DeepSeek extension (see contentGenerator.ts comment).
-  output_config?: { effort: 'low' | 'medium' | 'high' | 'max' };
+  // Anthropic beta feature: output_config.effort (requires beta header
+  // effort-2025-11-24), not yet represented in the official SDK types we depend
+  // on. Accepts the full ladder; xhigh/max are gated per model via
+  // anthropicSupportedEffortTiers + clampReasoningEffort.
+  output_config?: { effort: ReasoningEffort };
 };
 
 export class AnthropicContentGenerator implements ContentGenerator {
@@ -664,7 +707,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
    */
   private resolveEffectiveEffort(
     request: GenerateContentParameters,
-  ): 'low' | 'medium' | 'high' | 'max' | undefined {
+  ): ReasoningEffort | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
     }
@@ -676,20 +719,28 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (effort === undefined) {
       return undefined;
     }
-    if (
-      effort === 'max' &&
-      !isDeepSeekAnthropicHostname(this.contentGeneratorConfig)
-    ) {
-      if (!this.effortClampWarned) {
-        debugLogger.warn(
-          "reasoning.effort='max' is a DeepSeek extension; clamping to " +
-            "'high' for non-DeepSeek anthropic provider to avoid HTTP 400.",
-        );
-        this.effortClampWarned = true;
-      }
-      return 'high';
+    if (isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
+      // DeepSeek's anthropic-compatible output_config.effort accepts high/max;
+      // its docs group xhigh → max. Other tiers pass through unchanged.
+      return effort === 'xhigh' ? 'max' : effort;
     }
-    return effort;
+    // Real Anthropic: clamp the requested tier to what this model actually
+    // accepts. Opus 4.7/4.8 and the 5.x families take xhigh/max natively;
+    // older models (Opus 4.6 / Sonnet 4.6 lack xhigh, Opus 4.5 lacks both)
+    // clamp so we never 400 on an unsupported enum.
+    const supported = anthropicSupportedEffortTiers(
+      this.contentGeneratorConfig.model ?? '',
+    );
+    const clamped = clampReasoningEffort(effort, supported);
+    if (clamped !== effort && !this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not supported by '${
+          this.contentGeneratorConfig.model ?? 'unknown'
+        }'; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return clamped;
   }
 
   /**
@@ -718,7 +769,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private buildThinkingConfig(
     request: GenerateContentParameters,
-    effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
+    effectiveEffort: ReasoningEffort | undefined,
   ): AnthropicThinkingParam | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
@@ -759,20 +810,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return { type: 'adaptive' };
     }
 
-    // When using interleaved thinking with tools, this budget token limit is the entire context window(200k tokens).
-    // 'max' is the DeepSeek-specific extra-strong tier; bump the budget
-    // accordingly so any client-side budgeting matches the spirit of the
-    // server-side label. resolveEffectiveEffort already clamps 'max' to
-    // 'high' on non-DeepSeek anthropic backends so the budget here stays
-    // consistent with the effort label written into output_config.
+    // Budget path for non-adaptive (pre-4.6) models. resolveEffectiveEffort has
+    // already clamped the tier to what the model accepts, so map each tier to a
+    // budget that matches the spirit of the effort label written into
+    // output_config. xhigh/max only reach here on DeepSeek-anthropic backends
+    // (real pre-4.6 Anthropic models clamp them away).
     const budgetTokens =
       effectiveEffort === 'low'
         ? 16_000
         : effectiveEffort === 'max'
           ? 128_000
-          : effectiveEffort === 'high'
-            ? 64_000
-            : 32_000;
+          : effectiveEffort === 'xhigh'
+            ? 96_000
+            : effectiveEffort === 'high'
+              ? 64_000
+              : 32_000;
 
     return {
       type: 'enabled',
@@ -782,14 +834,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private buildOutputConfig(
     request: GenerateContentParameters,
-    effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
-  ): { effort: 'low' | 'medium' | 'high' | 'max' } | undefined {
+    effectiveEffort: ReasoningEffort | undefined,
+  ): { effort: ReasoningEffort } | undefined {
     // resolveEffectiveEffort already returns undefined when:
     //   - per-request includeThoughts is false (side queries)
     //   - reasoning is disabled or unset
     //   - the user didn't set an effort
-    // and clamps DeepSeek-only 'max' to 'high' on stricter anthropic
-    // backends. Just consume the value here.
+    // and clamps the tier to what the current model supports. Just consume the
+    // value here.
     if (effectiveEffort === undefined) return undefined;
     return { effort: effectiveEffort };
   }

@@ -2008,6 +2008,34 @@ describe('Server Config (config.ts)', () => {
       expect(GeminiClient).toHaveBeenCalledWith(config);
     });
 
+    it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
+      // Regression: the provider sync (applyResolvedModelDefaults) overwrites
+      // `reasoning` with the provider preset's undefined value, dropping the
+      // user-global effort on every restart. refreshAuth must re-apply it.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'max' } },
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      // The rebuilt config comes back WITHOUT reasoning (simulating the wipe).
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningEffort()).toBe('max');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'max',
+      });
+    });
+
     it('should fire auth_success notification hook when hooks are enabled', async () => {
       const mockMessageBus = { request: vi.fn() };
       const config = new Config({

@@ -125,16 +125,25 @@ export class GeminiContentGenerator implements ContentGenerator {
     }
 
     if (reasoning) {
-      // Gemini exposes LOW / HIGH / UNSPECIFIED. The 'max' tier (a
-      // DeepSeek-specific extension) maps to HIGH here since Gemini has
-      // no higher level.
-      const thinkingLevel = (
-        reasoning.effort === 'low'
-          ? 'LOW'
-          : reasoning.effort === 'high' || reasoning.effort === 'max'
-            ? 'HIGH'
-            : 'THINKING_LEVEL_UNSPECIFIED'
-      ) as ThinkingLevel;
+      // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH — there
+      // is no xhigh/max, so the extra-strong tiers are capped at HIGH. An unset
+      // effort stays UNSPECIFIED so the model picks its own default.
+      let thinkingLevel: ThinkingLevel;
+      switch (reasoning.effort) {
+        case 'low':
+          thinkingLevel = 'LOW' as ThinkingLevel;
+          break;
+        case 'medium':
+          thinkingLevel = 'MEDIUM' as ThinkingLevel;
+          break;
+        case 'high':
+        case 'xhigh':
+        case 'max':
+          thinkingLevel = 'HIGH' as ThinkingLevel;
+          break;
+        default:
+          thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
+      }
 
       return {
         includeThoughts: true,

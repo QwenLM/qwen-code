@@ -572,6 +572,45 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(lastMessage.content).toBe('Hello!');
     });
 
+    it('sends enable_thinking:true on a qwen model when a reasoning effort is set', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+    });
+
+    it('omits enable_thinking when no reasoning effort is set', () => {
+      const result = provider.buildRequest(
+        { ...baseRequest },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
+    });
+
+    it('does not send enable_thinking for a non-qwen wire model even with effort set', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-4.6',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'glm-4.6' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
+    });
+
     it('should add cache control to system message only for non-streaming requests with tools', () => {
       const requestWithTool: OpenAI.Chat.ChatCompletionCreateParams = {
         ...baseRequest,
