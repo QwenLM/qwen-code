@@ -759,6 +759,46 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('daily summary');
     });
 
+    it('/schedule list shows invalid cron when next fire formatting fails', async () => {
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(async () => [
+              {
+                id: 'job-1',
+                channelName: 'test-chan',
+                target: {
+                  channelName: 'test-chan',
+                  senderId: 'user1',
+                  chatId: 'chat1',
+                },
+                cwd: '/tmp',
+                cron: 'bad cron',
+                prompt: 'post summary',
+                recurring: true,
+                enabled: true,
+                createdBy: 'User 1',
+                createdAt: '2026-06-30T01:02:03.000Z',
+                consecutiveFailures: 0,
+                runCount: 0,
+              },
+            ]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+            nextFireTime: vi.fn(() => {
+              throw new Error('invalid cron');
+            }),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/schedule list' }));
+
+      expect(ch.sent[0]!.text).toContain('next=invalid cron');
+    });
+
     it('/schedule inspect shows lifecycle details for a current-target job', async () => {
       const ch = createChannel(
         {},
@@ -4944,6 +4984,129 @@ describe('ChannelBase', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('evicts the bridge session after a scheduled timeout', async () => {
+      let rejectLatePrompt: (error: Error) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((_resolve, reject) => {
+              rejectLatePrompt = reject;
+            }),
+        )
+        .mockResolvedValueOnce('second response');
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      vi.useFakeTimers();
+      try {
+        const scheduled = ch.runScheduledPrompt(
+          {
+            id: 'job-1',
+            channelName: 'test-chan',
+            target: {
+              channelName: 'test-chan',
+              senderId: 'alice',
+              chatId: 'chat1',
+              isGroup: false,
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            label: 'daily summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Alice',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+          },
+          { timeoutMs: 1000 },
+        );
+        const scheduledResult = scheduled.catch((error: unknown) => error);
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await expect(scheduledResult).resolves.toMatchObject({
+          message: 'scheduled job timed out',
+        });
+        rejectLatePrompt(new Error('late bridge failure'));
+        await Promise.resolve();
+
+        await ch.runScheduledPrompt({
+          id: 'job-2',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post again',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+        });
+
+        expect(bridge.newSession).toHaveBeenCalledTimes(2);
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-2',
+          '[Scheduled task "daily summary" set by Alice]\n\npost again',
+          {},
+        );
+        expect(ch.proactive).toEqual([
+          { chatId: 'chat1', text: 'second response' },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not push a scheduled response after the session is cancelled', async () => {
+      let resolveScheduledPrompt: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveScheduledPrompt = resolve;
+          }),
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      const scheduled = ch.runScheduledPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+      });
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+      });
+
+      await ch.handleInbound(envelope({ text: '/cancel', senderId: 'alice' }));
+      resolveScheduledPrompt('late scheduled response');
+      await scheduled;
+
+      expect(ch.proactive).toEqual([]);
     });
 
     it('disables a stored job when its sender is no longer allowed', async () => {

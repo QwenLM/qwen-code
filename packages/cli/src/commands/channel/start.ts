@@ -86,6 +86,7 @@ function createScheduleController(
     disable: (id) => store.disable(id),
     validateCron: (cron) => {
       parseCron(cron);
+      nextFireTime(cron, new Date());
     },
     nextFireTime: (job) =>
       nextFireTime(job.cron, new Date(job.lastFiredAt ?? job.createdAt)),
@@ -342,8 +343,8 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
-        scheduler.start();
         const result = await router.restoreSessions();
+        scheduler.start();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
@@ -451,19 +452,16 @@ async function startAll(proxy?: string): Promise<void> {
       }),
     );
   }
-  const scheduler = new ChannelCronScheduler({
-    store: cronStore,
-    channels,
-    nextFireTime,
-  });
   registerToolCallDispatch(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
   // Connect all channels
   let connectedCount = 0;
+  const connectedChannels: Map<string, ChannelBase> = new Map();
   for (const [name, channel] of channels) {
     try {
       await channel.connect();
+      connectedChannels.set(name, channel);
       connectedCount++;
       writeStdoutLine(`[Channel] "${name}" connected.`);
     } catch (err) {
@@ -478,6 +476,11 @@ async function startAll(proxy?: string): Promise<void> {
     bridge.stop();
     process.exit(1);
   }
+  const scheduler = new ChannelCronScheduler({
+    store: cronStore,
+    channels: connectedChannels,
+    nextFireTime,
+  });
   scheduler.start();
 
   writeServiceInfo(parsed.map((p) => p.name));
@@ -529,8 +532,8 @@ async function startAll(proxy?: string): Promise<void> {
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
-        scheduler.start();
         const result = await router.restoreSessions();
+        scheduler.start();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
