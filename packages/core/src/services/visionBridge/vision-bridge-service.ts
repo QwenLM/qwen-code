@@ -293,7 +293,10 @@ export async function runVisionBridge(params: {
   const intent = collectText(nonImageParts).slice(0, BRIDGE_INTENT_MAX_CHARS);
 
   const selection = config.getDefaultVisionBridgeModel?.();
-  const model = selection?.id;
+  const model =
+    selection?.baseUrl && selection.id
+      ? `${selection.id}\0${selection.baseUrl}`
+      : selection?.id;
   if (!model) {
     return failure(
       'no image-capable model is available for the vision bridge',

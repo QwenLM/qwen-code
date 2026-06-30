@@ -38,6 +38,15 @@ const DEFAULT_MAX_ATTEMPTS = 7;
 
 const debugLogger = createDebugLogger('BASE_LLM_CLIENT');
 
+function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
+  const idx = model.indexOf('\0');
+  if (idx < 0) return { model };
+  return {
+    model: model.slice(0, idx),
+    baseUrl: model.slice(idx + 1) || undefined,
+  };
+}
+
 /**
  * The pair of generator and retry-authType to use for a request targeting
  * a specific model. When the requested model differs from the main session
@@ -504,16 +513,22 @@ export class BaseLlmClient {
     model: string,
     opts?: { failClosed?: boolean },
   ): Promise<ResolvedGeneratorForModel> {
-    const selector = this.resolveModelSelector(model);
-    const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
-    const mainModel = this.config.getModel() ?? model;
+    const requested = splitModelBaseUrl(model);
+    const selector = this.resolveModelSelector(requested.model);
+    const requestModel =
+      selector?.modelId ?? this.config.getModel() ?? requested.model;
+    const mainModel = this.config.getModel() ?? requested.model;
     const mainGeneratorConfig = this.config.getContentGeneratorConfig();
     const mainAuthType = mainGeneratorConfig?.authType;
+    const mainBaseUrl = mainGeneratorConfig?.baseUrl;
     const mainRetryErrorCodes = mainGeneratorConfig?.retryErrorCodes;
+    const matchesMainBaseUrl =
+      requested.baseUrl === undefined || requested.baseUrl === mainBaseUrl;
 
     if (
       requestModel === mainModel &&
-      (!selector?.authType || selector.authType === mainAuthType)
+      (!selector?.authType || selector.authType === mainAuthType) &&
+      matchesMainBaseUrl
     ) {
       return {
         contentGenerator: this.getCurrentContentGenerator(),
@@ -524,11 +539,16 @@ export class BaseLlmClient {
     }
 
     const contentGenerator = await this.createContentGeneratorForModel(
-      model,
+      requested.model,
       selector,
       opts?.failClosed ?? false,
+      requested.baseUrl,
     );
-    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+    const resolvedModel = this.resolveModelAcrossAuthTypes(
+      requested.model,
+      selector,
+      requested.baseUrl,
+    );
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
     const retryErrorCodes =
@@ -558,14 +578,19 @@ export class BaseLlmClient {
   private resolveModelAcrossAuthTypes(
     model: string,
     selector: ResolvedModelId | undefined,
+    modelBaseUrl?: string,
   ): ResolvedModelConfig | undefined {
     const modelsConfig = this.config.getModelsConfig?.();
     if (!modelsConfig) return undefined;
     if (!selector) return undefined;
     const modelId = selector.modelId;
+    const getResolvedModel = (authType: AuthType) =>
+      modelBaseUrl === undefined
+        ? modelsConfig.getResolvedModel(authType, modelId)
+        : modelsConfig.getResolvedModel(authType, modelId, modelBaseUrl);
 
     if (selector.authType) {
-      return modelsConfig.getResolvedModel(selector.authType, modelId);
+      return getResolvedModel(selector.authType);
     }
 
     const allAuthTypes: AuthType[] = [
@@ -578,13 +603,13 @@ export class BaseLlmClient {
 
     const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
     if (mainAuthType) {
-      const resolved = modelsConfig.getResolvedModel(mainAuthType, modelId);
+      const resolved = getResolvedModel(mainAuthType);
       if (resolved) return resolved;
     }
 
     for (const authType of allAuthTypes) {
       if (authType === mainAuthType) continue;
-      const resolved = modelsConfig.getResolvedModel(authType, modelId);
+      const resolved = getResolvedModel(authType);
       if (resolved) return resolved;
     }
 
@@ -595,14 +620,19 @@ export class BaseLlmClient {
     model: string,
     selector: ResolvedModelId | undefined,
     failClosed = false,
+    modelBaseUrl?: string,
   ): Promise<ContentGenerator> {
     const cacheKey = selector
-      ? `${selector.authType ?? ''}:${selector.modelId}`
+      ? `${selector.authType ?? ''}:${selector.modelId}:${modelBaseUrl ?? ''}`
       : model;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
-    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+    const resolvedModel = this.resolveModelAcrossAuthTypes(
+      model,
+      selector,
+      modelBaseUrl,
+    );
 
     if (!resolvedModel) {
       // failClosed callers (vision bridge) must NOT silently run on the main

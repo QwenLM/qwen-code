@@ -446,14 +446,17 @@ export const modelCommand: SlashCommand = {
         // current vision model (non-interactive).
         if (context.executionMode !== 'interactive') {
           const visionModel =
-            context.services.settings?.merged?.visionModel?.trim() ||
-            t('not set');
+            context.services.settings?.merged?.visionModel?.trim();
           return {
             type: 'message',
             messageType: 'info',
             content: t(
               'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
-              { visionModel },
+              {
+                visionModel: visionModel
+                  ? visionModel.split('\0')[0] || visionModel
+                  : t('not set'),
+              },
             ),
           };
         }
@@ -522,9 +525,12 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'visionModel', modelName);
+      const visionModel = matched.baseUrl
+        ? `${modelName}\0${matched.baseUrl}`
+        : modelName;
+      persistSetting(settings, 'visionModel', visionModel);
       // Sync runtime Config so the vision bridge picks it up without a restart.
-      config.setVisionModel(modelName);
+      config.setVisionModel(visionModel);
       // The pin is honored even if the model isn't image-capable (the user may
       // know better than our metadata), but warn — the bridge sends images to it.
       const visionWarning = isImageCapable(matched)

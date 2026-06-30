@@ -612,6 +612,7 @@ describe('modelCommand', () => {
               id: 'qwen-vl-max',
               label: 'qwen-vl-max',
               authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://vision.example.com/v1',
             },
           ]),
           isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen-plus',
@@ -629,9 +630,11 @@ describe('modelCommand', () => {
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'visionModel',
-      'qwen-vl-max',
+      'qwen-vl-max\0https://vision.example.com/v1',
     );
-    expect(setVisionModel).toHaveBeenCalledWith('qwen-vl-max');
+    expect(setVisionModel).toHaveBeenCalledWith(
+      'qwen-vl-max\0https://vision.example.com/v1',
+    );
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
@@ -936,7 +939,9 @@ describe('modelCommand', () => {
           authType: AuthType.USE_OPENAI,
         }),
         settings: {
-          merged: { visionModel: 'qwen-vl-max' } as Record<string, unknown>,
+          merged: {
+            visionModel: 'qwen-vl-max\0https://vision.example.com/v1',
+          } as Record<string, unknown>,
         },
       },
     });

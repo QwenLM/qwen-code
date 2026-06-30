@@ -700,6 +700,31 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('uses the visionModel selector baseUrl to disambiguate duplicate same-provider vision models', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'openai:qwen3.7-plus\0https://token-plan.example.com/v1',
+      });
+      stubProvider(config, [
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          isVision: true,
+        },
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'openai:qwen3.7-plus',
+        baseUrl: 'https://token-plan.example.com/v1',
+      });
+    });
+
     it('falls back to auto-select on a malformed visionModel selector instead of throwing', () => {
       // 'openai:' is a known authType with no model id — resolveModelId throws,
       // and the guard must swallow it rather than take down every image request.

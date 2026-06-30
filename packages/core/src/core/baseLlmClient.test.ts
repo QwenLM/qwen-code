@@ -873,6 +873,47 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
     });
 
+    it('resolves same-id model selectors by baseUrl when provided', async () => {
+      const selectedBaseUrl = 'https://token-plan.example.com/v1';
+      getResolvedModel.mockImplementation(
+        (authType: string, model: string, baseUrl?: string) => {
+          if (
+            authType === AuthType.USE_OPENAI &&
+            model === 'qwen3.7-plus' &&
+            baseUrl === selectedBaseUrl
+          ) {
+            return {
+              id: 'qwen3.7-plus',
+              authType: AuthType.USE_OPENAI,
+              envKey: 'TOKEN_PLAN_KEY',
+              baseUrl: selectedBaseUrl,
+            };
+          }
+          return undefined;
+        },
+      );
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+      const resolved = await c.resolveForModel(
+        `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+      );
+
+      expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'qwen3.7-plus',
+        selectedBaseUrl,
+      );
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        'qwen3.7-plus',
+        expect.objectContaining({
+          authType: AuthType.USE_OPENAI,
+          baseUrl: selectedBaseUrl,
+        }),
+      );
+    });
+
     it('fails closed (throws) for an unregistered model when failClosed is set', async () => {
       getResolvedModel.mockReturnValue(undefined); // not registered anywhere
       const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);

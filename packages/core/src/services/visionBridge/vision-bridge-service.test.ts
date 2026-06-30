@@ -304,6 +304,26 @@ describe('runVisionBridge', () => {
     expect(mockSideQuery.mock.calls[0][1].model).toBe('qwen3.7-plus');
   });
 
+  it('passes the selected model baseUrl to the side query for endpoint disambiguation', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'auto-described' });
+    const configWithPinnedEndpoint = {
+      getDefaultVisionBridgeModel: () => ({
+        id: 'openai:qwen3.7-plus',
+        baseUrl: 'https://token-plan.example.com/v1',
+      }),
+    } as unknown as Config;
+
+    await runVisionBridge({
+      config: configWithPinnedEndpoint,
+      parts: ['look', image()],
+      signal: signal(),
+    });
+
+    expect(mockSideQuery.mock.calls[0][1].model).toBe(
+      'openai:qwen3.7-plus\0https://token-plan.example.com/v1',
+    );
+  });
+
   it('marks cancellation after dispatch as skipped with egress disclosure', async () => {
     const controller = new AbortController();
     mockSideQuery.mockImplementation(() => {
