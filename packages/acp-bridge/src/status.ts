@@ -1003,6 +1003,7 @@ export interface ServeExtensionEntry {
   id: string;
   name: string;
   displayName?: string;
+  description?: string;
   version: string;
   isActive: boolean;
   path: string;

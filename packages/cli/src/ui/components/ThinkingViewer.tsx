@@ -118,7 +118,10 @@ export const ThinkingViewer: FC<ThinkingViewerProps> = ({
       },
       [scheduleWheelFlush],
     ),
-    { isActive: true },
+    // Modal viewer renders on the alternate screen in non-VP mode (no native
+    // scrollback to protect), and owns the wheel for its own scrolling — opt
+    // out of the VP gate so it works in both VP and non-VP.
+    { isActive: true, bypassVpGate: true },
   );
 
   const title =
