@@ -3140,6 +3140,65 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps a removed queued prompt counted until its FIFO node drains', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async (p) => {
+            const text =
+              (p.prompt[0] as { text?: string } | undefined)?.text ?? '';
+            if (text === 'hold') {
+              await new Promise<void>((resolve) => {
+                releaseFirst = resolve;
+              });
+            }
+            return { stopReason: 'end_turn' };
+          },
+        }).channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        maxPendingPromptsPerSession: 2,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const active = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hold' }],
+      });
+      const queued = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'remove me' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+      const queuedId = bridge.getPendingPrompts(session.sessionId)[1]?.promptId;
+      expect(queuedId).toBeDefined();
+      expect(bridge.removePendingPrompt(session.sessionId, queuedId!)).toEqual({
+        removed: true,
+      });
+
+      expect(() =>
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'overflow before drain' }],
+        }),
+      ).toThrow(PromptQueueFullError);
+
+      await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+      releaseFirst!();
+      await active;
+      await expect(queued).rejects.toBeDefined();
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'after drain' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      await bridge.shutdown();
+    });
+
     it('does not count pre-aborted prompts against the pending cap', async () => {
       let releaseFirst: (() => void) | undefined;
       let calls = 0;

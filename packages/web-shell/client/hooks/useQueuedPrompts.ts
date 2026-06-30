@@ -189,7 +189,7 @@ export function useQueuedPrompts({
             p.serverState === 'submitting' &&
             p.text === serverPrompt.text,
         );
-        if (submittingMatches.length === 1) {
+        if (submittingMatches.length >= 1) {
           const submittingIndex = next.indexOf(submittingMatches[0]!);
           if (shouldHidePrompt) {
             next.splice(submittingIndex, 1);
@@ -200,9 +200,6 @@ export function useQueuedPrompts({
             serverPromptId: serverPrompt.promptId,
             serverState: serverPrompt.state,
           };
-          continue;
-        }
-        if (submittingMatches.length > 1) {
           continue;
         }
         if (shouldHidePrompt) {

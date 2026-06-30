@@ -461,6 +461,8 @@ const EN: Messages = {
   'queue.editing': 'Editing...',
   'queue.removing': 'Updating...',
   'queue.submittingDisabled': 'Submitting queued message...',
+  'queue.commandBlocked':
+    "Slash commands can't be queued while a turn is running.",
   'queue.shellBlocked':
     "Shell commands can't be queued while a turn is running.",
   'queue.queueFailed': 'Failed to queue message',
@@ -1659,11 +1661,12 @@ const ZH: Messages = {
   'queue.editTip': '移出队列并将内容放回输入框',
   'queue.insertTip': '将信息插入当前会话，下次模型调用生效。',
   'queue.inserted': '已插入，下次模型调用生效。',
-  'queue.insertCommandDisabled': '命令无法插入当前回合，会在回合结束后执行。',
+  'queue.insertCommandDisabled': '命令无法插入当前回合。',
   'queue.submitting': '提交中...',
   'queue.editing': '编辑中...',
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
+  'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.shellBlocked': '当前回合运行时，Shell 命令不能进入排队。',
   'queue.queueFailed': '排队消息失败',
   'queue.insertFailed': '插入排队消息失败',

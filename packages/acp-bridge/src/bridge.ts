@@ -4688,13 +4688,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       // Remove from the list immediately so the API reflects the change.
       entry.pendingPromptList.splice(idx, 1);
-      // Queued prompts have not reached the FIFO head, so removing one can
-      // free its admission slot immediately. Running prompts still occupy
-      // the FIFO head until the agent settles the turn after cancel, so their
-      // slot is released by the original `result.finally()` path.
-      if (target.state === 'queued') {
-        target.releaseSlot();
-      }
+      // Keep the admission slot until this prompt's FIFO node reaches the head
+      // and settles through the original result.finally() path. Otherwise a
+      // client could enqueue/delete queued prompts repeatedly while one turn is
+      // running and bypass maxPendingPromptsPerSession with hidden backlog nodes.
       try {
         entry.events.publish({
           type: 'pending_prompt_completed',

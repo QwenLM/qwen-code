@@ -1456,9 +1456,9 @@ export function App({
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
   }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
 
-  // Echo a local command into the transcript, or defer it to the queue when a
-  // turn is streaming so the injected user row can't split the active turn (see
-  // appendOrDeferLocalUserMessage). Returns true when deferred — callers must
+  // Echo a local command into the transcript, or suppress it while a turn is
+  // streaming so the injected user row can't split the active turn (see
+  // appendOrDeferLocalUserMessage). Returns true when suppressed — callers must
   // then stop and not run the command's inline side effects.
   const echoOrDeferLocalCommand = useCallback(
     (text: string, images?: PromptImage[]): boolean =>
@@ -1468,11 +1468,15 @@ export function App({
         images,
         {
           append: (value: string) => store.appendLocalUserMessage(value),
-          enqueue: enqueuePrompt,
         },
       ),
-    [enqueuePrompt, store],
+    [store],
   );
+
+  const blockLocalCommandDuringTurn = useCallback((): false => {
+    pushToast('error', t('queue.commandBlocked'));
+    return false;
+  }, [pushToast, t]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -1560,7 +1564,8 @@ export function App({
         ]);
       };
       if (streamingStateRef.current !== 'idle') {
-        enqueuePrompt(command, undefined, refreshSettings);
+        handleLanguageChange(previousLanguage);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(command)
@@ -1571,7 +1576,7 @@ export function App({
         });
     },
     [
-      enqueuePrompt,
+      blockLocalCommandDuringTurn,
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
@@ -2058,7 +2063,7 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             sendPrompt(text, images).catch((error: unknown) =>
               reportError(error, 'Failed to send hidden slash command'),
             );
@@ -2077,7 +2082,7 @@ export function App({
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
               }
-              return enqueuePrompt(text, images);
+              return blockLocalCommandDuringTurn();
             }
             return handleGoalSlashCommand(text, images);
           }
@@ -2179,13 +2184,13 @@ export function App({
             return true;
           }
           if (cmd === 'branch') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const branchName = text.slice(match[0].length).trim();
             branchCurrentSession(branchName || undefined);
             return true;
           }
           if (cmd === 'fork') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
               pushToast('error', t('fork.empty'));
@@ -2222,7 +2227,7 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --fast'),
               );
@@ -2242,7 +2247,7 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--voice ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --voice'),
               );
@@ -2263,7 +2268,7 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const prompt = text.slice(match[0].length).trim();
             sessionActions
               .setApprovalMode('plan')
@@ -2349,7 +2354,7 @@ export function App({
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /skills command'),
               );
@@ -2481,9 +2486,8 @@ export function App({
             }
             if (subCommand === 'install') {
               // Install echoes into the transcript (and its error/usage replies
-              // do too); defer the whole command mid-turn so it can't split the
-              // active turn. It re-dispatches here once the turn settles.
-              if (promptBlocked) return enqueuePrompt(text, images);
+              // do too); block it mid-turn so it can't split the active turn.
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -2600,7 +2604,7 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /rename command'),
               );
@@ -2821,6 +2825,7 @@ export function App({
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
+      blockLocalCommandDuringTurn,
       openTasksPanel,
       hiddenCommands,
       pushToast,
@@ -3064,14 +3069,14 @@ export function App({
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --fast ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError],
+    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError],
   );
 
   // Persist via the prompt channel (like `/model --fast`): the daemon's command
@@ -3081,14 +3086,14 @@ export function App({
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --voice ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
         reportError(error, t('model.setVoice'));
       });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError, t],
+    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError, t],
   );
 
   const commands = useMemo(() => {
