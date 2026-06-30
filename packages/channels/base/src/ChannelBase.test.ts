@@ -4917,6 +4917,7 @@ describe('ChannelBase', () => {
             createdBy: 'Alice',
             createdAt: '2026-06-30T01:00:00.000Z',
             consecutiveFailures: 0,
+            runCount: 0,
           },
           { timeoutMs: 1000 },
         );
@@ -4982,6 +4983,7 @@ describe('ChannelBase', () => {
           createdBy: 'Bob',
           createdAt: '2026-06-30T01:00:00.000Z',
           consecutiveFailures: 0,
+          runCount: 0,
         }),
       ).rejects.toThrow('no longer authorized');
 
@@ -5012,6 +5014,7 @@ describe('ChannelBase', () => {
           createdBy: 'User 1',
           createdAt: '2026-06-30T01:00:00.000Z',
           consecutiveFailures: 0,
+          runCount: 0,
         }),
       ).rejects.toThrow(
         'does not support proactive scheduled messages for this chat target',
@@ -5051,6 +5054,7 @@ describe('ChannelBase', () => {
         createdBy: 'User 1',
         createdAt: '2026-06-30T01:00:00.000Z',
         consecutiveFailures: 0,
+        runCount: 0,
       });
       await vi.waitFor(() => {
         expect(bridge.prompt).toHaveBeenCalledTimes(1);
