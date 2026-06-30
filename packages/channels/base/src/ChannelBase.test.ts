@@ -1972,6 +1972,49 @@ describe('ChannelBase', () => {
       expect(promptText).toContain('second');
     });
 
+    it('lets a queued turn claim context after an earlier queued read fails', async () => {
+      let rejectMemory: (error: Error) => void = () => {};
+      const firstRead = new Promise<string>((_resolve, reject) => {
+        rejectMemory = reject;
+      });
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockReturnValueOnce(firstRead)
+          .mockResolvedValueOnce('Use staging by default.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      const first = ch.handleInbound(
+        envelope({ text: 'first', senderId: 'alice' }),
+      );
+      await vi.waitFor(() =>
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+      );
+      const second = ch.handleInbound(
+        envelope({ text: 'second', senderId: 'alice' }),
+      );
+
+      rejectMemory(new Error('memory boom'));
+      await expect(first).rejects.toThrow('memory boom');
+      await second;
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(2);
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toContain(
+        'Channel memory for this chat:\nUse staging by default.',
+      );
+      expect(promptText).toContain('Use repo conventions.');
+      expect(promptText).toContain('second');
+    });
+
     it('/remember-channel invalidates current session context after append', async () => {
       let memory = 'old memory';
       let reads = 0;

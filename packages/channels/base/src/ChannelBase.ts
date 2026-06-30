@@ -1231,7 +1231,7 @@ export abstract class ChannelBase {
       }
     }
 
-    const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
+    let shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
     if (shouldPrependSessionContext) {
       this.instructedSessions.add(sessionId);
     }
@@ -1258,6 +1258,13 @@ export abstract class ChannelBase {
       // captured session is cleared, so don't run the prompt against it.
       if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
         return;
+      }
+      if (
+        !shouldPrependSessionContext &&
+        !this.instructedSessions.has(sessionId)
+      ) {
+        shouldPrependSessionContext = true;
+        this.instructedSessions.add(sessionId);
       }
       if (shouldPrependSessionContext) {
         try {
