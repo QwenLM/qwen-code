@@ -92,6 +92,49 @@ function isDeepSeekAnthropicProvider(
   return model.includes('deepseek');
 }
 
+type ClaudeModelFamily = 'opus' | 'sonnet' | 'haiku' | 'fable' | 'mythos';
+
+interface ParsedClaudeModelVersion {
+  family: ClaudeModelFamily;
+  major: number;
+  minor: number;
+}
+
+/**
+ * Parse a Claude model id into `{ family, major, minor }`, or `null` for
+ * non-Claude / unversioned ids. The single source of truth for the capability
+ * gating below — both `anthropicSupportedEffortTiers` and
+ * `modelSupportsAdaptiveThinking` consume this so the family list and the
+ * version-parsing rules can't drift apart when Anthropic ships a new family.
+ *
+ * The regex is unanchored so reseller-prefixed ids (`bedrock/…`, `vertex_ai/…`,
+ * `idealab:…`) match the same Anthropic models on the wire. The minor-version
+ * group is capped at one or two digits with a trailing `(?!\d)` so an 8-digit
+ * date suffix (`claude-opus-4-20250514` = Opus 4.0) is not mis-parsed as a giant
+ * minor version — otherwise `minor` would be `20250514` (or, with a bare 1–2
+ * digit cap, the greedy `20`), wrongly clearing `atLeast(4, 6)` / `atLeast(4, 7)`
+ * gates the model doesn't support (a server 400). Dated ids that do carry a
+ * minor, like `claude-opus-4-7-20251101`, still resolve to minor `7`; a bare
+ * major (`claude-opus-5`) resolves to minor `0`.
+ */
+function parseClaudeModelVersion(
+  model: string,
+): ParsedClaudeModelVersion | null {
+  const match = model
+    .toLowerCase()
+    .match(
+      /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?/,
+    );
+  if (!match) {
+    return null;
+  }
+  return {
+    family: match[1] as ClaudeModelFamily,
+    major: Number.parseInt(match[2], 10),
+    minor: match[3] ? Number.parseInt(match[3], 10) : 0,
+  };
+}
+
 /**
  * The reasoning-effort tiers a real Anthropic model accepts on
  * `output_config.effort`. Every effort-capable model takes low/medium/high; the
@@ -100,32 +143,17 @@ function isDeepSeekAnthropicProvider(
  *   - `max`:   Opus/Sonnet 4.6+ and every 5.x family (Fable 5, Mythos 5, …).
  *   - `xhigh`: Opus 4.7+ and every 5.x family (NOT Sonnet 4.6 / Opus 4.6).
  *
- * The version regex is unanchored so reseller-prefixed ids (`bedrock/…`,
- * `vertex_ai/…`) match. Unknown/unversioned ids fall back to low/medium/high so
- * we never send a tier the server might 400 on. Effort levels above what the
- * model supports are clamped by the caller via clampReasoningEffort.
- *
- * The minor-version group is capped at one or two digits and a trailing
- * `(?!\d)` so an 8-digit date suffix (`claude-opus-4-20250514` = Opus 4.0) is
- * not mis-parsed as a minor version — otherwise `minor` would be `20250514`
- * (or, with a bare 1–2 digit cap, the greedy `20`), making `atLeast(4, 6)` /
- * `atLeast(4, 7)` true and wrongly granting Opus 4.0 the `xhigh`/`max` tiers it
- * does not support (a server 400). Dated ids that do carry a minor, like
- * `claude-opus-4-7-20251101`, still resolve to minor `7`.
+ * Unknown/unversioned ids fall back to low/medium/high so we never send a tier
+ * the server might 400 on. Effort levels above what the model supports are
+ * clamped by the caller via clampReasoningEffort.
  */
 function anthropicSupportedEffortTiers(model: string): ReasoningEffort[] {
   const tiers: ReasoningEffort[] = ['low', 'medium', 'high'];
-  const match = model
-    .toLowerCase()
-    .match(
-      /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?/,
-    );
-  if (!match) {
+  const parsed = parseClaudeModelVersion(model);
+  if (!parsed) {
     return tiers;
   }
-  const family = match[1];
-  const major = Number.parseInt(match[2], 10);
-  const minor = match[3] ? Number.parseInt(match[3], 10) : 0;
+  const { family, major, minor } = parsed;
   const atLeast = (maj: number, min: number) =>
     major > maj || (major === maj && minor >= min);
 
@@ -763,31 +791,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
   /**
    * Check if the current model supports adaptive thinking (type: 'adaptive').
    * Claude 4.6+ models require adaptive thinking; older models use the
-   * budget-based config. Uses numeric major/minor comparison rather than a
-   * single-digit character class so that future families (haiku, opus-4-10,
-   * opus-5-1, …) are recognized instead of silently falling back to the
-   * budget path and tripping HTTP 400 with `budget_tokens` they don't
-   * accept.
-   *
-   * The regex is intentionally unanchored so reseller-prefixed model names
-   * also match (`bedrock/claude-opus-4-7`, `vertex_ai/claude-sonnet-4-6@…`,
-   * `idealab:claude-opus-4-6`, etc.) — those route to the same Anthropic
-   * models on the wire and need the same thinking shape. Do not tighten to
-   * `^claude-` without also covering those naming conventions.
+   * budget-based config. Shares `parseClaudeModelVersion` with
+   * `anthropicSupportedEffortTiers` so the family list and the date-suffix guard
+   * stay in lockstep — a model parsed for effort gating is parsed identically
+   * here for the thinking shape.
    */
   private modelSupportsAdaptiveThinking(): boolean {
-    const model = (this.contentGeneratorConfig.model || '').toLowerCase();
-    // Mirror anthropicSupportedEffortTiers: capture an optional 1–2 digit minor
-    // with a trailing (?!\d) guard so an 8-digit date suffix
-    // (claude-opus-4-20250514 = Opus 4.0) is not mis-parsed as a giant minor
-    // version and wrongly granted adaptive thinking (server 400). Also covers
-    // the fable/mythos families and a bare major with no minor (claude-opus-5).
-    const match = model.match(
-      /claude-(?:opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?/,
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
     );
-    if (!match) return false;
-    const major = Number.parseInt(match[1], 10);
-    const minor = match[2] ? Number.parseInt(match[2], 10) : 0;
+    if (!parsed) return false;
+    const { major, minor } = parsed;
     return major > 4 || (major === 4 && minor >= 6);
   }
 
