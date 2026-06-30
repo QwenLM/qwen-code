@@ -34,7 +34,10 @@ type MessageListHandle = import('./MessageList').MessageListHandle;
 // jsdom provides neither ResizeObserver (MessageList's resize guard) nor a real
 // scrollIntoView (the non-virtual scroll path) — stub both.
 class ResizeObserverStub {
-  observe() {}
+  constructor(private readonly callback: ResizeObserverCallback) {}
+  observe() {
+    this.callback([], this as unknown as ResizeObserver);
+  }
   unobserve() {}
   disconnect() {}
 }
@@ -63,6 +66,13 @@ const userMsg = (id: string): UserMessage => ({
   id,
   role: 'user',
   content: 'q',
+});
+const userShellMsg = (
+  id: string,
+): Extract<Message, { role: 'user_shell' }> => ({
+  id,
+  role: 'user_shell',
+  command: 'npm test',
 });
 const toolMsg = (id: string): ToolGroupMessage => ({
   id,
@@ -253,6 +263,33 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('[data-testid="turn-timeline-row"]')).toBeNull();
   });
 
+  it('hides the session timeline when the message list is narrow', async () => {
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue({
+        width: 1000,
+        height: 600,
+        top: 0,
+        right: 1000,
+        bottom: 600,
+        left: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
   it('scrollToMessage auto-expands the collapsed turn that holds the target', () => {
     const ref = createRef<MessageListHandle>();
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')], ref);
@@ -284,6 +321,29 @@ describe('MessageList — turn collapse (DOM)', () => {
     mount([userMsg('u1')]);
 
     expect(scrollTo).toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
+  it('does not treat a user_shell row as a new chat prompt', () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+
+    mount([userShellMsg('shell')]);
+
+    expect(scrollTo).not.toHaveBeenCalledWith({
       top: 1200,
       behavior: 'smooth',
     });

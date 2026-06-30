@@ -203,8 +203,6 @@
 }
 
 .contentHasMessages {
-  container-name: message-content;
-  container-type: inline-size;
   flex: 1 1 auto;
 }
 

@@ -63,7 +63,15 @@ interface MessageListProps {
 function getLastUserMessageId(messages: Message[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (isTurnStartMessage(msg)) return msg.id;
+    if (msg?.role === 'user') return msg.id;
+  }
+  return null;
+}
+
+function getLastTurnStartMessageId(messages: Message[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg && isTurnStartMessage(msg)) return msg.id;
   }
   return null;
 }
@@ -1362,14 +1370,16 @@ const SessionTimeline = memo(function SessionTimeline({
   entries,
   currentTurnId,
   currentRange,
+  hidden,
   onSelect,
 }: {
   entries: readonly SessionTimelineEntry[];
   currentTurnId: string | null;
   currentRange: SessionTimelineRange | null;
+  hidden: boolean;
   onSelect: (turnId: string) => void;
 }) {
-  if (entries.length === 0) return null;
+  if (hidden || entries.length === 0) return null;
 
   return (
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
@@ -1487,7 +1497,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       [sessionTimelineEntries],
     );
     const fallbackCurrentTimelineTurnId = useMemo(
-      () => getLastUserMessageId(mergedMessages),
+      () => getLastTurnStartMessageId(mergedMessages),
       [mergedMessages],
     );
     const [sessionTimelineRange, setSessionTimelineRange] =
@@ -1577,6 +1587,25 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     );
 
     const containerRef = useRef<HTMLDivElement>(null);
+    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
+      useState(true);
+
+    useEffect(() => {
+      const el = containerRef.current;
+      if (!el || typeof ResizeObserver === 'undefined') return;
+
+      const updateVisibility = () => {
+        const width = el.getBoundingClientRect().width;
+        if (width > 0) {
+          setIsSessionTimelineVisible(width >= 1160);
+        }
+      };
+
+      updateVisibility();
+      const observer = new ResizeObserver(updateVisibility);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }, []);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -1862,13 +1891,20 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         setTimeout(() => {
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
+            scheduleSessionTimelineRangeUpdate();
           }
         }, 150);
         const key = getItemKey(rowIndex);
         setFlashKey(null);
         requestAnimationFrame(() => setFlashKey(key));
       },
-      [useVirtualScroll, virtualizer, getItemKey, setShouldFollow],
+      [
+        useVirtualScroll,
+        virtualizer,
+        getItemKey,
+        setShouldFollow,
+        scheduleSessionTimelineRangeUpdate,
+      ],
     );
 
     // A scroll target that currently sits inside a collapsed turn: expand the
@@ -2224,6 +2260,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}
           currentRange={sessionTimelineRange}
+          hidden={!isSessionTimelineVisible}
           onSelect={scrollToMessage}
         />
         {useVirtualScroll ? (

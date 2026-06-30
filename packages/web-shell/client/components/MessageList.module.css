@@ -293,12 +293,6 @@
   }
 }
 
-@container message-content (width < 1160px) {
-  .sessionTimelinePanel {
-    display: none;
-  }
-}
-
 @keyframes row-flash {
   0%,
   30% {
