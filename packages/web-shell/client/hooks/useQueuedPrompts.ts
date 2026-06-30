@@ -786,20 +786,29 @@ export function useQueuedPrompts({
       if (removed) {
         restoreTextToEditor(target.text, target.images, target.sessionId);
       }
-    })();
+    })().catch((error: unknown) => {
+      reportError(error, t('queue.editFailed'));
+    });
     return true;
   }, [
     popQueuedPromptForEdit,
     removeServerPromptForAction,
+    reportError,
     restoreTextToEditor,
     t,
   ]);
 
   const clearQueuedPrompts = useCallback((): boolean => {
     if (queuedPromptsRef.current.length === 0) return false;
+    const submittingPrompts = queuedPromptsRef.current.filter(
+      (prompt) => prompt.serverState === 'submitting',
+    );
     const clearablePrompts = queuedPromptsRef.current.filter(
       (prompt) => prompt.serverState !== 'submitting',
     );
+    for (const prompt of [...submittingPrompts].reverse()) {
+      restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
+    }
     for (const controller of submitAbortControllersRef.current) {
       controller.abort();
     }
@@ -879,7 +888,14 @@ export function useQueuedPrompts({
       store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
     })();
     return true;
-  }, [refreshPendingPrompts, reportError, store, t, sessionActions]);
+  }, [
+    refreshPendingPrompts,
+    reportError,
+    restoreTextToEditor,
+    store,
+    t,
+    sessionActions,
+  ]);
 
   const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
     useDaemonMidTurnInjected();

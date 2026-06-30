@@ -450,6 +450,7 @@ const EN: Messages = {
   'queue.delete': 'Delete',
   'queue.edit': 'Edit',
   'queue.insert': 'Insert',
+  'queue.cleared': 'Queue cleared.',
   'queue.deleteTip': 'Remove from queue',
   'queue.editTip': 'Remove from queue and edit again',
   'queue.insertTip':
@@ -1657,6 +1658,7 @@ const ZH: Messages = {
   'queue.delete': '删除',
   'queue.edit': '编辑',
   'queue.insert': '插入',
+  'queue.cleared': '队列已清空。',
   'queue.deleteTip': '移出队列',
   'queue.editTip': '移出队列并将内容放回输入框',
   'queue.insertTip': '将信息插入当前会话，下次模型调用生效。',

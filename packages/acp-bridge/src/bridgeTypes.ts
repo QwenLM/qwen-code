@@ -273,13 +273,6 @@ export interface PendingPromptEntry {
   text: string;
   abortController: AbortController;
   state: 'queued' | 'running';
-  /**
-   * Idempotent callback that decrements `pendingPromptCount` exactly once.
-   * Set by `sendPrompt` after creating the entry so that `removePendingPrompt`
-   * can release the slot immediately instead of waiting for the FIFO tail's
-   * `result.finally()`.
-   */
-  releaseSlot: () => void;
 }
 
 /**

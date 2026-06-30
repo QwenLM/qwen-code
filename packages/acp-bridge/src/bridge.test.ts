@@ -3585,6 +3585,7 @@ describe('createAcpSessionBridge', () => {
       resolveFirst!();
       await p1;
       await expect(p2).rejects.toBeDefined();
+      expect(handle.agent.cancelCalls).toHaveLength(0);
       await bridge.shutdown();
     });
 

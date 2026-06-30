@@ -2943,7 +2943,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         text: extractPromptText(req.prompt),
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
-        releaseSlot: releasePromptSlot,
       };
       entry.pendingPromptList.push(pendingEntry);
       if (isQueued) {
@@ -3154,6 +3153,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .then(
                     () => {},
                     (err) => {
+                      if (
+                        err instanceof DOMException &&
+                        err.name === 'AbortError' &&
+                        pendingEntry.state === 'queued'
+                      ) {
+                        return;
+                      }
                       writeStderrLine(
                         `sendPrompt: forward failed for session ${sessionId}: ${extractErrorMessage(err)}`,
                       );
