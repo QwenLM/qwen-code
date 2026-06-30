@@ -52,6 +52,8 @@ interface ChatEditorProps {
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
   isRunning?: boolean;
+  /** First Esc armed a cancel — the send button shows an "Esc to stop" hint. */
+  cancelArmed?: boolean;
   disabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
@@ -849,6 +851,7 @@ export const ChatEditor = memo(
       onToggleShortcuts,
       onCancel,
       isRunning = false,
+      cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
       commands,
@@ -856,7 +859,6 @@ export const ChatEditor = memo(
       slashCommandCategoryOrder,
       queuedMessages = [],
       onPopQueuedMessages,
-      onClearQueuedMessages,
       currentMode = 'default',
       currentModel = '',
       chatWidthMode = '1000',
@@ -888,7 +890,6 @@ export const ChatEditor = memo(
       slashCommandCategoryOrder,
       queuedMessages,
       onPopQueuedMessages,
-      onClearQueuedMessages,
       currentMode,
       onFocusFooter,
       dialogOpen,
@@ -1573,6 +1574,13 @@ export const ChatEditor = memo(
                 >
                   {showCancelButton ? <StopIcon /> : <SendIcon />}
                 </button>
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className={styles.srOnly}
+                >
+                  {isRunning && cancelArmed ? t('stream.cancelArmed') : ''}
+                </span>
               </div>
             </div>
           </div>

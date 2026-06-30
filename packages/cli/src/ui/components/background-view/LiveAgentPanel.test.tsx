@@ -292,13 +292,18 @@ describe('<LiveAgentPanel />', () => {
           status: 'completed',
           startTime: -12_000,
           endTime: 0,
-          stats: { totalTokens: 2400, toolUses: 5, durationMs: 12_000 },
+          stats: {
+            totalTokens: 2400,
+            outputTokens: 800,
+            toolUses: 5,
+            durationMs: 12_000,
+          },
         }),
       ],
     });
     const frame = lastFrame() ?? '';
     expect(frame).toContain('12s');
-    expect(frame).toContain('2.4k tokens');
+    expect(frame).toContain('800 tokens');
   });
 
   it('renders paused agents with the paused glyph', () => {

@@ -3905,7 +3905,9 @@ class QwenAgent implements Agent {
           : currentModelId || undefined;
       const providers = new Map<string, ServeWorkspaceProviderStatus>();
 
-      for (const model of config.getAllConfiguredModels()) {
+      for (const model of config
+        .getAllConfiguredModels()
+        .filter(isMainSelectableModel)) {
         const authType = String(model.authType);
         let provider = providers.get(authType);
         if (!provider) {
@@ -4769,6 +4771,9 @@ class QwenAgent implements Agent {
             id: ext.id,
             name: ext.name,
             displayName: ext.displayName,
+            ...(ext.config.description
+              ? { description: ext.config.description }
+              : {}),
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
@@ -7688,7 +7693,9 @@ class QwenAgent implements Agent {
       ''
     ).trim();
     const currentAuthType = config.getAuthType();
-    const allConfiguredModels = config.getAllConfiguredModels();
+    const allConfiguredModels = config
+      .getAllConfiguredModels()
+      .filter(isMainSelectableModel);
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = activeRuntimeSnapshot
@@ -7737,7 +7744,9 @@ class QwenAgent implements Agent {
 
   private buildConfigOptions(config: Config): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
-    const allConfiguredModels = config.getAllConfiguredModels();
+    const allConfiguredModels = config
+      .getAllConfiguredModels()
+      .filter(isMainSelectableModel);
     const rawCurrentModelId = (config.getModel() || '').trim();
     const currentAuthType = config.getAuthType?.();
 
@@ -7797,6 +7806,13 @@ class QwenAgent implements Agent {
     if (!baseModelId) return baseModelId;
     return authType ? formatAcpModelId(baseModelId, authType) : baseModelId;
   }
+}
+
+function isMainSelectableModel(model: {
+  fastOnly?: boolean;
+  voiceOnly?: boolean;
+}): boolean {
+  return model.fastOnly !== true && model.voiceOnly !== true;
 }
 
 function diffSettingsKeys(

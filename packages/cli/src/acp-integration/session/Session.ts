@@ -160,6 +160,12 @@ import {
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  matchExtensionByRef,
+  parseExtensionRef,
+} from '../../utils/extension-mention.js';
 
 // Import modular session components
 import type {
@@ -555,6 +561,22 @@ function isUserPromptRecord(record: ChatRecord): boolean {
   );
 }
 
+const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
+
+function collectExtensionMentionRefs(
+  text: string,
+  mentions: Map<string, string>,
+): void {
+  for (const match of text.matchAll(AT_TOKEN_RE)) {
+    const pathName = match[1];
+    if (!pathName) continue;
+    const ref = parseExtensionRef(pathName);
+    if (ref) {
+      mentions.set(ref.name.toLowerCase(), ref.name);
+    }
+  }
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -598,6 +620,13 @@ export async function buildAvailableCommandsSnapshot(
         supportedModes: getEffectiveSupportedModes(cmd),
         subcommands: getCommandSubcommandNames(cmd),
         modelInvocable: cmd.modelInvocable === true,
+        // Carry aliases so a channel consumer (which only sees the wire snapshot,
+        // not the command registry) can recognize an aliased command and avoid
+        // tagging it. _meta is ACP's extension point; omitted when there are none
+        // so command entries without aliases stay byte-identical on the wire.
+        ...(cmd.altNames && cmd.altNames.length > 0
+          ? { altNames: cmd.altNames }
+          : {}),
       },
     };
   });
@@ -4995,10 +5024,12 @@ export class Session implements SessionContext {
     const FILE_URI_SCHEME = 'file://';
 
     const embeddedContext: EmbeddedResourceResource[] = [];
+    const extensionMentions = new Map<string, string>();
 
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
+          collectExtensionMentionRefs(part.text, extensionMentions);
           return { text: part.text };
         case 'image':
         case 'audio':
@@ -5033,9 +5064,21 @@ export class Session implements SessionContext {
     });
 
     const atPathCommandParts = parts.filter((part) => 'fileData' in part);
+    const extensionParts = await this.#resolveExtensionMentionParts(
+      extensionMentions,
+      abortSignal,
+    );
+
+    if (
+      atPathCommandParts.length === 0 &&
+      embeddedContext.length === 0 &&
+      extensionParts.length === 0
+    ) {
+      return parts;
+    }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
-      return parts;
+      return [...parts, ...extensionParts];
     }
 
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
@@ -5078,6 +5121,7 @@ export class Session implements SessionContext {
 
       // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
+      processedQueryParts.push(...extensionParts);
 
       // Then add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
@@ -5089,6 +5133,7 @@ export class Session implements SessionContext {
       }
     } else {
       processedQueryParts.push({ text: initialQueryText.trim() });
+      processedQueryParts.push(...extensionParts);
     }
 
     // Process embedded context from resource blocks
@@ -5113,6 +5158,39 @@ export class Session implements SessionContext {
     }
 
     return processedQueryParts;
+  }
+
+  async #resolveExtensionMentionParts(
+    extensionMentions: Map<string, string>,
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    if (extensionMentions.size === 0) return [];
+    const activeExtensions = this.config.getActiveExtensions?.() ?? [];
+    if (activeExtensions.length === 0) return [];
+
+    const extensionParts: Part[] = [];
+    const resolvedExtensionNames = new Set<string>();
+    let remainingBudget = EXTENSION_CONTEXT_BUDGET;
+    for (const name of extensionMentions.values()) {
+      const extension = matchExtensionByRef(name, activeExtensions);
+      if (!extension) {
+        this.debug(
+          `Extension "${name}" not found among active extensions. ` +
+            `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+        );
+        continue;
+      }
+      if (resolvedExtensionNames.has(extension.name)) continue;
+      resolvedExtensionNames.add(extension.name);
+      const context = await buildExtensionMentionContext(extension, {
+        remainingBudget,
+        signal: abortSignal,
+        onDebugMessage: (message) => this.debug(message),
+      });
+      remainingBudget = context.remainingBudget;
+      extensionParts.push({ text: context.text });
+    }
+    return extensionParts;
   }
 
   debug(msg: string): void {

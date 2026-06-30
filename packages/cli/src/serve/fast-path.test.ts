@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,7 +17,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
+import * as ts from 'typescript';
 import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 
 import {
@@ -66,6 +68,119 @@ const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
 const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
 const originalCwd = process.cwd();
+const cliPackageRoot = process.cwd();
+
+interface StaticSourceGraph {
+  localFiles: Set<string>;
+  externalValueImports: Set<string>;
+  unresolvedLocalImports: string[];
+}
+
+function normalizePathForTest(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
+
+function moduleSpecifierText(
+  specifier: ts.Expression | undefined,
+): string | undefined {
+  if (!specifier || !ts.isStringLiteral(specifier)) return undefined;
+  return specifier.text;
+}
+
+function importDeclarationHasRuntimeValue(node: ts.ImportDeclaration): boolean {
+  const clause = node.importClause;
+  if (!clause) return true;
+  if (clause.isTypeOnly) return false;
+  if (clause.name) return true;
+  const bindings = clause.namedBindings;
+  if (!bindings) return false;
+  if (ts.isNamespaceImport(bindings)) return true;
+  if (bindings.elements.length === 0) return true;
+  return bindings.elements.some((element) => !element.isTypeOnly);
+}
+
+function exportDeclarationHasRuntimeValue(node: ts.ExportDeclaration): boolean {
+  if (node.isTypeOnly) return false;
+  const clause = node.exportClause;
+  if (!clause) return true;
+  if (ts.isNamespaceExport(clause)) return true;
+  if (clause.elements.length === 0) return true;
+  return clause.elements.some((element) => !element.isTypeOnly);
+}
+
+function resolveLocalSourceImport(
+  importer: string,
+  specifier: string,
+): string | undefined {
+  const basePath = resolve(dirname(importer), specifier);
+  const candidates = specifier.endsWith('.js')
+    ? [`${basePath.slice(0, -3)}.ts`, `${basePath.slice(0, -3)}.tsx`]
+    : [
+        `${basePath}.ts`,
+        `${basePath}.tsx`,
+        join(basePath, 'index.ts'),
+        join(basePath, 'index.tsx'),
+      ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function collectStaticSourceGraph(entryFile: string): StaticSourceGraph {
+  const visited = new Set<string>();
+  const localFiles = new Set<string>();
+  const externalValueImports = new Set<string>();
+  const unresolvedLocalImports: string[] = [];
+
+  function visit(filePath: string): void {
+    const normalizedFilePath = resolve(filePath);
+    if (visited.has(normalizedFilePath)) return;
+    visited.add(normalizedFilePath);
+    localFiles.add(
+      normalizePathForTest(relative(cliPackageRoot, normalizedFilePath)),
+    );
+
+    const sourceText = readFileSync(normalizedFilePath, 'utf8');
+    const sourceFile = ts.createSourceFile(
+      normalizedFilePath,
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      normalizedFilePath.endsWith('.tsx')
+        ? ts.ScriptKind.TSX
+        : ts.ScriptKind.TS,
+    );
+
+    for (const statement of sourceFile.statements) {
+      let specifier: string | undefined;
+      let hasRuntimeValue = false;
+      if (ts.isImportDeclaration(statement)) {
+        specifier = moduleSpecifierText(statement.moduleSpecifier);
+        hasRuntimeValue = importDeclarationHasRuntimeValue(statement);
+      } else if (ts.isExportDeclaration(statement)) {
+        specifier = moduleSpecifierText(statement.moduleSpecifier);
+        hasRuntimeValue = exportDeclarationHasRuntimeValue(statement);
+      }
+      if (!specifier || !hasRuntimeValue) continue;
+      if (!specifier.startsWith('.')) {
+        externalValueImports.add(specifier);
+        continue;
+      }
+      const resolvedImport = resolveLocalSourceImport(
+        normalizedFilePath,
+        specifier,
+      );
+      if (!resolvedImport) {
+        unresolvedLocalImports.push(
+          `${normalizePathForTest(relative(cliPackageRoot, normalizedFilePath))} -> ${specifier}`,
+        );
+        continue;
+      }
+      visit(resolvedImport);
+    }
+  }
+
+  visit(entryFile);
+  return { localFiles, externalValueImports, unresolvedLocalImports };
+}
 
 function useTempQwenHome(): string {
   tempQwenHome = realpathSync(
@@ -296,6 +411,53 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+  });
+
+  it('keeps request helpers from value-importing the ACP compatibility shim', () => {
+    const requestHelpersSource = readFileSync(
+      'src/serve/server/request-helpers.ts',
+      'utf8',
+    );
+
+    expect(requestHelpersSource).not.toMatch(
+      /from ['"]\.\.\/acp-session-bridge\.js['"]/,
+    );
+    expect(requestHelpersSource).toContain(
+      "import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';",
+    );
+    expect(requestHelpersSource).toContain(
+      "import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';",
+    );
+  });
+
+  it('keeps the runQwenServe static source graph free of ACP runtime modules', () => {
+    const graph = collectStaticSourceGraph(
+      resolve(cliPackageRoot, 'src/serve/run-qwen-serve.ts'),
+    );
+
+    expect(graph.unresolvedLocalImports).toEqual([]);
+    const forbiddenLocalFiles = [...graph.localFiles].filter(
+      (filePath) => filePath === 'src/serve/acp-session-bridge.ts',
+    );
+    expect(
+      forbiddenLocalFiles,
+      `Unexpected static source graph files:\n${forbiddenLocalFiles.join('\n')}`,
+    ).toEqual([]);
+
+    const forbiddenExternalImports = [
+      '@qwen-code/acp-bridge',
+      '@qwen-code/acp-bridge/bridge',
+      '@qwen-code/acp-bridge/spawnChannel',
+      '@qwen-code/acp-bridge/bridgeClient',
+      '@qwen-code/acp-bridge/bridgeErrors',
+    ];
+    const forbiddenImports = [...graph.externalValueImports].filter(
+      (specifier) => forbiddenExternalImports.includes(specifier),
+    );
+    expect(
+      forbiddenImports,
+      `Unexpected ACP runtime imports:\n${forbiddenImports.join('\n')}`,
+    ).toEqual([]);
   });
 });
 
