@@ -1,5 +1,6 @@
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -75,7 +76,6 @@ export class GroupHistoryStore {
     const state = loaded.entries;
     const limits = loaded.limits;
     const current = state.get(key) ?? [];
-    const shouldCompactForLimit = current.length >= normalizedLimit;
     current.push(entry);
     if (current.length > normalizedLimit) {
       current.splice(0, current.length - normalizedLimit);
@@ -95,7 +95,6 @@ export class GroupHistoryStore {
 
     if (
       loaded.hadInvalidRecords ||
-      shouldCompactForLimit ||
       loaded.recordCount + 1 >= this.compactAfterRecords
     ) {
       this.compact(state, limits);
@@ -113,7 +112,6 @@ export class GroupHistoryStore {
       state.delete(key);
       loaded.limits.delete(key);
       this.append({ type: 'clear', key, recordedAt: Date.now() });
-      this.compact(state, loaded.limits);
     }
 
     return entries;
@@ -130,6 +128,19 @@ export class GroupHistoryStore {
     loaded.limits.delete(key);
     this.append({ type: 'clear', key, recordedAt: Date.now() });
     this.compact(state, loaded.limits);
+  }
+
+  clearAll(): void {
+    const loaded = this.loadState();
+    if (loaded.entries.size === 0) {
+      return;
+    }
+
+    const recordedAt = Date.now();
+    for (const key of loaded.entries.keys()) {
+      this.append({ type: 'clear', key, recordedAt });
+    }
+    this.compact(new Map(), new Map());
   }
 
   size(key?: string): number {
@@ -179,8 +190,11 @@ export class GroupHistoryStore {
     let data: string;
     try {
       data = readFileSync(this.filePath, 'utf-8');
-    } catch {
-      return { records: [], hadInvalidRecords: false };
+    } catch (err) {
+      if (isErrnoCode(err, 'ENOENT')) {
+        return { records: [], hadInvalidRecords: false };
+      }
+      throw err;
     }
 
     const records: GroupHistoryRecord[] = [];
@@ -205,8 +219,14 @@ export class GroupHistoryStore {
   }
 
   private append(record: GroupHistoryRecord): void {
-    mkdirSync(dirname(this.filePath), { recursive: true });
-    appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+    const dir = dirname(this.filePath);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodPrivate(dir, 0o700);
+    appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    chmodPrivate(this.filePath, 0o600);
   }
 
   private compact(
@@ -214,7 +234,8 @@ export class GroupHistoryStore {
     limits: Map<string, number>,
   ): void {
     const dir = dirname(this.filePath);
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodPrivate(dir, 0o700);
     const records: MessageRecord[] = [];
     const recordedAt = Date.now();
     for (const [key, entries] of state) {
@@ -236,8 +257,10 @@ export class GroupHistoryStore {
       dir,
       `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.tmp`,
     );
-    writeFileSync(tempPath, data, 'utf-8');
+    writeFileSync(tempPath, data, { encoding: 'utf-8', mode: 0o600 });
+    chmodPrivate(tempPath, 0o600);
     renameSync(tempPath, this.filePath);
+    chmodPrivate(this.filePath, 0o600);
   }
 }
 
@@ -292,4 +315,20 @@ function isGroupHistoryEntry(value: unknown): value is GroupHistoryEntry {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function isErrnoCode(err: unknown, code: string): boolean {
+  return (
+    err instanceof Error &&
+    'code' in err &&
+    (err as NodeJS.ErrnoException).code === code
+  );
+}
+
+function chmodPrivate(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode);
+  } catch {
+    // Best effort: some filesystems/platforms do not support POSIX modes.
+  }
 }

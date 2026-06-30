@@ -44,7 +44,7 @@ describe('GroupHistoryStore', () => {
     expect(store.drain('k', 2).map((item) => item.text)).toEqual(['b', 'c']);
   });
 
-  it('keeps only the latest entries on disk', () => {
+  it('replays only the latest entries from disk', () => {
     const path = filePath();
     const store = new GroupHistoryStore(path);
 
@@ -52,12 +52,9 @@ describe('GroupHistoryStore', () => {
     store.record('k', entry('b'), 2);
     store.record('k', entry('c'), 2);
 
-    const lines = readFileSync(path, 'utf-8').trim().split('\n');
-    expect(lines).toHaveLength(2);
-    expect(lines.map((line) => JSON.parse(line).entry.text)).toEqual([
-      'b',
-      'c',
-    ]);
+    expect(
+      new GroupHistoryStore(path).drain('k', 2).map((item) => item.text),
+    ).toEqual(['b', 'c']);
   });
 
   it('persists pending history across store instances', () => {
@@ -112,6 +109,26 @@ describe('GroupHistoryStore', () => {
 
     expect(store.drain('k', 10).map((item) => item.text)).toEqual(['a']);
     expect(new GroupHistoryStore(path).drain('k', 10)).toEqual([]);
+  });
+
+  it('clears all keys on disk', () => {
+    const path = filePath();
+    const store = new GroupHistoryStore(path);
+
+    store.record('a', entry('a'), 10);
+    store.record('b', entry('b'), 10);
+    store.clearAll();
+
+    const next = new GroupHistoryStore(path);
+    expect(next.drain('a', 10)).toEqual([]);
+    expect(next.drain('b', 10)).toEqual([]);
+  });
+
+  it('does not treat unreadable existing stores as empty', () => {
+    const path = mkdtempSync(join(tmpdir(), 'qwen-group-history-dir-'));
+    const store = new GroupHistoryStore(path);
+
+    expect(() => store.record('k', entry('a'), 10)).toThrow();
   });
 
   it('evicts oldest keys when max keys is reached', () => {

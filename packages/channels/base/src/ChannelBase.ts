@@ -35,6 +35,7 @@ const GROUP_HISTORY_CONTEXT_MARKER =
   '[Chat messages since your last reply - for context]';
 const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
+const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -845,10 +846,13 @@ export abstract class ChannelBase {
     }
 
     const entry: GroupHistoryEntry = {
-      senderId: envelope.senderId,
-      senderName: envelope.senderName,
+      senderId: truncateGroupHistoryField(envelope.senderId),
+      senderName: truncateGroupHistoryField(envelope.senderName),
       text: envelope.text.slice(0, GROUP_HISTORY_ENTRY_TEXT_LIMIT),
-      messageId: envelope.messageId,
+      messageId:
+        envelope.messageId === undefined
+          ? undefined
+          : truncateGroupHistoryField(envelope.messageId),
       timestamp: Date.now(),
     };
     try {
@@ -876,11 +880,15 @@ export abstract class ChannelBase {
   }
 
   private clearPendingGroupHistory(envelope: Envelope): void {
-    if (!envelope.isGroup) {
+    if (!envelope.isGroup && this.config.sessionScope !== 'single') {
       return;
     }
     try {
-      this.groupHistory.clear(this.groupHistoryKey(envelope));
+      if (this.config.sessionScope === 'single') {
+        this.groupHistory.clearAll();
+      } else {
+        this.groupHistory.clear(this.groupHistoryKey(envelope));
+      }
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to clear group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
@@ -896,7 +904,9 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines = entries.filter((entry) => this.gate.isAllowed(entry.senderId));
+    const lines = entries.filter((entry) =>
+      this.gate.isAllowed(entry.senderId),
+    );
     if (lines.length === 0) {
       return promptText;
     }
@@ -907,7 +917,7 @@ export abstract class ChannelBase {
         entry.text,
         GROUP_HISTORY_ENTRY_TEXT_LIMIT,
       );
-      return `[${who}] ${text}`;
+      return `- [${who}] ${text}`;
     });
 
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
@@ -1028,10 +1038,6 @@ export abstract class ChannelBase {
     const recognizedSlashCommand =
       this.isSlashCommand(envelope.text) &&
       this.isRecognizedCommand(envelope.text, sessionId);
-    const groupHistoryEntries = recognizedSlashCommand
-      ? []
-      : this.drainPendingGroupHistory(envelope);
-
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
 
@@ -1059,9 +1065,7 @@ export abstract class ChannelBase {
     if (
       (envelope.isGroup || this.config.sessionScope === 'single') &&
       !envelope.alreadyPrefixed &&
-      !(
-        recognizedSlashCommand
-      )
+      !recognizedSlashCommand
     ) {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
@@ -1078,11 +1082,6 @@ export abstract class ChannelBase {
       const quoted = sanitizeQuotedText(envelope.referencedText, 500);
       promptText = `[Replying to: "${quoted}"]\n\n${promptText}`;
     }
-
-    promptText = this.prependGroupHistoryContext(
-      promptText,
-      groupHistoryEntries,
-    );
 
     // Resolve attachments: extract image for bridge, append file paths to text
     let imageBase64 = envelope.imageBase64;
@@ -1117,12 +1116,6 @@ export abstract class ChannelBase {
       if (filePaths.length > 0) {
         promptText = promptText + '\n\n' + filePaths.join('\n');
       }
-    }
-
-    // Prepend channel instructions on first message of a session
-    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-      promptText = `${this.config.instructions}\n\n${promptText}`;
-      this.instructedSessions.add(sessionId);
     }
 
     // Resolve dispatch mode: per-group override → channel config → default
@@ -1273,6 +1266,17 @@ export abstract class ChannelBase {
         );
         return;
       }
+      const groupHistoryEntries = recognizedSlashCommand
+        ? []
+        : this.drainPendingGroupHistory(envelope);
+      let promptToSend = this.prependGroupHistoryContext(
+        promptText,
+        groupHistoryEntries,
+      );
+      if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
+        promptToSend = `${this.config.instructions}\n\n${promptToSend}`;
+        this.instructedSessions.add(sessionId);
+      }
       // Register this prompt as active
       let doneResolve: () => void = () => {};
       const done = new Promise<void>((r) => {
@@ -1312,7 +1316,7 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
 
       try {
-        const response = await promptBridge.prompt(sessionId, promptText, {
+        const response = await promptBridge.prompt(sessionId, promptToSend, {
           imageBase64,
           imageMimeType,
         });
@@ -1374,7 +1378,6 @@ export abstract class ChannelBase {
         }
         if (stillCurrent) {
           this.activePrompts.delete(sessionId);
-          this.clearPendingGroupHistory(envelope);
         }
         // Signal any /clear waiter racing our done that we're done — even a
         // /clear-evicted wedged turn must release it (its bounded wait already
@@ -1439,4 +1442,8 @@ export abstract class ChannelBase {
       );
     }
   }
+}
+
+function truncateGroupHistoryField(value: string): string {
+  return value.slice(0, GROUP_HISTORY_ENTRY_METADATA_LIMIT);
 }
