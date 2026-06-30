@@ -75,14 +75,5 @@ export function toModelVisibleSubagentResult(
     return text;
   }
 
-  const withoutAnalysis = stripAnalysisOutsideSummary(text);
-  const trimmed = withoutAnalysis.trim();
-  const summaryOpen = trimmed.match(/^<summary\b[^>]*>/i);
-  if (summaryOpen && trimmed.toLowerCase().endsWith('</summary>')) {
-    return stripVisibleTags(
-      trimmed.slice(summaryOpen[0].length, -'</summary>'.length),
-    ).trim();
-  }
-
-  return stripVisibleTags(trimmed).trim();
+  return stripVisibleTags(stripAnalysisOutsideSummary(text).trim()).trim();
 }
