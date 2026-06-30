@@ -322,6 +322,54 @@ describe('useHistoryManager', () => {
       expect(recentTool.resultDisplay).toBe('some file content here');
     });
 
+    it('should also clear detailedDisplay when clearing an old tool result (Ctrl+O privacy)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Add 25 collapsible tool_groups carrying the raw functionResponse text
+      // in `detailedDisplay` (the Ctrl+O full-detail source). The first ones
+      // fall outside keep-recent-20 and must be compacted.
+      for (let i = 0; i < 25; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: 'some file content here',
+                  detailedDisplay: 'full secret file content here',
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // Oldest compacted tool: both resultDisplay AND detailedDisplay cleared,
+      // so reopening Ctrl+O cannot re-surface the cleared output.
+      const tool = (
+        result.current.history[0] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(tool.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
+      expect(tool.detailedDisplay).toBeUndefined();
+      // Newest tool untouched: still has both fields.
+      const recentTool = (
+        result.current.history[24] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(recentTool.resultDisplay).toBe('some file content here');
+      expect(recentTool.detailedDisplay).toBe('full secret file content here');
+    });
+
     it('should blank fileDiff object on old tool_group items', () => {
       const { result } = renderHook(() => useHistory());
       const ts = Date.now();

@@ -213,7 +213,16 @@ export function useHistory(): UseHistoryManagerReturn {
                 t.resultDisplay != null &&
                 t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE
               ) {
-                return { ...t, resultDisplay: UI_COMPACT_CLEARED_MESSAGE };
+                // Also drop `detailedDisplay` (the raw functionResponse text
+                // kept for the Ctrl+O full-detail transcript): clearing only
+                // `resultDisplay` would let a post-compaction transcript reopen
+                // re-surface the supposedly cleared read/search/list output,
+                // defeating the memory/privacy compaction.
+                return {
+                  ...t,
+                  resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
+                  detailedDisplay: undefined,
+                };
               }
               return t;
             }),
