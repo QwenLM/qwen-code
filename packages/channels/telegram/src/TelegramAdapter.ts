@@ -60,6 +60,10 @@ export class TelegramChannel extends ChannelBase {
     this.registerCancelCommand();
   }
 
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
   private getFileUrl(filePath: string): string {
     return `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
   }

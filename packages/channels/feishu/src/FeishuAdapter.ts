@@ -125,6 +125,10 @@ export class FeishuChannel extends ChannelBase {
       (feishuCfg['collapsibleThreshold'] as number) || 500;
   }
 
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
   /** Build the event handler map shared between WebSocket and webhook modes. */
   private buildHandlerMap(): Record<string, (data: unknown) => unknown> {
     return {

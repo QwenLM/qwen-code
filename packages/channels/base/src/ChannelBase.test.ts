@@ -4,10 +4,16 @@ import type { ChannelConfig, Envelope } from './types.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
+import type {
+  ChannelCronJob,
+  ChannelCronJobInput,
+} from './ChannelCronStore.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
+  proactive: Array<{ chatId: string; text: string }> = [];
+  proactiveSupported = false;
   connected = false;
   toolCalls: Array<{ chatId: string; event: unknown }> = [];
   promptStarts: Array<{
@@ -34,6 +40,17 @@ class TestChannel extends ChannelBase {
 
   override onToolCall(chatId: string, event: unknown): void {
     this.toolCalls.push({ chatId, event });
+  }
+
+  override supportsProactiveSend(): boolean {
+    return this.proactiveSupported;
+  }
+
+  protected override async pushProactive(
+    target: { chatId: string },
+    text: string,
+  ): Promise<void> {
+    this.proactive.push({ chatId: target.chatId, text });
   }
 
   enableCancelCommand(): void {
@@ -438,6 +455,87 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session: none');
       expect(ch.sent[0]!.text).toContain('Access: open');
       expect(ch.sent[0]!.text).toContain('Channel: test-chan');
+    });
+
+    it('/schedule add stores a job for the current channel target', async () => {
+      const created: ChannelCronJob = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+      };
+      const createSchedule = vi.fn(
+        async (_input: ChannelCronJobInput) => created,
+      );
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: createSchedule,
+            listForTarget: vi.fn(),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.handleInbound(
+        envelope({ text: '/schedule add "0 9 * * *" post summary' }),
+      );
+
+      expect(createSchedule).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'post summary',
+        recurring: true,
+        createdBy: 'User 1',
+      });
+      expect(ch.sent[0]!.text).toContain('Scheduled job job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/schedule add rejects adapters that cannot cold send', async () => {
+      const createSchedule = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: createSchedule,
+            listForTarget: vi.fn(),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+
+      await ch.handleInbound(
+        envelope({ text: '/schedule add "0 9 * * *" post summary' }),
+      );
+
+      expect(createSchedule).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain(
+        'does not support proactive scheduled messages',
+      );
     });
 
     it('/status shows active session', async () => {
@@ -4432,6 +4530,72 @@ describe('ChannelBase', () => {
       expect(slash).toBe(true);
       expect(parsed).not.toBeNull();
       expect(slash).toBe(parsed !== null);
+    });
+  });
+
+  describe('scheduled prompts', () => {
+    it('runs a scheduled prompt as a follow-up and pushes the result proactively', async () => {
+      let resolveFirstPrompt: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveFirstPrompt = resolve;
+            }),
+        )
+        .mockResolvedValueOnce('scheduled response');
+      const ch = createChannel({
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+      });
+      ch.proactiveSupported = true;
+
+      const inbound = ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'group-1',
+          text: 'first task',
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+
+      const scheduled = ch.runScheduledPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'group-1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+      });
+      await Promise.resolve();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      resolveFirstPrompt('first response');
+      await inbound;
+      await scheduled;
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      expect(bridge.prompt).toHaveBeenLastCalledWith(
+        expect.any(String),
+        '[Scheduled task "daily summary" set by Alice]\n\npost summary',
+        {},
+      );
+      expect(ch.proactive).toEqual([
+        { chatId: 'group-1', text: 'scheduled response' },
+      ]);
     });
   });
 });

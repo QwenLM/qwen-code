@@ -59,6 +59,12 @@ describe('FeishuChannel', () => {
         /requires clientId.*clientSecret/,
       );
     });
+
+    it('supports proactive scheduled messages', () => {
+      const channel = createChannel();
+
+      expect(channel.supportsProactiveSend()).toBe(true);
+    });
   });
 
   describe('extractContent', () => {

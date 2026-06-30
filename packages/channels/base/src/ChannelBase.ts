@@ -1,5 +1,10 @@
 import { basename } from 'node:path';
-import type { ChannelConfig, DispatchMode, Envelope } from './types.js';
+import type {
+  ChannelConfig,
+  DispatchMode,
+  Envelope,
+  SessionTarget,
+} from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
@@ -18,6 +23,10 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import type {
+  ChannelCronJob,
+  ChannelCronJobInput,
+} from './ChannelCronStore.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -37,6 +46,17 @@ export interface ChannelBaseOptions {
    * events directly.
    */
   registerBridgeEvents?: boolean;
+  scheduleController?: ChannelScheduleController;
+}
+
+export interface ChannelScheduleController {
+  create(input: ChannelCronJobInput): Promise<ChannelCronJob>;
+  listForTarget(
+    channelName: string,
+    target: SessionTarget,
+  ): Promise<ChannelCronJob[]>;
+  disable(id: string): Promise<boolean>;
+  validateCron(cron: string): void;
 }
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
@@ -75,6 +95,7 @@ const PARSE_COMMAND_RE = new RegExp(
 );
 /** isSlashCommand: the first whitespace-delimited token alone must be a pure command token. */
 const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
+const SCHEDULE_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -89,6 +110,16 @@ interface AgentCommandsProvider {
   availableCommands?: AvailableCommand[];
 }
 
+function parseScheduleAddArgs(
+  args: string,
+): { cron: string; prompt: string } | null {
+  const match = args.trim().match(SCHEDULE_ADD_RE);
+  if (!match) return null;
+  const cron = match[1].trim();
+  const prompt = match[2].trim();
+  return cron && prompt ? { cron, prompt } : null;
+}
+
 export abstract class ChannelBase {
   protected config: ChannelConfig;
   protected bridge: ChannelAgentBridge;
@@ -98,6 +129,7 @@ export abstract class ChannelBase {
   protected name: string;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
+  private readonly scheduleController?: ChannelScheduleController;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
@@ -139,6 +171,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
+    this.scheduleController = options?.scheduleController;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
 
@@ -168,6 +201,17 @@ export abstract class ChannelBase {
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
 
+  supportsProactiveSend(): boolean {
+    return false;
+  }
+
+  protected async pushProactive(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    await this.sendMessage(target.chatId, text);
+  }
+
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
     if (this.registerBridgeEvents) {
@@ -178,6 +222,91 @@ export abstract class ChannelBase {
     if (this.registerBridgeEvents) {
       this.attachBridgeEvents(bridge);
     }
+  }
+
+  async runScheduledPrompt(job: ChannelCronJob): Promise<void> {
+    if (!this.supportsProactiveSend()) {
+      throw new Error('Channel does not support proactive scheduled messages.');
+    }
+    if (job.channelName !== this.name) {
+      throw new Error(
+        `Scheduled job ${job.id} belongs to ${job.channelName}, not ${this.name}.`,
+      );
+    }
+
+    const sessionId = await this.router.resolve(
+      this.name,
+      job.target.senderId,
+      job.target.chatId,
+      job.target.threadId,
+      job.cwd,
+    );
+    const label = sanitizeQuotedText(job.label || job.id, 80);
+    const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
+    let promptText = `[Scheduled task "${label}" set by ${createdBy}]\n\n${job.prompt}`;
+    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
+      promptText = `${this.config.instructions}\n\n${promptText}`;
+      this.instructedSessions.add(sessionId);
+    }
+
+    const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    const generation = this.sessionGenerations.get(sessionId) ?? 0;
+    const current = prev.then(async () => {
+      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
+        process.stderr.write(
+          `[${this.name}] dropped scheduled job ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
+        );
+        return;
+      }
+
+      let doneResolve: () => void = () => {};
+      const done = new Promise<void>((resolve) => {
+        doneResolve = resolve;
+      });
+      const promptState: ActivePrompt = {
+        cancelled: false,
+        done,
+        resolve: doneResolve,
+        chatId: job.target.chatId,
+      };
+      this.activePrompts.set(sessionId, promptState);
+      this.onPromptStart(job.target.chatId, sessionId);
+
+      const onChunk = (sid: string, chunk: string) => {
+        if (sid === sessionId && !promptState.cancelled) {
+          this.onResponseChunk(job.target.chatId, chunk, sessionId);
+        }
+      };
+      this.bridge.on('textChunk', onChunk);
+
+      try {
+        const response = await this.bridge.prompt(sessionId, promptText, {});
+        if (!promptState.cancelled && response) {
+          await this.pushProactive(job.target, response);
+        }
+      } finally {
+        this.bridge.off('textChunk', onChunk);
+        const stillCurrent = this.activePrompts.get(sessionId) === promptState;
+        if (!promptState.clearEvicted) {
+          try {
+            this.onPromptEnd(job.target.chatId, sessionId);
+          } catch (err) {
+            process.stderr.write(
+              `[${this.name}] onPromptEnd threw in scheduled job ${job.id} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+          }
+        }
+        if (stillCurrent) {
+          this.activePrompts.delete(sessionId);
+        }
+        promptState.resolve();
+      }
+    });
+    this.sessionQueues.set(
+      sessionId,
+      current.catch(() => {}),
+    );
+    await current;
   }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
@@ -574,6 +703,139 @@ export abstract class ChannelBase {
       await this.sendMessage(envelope.chatId, lines.join('\n'));
       return true;
     });
+
+    this.registerCommand('schedule', async (envelope, args) =>
+      this.handleScheduleCommand(envelope, args),
+    );
+  }
+
+  private async handleScheduleCommand(
+    envelope: Envelope,
+    args: string,
+  ): Promise<boolean> {
+    if (!this.scheduleController) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Scheduled tasks are not available.',
+      );
+      return true;
+    }
+
+    const [subcommand = '', ...rest] = args.trim().split(/\s+/u);
+    switch (subcommand.toLowerCase()) {
+      case 'add':
+        return this.handleScheduleAdd(envelope, rest.join(' '));
+      case 'list':
+        return this.handleScheduleList(envelope);
+      case 'cancel':
+        return this.handleScheduleCancel(envelope, rest[0]);
+      default:
+        await this.sendMessage(
+          envelope.chatId,
+          'Usage: /schedule add "<cron>" <prompt> | /schedule list | /schedule cancel <id>',
+        );
+        return true;
+    }
+  }
+
+  private async handleScheduleAdd(
+    envelope: Envelope,
+    args: string,
+  ): Promise<boolean> {
+    if (!this.scheduleController) return true;
+    if (!this.supportsProactiveSend()) {
+      await this.sendMessage(
+        envelope.chatId,
+        'This channel does not support proactive scheduled messages.',
+      );
+      return true;
+    }
+
+    const parsed = parseScheduleAddArgs(args);
+    if (!parsed) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Usage: /schedule add "<cron>" <prompt>',
+      );
+      return true;
+    }
+
+    try {
+      this.scheduleController.validateCron(parsed.cron);
+    } catch (err) {
+      await this.sendMessage(
+        envelope.chatId,
+        `Invalid cron expression: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return true;
+    }
+
+    const prompt = parsed.prompt.trim();
+    const job = await this.scheduleController.create({
+      channelName: this.name,
+      target: {
+        channelName: this.name,
+        senderId: envelope.senderId,
+        chatId: envelope.chatId,
+        threadId: envelope.threadId,
+      },
+      cwd: this.config.cwd,
+      cron: parsed.cron,
+      prompt,
+      label: prompt.length > 60 ? `${prompt.slice(0, 57)}...` : prompt,
+      recurring: true,
+      createdBy: sanitizeSenderName(
+        envelope.senderName || envelope.senderId || 'unknown',
+      ),
+    });
+
+    await this.sendMessage(
+      envelope.chatId,
+      `Scheduled job ${job.id}: ${job.cron}`,
+    );
+    return true;
+  }
+
+  private async handleScheduleList(envelope: Envelope): Promise<boolean> {
+    if (!this.scheduleController) return true;
+    const jobs = await this.scheduleController.listForTarget(this.name, {
+      channelName: this.name,
+      senderId: envelope.senderId,
+      chatId: envelope.chatId,
+      threadId: envelope.threadId,
+    });
+    if (jobs.length === 0) {
+      await this.sendMessage(envelope.chatId, 'No scheduled jobs.');
+      return true;
+    }
+    await this.sendMessage(
+      envelope.chatId,
+      jobs
+        .map((job) => {
+          const status = job.enabled ? 'enabled' : 'disabled';
+          const label = job.label ? ` ${job.label}` : '';
+          return `${job.id} ${job.cron} ${status}${label}`;
+        })
+        .join('\n'),
+    );
+    return true;
+  }
+
+  private async handleScheduleCancel(
+    envelope: Envelope,
+    id: string | undefined,
+  ): Promise<boolean> {
+    if (!this.scheduleController) return true;
+    if (!id) {
+      await this.sendMessage(envelope.chatId, 'Usage: /schedule cancel <id>');
+      return true;
+    }
+    const disabled = await this.scheduleController.disable(id);
+    await this.sendMessage(
+      envelope.chatId,
+      disabled ? `Cancelled scheduled job ${id}.` : `No scheduled job ${id}.`,
+    );
+    return true;
   }
 
   /** Check if a message text matches a registered local command. */
