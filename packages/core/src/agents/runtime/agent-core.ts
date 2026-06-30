@@ -126,6 +126,11 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  // Plan mode is a conversation-level approval contract owned by the parent
+  // session. Ordinary subagents are delegated workers that report back, not
+  // lifecycle owners — they must not enter or exit plan mode independently.
+  ToolNames.ENTER_PLAN_MODE,
+  ToolNames.EXIT_PLAN_MODE,
   // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
@@ -148,6 +153,10 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  // Plan mode is a conversation-level approval contract — teammates
+  // are delegated workers that must not own the plan lifecycle.
+  ToolNames.ENTER_PLAN_MODE,
+  ToolNames.EXIT_PLAN_MODE,
   // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
   // identity propagates through AsyncLocalStorage into anything it
   // spawns, so prepareTools() would keep choosing THIS exclusion set
@@ -469,10 +478,6 @@ export class AgentCore {
     const excludedFromSubagents = isTeammate()
       ? EXCLUDED_TOOLS_FOR_TEAMMATES
       : EXCLUDED_TOOLS_FOR_SUBAGENTS;
-    // When a subagent has an explicit tools list (not wildcard), only the
-    // recursive-spawn guard (AgentTool) is enforced.
-    const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
-
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
         (t): t is string => typeof t === 'string',
@@ -507,9 +512,13 @@ export class AgentCore {
         );
       }
       // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
+      // Apply the full subagent exclusion set (same as wildcard and explicit
+      // name paths), not just the recursion guard, so inline-declared
+      // control-plane tools (ENTER_PLAN_MODE, EXIT_PLAN_MODE, etc.) are
+      // blocked alongside the registry-resolved tools.
       toolsList.push(
         ...onlyInlineDecls.filter(
-          (d) => !(d.name && recursionGuardOnly.has(d.name)),
+          (d) => !(d.name && excludedFromSubagents.has(d.name)),
         ),
       );
     } else {

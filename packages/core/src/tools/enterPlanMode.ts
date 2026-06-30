@@ -13,6 +13,7 @@ import { ApprovalMode } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
 
@@ -64,6 +65,18 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    // Plan mode is a conversation-level approval contract owned by the
+    // parent session. Ordinary subagents are delegated workers — they
+    // must not enter plan mode independently.
+    const agentId = getCurrentAgentId();
+    if (agentId !== null) {
+      return {
+        llmContent:
+          'Cannot enter plan mode from a subagent context. Plan mode is owned by the parent session.',
+        returnDisplay: 'Plan mode unavailable in subagent context.',
+      };
+    }
+
     // In headless (non-interactive) mode without ACP support, the gate
     // exit paths require user interaction that cannot be fulfilled.
     const isAcpMode =

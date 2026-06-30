@@ -1156,13 +1156,14 @@ describe('createProductionDispatch', () => {
     });
   });
 
-  // T11: disallow SendMessage / ExitPlanMode to mirror upstream Tg8.
-  it('disallows SendMessage and ExitPlanMode for workflow subagents', async () => {
+  // T11: disallow SendMessage / EnterPlanMode / ExitPlanMode to mirror upstream Tg8.
+  it('disallows SendMessage, EnterPlanMode, and ExitPlanMode for workflow subagents', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
       'send_message',
+      'enter_plan_mode',
       'exit_plan_mode',
     ]);
   });
@@ -1759,8 +1760,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // by one test does not bleed into the next (mockImplementation is
   // persistent; the per-test overrides below rely on a clean baseline).
   beforeEach(async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     worktreeStubs.instances.length = 0;
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
@@ -2536,8 +2538,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
 
   it("isolation:'worktree' refuses when git is not available", async () => {
     worktreeStubs.instances.length = 0; // reset
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2558,8 +2561,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' refuses when cwd is not a git repository", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2577,8 +2581,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' refuses when parent working tree is dirty", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2596,8 +2601,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' surfaces createUserWorktree failure", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2625,8 +2631,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // suffix and was previously untested.
 
   it("isolation:'worktree' cleanup: removeUserWorktree failure preserves path+branch", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2656,8 +2663,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' cleanup: branchPreserved race yields branch-only suffix", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2680,8 +2688,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' cleanup: thrown removeUserWorktree preserves path+branch", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2773,8 +2782,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // the worktree on disk.
   it("isolation:'worktree' + schema setup throws → worktree is still cleaned up", async () => {
     const removeCalls: string[] = [];
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
       // Track removeUserWorktree calls — the fallback finally must call it.
