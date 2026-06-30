@@ -844,6 +844,12 @@ export async function runNonInteractive(
       let isFirstTurn = true;
       let hasUnsentToolResponse = false;
       let modelOverride: string | undefined = inlineModelOverride;
+      // An explicit inline `/model <id> <prompt>` override wins for the whole
+      // turn. Mirrors useGeminiStream's `inlineModelOverrideActiveRef`: while
+      // active, skill-tool `modelOverride` writes (including the
+      // undefined-clears case) are skipped so they cannot silently revert the
+      // submitted prompt to the session model mid-turn.
+      const inlineModelOverrideActive = inlineModelOverride !== undefined;
       // Session-scoped because the synthetic `structured_output` tool can
       // be invoked from EITHER the main assistant-turn loop or from a
       // drain-turn (queued notification / cron prompt); whichever fires
@@ -1389,7 +1395,9 @@ export async function runNonInteractive(
             responseParts: toolResponseParts,
             repeatedDuplicateProviderToolCall,
           } = await processToolCallBatch(toolCallRequests, (override) => {
-            modelOverride = override;
+            if (!inlineModelOverrideActive) {
+              modelOverride = override;
+            }
           });
 
           if (structuredSubmission !== undefined) {

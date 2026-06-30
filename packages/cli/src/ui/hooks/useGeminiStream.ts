@@ -2176,9 +2176,15 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
-        // Clear model override for new user turns, but preserve it on retry
-        // so the same skill-selected model is used again.
+        // Clear model override for new user turns. On retry, preserve a
+        // skill-selected override so the same model is used again, but drop an
+        // explicit inline `/model <id> <prompt>` override: that is a one-off
+        // for the original prompt, so a retry reverts to the session model and
+        // lets skill-tool overrides apply again.
         if (submitType !== SendMessageType.Retry) {
+          modelOverrideRef.current = undefined;
+          inlineModelOverrideActiveRef.current = false;
+        } else if (inlineModelOverrideActiveRef.current) {
           modelOverrideRef.current = undefined;
           inlineModelOverrideActiveRef.current = false;
         }
