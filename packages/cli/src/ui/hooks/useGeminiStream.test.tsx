@@ -805,6 +805,43 @@ describe('useGeminiStream', () => {
     expect(secondSent).toContain('# Autonomous loop tick (dynamic pacing)');
   });
 
+  it('skips missed autonomous loop wakeup sentinels', async () => {
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            prompt: string;
+            cronExpr?: string;
+            missed?: boolean;
+          }) => void,
+        ) => {
+          callback({
+            prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+            cronExpr: '@wakeup',
+            missed: true,
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(scheduler.start).toHaveBeenCalled();
+    });
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: 'notification', text: 'Missed: Autonomous loop tick' },
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('renders teammate reports as a compact notification, not a raw envelope bubble', async () => {
     const mockManager = { setLeaderMessageCallback: vi.fn() };
     (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(mockManager);

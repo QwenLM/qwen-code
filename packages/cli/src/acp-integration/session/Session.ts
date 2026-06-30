@@ -2602,14 +2602,17 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start((job: { prompt: string; cronExpr?: string }) => {
-      if (this.cronDisabledByTokenLimit) return;
-      this.cronQueue.push({
-        prompt: job.prompt,
-        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
-      });
-      void this.#drainCronQueue();
-    });
+    scheduler.start(
+      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        if (this.cronDisabledByTokenLimit) return;
+        if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+        this.cronQueue.push({
+          prompt: job.prompt,
+          source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+        });
+        void this.#drainCronQueue();
+      },
+    );
   }
 
   /**

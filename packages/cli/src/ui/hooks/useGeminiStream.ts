@@ -3224,6 +3224,7 @@ export const useGeminiStream = (
           let label = job.prompt.slice(0, 40);
           let modelText = job.prompt;
           if (autonomousMode) {
+            if (job.missed) return;
             const resolver = getAutonomousLoopTickResolver();
             const tick = resolver.resolveAutonomous(autonomousMode);
             label = 'Autonomous loop tick';

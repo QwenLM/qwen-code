@@ -5051,6 +5051,57 @@ describe('Session', () => {
         );
       });
 
+      it('skips missed bare-/loop autonomous sentinels', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: {
+                prompt: string;
+                cronExpr?: string;
+                missed?: boolean;
+              }) => void,
+            ) => {
+              callback({
+                prompt: '<<autonomous-loop-dynamic>>',
+                cronExpr: '@wakeup',
+                missed: true,
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        const sentToModel = (
+          mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+        ).mock.calls
+          .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+          .map((p: { text?: string }) => p.text ?? '')
+          .join('');
+        expect(sentToModel).not.toContain('# Autonomous loop check');
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'Autonomous loop tick' },
+            _meta: { source: 'loop' },
+          },
+        });
+      });
+
       it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', async () => {
         // Minimal containers with no HOME make os.homedir() === ''. With QWEN_HOME
         // unset the home confinement root must NOT collapse to '': isWithin('',
