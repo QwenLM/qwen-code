@@ -5,6 +5,7 @@ import type {
 } from './ChannelLoopStore.js';
 
 const MAX_RESULT_PREVIEW_LENGTH = 500;
+const MAX_CONCURRENT_LOOP_FIRES = 5;
 
 export interface ChannelLoopRunner {
   runLoopPrompt(
@@ -111,7 +112,9 @@ export class ChannelLoopScheduler {
         !this.inFlightJobs.has(job.id) &&
         this.isDue(job, now),
     );
-    for (const job of dueJobs) {
+    const availableSlots = MAX_CONCURRENT_LOOP_FIRES - this.inFlightJobs.size;
+    if (availableSlots <= 0) return;
+    for (const job of dueJobs.slice(0, availableSlots)) {
       void this.fireOnce(job, now, generation);
     }
   }
@@ -269,7 +272,14 @@ export class ChannelLoopScheduler {
         `[scheduler] loop ${job.id} auto-disabled after ${consecutiveFailures} consecutive failures\n`,
       );
     }
-    await this.store.update(job.id, patch);
+    try {
+      await this.store.update(job.id, patch);
+    } catch (err) {
+      process.stderr.write(
+        `[scheduler] loop ${job.id} failure persist failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      await this.clearRunningSince(job.id);
+    }
   }
 }
 

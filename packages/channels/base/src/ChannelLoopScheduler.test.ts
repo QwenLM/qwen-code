@@ -437,6 +437,26 @@ describe('ChannelLoopScheduler', () => {
     });
   });
 
+  it('starts at most five due jobs per tick', async () => {
+    jobs = Array.from({ length: 6 }, (_, index) => ({
+      ...baseJob,
+      id: `job-${index + 1}`,
+    }));
+    runLoopPrompt.mockImplementation(() => new Promise(() => undefined));
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    await vi.waitFor(() => {
+      expect(runLoopPrompt).toHaveBeenCalledTimes(5);
+    });
+  });
+
   it('does not block later ticks behind a hung job', async () => {
     const laterJob = {
       ...baseJob,
@@ -493,6 +513,38 @@ describe('ChannelLoopScheduler', () => {
     });
     expect(writeSpy).toHaveBeenCalledWith(
       expect.stringContaining('succeeded but status persist failed'),
+    );
+    writeSpy.mockRestore();
+  });
+
+  it('clears running state when failure persistence fails', async () => {
+    runLoopPrompt.mockRejectedValue(new Error('cannot cold send'));
+    store.update = vi.fn(async (id, patch) => {
+      if (patch.lastStatus === 'error') {
+        throw new Error('disk full');
+      }
+      jobs = jobs.map((job) => (job.id === id ? { ...job, ...patch } : job));
+      return true;
+    });
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith('job-1', {
+        runningSince: undefined,
+      });
+    });
+    expect(writeSpy).toHaveBeenCalledWith(
+      expect.stringContaining('failure persist failed'),
     );
     writeSpy.mockRestore();
   });
