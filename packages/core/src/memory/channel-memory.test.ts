@@ -165,6 +165,30 @@ describe('channel memory', () => {
     ).rejects.toThrow('Channel memory exceeds maximum size');
   });
 
+  it('keeps concurrent appends within the maximum size', async () => {
+    const target: ChannelMemoryTarget = {
+      channelName: 'prod',
+      chatId: 'chat-1',
+    };
+    const firstEntry = 'a'.repeat(MAX_CHANNEL_MEMORY_BYTES - 3);
+    await appendChannelMemory(target, firstEntry);
+
+    const results = await Promise.allSettled([
+      appendChannelMemory(target, 'b'),
+      appendChannelMemory(target, 'c'),
+    ]);
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+    expect(
+      fs.statSync(getChannelMemoryFilePath(target)).size,
+    ).toBeLessThanOrEqual(MAX_CHANNEL_MEMORY_BYTES);
+  });
+
   it('reads oversized existing memory as empty', async () => {
     const target: ChannelMemoryTarget = {
       channelName: 'prod',

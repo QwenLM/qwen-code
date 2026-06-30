@@ -523,10 +523,20 @@ export abstract class ChannelBase {
       if (!channelMemory) {
         return true;
       }
-      await channelMemory.appendChannelMemory(
-        this.channelMemoryTarget(envelope),
-        args.trim(),
-      );
+      try {
+        await channelMemory.appendChannelMemory(
+          this.channelMemoryTarget(envelope),
+          args.trim(),
+        );
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('save', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to save channel memory: ${message}`,
+        );
+        return true;
+      }
       this.invalidateSessionContext(envelope);
       await this.sendMessage(envelope.chatId, 'Channel memory updated.');
       return true;
@@ -540,11 +550,22 @@ export abstract class ChannelBase {
       if (!channelMemory) {
         return true;
       }
-      const text = (
-        await channelMemory.readChannelMemory(
-          this.channelMemoryTarget(envelope),
-        )
-      ).trim();
+      let text: string;
+      try {
+        text = (
+          await channelMemory.readChannelMemory(
+            this.channelMemoryTarget(envelope),
+          )
+        ).trim();
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('read', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to read channel memory: ${message}`,
+        );
+        return true;
+      }
       await this.sendMessage(
         envelope.chatId,
         text === '' ? 'No channel memory saved.' : text,
@@ -567,9 +588,20 @@ export abstract class ChannelBase {
       if (!channelMemory) {
         return true;
       }
-      const result = await channelMemory.clearChannelMemory(
-        this.channelMemoryTarget(envelope),
-      );
+      let result: { changed: boolean };
+      try {
+        result = await channelMemory.clearChannelMemory(
+          this.channelMemoryTarget(envelope),
+        );
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('clear', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to clear channel memory: ${message}`,
+        );
+        return true;
+      }
       this.invalidateSessionContext(envelope);
       await this.sendMessage(
         envelope.chatId,
@@ -755,6 +787,26 @@ export abstract class ChannelBase {
       return undefined;
     }
     return this.channelMemory;
+  }
+
+  private channelMemoryErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private logChannelMemoryError(
+    action: 'save' | 'read' | 'clear',
+    envelope: Envelope,
+    message: string,
+  ): void {
+    process.stderr.write(
+      `[${this.name}] channel memory ${action} failed for sender=${sanitizeLogText(
+        envelope.senderId,
+        80,
+      )} chat=${sanitizeLogText(envelope.chatId, 80)} thread=${sanitizeLogText(
+        envelope.threadId ?? '',
+        80,
+      )}: ${sanitizeLogText(message, 200)}\n`,
+    );
   }
 
   /**
@@ -1306,7 +1358,9 @@ export abstract class ChannelBase {
             )
           )?.trim();
           if (channelMemory) {
-            context.push(`Channel memory for this chat:\n${channelMemory}`);
+            context.push(
+              `Channel memory for this chat:\n${sanitizePromptText(channelMemory)}`,
+            );
           }
           if (this.config.instructions) {
             context.push(this.config.instructions);

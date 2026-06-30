@@ -22,6 +22,7 @@ export interface ChannelMemoryWriteResult {
 
 export const CHANNEL_MEMORY_FILE_NAME = 'CHANNEL.md';
 export const MAX_CHANNEL_MEMORY_BYTES = 1024 * 1024;
+const pendingAppends = new Map<string, Promise<void>>();
 
 function isMissingFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
@@ -55,14 +56,26 @@ export function getChannelMemoryFilePath(target: ChannelMemoryTarget): string {
   );
 }
 
-async function getExistingSize(filePath: string): Promise<number> {
+async function serializeAppend<T>(
+  filePath: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = pendingAppends.get(filePath) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  pendingAppends.set(filePath, queued);
+
+  await previous;
   try {
-    return (await fs.stat(filePath)).size;
-  } catch (error) {
-    if (isMissingFile(error)) {
-      return 0;
+    return await task();
+  } finally {
+    release();
+    if (pendingAppends.get(filePath) === queued) {
+      pendingAppends.delete(filePath);
     }
-    throw error;
   }
 }
 
@@ -95,15 +108,21 @@ export async function appendChannelMemory(
     return { changed: false, filePath };
   }
 
-  const appendBytes = Buffer.byteLength(`${entry}\n`, 'utf8');
-  const existingSize = await getExistingSize(filePath);
-  if (existingSize + appendBytes > MAX_CHANNEL_MEMORY_BYTES) {
-    throw new Error('Channel memory exceeds maximum size');
-  }
-
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.appendFile(filePath, `${entry}\n`, 'utf8');
-  return { changed: true, filePath };
+  return serializeAppend(filePath, async () => {
+    const appendBytes = Buffer.byteLength(`${entry}\n`, 'utf8');
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const handle = await fs.open(filePath, 'a+');
+    try {
+      const existingSize = (await handle.stat()).size;
+      if (existingSize + appendBytes > MAX_CHANNEL_MEMORY_BYTES) {
+        throw new Error('Channel memory exceeds maximum size');
+      }
+      await handle.appendFile(`${entry}\n`, 'utf8');
+    } finally {
+      await handle.close();
+    }
+    return { changed: true, filePath };
+  });
 }
 
 export async function clearChannelMemory(

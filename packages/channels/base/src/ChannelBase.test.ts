@@ -241,6 +241,29 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('/remember-channel reports append failures', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi
+          .fn()
+          .mockRejectedValue(new Error('Channel memory exceeds maximum size')),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/remember-channel new memory', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'Failed to save channel memory: Channel memory exceeds maximum size',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('/channel-memory denies when allowedUsers is empty', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
@@ -282,6 +305,24 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('/channel-memory reports read failures', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockRejectedValue(new Error('disk full')),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/channel-memory', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Failed to read channel memory: disk full' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('/forget-channel requires confirmation and then clears memory', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
@@ -310,6 +351,24 @@ describe('ChannelBase', () => {
       expect(channelMemory.clearChannelMemory).toHaveBeenCalledTimes(1);
       expect(ch.sent).toEqual([
         { chatId: 'chat1', text: 'Channel memory cleared.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/forget-channel confirm reports clear failures', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockRejectedValue(new Error('EACCES')),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Failed to clear channel memory: EACCES' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -2006,6 +2065,24 @@ describe('ChannelBase', () => {
           'ship it',
         ].join('\n\n'),
       );
+    });
+
+    it('sanitizes channel memory before injecting it into the prompt', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('safe\u202Ehidden'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toContain(
+        'Channel memory for this chat:\nsafe hidden',
+      );
+      expect(promptText).not.toContain('\u202E');
     });
 
     it('does not read or inject memory again in the same session', async () => {
