@@ -54,6 +54,7 @@ import {
 import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
 import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import type { WorkspaceRememberTaskLane } from '../workspace-remember.js';
+import { extractRememberErrorCode } from '../workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
@@ -1870,12 +1871,7 @@ export class AcpDispatcher {
             });
             this.replyConn(conn, id, task);
           } catch (err) {
-            const code =
-              err &&
-              typeof err === 'object' &&
-              typeof (err as Record<string, unknown>)['code'] === 'string'
-                ? ((err as Record<string, unknown>)['code'] as string)
-                : 'remember_failed';
+            const code = extractRememberErrorCode(err);
             if (id !== undefined) {
               conn.sendConn(
                 error(
@@ -1883,10 +1879,17 @@ export class AcpDispatcher {
                   -32099,
                   code === 'remember_queue_full'
                     ? 'Workspace memory remember queue is full.'
-                    : 'Workspace memory remember failed.',
+                    : code === 'managed_memory_unavailable'
+                      ? 'Managed memory is unavailable for this daemon workspace'
+                      : 'Workspace memory remember failed.',
                   {
                     errorKind: code,
-                    httpStatus: code === 'remember_queue_full' ? 429 : 500,
+                    httpStatus:
+                      code === 'remember_queue_full'
+                        ? 429
+                        : code === 'managed_memory_unavailable'
+                          ? 409
+                          : 500,
                   },
                 ),
               );

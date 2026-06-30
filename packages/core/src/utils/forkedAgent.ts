@@ -594,10 +594,7 @@ export async function runForkedAgent(
         filesWritten: written,
       };
     }
-    if (
-      terminateReason === AgentTerminateMode.ERROR ||
-      terminateReason === AgentTerminateMode.TIMEOUT
-    ) {
+    if (terminateReason !== AgentTerminateMode.GOAL) {
       return {
         status: 'failed',
         terminateReason,

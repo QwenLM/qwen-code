@@ -157,6 +157,7 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
+import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -5449,12 +5450,7 @@ class QwenAgent implements Agent {
               { errorKind: 'remember_timeout' },
             );
           }
-          const code =
-            err &&
-            typeof err === 'object' &&
-            typeof (err as Record<string, unknown>)['code'] === 'string'
-              ? ((err as Record<string, unknown>)['code'] as string)
-              : 'remember_failed';
+          const code = extractRememberErrorCode(err);
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
               -32009,
@@ -5468,8 +5464,7 @@ class QwenAgent implements Agent {
               ? err.message
               : 'Workspace memory remember failed',
             {
-              errorKind:
-                code === 'remember_path_escape' ? code : 'remember_failed',
+              errorKind: code,
             },
           );
         }

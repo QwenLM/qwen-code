@@ -195,14 +195,13 @@ export async function runManagedRememberByAgent(params: {
   });
 
   const filesWritten = result.filesWritten ?? [];
-  const touchedScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
-
   if (result.status === 'failed') {
     throw new Error(result.terminateReason || 'Remember agent failed');
   }
   if (result.status === 'cancelled') {
     throw new Error(result.terminateReason || 'Remember agent cancelled');
   }
+  const touchedScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
 
   await Promise.all([
     touchedScopes.includes('project')

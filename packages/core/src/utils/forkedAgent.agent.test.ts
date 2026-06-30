@@ -234,6 +234,42 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     }
   });
 
+  it.each([AgentTerminateMode.MAX_TURNS, AgentTerminateMode.LOOP_DETECTED])(
+    'reports %s as failed',
+    async (terminateMode) => {
+      const parent = new ConfigImpl(baseParams);
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (parent as any).toolRegistry = parentRegistry;
+
+      const createSpy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+        async (): Promise<AgentHeadless> =>
+          ({
+            execute: vi.fn().mockResolvedValue(undefined),
+            getTerminateMode: vi.fn().mockReturnValue(terminateMode),
+            getFinalText: vi.fn().mockReturnValue('stopped'),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          }) as any,
+      );
+
+      try {
+        const result = await runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        });
+
+        expect(result.status).toBe('failed');
+        expect(result.terminateReason).toBe(terminateMode);
+      } finally {
+        createSpy.mockRestore();
+      }
+    },
+  );
+
   it('reports filesWritten from successful mutating tool results only', async () => {
     const parent = new ConfigImpl(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {

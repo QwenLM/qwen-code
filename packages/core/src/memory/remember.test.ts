@@ -304,7 +304,7 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
   });
 
-  it('audits written paths before failed termination reasons', async () => {
+  it('propagates failed termination reasons before auditing written paths', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'failed',
       terminateReason: 'max turns exceeded',
@@ -319,7 +319,7 @@ describe('remember memory helper', () => {
         content: 'Remember me.',
         contextMode: 'workspace',
       }),
-    ).rejects.toMatchObject({ code: 'remember_path_escape' });
+    ).rejects.toThrow('max turns exceeded');
     expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
   });
 

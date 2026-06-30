@@ -1613,7 +1613,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           });
         } else {
           ci.emptyReapPending = true;
-          ci.isDying = true;
         }
         throw err;
       }

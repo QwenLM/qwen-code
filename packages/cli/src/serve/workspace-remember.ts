@@ -12,6 +12,7 @@ import type {
   BridgeWorkspaceMemoryRememberContextMode,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
+import { extractRememberErrorCode } from './workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_REMEMBER');
@@ -75,22 +76,6 @@ function cloneTask(
   };
 }
 
-function errorCode(err: unknown): string {
-  if (err && typeof err === 'object') {
-    const record = err as Record<string, unknown>;
-    if (typeof record['code'] === 'string') return record['code'];
-    const data = record['data'];
-    if (data && typeof data === 'object') {
-      const dataRecord = data as Record<string, unknown>;
-      if (typeof dataRecord['errorKind'] === 'string') {
-        return dataRecord['errorKind'];
-      }
-      if (typeof dataRecord['code'] === 'string') return dataRecord['code'];
-    }
-  }
-  return 'remember_failed';
-}
-
 function publicErrorMessage(code: string): string {
   if (code === 'managed_memory_unavailable') {
     return 'Managed memory is unavailable for this daemon workspace.';
@@ -105,6 +90,12 @@ function publicErrorMessage(code: string): string {
     return 'Workspace memory remember timed out.';
   }
   return 'Workspace memory remember failed.';
+}
+
+function publicErrorStatus(code: string): number {
+  if (code === 'remember_queue_full') return 429;
+  if (code === 'managed_memory_unavailable') return 409;
+  return 500;
 }
 
 export class WorkspaceRememberTaskLane {
@@ -175,7 +166,7 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = errorCode(err);
+        const code = extractRememberErrorCode(err);
         debugLogger.error('Remember task failed:', err);
         task.status = 'failed';
         task.error = {
@@ -316,8 +307,8 @@ export function mountWorkspaceMemoryRememberRoutes(
           ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch (err) {
-        const code = errorCode(err);
-        res.status(code === 'remember_queue_full' ? 429 : 500).json({
+        const code = extractRememberErrorCode(err);
+        res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code),
           code,
         });
