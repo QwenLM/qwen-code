@@ -2465,16 +2465,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (isAcpSessionResourceNotFound(err, req.sessionId)) {
           throw new SessionNotFoundError(req.sessionId);
         }
-        if (
-          ci.sessionIds.size === 0 &&
-          ci.pendingRestoreIds.size === 1 &&
-          ci.pendingRestoreIds.has(req.sessionId) &&
-          ci.workspaceControlInFlight === 0
-        ) {
+        if (hasNoChannelWork(ci)) {
           ci.isDying = true;
           await ci.channel.kill().catch(() => {
             /* best-effort — channel.exited handler still runs */
           });
+        } else {
+          ci.emptyReapPending = true;
         }
         throw err;
       }
@@ -2543,7 +2540,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         hasActivePrompt: entry.promptActive,
         ...replayFieldsFor(entry, action),
       };
-    })().finally(() => {
+    })().finally(async () => {
       ci?.pendingRestoreIds.delete(req.sessionId);
       // Pair with `markRestoreInFlight`. Once the IIFE settles, either
       // `createSessionEntry` ran (`drainEarlyEvents` already cleared
@@ -2559,6 +2556,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // new session. `markSessionClosed` already does both: refresh
         // tombstone + delete `earlyEvents[id]`.
         ci?.client.markSessionClosed(req.sessionId);
+      }
+      if (ci) {
+        await reapPendingEmptyChannel(ci);
       }
     });
 

@@ -19,6 +19,7 @@ import type {
   Agent,
   InitializeResponse,
   LoadSessionResponse,
+  NewSessionResponse,
   PromptRequest,
   PromptResponse,
   ResumeSessionResponse,
@@ -1254,6 +1255,48 @@ describe('createAcpSessionBridge', () => {
     expect(restored.sessionId).toBe('pending-restore');
     expect(bridge.sessionCount).toBe(1);
     expect(handles[0]?.killed).toBe(false);
+
+    await bridge.shutdown();
+  });
+
+  it('does not kill the channel when restore fails while a spawn is pending', async () => {
+    const handles: ChannelHandle[] = [];
+    const newSession = deferred<NewSessionResponse>();
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        newSessionImpl: () => newSession.promise,
+        loadSessionImpl: () => {
+          throw new Error('restore failed while spawn pending');
+        },
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const spawn = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    for (
+      let i = 0;
+      i < 50 && handles[0]?.agent.newSessionCalls.length !== 1;
+      i++
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(handles).toHaveLength(1);
+    expect(handles[0]!.agent.newSessionCalls).toHaveLength(1);
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'failed-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toThrow();
+    expect(handles[0]!.killed).toBe(false);
+
+    newSession.resolve({ sessionId: 'spawned-after-restore-failure' });
+    const spawned = await spawn;
+    expect(spawned.sessionId).toBe('spawned-after-restore-failure');
+    expect(handles[0]!.killed).toBe(false);
 
     await bridge.shutdown();
   });
