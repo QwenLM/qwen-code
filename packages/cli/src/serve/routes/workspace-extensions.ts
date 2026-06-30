@@ -485,6 +485,9 @@ export function registerWorkspaceExtensionRoutes(
             id: ext.id,
             name: ext.name,
             ...(ext.displayName ? { displayName: ext.displayName } : {}),
+            ...(ext.config.description
+              ? { description: ext.config.description }
+              : {}),
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
