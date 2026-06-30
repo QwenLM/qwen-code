@@ -945,6 +945,11 @@ describe('expandHomeDir', () => {
     expect(expandHomeDir('~')).toBe(path.normalize(homeDir));
   });
 
+  it('should preserve trailing separators for home directory paths', () => {
+    expect(expandHomeDir('~/')).toBe(path.normalize(homeDir + path.sep));
+    expect(expandHomeDir('~\\')).toBe(path.normalize(homeDir + path.sep));
+  });
+
   it('should expand ~/path to home directory path', () => {
     expect(expandHomeDir('~/documents')).toBe(path.join(homeDir, 'documents'));
   });

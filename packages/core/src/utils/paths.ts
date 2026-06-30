@@ -92,7 +92,7 @@ function expandTilde(p: string): string {
     return os.homedir();
   }
   if (p === '~/' || p === '~\\') {
-    return os.homedir();
+    return os.homedir() + path.sep;
   }
   if (p.startsWith('~/')) {
     return path.join(os.homedir(), p.substring(2));
