@@ -774,6 +774,7 @@ V1 的 store 是 live bridge session 内存索引：
 
 - bridge/session 重启后 artifacts 不恢复。
 - Client SSE 断线重连后应重新 `GET /session/:id/artifacts` 做 snapshot sync。
+- V1 不要求额外 `artifacts_reset` event；如果后续支持 session 继续存在但 artifact store 被清空的运行模式，再增加 `artifacts_reset` 或等价 resync event。
 - 历史恢复、跨进程持久化和 session load replay 属于后续阶段。
 
 ## 8. 内部实现链路
