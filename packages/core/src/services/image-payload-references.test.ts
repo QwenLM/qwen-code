@@ -13,7 +13,7 @@ import {
   FileSystemImagePayloadStore,
   InMemoryImagePayloadStore,
   prepareImagePayloadsForRequest,
-} from './imagePayloadReferences.js';
+} from './image-payload-references.js';
 
 function toolImageTurn(data: string): Content {
   return {

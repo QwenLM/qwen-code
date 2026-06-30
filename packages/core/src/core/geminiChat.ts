@@ -64,7 +64,7 @@ import {
   FileSystemImagePayloadStore,
   getImagePayloadCacheDir,
   prepareImagePayloadsForRequest,
-} from '../services/imagePayloadReferences.js';
+} from '../services/image-payload-references.js';
 import {
   estimateContentTokens,
   estimatePromptTokens,
