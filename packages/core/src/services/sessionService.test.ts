@@ -1129,6 +1129,43 @@ describe('SessionService', () => {
       );
     });
 
+    it('should warn when archiving sidecar rollback fails', async () => {
+      mockActiveSessionOnly();
+      mockActiveWorktreeSidecarOnly();
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const jsonlError = new Error('jsonl move failed');
+      const rollbackError = new Error('rollback failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        const source = sourcePath.toString();
+        if (source.endsWith('.jsonl')) {
+          throw jsonlError;
+        }
+        if (source.endsWith(`/chats/archive/${sessionIdA}.worktree.json`)) {
+          throw rollbackError;
+        }
+        return undefined;
+      });
+
+      const result = await service.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: jsonlError },
+      ]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        `archiveSessions: failed to roll back worktree sidecar for ${sessionIdA}`,
+      );
+      expect(warnings[0]).toContain(
+        `/chats/archive/${sessionIdA}.worktree.json`,
+      );
+      expect(warnings[0]).toContain(`/chats/${sessionIdA}.worktree.json`);
+      expect(warnings[0]).toContain('rollback failed');
+    });
+
     it('should report already archived sessions without moving them', async () => {
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
@@ -1297,6 +1334,43 @@ describe('SessionService', () => {
         expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
       );
+    });
+
+    it('should warn when unarchiving sidecar rollback fails', async () => {
+      mockArchivedSessionOnly();
+      mockArchivedWorktreeSidecarOnly();
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const jsonlError = new Error('jsonl move failed');
+      const rollbackError = new Error('rollback failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        const source = sourcePath.toString();
+        if (source.endsWith('.jsonl') && source.includes('/chats/archive/')) {
+          throw jsonlError;
+        }
+        if (source.endsWith(`/chats/${sessionIdA}.worktree.json`)) {
+          throw rollbackError;
+        }
+        return undefined;
+      });
+
+      const result = await service.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: jsonlError },
+      ]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        `unarchiveSessions: failed to roll back worktree sidecar for ${sessionIdA}`,
+      );
+      expect(warnings[0]).toContain(`/chats/${sessionIdA}.worktree.json`);
+      expect(warnings[0]).toContain(
+        `/chats/archive/${sessionIdA}.worktree.json`,
+      );
+      expect(warnings[0]).toContain('rollback failed');
     });
 
     it('should reject unarchive when active and archived files both exist', async () => {

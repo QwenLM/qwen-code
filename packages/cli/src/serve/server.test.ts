@@ -9470,6 +9470,41 @@ describe('createServeApp', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('logs archive result counts and session ids to stderr', async () => {
+      const archivedId = '11111111-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const notFoundId = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(archivedId);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createArchiveApp(bridge);
+      try {
+        const res = await request(app)
+          .post('/sessions/archive')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionIds: [archivedId, notFoundId] });
+
+        expect(res.status).toBe(200);
+        const logLine = stderrSpy.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('sessions archive result'));
+        expect(logLine).toContain('requested=2');
+        expect(logLine).toContain(
+          `requestedIds=["${archivedId}","${notFoundId}"]`,
+        );
+        expect(logLine).toContain('archived=1');
+        expect(logLine).toContain(`archivedIds=["${archivedId}"]`);
+        expect(logLine).toContain('notFound=1');
+        expect(logLine).toContain(`notFoundIds=["${notFoundId}"]`);
+        expect(logLine).toContain('errors=0');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
     it('does not move JSONL when live strict close fails', async () => {
       const sid = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
       await writeSession(sid);
@@ -9513,6 +9548,37 @@ describe('createServeApp', () => {
       await expect(
         fsp.access(sessionFilePath(sid, 'archived')),
       ).rejects.toThrow();
+    });
+
+    it('logs unarchive result counts and session ids to stderr', async () => {
+      const unarchivedId = '33333333-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const alreadyActiveId = '44444444-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(unarchivedId, 'archived');
+      await writeSession(alreadyActiveId);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const app = createArchiveApp();
+      try {
+        const res = await request(app)
+          .post('/sessions/unarchive')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionIds: [unarchivedId, alreadyActiveId] });
+
+        expect(res.status).toBe(200);
+        const logLine = stderrSpy.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('sessions unarchive result'));
+        expect(logLine).toContain('requested=2');
+        expect(logLine).toContain(
+          `requestedIds=["${unarchivedId}","${alreadyActiveId}"]`,
+        );
+        expect(logLine).toContain('unarchived=1');
+        expect(logLine).toContain(`unarchivedIds=["${unarchivedId}"]`);
+        expect(logLine).toContain('alreadyActive=1');
+        expect(logLine).toContain(`alreadyActiveIds=["${alreadyActiveId}"]`);
+        expect(logLine).toContain('errors=0');
+      } finally {
+        stderrSpy.mockRestore();
+      }
     });
 
     it('rejects load and resume for archived sessions with session_archived', async () => {

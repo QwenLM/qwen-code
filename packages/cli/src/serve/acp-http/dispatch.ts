@@ -70,6 +70,7 @@ import {
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
+  logSessionArchiveWarning,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -2516,7 +2517,9 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
-          const svc = new SessionService(this.boundWorkspace);
+          const svc = new SessionService(this.boundWorkspace, {
+            onWarning: logSessionArchiveWarning,
+          });
           const result = await archiveDaemonSessions({
             sessionIds: ids,
             service: svc,
@@ -2534,7 +2537,9 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/unarchive`: {
           const ids = this.parseSessionIds(params);
-          const svc = new SessionService(this.boundWorkspace);
+          const svc = new SessionService(this.boundWorkspace, {
+            onWarning: logSessionArchiveWarning,
+          });
           const result = await unarchiveDaemonSessions({
             sessionIds: ids,
             service: svc,

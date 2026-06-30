@@ -46,6 +46,7 @@ import {
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
+  logSessionArchiveWarning,
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -906,7 +907,9 @@ export function registerSessionRoutes(
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
 
-    const service = new SessionService(boundWorkspace);
+    const service = new SessionService(boundWorkspace, {
+      onWarning: logSessionArchiveWarning,
+    });
 
     try {
       const result = await archiveDaemonSessions({
@@ -930,7 +933,9 @@ export function registerSessionRoutes(
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
 
-    const service = new SessionService(boundWorkspace);
+    const service = new SessionService(boundWorkspace, {
+      onWarning: logSessionArchiveWarning,
+    });
 
     try {
       const result = await unarchiveDaemonSessions({

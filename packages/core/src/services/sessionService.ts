@@ -143,6 +143,10 @@ export interface UnarchiveSessionsResult {
   errors: Array<{ sessionId: string; error: Error }>;
 }
 
+export interface SessionServiceOptions {
+  onWarning?: (message: string) => void;
+}
+
 /**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
@@ -260,11 +264,18 @@ export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;
   private readonly projectRoot: string;
+  private readonly onWarning: ((message: string) => void) | undefined;
 
-  constructor(cwd: string) {
+  constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd);
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
+    this.onWarning = options.onWarning;
+  }
+
+  private warn(message: string): void {
+    debugLogger.warn(message);
+    this.onWarning?.(message);
   }
 
   private getChatsDir(): string {
@@ -1075,7 +1086,7 @@ export class SessionService {
             try {
               fs.renameSync(archivedSidecar, activeSidecar);
             } catch (rollbackError) {
-              debugLogger.warn(
+              this.warn(
                 `archiveSessions: failed to roll back worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${rollbackError}`,
               );
             }
@@ -1143,7 +1154,7 @@ export class SessionService {
             try {
               fs.renameSync(activeSidecar, archivedSidecar);
             } catch (rollbackError) {
-              debugLogger.warn(
+              this.warn(
                 `unarchiveSessions: failed to roll back worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${rollbackError}`,
               );
             }

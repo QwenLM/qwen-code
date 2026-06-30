@@ -12,6 +12,7 @@ import {
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { safeLogValue } from './request-helpers.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -75,12 +76,55 @@ function isSessionNotFoundError(err: unknown): boolean {
 
 function logSessionArchiveResult(
   action: 'archive' | 'unarchive',
-  counts: Record<string, number>,
+  result: {
+    requested: string[];
+    changed: string[];
+    already: string[];
+    notFound: string[];
+    errors: Array<{ sessionId: string; error: unknown }>;
+  },
 ): void {
-  const details = Object.entries(counts)
-    .map(([key, value]) => `${key}=${value}`)
-    .join(' ');
+  const changedLabel = action === 'archive' ? 'archived' : 'unarchived';
+  const alreadyLabel =
+    action === 'archive' ? 'alreadyArchived' : 'alreadyActive';
+  const details = [
+    `requested=${result.requested.length} requestedIds=${formatSessionIds(result.requested)}`,
+    `${changedLabel}=${result.changed.length} ${changedLabel}Ids=${formatSessionIds(result.changed)}`,
+    `${alreadyLabel}=${result.already.length} ${alreadyLabel}Ids=${formatSessionIds(result.already)}`,
+    `notFound=${result.notFound.length} notFoundIds=${formatSessionIds(result.notFound)}`,
+    `errors=${result.errors.length} errorIds=${formatSessionErrors(result.errors)}`,
+  ].join(' ');
   writeStderrLine(`qwen serve: sessions ${action} result ${details}`);
+}
+
+function formatSessionIds(sessionIds: string[]): string {
+  return `[${sessionIds.map((sessionId) => safeLogValue(sessionId)).join(',')}]`;
+}
+
+function formatSessionErrors(
+  errors: Array<{ sessionId: string; error: unknown }>,
+): string {
+  return `[${errors
+    .map(
+      ({ sessionId, error }) =>
+        `${safeLogValue(sessionId)}:${safeLogValue(errorMessage(error))}`,
+    )
+    .join(',')}]`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function logSessionArchiveWarning(message: string): void {
+  writeStderrLine(`qwen serve: ${sanitizeLogLine(message)}`);
+}
+
+const LOG_LINE_UNSAFE_RE =
+  /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+
+function sanitizeLogLine(message: string): string {
+  return message.replace(LOG_LINE_UNSAFE_RE, ' ').slice(0, 4096);
 }
 
 export async function archiveDaemonSessions(params: {
@@ -122,11 +166,11 @@ export async function archiveDaemonSessions(params: {
   });
 
   logSessionArchiveResult('archive', {
-    requested: sessionIds.length,
-    archived: archived.length,
-    alreadyArchived: alreadyArchived.length,
-    notFound: notFound.length,
-    errors: errors.length,
+    requested: sessionIds,
+    changed: archived,
+    already: alreadyArchived,
+    notFound,
+    errors,
   });
 
   return { archived, alreadyArchived, notFound, errors };
@@ -160,11 +204,11 @@ export async function unarchiveDaemonSessions(params: {
   });
 
   logSessionArchiveResult('unarchive', {
-    requested: sessionIds.length,
-    unarchived: unarchived.length,
-    alreadyActive: alreadyActive.length,
-    notFound: notFound.length,
-    errors: errors.length,
+    requested: sessionIds,
+    changed: unarchived,
+    already: alreadyActive,
+    notFound,
+    errors,
   });
 
   return { unarchived, alreadyActive, notFound, errors };
