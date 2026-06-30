@@ -1021,6 +1021,12 @@ export function SettingsDialog({
           // so it never reaches here).
           setFocusZone('search');
           setSearchQuery((q) => q + key.sequence);
+          // Consume the keypress: without this return, a printable char in the
+          // list zone falls through to the restart handler below, so typing `r`
+          // while a restart prompt is showing would trigger onRestartRequest /
+          // process exit instead of filtering. (The "Press r" affordance is
+          // unaffected from other zones; see the focus-zone routing above.)
+          return;
         }
       }
       if (showRestartPrompt && mode === 'settings' && name === 'r') {
