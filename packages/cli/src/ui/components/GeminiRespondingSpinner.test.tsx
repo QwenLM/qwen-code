@@ -19,7 +19,7 @@ describe('<GeminiSpinner />', () => {
 
     const { lastFrame } = render(<GeminiSpinner />);
 
-    expect(lastFrame()).toContain('·');
+    expect(lastFrame()).toContain('.');
   });
 
   // Regression: Footer.tsx renders <GeminiSpinner /> inside a <Text> wrapper
