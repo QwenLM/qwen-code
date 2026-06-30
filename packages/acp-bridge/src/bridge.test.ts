@@ -8236,6 +8236,42 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps session live when required agent close fails', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/close') {
+            throw new Error('flush failed');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireAgentClose: true,
+        }),
+      ).rejects.toThrow();
+
+      expect(handle.agent.extMethodCalls).toEqual([
+        {
+          method: 'qwen/control/session/close',
+          params: { sessionId: session.sessionId, requireFlush: true },
+        },
+      ]);
+      expect(bridge.sessionCount).toBe(1);
+      expect(
+        bridge.recordHeartbeat(session.sessionId, {
+          clientId: session.clientId,
+        }),
+      ).toMatchObject({ sessionId: session.sessionId });
+
+      await bridge.shutdown();
+    });
+
     it('resolves pending permissions as cancelled', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {

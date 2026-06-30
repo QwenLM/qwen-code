@@ -2608,7 +2608,10 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async closeStoredSession(sessionId: string): Promise<void> {
+  private async closeStoredSession(
+    sessionId: string,
+    opts?: { requireFlush?: boolean },
+  ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
@@ -2645,6 +2648,10 @@ class QwenAgent implements Agent {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    }
+
+    if (flushError !== undefined && opts?.requireFlush === true) {
+      throw flushError;
     }
 
     unregisterGoalHook(session.getConfig(), sessionId);
@@ -5789,7 +5796,9 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        await this.closeStoredSession(sessionId);
+        await this.closeStoredSession(sessionId, {
+          requireFlush: params['requireFlush'] === true,
+        });
         return { sessionId, closed: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {

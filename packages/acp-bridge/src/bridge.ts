@@ -1831,14 +1831,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     ci: ChannelInfo | undefined,
     label: 'closeSession' | 'killSession',
-    opts?: { throwOnFailure?: boolean },
+    opts?: { throwOnFailure?: boolean; requireFlush?: boolean },
   ): Promise<void> => {
-    if (!ci || ci.channel !== entry.channel) return;
+    if (!ci || ci.channel !== entry.channel) {
+      if (opts?.throwOnFailure === true) {
+        throw new Error(
+          `ACP session close channel unavailable for ${entry.sessionId}`,
+        );
+      }
+      return;
+    }
     try {
       await Promise.race([
         withTimeout(
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
             sessionId: entry.sessionId,
+            ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
           }),
           initTimeoutMs,
           SERVE_CONTROL_EXT_METHODS.sessionClose,
@@ -2514,6 +2522,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
       );
     }
+    const requireAgentClose = closeOpts?.requireAgentClose === true;
+    if (requireAgentClose) {
+      await notifyAgentSessionClose(entry, ci, 'closeSession', {
+        throwOnFailure: true,
+        requireFlush: true,
+      });
+    }
     if (ci && ci.channel === entry.channel) {
       ci.sessionIds.delete(sessionId);
     }
@@ -2556,9 +2571,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `session_closed` is terminal. Close the bus before ACP cancel so any
     // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
-    await notifyAgentSessionClose(entry, ci, 'closeSession', {
-      throwOnFailure: closeOpts?.requireAgentClose === true,
-    });
+    if (!requireAgentClose) {
+      await notifyAgentSessionClose(entry, ci, 'closeSession');
+    }
     try {
       await telemetry.withSpan(
         'session.close.cancel_active_prompt',
