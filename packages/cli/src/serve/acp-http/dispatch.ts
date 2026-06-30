@@ -68,8 +68,10 @@ import {
   listWorkspaceSessionsForResponse,
 } from '../server.js';
 import {
+  archiveDaemonSessions,
   assertSessionLoadable,
   SessionArchiveCoordinator,
+  unarchiveDaemonSessions,
 } from '../server/session-archive.js';
 import type {
   DaemonWorkspaceService,
@@ -2513,42 +2515,17 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
           const svc = new SessionService(this.boundWorkspace);
-          const archived: string[] = [];
-          const alreadyArchived: string[] = [];
-          const notFound: string[] = [];
-          const errors: Array<{ sessionId: string; error: unknown }> = [];
-          await this.archiveCoordinator.runExclusiveMany(ids, async () => {
-            for (const sid of ids) {
-              try {
-                try {
-                  await this.bridge.closeSession(sid, undefined, {
-                    requireAgentClose: true,
-                  });
-                } catch (err) {
-                  if (
-                    !(
-                      err instanceof Error &&
-                      err.name === 'SessionNotFoundError'
-                    )
-                  ) {
-                    throw err;
-                  }
-                }
-                const result = await svc.archiveSessions([sid]);
-                archived.push(...result.archived);
-                alreadyArchived.push(...result.alreadyArchived);
-                notFound.push(...result.notFound);
-                errors.push(...result.errors);
-              } catch (err) {
-                errors.push({ sessionId: sid, error: err });
-              }
-            }
+          const result = await archiveDaemonSessions({
+            sessionIds: ids,
+            service: svc,
+            bridge: this.bridge,
+            coordinator: this.archiveCoordinator,
           });
           this.replyConn(conn, id, {
-            archived,
-            alreadyArchived,
-            notFound,
-            errors: this.serializeSessionErrors(errors),
+            archived: result.archived,
+            alreadyArchived: result.alreadyArchived,
+            notFound: result.notFound,
+            errors: this.serializeSessionErrors(result.errors),
           } as unknown);
           return;
         }
@@ -2556,28 +2533,16 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/unarchive`: {
           const ids = this.parseSessionIds(params);
           const svc = new SessionService(this.boundWorkspace);
-          const unarchived: string[] = [];
-          const alreadyActive: string[] = [];
-          const notFound: string[] = [];
-          const errors: Array<{ sessionId: string; error: unknown }> = [];
-          await this.archiveCoordinator.runExclusiveMany(ids, async () => {
-            try {
-              const result = await svc.unarchiveSessions(ids);
-              unarchived.push(...result.unarchived);
-              alreadyActive.push(...result.alreadyActive);
-              notFound.push(...result.notFound);
-              errors.push(...result.errors);
-            } catch (err) {
-              for (const sid of ids) {
-                errors.push({ sessionId: sid, error: err });
-              }
-            }
+          const result = await unarchiveDaemonSessions({
+            sessionIds: ids,
+            service: svc,
+            coordinator: this.archiveCoordinator,
           });
           this.replyConn(conn, id, {
-            unarchived,
-            alreadyActive,
-            notFound,
-            errors: this.serializeSessionErrors(errors),
+            unarchived: result.unarchived,
+            alreadyActive: result.alreadyActive,
+            notFound: result.notFound,
+            errors: this.serializeSessionErrors(result.errors),
           } as unknown);
           return;
         }

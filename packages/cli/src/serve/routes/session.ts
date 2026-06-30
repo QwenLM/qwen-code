@@ -44,8 +44,10 @@ import {
   parseSessionPageSizeQuery,
 } from '../server/session-list.js';
 import {
+  archiveDaemonSessions,
   assertSessionLoadable,
   type SessionArchiveCoordinator,
+  unarchiveDaemonSessions,
 } from '../server/session-archive.js';
 
 interface RegisterSessionRoutesDeps {
@@ -905,45 +907,23 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
 
     const service = new SessionService(boundWorkspace);
-    const archived: string[] = [];
-    const alreadyArchived: string[] = [];
-    const notFound: string[] = [];
-    const errors: Array<{ sessionId: string; error: unknown }> = [];
 
     try {
-      await archiveCoordinator.runExclusiveMany(uniqueIds, async () => {
-        for (const sessionId of uniqueIds) {
-          try {
-            try {
-              await bridge.closeSession(sessionId, undefined, {
-                requireAgentClose: true,
-              });
-            } catch (err) {
-              if (!(err instanceof SessionNotFoundError)) {
-                throw err;
-              }
-            }
-            const result = await service.archiveSessions([sessionId]);
-            archived.push(...result.archived);
-            alreadyArchived.push(...result.alreadyArchived);
-            notFound.push(...result.notFound);
-            errors.push(...result.errors);
-          } catch (err) {
-            errors.push({ sessionId, error: err });
-          }
-        }
+      const result = await archiveDaemonSessions({
+        sessionIds: uniqueIds,
+        service,
+        bridge,
+        coordinator: archiveCoordinator,
+      });
+      res.status(200).json({
+        archived: result.archived,
+        alreadyArchived: result.alreadyArchived,
+        notFound: result.notFound,
+        errors: serializeSessionErrors(result.errors),
       });
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/archive' });
-      return;
     }
-
-    res.status(200).json({
-      archived,
-      alreadyArchived,
-      notFound,
-      errors: serializeSessionErrors(errors),
-    });
   });
 
   app.post('/sessions/unarchive', mutate(), async (req, res) => {
@@ -951,36 +931,22 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
 
     const service = new SessionService(boundWorkspace);
-    const unarchived: string[] = [];
-    const alreadyActive: string[] = [];
-    const notFound: string[] = [];
-    const errors: Array<{ sessionId: string; error: unknown }> = [];
 
     try {
-      await archiveCoordinator.runExclusiveMany(uniqueIds, async () => {
-        try {
-          const result = await service.unarchiveSessions(uniqueIds);
-          unarchived.push(...result.unarchived);
-          alreadyActive.push(...result.alreadyActive);
-          notFound.push(...result.notFound);
-          errors.push(...result.errors);
-        } catch (err) {
-          for (const sessionId of uniqueIds) {
-            errors.push({ sessionId, error: err });
-          }
-        }
+      const result = await unarchiveDaemonSessions({
+        sessionIds: uniqueIds,
+        service,
+        coordinator: archiveCoordinator,
+      });
+      res.status(200).json({
+        unarchived: result.unarchived,
+        alreadyActive: result.alreadyActive,
+        notFound: result.notFound,
+        errors: serializeSessionErrors(result.errors),
       });
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/unarchive' });
-      return;
     }
-
-    res.status(200).json({
-      unarchived,
-      alreadyActive,
-      notFound,
-      errors: serializeSessionErrors(errors),
-    });
   });
 
   app.patch('/session/:id/metadata', async (req, res) => {
