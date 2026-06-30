@@ -633,7 +633,7 @@ describe('handleGroupAll', () => {
     expect(env['text']).toBe('/help');
   });
 
-  it('bot 消息被静默丢弃（isBot guard）', async () => {
+  it('bot 消息带有 [bot] 前缀透传给模型', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroupAll'](
@@ -643,7 +643,10 @@ describe('handleGroupAll', () => {
       }),
     );
     await vi.advanceTimersByTimeAsync(600);
-    expect(mockHandleInbound).not.toHaveBeenCalled();
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toContain('[bot]');
+    expect(env['text']).toContain('auto reply');
   });
 
   it('groupActiveMsgEnabled=false 时被阻断', async () => {

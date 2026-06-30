@@ -62,15 +62,6 @@ export function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
 }
 
-/**
- * Detect whether text contains markdown syntax (for msg_type selection).
- *
- * The list-item patterns `^[-*+]\s` and `^\d+\.\s` trade precision for recall:
- * text like "- temperature: 5°C" or "1. first thing" will trigger markdown
- * mode. Sending non-markdown as msg_type=2 (markdown) is harmless — QQ renders
- * it as plain text — so false positives are safe. False negatives (missing
- * markdown in msg_type=0) would strip formatting, so we bias toward markdown.
- */
 export class QQChannel extends ChannelBase {
   private ws: WebSocket | null = null;
   private accessToken: string = '';
@@ -83,7 +74,7 @@ export class QQChannel extends ChannelBase {
   private readonly maxReconnectAttempts: number = 20;
   /** QQ Bot session_id from READY, used for RESUME on reconnect. */
   private sessionId: string = '';
-  /** Bot's own QQ OPENID, extracted from gateway READY event. */
+  /** Bot's own QQ OPENID, extracted from the first inbound @mention targeting us. */
   private botOpenId: string = '';
   /** Set to true after first READY + session restore completes. Guards
    *  against stale textChunk events during startup reconnection. */
@@ -369,7 +360,6 @@ export class QQChannel extends ChannelBase {
         body['msg_seq'] = nextSeq;
       }
 
-      const sentSeq = nextSeq;
       const resp = await sendQQMessage(
         route.base,
         route.path,
@@ -417,10 +407,6 @@ export class QQChannel extends ChannelBase {
         return;
       }
 
-      // Sync msgSeqMap if the actual sent seq differs from the pre-send estimate.
-      if (msgId && sentSeq !== nextSeq) {
-        this.msgSeqMap.set(msgId, sentSeq);
-      }
       if (msgId) this.saveQQState();
     } catch (e) {
       if (msgId) {
@@ -1420,8 +1406,8 @@ export class QQChannel extends ChannelBase {
       isMentioned: true,
       isReplyToBot: false,
       alreadyPrefixed: !isSlash || undefined,
-    }).catch((e) =>
-      process.stderr.write(`[QQ:${this.name}] C2C handler error: ${e}\n`),
+    }).catch((err: unknown) =>
+      process.stderr.write(`[QQ:${this.name}] C2C handler error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`),
     );
   }
 
@@ -1525,8 +1511,8 @@ export class QQChannel extends ChannelBase {
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
       alreadyPrefixed: !isSlash || undefined,
-    }).catch((e) =>
-      process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
+    }).catch((err: unknown) =>
+      process.stderr.write(`[QQ:${this.name}] Group handler error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`),
     );
   }
 
@@ -1606,8 +1592,7 @@ export class QQChannel extends ChannelBase {
       return;
     }
 
-    // Guard: ignore messages from other bots (including our own) to
-    // prevent infinite self-reply loops.
+    // Guard: drop messages without an author (malformed events).
     if (!event.author) {
       process.stderr.write(
         `[QQ:${this.name}] Group all-message dropped: missing author\n`,
@@ -1617,27 +1602,20 @@ export class QQChannel extends ChannelBase {
     const isBot = event.author.bot === true;
     const botTag = isBot ? '[bot] ' : '';
 
-    // Guard: drop messages from other bots (including our own) to
-    // prevent infinite self-reply loops.
-    if (isBot) {
-      process.stderr.write(
-        `[QQ:${this.name}] Group all-message dropped: bot message from ${event.author.id}\n`,
-      );
-      return;
-    }
-
-    const content = event.content?.trim() ?? '';
-    // Compute cleanText early so keyword matching and text construction
-    // both use the sanitized content (without <@OPENID> tags).
-    const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
-    if (!cleanText) return;
-
     // Validate groupAllPolicy — unknown values default to 'log'.
+    // Policy check runs BEFORE content/regex processing to avoid
+    // unnecessary work when policy is 'log' (discard all messages).
     const rawPolicy = this.qqConfig.groupAllPolicy;
     const policy =
       rawPolicy === 'keyword' || rawPolicy === 'all' ? rawPolicy : 'log';
 
     if (policy === 'log') return;
+
+    const content = event.content?.trim() ?? '';
+    // Compute cleanText so keyword matching and text construction
+    // both use the sanitized content (without <@OPENID> tags).
+    const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    if (!cleanText) return;
 
     if (policy === 'keyword') {
       const triggers = (this.qqConfig.keywordTriggers ?? []).filter(
@@ -1721,7 +1699,7 @@ export class QQChannel extends ChannelBase {
       alreadyPrefixed: !isSlash || undefined,
     }).catch((err: unknown) => {
       process.stderr.write(
-        `[QQ:${this.name}] handleGroupAll error: ${err instanceof Error ? err.message : String(err)}\n`,
+        `[QQ:${this.name}] handleGroupAll error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
       );
     });
   }

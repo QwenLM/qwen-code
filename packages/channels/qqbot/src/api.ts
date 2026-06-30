@@ -111,23 +111,6 @@ export function getApiBase(sandbox: boolean): string {
 }
 
 /**
- * Fetch the bot's own user info from QQ Bot API.
- * Returns the response JSON which includes `id` (the bot's openid),
- * `username`, and other account details.
- */
-export async function fetchBotInfo(
-  apiBase: string,
-  accessToken: string,
-): Promise<{ id: string; username?: string } | null> {
-  const resp = await fetch(`${apiBase}/users/@me`, {
-    headers: { Authorization: `QQBot ${accessToken}` },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT),
-  });
-  if (!resp.ok) return null;
-  return resp.json() as Promise<{ id: string; username?: string }>;
-}
-
-/**
  * Send a message chunk to a QQ chat.
  * Resolves on success; caller should handle errors and msg_seq tracking.
  */
