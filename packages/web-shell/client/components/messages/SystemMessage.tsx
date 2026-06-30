@@ -38,6 +38,15 @@ export const SystemMessage = memo(function SystemMessage({
   onRetryClick,
 }: SystemMessageProps) {
   const { t } = useI18n();
+  // The user ESC-cancelled a live stream. Render it right-aligned and subtle —
+  // a user-initiated stop reads as belonging to the user side of the transcript.
+  if (source === 'prompt_cancelled') {
+    return (
+      <div className={styles.cancelled} role="status">
+        <span>{t('turn.stopped')}</span>
+      </div>
+    );
+  }
   const contextUsage =
     variant === 'info' ? parseContextUsageMessage(content) : null;
   if (contextUsage) {
