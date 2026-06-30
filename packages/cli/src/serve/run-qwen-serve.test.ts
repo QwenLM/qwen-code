@@ -679,6 +679,9 @@ describe('runQwenServe runtime startup failures', () => {
     ['false', false],
     ['FALSE', false],
     [' 0 ', false],
+    ['off', false],
+    ['OFF', false],
+    ['no', false],
     ['1', true],
     ['true', true],
     ['anything', true],
@@ -1488,7 +1491,7 @@ describe('runQwenServe startup observability', () => {
         'qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth.',
       );
       expect(stderrWrites.join('')).toContain(
-        'qwen serve: CDP tunnel (/cdp) auto-enabled; a connected client can drive browser tabs.',
+        'qwen serve: CDP tunnel (/cdp) is enabled, but browser MCP auto-wire is unavailable without a fixed unauthenticated --port.',
       );
 
       expect(await readStartup(handle)).toMatchObject({
@@ -1512,6 +1515,11 @@ describe('runQwenServe startup observability', () => {
       .mockReturnValue(
         makeFakeBridge() as ReturnType<typeof acpBridge.createAcpSessionBridge>,
       );
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
     const port = await getFreeLoopbackPort();
     const handle = await runQwenServe(
       {
@@ -1537,6 +1545,9 @@ describe('runQwenServe startup observability', () => {
         QWEN_SERVE_CDP_TUNNEL_OVER_WS: '1',
         QWEN_SERVE_CDP_TUNNEL_PORT: String(port),
       });
+      expect(stderrWrites.join('')).toContain(
+        'qwen serve: CDP tunnel (/cdp) enabled; a connected client can drive browser tabs.',
+      );
     } finally {
       await handle.close();
     }
@@ -1569,6 +1580,12 @@ describe('runQwenServe startup observability', () => {
         QWEN_SERVE_CDP_TUNNEL_PORT: undefined,
         QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED: '1',
       });
+      expect(stderrWrites.join('')).toContain(
+        'qwen serve: client-hosted MCP tools are accepted over the WebSocket (auth required).',
+      );
+      expect(stderrWrites.join('')).toContain(
+        'qwen serve: CDP tunnel (/cdp) is enabled, but browser MCP auto-wire is unavailable without a fixed unauthenticated --port.',
+      );
     } finally {
       await authHandle.close();
     }

@@ -7896,13 +7896,29 @@ export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
     if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
       return undefined;
     }
-    return Object.assign(
-      new MCPServerConfig(process.execPath, [
-        binPath,
-        '--wsEndpoint',
-        `ws://127.0.0.1:${port}/cdp`,
-      ]),
-      { alwaysLoadTools: true },
+    return new MCPServerConfig(
+      process.execPath,
+      [binPath, '--wsEndpoint', `ws://127.0.0.1:${port}/cdp`],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
     );
   } catch {
     // chrome-devtools-mcp not installed in this build — skip auto-wiring.

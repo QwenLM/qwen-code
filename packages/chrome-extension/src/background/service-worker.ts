@@ -121,9 +121,11 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
   }
 
   // CDP-tunnel frames: route to the bridge, which drives the tab via
-  // chrome.debugger and pushes results/events back over this socket.
+  // chrome.debugger and pushes results/events back over the active socket.
   if (isCdpBridgeFrame(msg['type'])) {
-    handleCdpFrame(msg as { type?: unknown }, (frame) => sendRaw(ws, frame));
+    handleCdpFrame(msg as { type?: unknown }, (frame) =>
+      sendRaw(socket ?? ws, frame),
+    );
     return;
   }
   // Other frame types (chat/session traffic) aren't ours; ignore.

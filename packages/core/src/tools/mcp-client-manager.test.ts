@@ -1656,11 +1656,14 @@ describe('McpClientManager', () => {
     );
 
     let includeTools: string[] | undefined = undefined;
+    let alwaysLoadTools: boolean | undefined = undefined;
     const mockConfig = {
       isTrustedFolder: () => true,
       // command/args/env unchanged across passes → transport fingerprint stays
       // identical; only the per-session filter changes.
-      getMcpServers: () => ({ foo: { command: 'node', includeTools } }),
+      getMcpServers: () => ({
+        foo: { command: 'node', includeTools, alwaysLoadTools },
+      }),
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () =>
         ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
@@ -1685,6 +1688,13 @@ describe('McpClientManager', () => {
     await manager.discoverAllMcpToolsIncremental(mockConfig);
     expect(mockedMcpClient.disconnect).toHaveBeenCalledTimes(1);
     expect(mockedMcpClient.connect).toHaveBeenCalledTimes(2);
+
+    // Same path for alwaysLoadTools: it changes discovery visibility, not the
+    // underlying transport identity.
+    alwaysLoadTools = true;
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(mockedMcpClient.disconnect).toHaveBeenCalledTimes(2);
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(3);
   });
 
   it('reconnects a server first connected via the bulk path when its config later changes', async () => {
