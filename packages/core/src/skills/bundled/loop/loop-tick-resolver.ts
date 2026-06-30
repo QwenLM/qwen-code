@@ -11,6 +11,22 @@ import {
   readLoopTaskFile,
   type LoopTaskFileSource,
 } from './loop-task-file.js';
+import {
+  AUTONOMOUS_PREAMBLE,
+  AUTONOMOUS_PREAMBLE_MARKER,
+  CRON_REARM,
+  autonomousTickText,
+  keepAliveRearm,
+  type LoopMode,
+} from './autonomous-loop.js';
+
+export {
+  AUTONOMOUS_SENTINEL_CRON,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
+  AutonomousLoopTickResolver,
+  detectAutonomousSentinel,
+} from './autonomous-loop.js';
+export type { LoopMode } from './autonomous-loop.js';
 
 /**
  * Fire-time resolver for `.qwen/loop.md`-driven loops.
@@ -29,8 +45,6 @@ import {
 
 export const LOOP_SENTINEL_CRON = '<<loop.md>>';
 export const LOOP_SENTINEL_DYNAMIC = '<<loop.md-dynamic>>';
-
-export type LoopMode = 'cron' | 'dynamic';
 
 export interface LoopTickResolverDeps {
   /** Pass `config.getWorkingDir()` — loop.md is resolved against the cwd. */
@@ -67,6 +81,10 @@ export interface LoopTickResult {
    * say "temporarily unavailable" instead of "not present". Carries no errno or
    * path — those stay in the modelText note and LOCAL debug logs only. */
   transientError?: boolean;
+  /** True when this tick is an autonomous-mode tick (a `<<autonomous-loop*>>`
+   * fire, or a loop.md sentinel whose file is gone and has converged on the
+   * autonomous preamble). Lets the caller's echo label it distinctly. */
+  autonomous?: boolean;
 }
 
 const TRUNCATION_WARNING = `> WARNING: loop.md was truncated to ${LOOP_TASK_FILE_MAX_BYTES} bytes. Keep the task list concise.`;
@@ -77,7 +95,7 @@ const INTRO =
 // Mode-specific pacing guidance. Appended to BOTH the full block and the short
 // reminder — the no-op/re-arm instruction applies on every tick.
 const PACING_SUFFIX: Record<LoopMode, string> = {
-  cron: 'The recurring cron fires the next tick automatically — do not call LoopWakeup from this tick.',
+  cron: CRON_REARM,
   dynamic: `You scheduled this tick via LoopWakeup (not a recurring cron). To keep the loop alive, call LoopWakeup again at the end of this turn with prompt set to the literal sentinel \`${LOOP_SENTINEL_DYNAMIC}\` — otherwise the loop ends after this tick.`,
 };
 
@@ -121,22 +139,14 @@ const SOURCE_LABELS: Record<LoopTaskFileSource, string> = {
   home: 'home loop.md',
 };
 
-// Per-mode tail of the absent reminder. The shared prefix (built in absentBody)
-// names the candidate location(s) actually checked; only this no-op/re-arm
-// guidance differs by mode.
+// Per-mode tail for a TRANSIENT-failure no-op tick (buildTransientErrorTick):
+// "treat this as a no-op" + the mode's re-arm. A genuinely-absent loop.md does
+// NOT use this — it converges on absentAutonomousTickText (run the autonomous
+// check, not a no-op).
 const ABSENT_TAIL: Record<LoopMode, string> = {
   cron: 'Treat this as a no-op tick; the recurring cron fires the next tick automatically.',
   dynamic: `Treat this as a no-op tick. To pick it up if it is recreated, call LoopWakeup again with prompt set to the literal sentinel \`${LOOP_SENTINEL_DYNAMIC}\` — otherwise the loop ends after this tick.`,
 };
-
-// Body of the absent reminder — the H1 is supplied by tickHeading() so the
-// absent tick shares the same heading style as the full block and reminder.
-// `locations` is LoopTickResolver.absentLocations(): the candidate path(s)
-// ACTUALLY checked this tick (the project candidate is omitted on an untrusted
-// folder), with a QWEN_HOME-aware home label that is never a raw absolute path.
-function absentBody(mode: LoopMode, locations: string): string {
-  return `loop.md is not currently present at ${locations}. ${ABSENT_TAIL[mode]}`;
-}
 
 /** Detect whether a scheduled prompt is a loop.md sentinel, and which mode. */
 export function detectLoopSentinel(prompt: string): LoopMode | null {
@@ -148,6 +158,32 @@ export function detectLoopSentinel(prompt: string): LoopMode | null {
     return 'cron';
   }
   return null;
+}
+
+// Shared self-paced re-arm instruction; the loop.md and autonomous dynamic ticks
+// differ only in the sentinel the model re-arms with, so build both from one
+// template to keep them in lockstep.
+// `keepAliveRearm` itself lives in autonomous-loop.ts so the interactive TUI
+// path can expand autonomous sentinels without importing loop.md file readers.
+
+// Re-arm guidance for an absent-loop.md tick that has converged on autonomous
+// mode: re-arm the LOOP.MD sentinel (not the autonomous one) so a recreated file
+// is picked up on the next fire.
+const ABSENT_AUTONOMOUS_REARM: Record<LoopMode, string> = {
+  cron: PACING_SUFFIX.cron,
+  dynamic: keepAliveRearm(
+    LOOP_SENTINEL_DYNAMIC,
+    'To pick up loop.md if it is recreated',
+  ),
+};
+
+/** The tick text for an absent loop.md that converges on autonomous mode — like
+ * a pure autonomous tick but headed "loop.md absent" and re-arming the loop.md
+ * sentinel so a recreated file is picked up. It says "run the autonomous check",
+ * NOT an unconditional no-op: the no-op wording would contradict the preamble
+ * prepended on the first fire (and the dedup tick that follows it). */
+function absentAutonomousTickText(mode: LoopMode, locations: string): string {
+  return `${tickHeading(mode, { absent: true })}\nloop.md is not currently present at ${locations}. Run the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick and stop immediately. ${ABSENT_AUTONOMOUS_REARM[mode]}`;
 }
 
 /** Trim a truncated body back to its last full line before the warning tail. */
@@ -163,12 +199,12 @@ function cutToLastNewline(content: string): string {
 
 export class LoopTickResolver {
   // What the model has actually received. Drives full-vs-reminder detection.
-  #lastContent: string | null = null;
+  #lastContent: string | typeof AUTONOMOUS_PREAMBLE_MARKER | null = null;
   // The most recent resolve()'s content, committed to #lastContent only once
   // the caller confirms it reached the model (markDelivered) — so a tick that
   // is aborted between resolve() and delivery can't poison the cache into
   // sending a dangling short reminder next time.
-  #pendingContent: string | null = null;
+  #pendingContent: string | typeof AUTONOMOUS_PREAMBLE_MARKER | null = null;
   // Instance-scoped fs.realpath cache for the confinement boundaries, handed to
   // readLoopTaskFile. Tying it to the resolver (a fresh Map per /cd rebuild,
   // cleared by resetCache) keeps the per-tick perf win while staying
@@ -193,6 +229,33 @@ export class LoopTickResolver {
     if (this.#pendingContent !== null) {
       this.#lastContent = this.#pendingContent;
     }
+  }
+
+  /** Expand an autonomous tick: the full preamble + tick text on the first
+   * delivery, then only the short tick text once the preamble was committed
+   * (markDelivered sets #lastContent to the shared marker). Shared by a pure
+   * autonomous fire and the absent-loop.md convergence in resolve(), so the
+   * preamble is delivered once across both. */
+  #autonomousTick(tickText: string): LoopTickResult {
+    // Set the marker in BOTH branches (like resolve() sets #pendingContent above
+    // its short/full split): the short branch must also refresh it, or a stale
+    // value left by a previously-aborted full tick would be committed by the next
+    // markDelivered() and poison a later fire into a dangling short reminder.
+    this.#pendingContent = AUTONOMOUS_PREAMBLE_MARKER;
+    if (this.#lastContent === AUTONOMOUS_PREAMBLE_MARKER) {
+      return { modelText: tickText, full: false, autonomous: true };
+    }
+    return {
+      modelText: `${AUTONOMOUS_PREAMBLE}\n${tickText}`,
+      full: true,
+      autonomous: true,
+    };
+  }
+
+  /** Resolve an autonomous-loop sentinel fire (a bare `/loop`, no loop.md).
+   * Synchronous — the preamble is static; only the dedup state is consulted. */
+  resolveAutonomous(mode: LoopMode): LoopTickResult {
+    return this.#autonomousTick(autonomousTickText(mode));
   }
 
   /** MODEL-FACING label for the home loop.md location. Mirrors
@@ -243,14 +306,16 @@ export class LoopTickResolver {
       : `${homeLabel} (home)`;
   }
 
-  /** A model-facing no-op tick (loop.md absent, or unreadable this tick). Clears
-   * the change-detection caches so a later successful tick re-delivers the FULL
-   * block instead of a dangling short reminder pointing at a block no longer
-   * guaranteed to be in context — absence (and a failed read) is itself a state
-   * change. */
+  /** A model-facing no-op tick for a loop.md that is unreadable THIS tick (a
+   * transient read failure — see buildTransientErrorTick). Clears the
+   * change-detection caches so a later successful tick re-delivers the FULL block
+   * instead of a dangling short reminder. A genuinely-absent loop.md no longer
+   * routes here — it converges on the autonomous preamble in resolve(). */
   #noOpTick(modelText: string, transientError = false): LoopTickResult {
     this.#pendingContent = null;
-    this.#lastContent = null;
+    if (this.#lastContent !== AUTONOMOUS_PREAMBLE_MARKER) {
+      this.#lastContent = null;
+    }
     return { modelText, full: false, transientError };
   }
 
@@ -308,11 +373,15 @@ export class LoopTickResolver {
     });
 
     if (result.status === 'missing') {
-      // Absence is itself a state change: #noOpTick clears both caches so a
-      // later recreate — even with byte-identical content — re-expands the full
-      // block rather than sending a dangling short reminder.
-      return this.#noOpTick(
-        `${tickHeading(mode, { absent: true })}\n${absentBody(mode, this.absentLocations(allowProjectFile))}`,
+      // Absent loop.md converges on autonomous mode: prepend the autonomous
+      // preamble (once, deduped via the shared marker) so a file-less loop keeps
+      // working autonomously instead of no-op'ing forever. The tick text says
+      // "run the autonomous check" (NOT an unconditional no-op, which would
+      // contradict the prepended preamble) and keeps the loop.md-absent heading +
+      // a loop.md-sentinel re-arm so a recreated file is still picked up (its
+      // content can never equal the marker, so it re-delivers full).
+      return this.#autonomousTick(
+        absentAutonomousTickText(mode, this.absentLocations(allowProjectFile)),
       );
     }
 

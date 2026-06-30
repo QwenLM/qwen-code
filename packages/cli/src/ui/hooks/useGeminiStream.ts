@@ -48,6 +48,7 @@ import {
   ToolConfirmationOutcome,
   logApiCancel,
   ApiCancelEvent,
+  detectAutonomousSentinel,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   runVisionBridge,
@@ -62,6 +63,7 @@ import {
   createDuplicateProviderToolCallResponse,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  AutonomousLoopTickResolver,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -1512,11 +1514,15 @@ export const useGeminiStream = (
     [addItem, clearRetryCountdown],
   );
 
+  const autonomousLoopTickResolverRef =
+    useRef<AutonomousLoopTickResolver | null>(null);
+
   const handleChatCompressionEvent = useCallback(
     (
       eventValue: ServerGeminiChatCompressedEvent['value'],
       userMessageTimestamp: number,
     ) => {
+      autonomousLoopTickResolverRef.current?.resetCache();
       if (pendingHistoryItemRef.current) {
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -2094,7 +2100,11 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
-      metadata?: { notificationDisplayText?: string },
+      metadata?: {
+        notificationDisplayText?: string;
+        onDelivered?: () => void;
+        onDeliveryFailed?: () => void;
+      },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -2109,6 +2119,7 @@ export const useGeminiStream = (
         submitType !== SendMessageType.ToolResult &&
         !allowConcurrentBtwDuringResponse
       ) {
+        metadata?.onDeliveryFailed?.();
         return;
       }
 
@@ -2117,8 +2128,10 @@ export const useGeminiStream = (
           streamingState === StreamingState.WaitingForConfirmation) &&
         submitType !== SendMessageType.ToolResult &&
         !allowConcurrentBtwDuringResponse
-      )
+      ) {
+        metadata?.onDeliveryFailed?.();
         return;
+      }
 
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
@@ -2213,6 +2226,7 @@ export const useGeminiStream = (
 
         if (!shouldProceed || queryToSend === null) {
           isSubmittingQueryRef.current = false;
+          metadata?.onDeliveryFailed?.();
           return;
         }
 
@@ -2316,6 +2330,7 @@ export const useGeminiStream = (
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
+            metadata?.onDeliveryFailed?.();
             return;
           }
 
@@ -2344,6 +2359,12 @@ export const useGeminiStream = (
           if (loopDetectedRef.current) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
+          }
+
+          if (lastPromptErroredRef.current) {
+            metadata?.onDeliveryFailed?.();
+          } else {
+            metadata?.onDelivered?.();
           }
 
           // If the turn was initiated by a submit_prompt with an onComplete
@@ -2377,6 +2398,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -3126,9 +3148,16 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      onDelivered?: () => void;
+      onDeliveryFailed?: () => void;
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+
+  const getAutonomousLoopTickResolver = useCallback(() => {
+    autonomousLoopTickResolverRef.current ??= new AutonomousLoopTickResolver();
+    return autonomousLoopTickResolverRef.current;
+  }, []);
   const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
 
   useEffect(() => {
@@ -3137,6 +3166,7 @@ export const useGeminiStream = (
     }
     notificationQueueSessionIdRef.current = sessionStates.sessionId;
     notificationQueueRef.current = [];
+    autonomousLoopTickResolverRef.current?.resetCache();
   }, [sessionStates.sessionId]);
 
   // Current sessionId for the cron effect, read through a ref so the
@@ -3189,11 +3219,28 @@ export const useGeminiStream = (
       if (stopped) return;
       scheduler.start(
         (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
-          const label = job.prompt.slice(0, 40);
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+          const autonomousMode = detectAutonomousSentinel(job.prompt);
+          let label = job.prompt.slice(0, 40);
+          let modelText = job.prompt;
+          if (autonomousMode) {
+            if (job.missed) return;
+            const resolver = getAutonomousLoopTickResolver();
+            const tick = resolver.resolveAutonomous(autonomousMode);
+            label = 'Autonomous loop tick';
+            modelText = tick.modelText;
+            notificationQueueRef.current.push({
+              displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+              modelText,
+              sendMessageType: SendMessageType.Cron,
+              onDelivered: () => resolver.markDelivered(),
+            });
+            setNotificationTrigger((n) => n + 1);
+            return;
+          }
           notificationQueueRef.current.push({
             displayText: `${job.missed ? 'Missed' : source}: ${label}`,
-            modelText: job.prompt,
+            modelText,
             sendMessageType: SendMessageType.Cron,
           });
           setNotificationTrigger((n) => n + 1);
@@ -3209,7 +3256,7 @@ export const useGeminiStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config, isConfigInitialized]);
+  }, [config, getAutonomousLoopTickResolver, isConfigInitialized]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
@@ -3289,6 +3336,8 @@ export const useGeminiStream = (
         );
         submitQuery(item.modelText, item.sendMessageType, undefined, {
           notificationDisplayText: item.displayText,
+          onDelivered: item.onDelivered,
+          onDeliveryFailed: item.onDeliveryFailed,
         });
         return;
       }
