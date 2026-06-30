@@ -1038,10 +1038,16 @@ export const useGeminiStream = (
           };
         }
 
-        // Yield to let React render the user message before continuing
-        // with @-command processing and API call. Reduces the visual lag
-        // between input-box clear and the message appearing in history.
-        await Promise.resolve();
+        // Yield via macrotask to let Ink/React flush the user message render
+        // before continuing with @-command processing and API call.
+        // React 19.2.4 (Ink 7.0.3) schedules renders via
+        // MessageChannel.postMessage (a macrotask), so a microtask yield
+        // (await Promise.resolve()) does NOT give React a chance to render —
+        // the continuation runs first. setImmediate fires in the check phase
+        // after I/O events (where MessageChannel delivers its postMessage),
+        // guaranteeing React renders first without the ~1ms timer overhead
+        // of setTimeout(0).
+        await new Promise((r) => setImmediate(r));
 
         // Handle @-commands (which might involve tool calls)
         if (isAtCommand(trimmedQuery)) {
