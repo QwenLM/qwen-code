@@ -367,8 +367,8 @@ export class QQChannel extends ChannelBase {
         body['msg_seq'] = nextSeq;
       }
 
-      let sentSeq = nextSeq;
-      let resp = await sendQQMessage(
+      const sentSeq = nextSeq;
+      const resp = await sendQQMessage(
         route.base,
         route.path,
         this.accessToken,
