@@ -111,6 +111,10 @@ export class QQChannel extends ChannelBase {
   /** Whether this process has never received READY (cold start vs RESUME fallback). */
   private coldStart: boolean = true;
 
+  /** Named handler for permanent textChunk listener (cron/non-prompt messages). */
+  private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
+    null;
+
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
   /** Track the latest user messageId per chatId for proper reply (msg_id). */
@@ -185,6 +189,25 @@ export class QQChannel extends ChannelBase {
       stateDir,
       `${safeName}-sessions-backup.json`,
     );
+
+    // Permanent textChunk listener for cron/non-prompt messages.
+    // ChannelBase's prompt-path textChunk listener is only alive during
+    // bridge.prompt(). Cron messages bypass prompt() so their textChunk
+    // events arrive without a listener. This permanent listener catches them.
+    // We use setImmediate to let ChannelBase's prompt listener set up
+    // streamState first — if streamState has the sessionId, it's a
+    // normal prompt and we skip.
+    this._cronTextHandler = (sessionId: string, text: string) => {
+      setImmediate(() => {
+        if (!this.streamState.has(sessionId)) {
+          const target = this.router.getTarget(sessionId);
+          if (target) {
+            this.sendMessage(target.chatId, text).catch(() => {});
+          }
+        }
+      });
+    };
+    this.bridge.on?.('textChunk', this._cronTextHandler);
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -458,6 +481,10 @@ export class QQChannel extends ChannelBase {
     if (this.connectReject) {
       this.connectReject(new Error('Channel disconnected'));
       this.connectReject = null;
+    }
+    if (this._cronTextHandler) {
+      this.bridge.off?.('textChunk', this._cronTextHandler);
+      this._cronTextHandler = null;
     }
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
