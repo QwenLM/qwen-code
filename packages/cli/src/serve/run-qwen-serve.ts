@@ -159,12 +159,7 @@ function parseDeadlineEnv(
 function envFlagDisabled(raw: string | undefined): boolean {
   if (raw === undefined) return false;
   const normalized = raw.trim().toLowerCase();
-  return (
-    normalized === '0' ||
-    normalized === 'false' ||
-    normalized === 'off' ||
-    normalized === 'no'
-  );
+  return normalized === '0' || normalized === 'false';
 }
 
 function hasChromeExtensionOrigin(origins: readonly string[] | undefined) {
@@ -1120,6 +1115,10 @@ export async function runQwenServe(
         (cdpTunnelOverWsEnv !== undefined ||
           hasChromeExtensionOrigin(optsIn.allowOrigins))),
   };
+  const cdpTunnelAutoEnabled =
+    optsIn.cdpTunnelOverWs === undefined &&
+    cdpTunnelOverWsEnv === undefined &&
+    opts.cdpTunnelOverWs === true;
   validateRateLimitOptions(opts);
 
   // Catch the `--hostname localhost:4170` / `127.0.0.1:4170`
@@ -2022,6 +2021,12 @@ export async function runQwenServe(
         writeStderrLine(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
         );
+        if (opts.clientMcpOverWs === true) {
+          writeStderrLine(
+            `qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth. ` +
+              `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
+          );
+        }
       } else if (opts.requireAuth) {
         // The boot check above guarantees `token` is set whenever
         // `--require-auth` is on, so this branch only fires alongside
@@ -2034,22 +2039,10 @@ export async function runQwenServe(
             'on every route, including loopback /health).',
         );
       }
-      if (opts.clientMcpOverWs === true) {
+      if (cdpTunnelAutoEnabled) {
         writeStderrLine(
-          `qwen serve: client-hosted MCP tools are accepted over the WebSocket` +
-            (token ? ' (auth required). ' : ' without auth. ') +
-            `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
-        );
-      }
-      if (cdpTunnelMcpAutoRegisterable) {
-        writeStderrLine(
-          `qwen serve: CDP tunnel (/cdp) enabled; a connected client can drive browser tabs. ` +
+          `qwen serve: CDP tunnel (/cdp) auto-enabled; a connected client can drive browser tabs. ` +
             `Set ${QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV}=0 to disable.`,
-        );
-      } else if (opts.cdpTunnelOverWs === true) {
-        writeStderrLine(
-          `qwen serve: CDP tunnel (/cdp) is enabled, but browser MCP auto-wire is unavailable ` +
-            `without a fixed unauthenticated --port.`,
         );
       }
 
