@@ -138,6 +138,8 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the model alternated between the same two tool calls in a repeating pattern',
   [LoopType.TURN_TOOL_CALL_CAP]:
     'the model exceeded the maximum number of tool calls allowed in a single turn',
+  [LoopType.INVALID_TOOL_PARAMS_STAGNATION]:
+    'the model repeatedly sent invalid tool parameters without correcting them',
 };
 
 function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
@@ -150,7 +152,8 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
     loopType === LoopType.TURN_TOOL_CALL_CAP ||
     loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
     loopType === LoopType.SHELL_COMMAND_STAGNATION ||
-    loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
+    loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
+    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION;
   const hint = isAlwaysOn
     ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
     : ' Set the `model.skipLoopDetection` setting to true to disable.';
