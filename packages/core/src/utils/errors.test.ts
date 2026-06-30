@@ -38,6 +38,19 @@ describe('getErrorMessage cause unwrapping', () => {
     expect(getErrorMessage(err)).toBe('outer (cause: inner detail)');
   });
 
+  it('bounds Error messages that include long cause details', () => {
+    const expectedPrefix = 'outer (cause: ';
+    const err = new Error('outer', {
+      cause: { message: 'x'.repeat(2000) },
+    });
+    const message = getErrorMessage(err);
+
+    expect(message).toBe(
+      `${expectedPrefix}${'x'.repeat(1000 - expectedPrefix.length - 3)}...`,
+    );
+    expect(message.length).toBe(1000);
+  });
+
   it('does not append a redundant cause equal to the message', () => {
     const err = new Error('same', { cause: new Error('same') });
     expect(getErrorMessage(err)).toBe('same');
@@ -86,6 +99,13 @@ describe('getErrorMessage cause unwrapping', () => {
 
     expect(message.length).toBeLessThanOrEqual(1000);
     expect(message).toContain('"detail"');
+  });
+
+  it('uses plain object code when JSON stringification fails', () => {
+    const circular: Record<string, unknown> = { code: -32603 };
+    circular['self'] = circular;
+
+    expect(getErrorMessage(circular)).toBe('-32603');
   });
 
   it('uses String formatting for arrays', () => {

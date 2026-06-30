@@ -108,7 +108,9 @@ export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     const detail = describeErrorCause(error.cause);
     if (detail && detail !== error.message) {
-      return `${error.message} (cause: ${detail})`;
+      return truncateStringifiedErrorMessage(
+        `${error.message} (cause: ${detail})`,
+      );
     }
     return error.message;
   }
@@ -131,7 +133,8 @@ export function getErrorMessage(error: unknown): string {
         ? truncateStringifiedErrorMessage(serialized)
         : String(error);
     } catch {
-      return String(error);
+      const detail = describeSingleError(error);
+      return detail ? truncateStringifiedErrorMessage(detail) : String(error);
     }
   }
   try {

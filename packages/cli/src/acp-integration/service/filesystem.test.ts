@@ -185,6 +185,24 @@ describe('AcpFileSystemService', () => {
       expect(String(err)).not.toContain('[object Object]');
     });
 
+    it('passes Error instances through without wrapping them', async () => {
+      const upstreamError = new Error('upstream failure');
+      const client = {
+        readTextFile: vi.fn().mockRejectedValue(upstreamError),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-2b-error',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await expect(svc.readTextFile({ path: '/some/file.txt' })).rejects.toBe(
+        upstreamError,
+      );
+    });
+
     it('does not copy unsafe properties from plain object ACP errors', async () => {
       const otherError: Record<string, unknown> = {
         code: 'ABORT_ERR',
