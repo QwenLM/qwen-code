@@ -207,8 +207,19 @@
   transform: scaleX(1.6);
 }
 
+.sessionTimelineButtonInRange .sessionTimelineTick {
+  background: color-mix(in srgb, var(--foreground) 50%, transparent);
+}
+
 .sessionTimelineButtonCurrent .sessionTimelineTick {
-  background: color-mix(in srgb, var(--foreground) 82%, transparent);
+  background: color-mix(in srgb, var(--foreground) 86%, transparent);
+}
+
+.sessionTimelineButtonInRange:hover .sessionTimelineTick,
+.sessionTimelineButtonInRange:focus-visible .sessionTimelineTick,
+.sessionTimelineButtonCurrent:hover .sessionTimelineTick,
+.sessionTimelineButtonCurrent:focus-visible .sessionTimelineTick {
+  background: color-mix(in srgb, var(--foreground) 94%, transparent);
 }
 
 .sessionTimelineDetails {

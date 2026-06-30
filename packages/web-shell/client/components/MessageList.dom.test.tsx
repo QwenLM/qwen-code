@@ -238,6 +238,11 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(details[0]?.getAttribute('data-detail')).toContain(
       'thinking · answer · 1 tool call · plan update',
     );
+    expect(entries[0]?.getAttribute('data-in-current-range')).toBe('true');
+    expect(entries[1]?.getAttribute('data-in-current-range')).toBe('true');
+    expect(
+      c.querySelector('[data-testid="session-timeline-range"]'),
+    ).toBeNull();
     expect(isCollapsed(c, 'g1')).toBe(true);
     expect(c.querySelector('[data-testid="turn-timeline-row"]')).toBeNull();
   });

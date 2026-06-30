@@ -5,6 +5,7 @@ import {
   findDisplayItemIndex,
   findTurnIdForIndex,
   getSessionTimelineEntries,
+  getSessionTimelineRangeForIndexes,
   getTurnTimelineNode,
   getDisplayItemVirtualKey,
   groupParallelAgents,
@@ -427,6 +428,46 @@ describe('getSessionTimelineEntries', () => {
         nodeKinds: ['commentary', 'thought'],
       },
     ]);
+  });
+});
+
+describe('getSessionTimelineRangeForIndexes', () => {
+  it('maps visible rows to a timeline range and current turn', () => {
+    const messages = [
+      makeUserMessage('u1'),
+      makeMultiToolGroup('tools'),
+      makeAssistantMessage('a1'),
+      makeUserMessage('u2'),
+      makeThinkingMessage('think'),
+      makeAssistantMessage('a2'),
+      makeUserMessage('u3'),
+      makeAssistantMessage('a3'),
+    ];
+    const entries = getSessionTimelineEntries(messages);
+    const entryIndexById = new Map(
+      entries.map((entry, index) => [entry.id, index]),
+    );
+    const visibleItems = groupParallelAgents(messages);
+
+    expect(
+      getSessionTimelineRangeForIndexes(
+        visibleItems,
+        [1, 2, 3, 4],
+        entryIndexById,
+        3,
+      ),
+    ).toEqual({
+      startIndex: 0,
+      endIndex: 1,
+      currentIndex: 1,
+    });
+  });
+
+  it('returns null when visible rows do not belong to a turn', () => {
+    const entryIndexById = new Map<string, number>([['u1', 0]]);
+    expect(
+      getSessionTimelineRangeForIndexes([], [0], entryIndexById, 0),
+    ).toBeNull();
   });
 });
 
