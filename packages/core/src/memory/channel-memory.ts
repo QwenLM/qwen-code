@@ -28,10 +28,7 @@ function isMissingFile(error: unknown): boolean {
 }
 
 function safeChannelName(channelName: string): string {
-  const safeName = channelName
-    .replace(/[^a-zA-Z0-9._-]/g, '_')
-    .replace(/\.\.+/g, '_')
-    .slice(0, 80);
+  const safeName = channelName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
   return safeName || '_';
 }
 

@@ -56,9 +56,19 @@ describe('channel memory', () => {
     });
     const relativePath = path.relative(qwenHome, filePath);
 
-    expect(relativePath).not.toContain('..');
+    expect(relativePath.split(path.sep)).not.toContain('..');
     expect(filePath).not.toContain('raw-chat-id');
     expect(filePath).not.toContain('raw-thread-id');
+  });
+
+  it('preserves allowed dots in channel names', () => {
+    const filePath = getChannelMemoryFilePath({
+      channelName: 'team..bot',
+      chatId: 'chat-1',
+    });
+    const relativeSegments = path.relative(qwenHome, filePath).split(path.sep);
+
+    expect(relativeSegments).toContain('team..bot');
   });
 
   it('uses different paths for different thread ids', () => {
