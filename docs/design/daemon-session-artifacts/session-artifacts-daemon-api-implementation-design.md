@@ -214,7 +214,7 @@ GET /session/:id/artifacts
   "sessionId": "session-123",
   "artifacts": [
     {
-      "id": "a1b2c3d4",
+      "id": "a1b2c3d4e5f6",
       "kind": "link",
       "storage": "external_url",
       "title": "用户画像资源详情",
@@ -225,6 +225,15 @@ GET /session/:id/artifacts
       "source": "tool",
       "toolCallId": "call_abc",
       "toolName": "artifact",
+      "provenance": [
+        {
+          "source": "tool",
+          "toolCallId": "call_abc",
+          "toolName": "artifact",
+          "firstSeenAt": "2026-06-26T10:00:00.000Z",
+          "lastSeenAt": "2026-06-26T10:00:00.000Z"
+        }
+      ],
       "createdAt": "2026-06-26T10:00:00.000Z",
       "updatedAt": "2026-06-26T10:00:00.000Z",
       "metadata": {
@@ -254,7 +263,7 @@ GET /session/:id/events
     "sessionId": "session-123",
     "change": "created",
     "artifact": {
-      "id": "a1b2c3d4",
+      "id": "a1b2c3d4e5f6",
       "kind": "link",
       "storage": "external_url",
       "title": "用户画像资源详情",
@@ -262,6 +271,14 @@ GET /session/:id/events
       "status": "available",
       "source": "tool",
       "toolName": "artifact",
+      "provenance": [
+        {
+          "source": "tool",
+          "toolName": "artifact",
+          "firstSeenAt": "2026-06-26T10:00:00.000Z",
+          "lastSeenAt": "2026-06-26T10:00:00.000Z"
+        }
+      ],
       "createdAt": "2026-06-26T10:00:00.000Z",
       "updatedAt": "2026-06-26T10:00:00.000Z"
     }
@@ -325,6 +342,13 @@ POST /session/:id/artifacts
         "mimeType": "text/html",
         "status": "available",
         "source": "client",
+        "provenance": [
+          {
+            "source": "client",
+            "firstSeenAt": "2026-06-26T10:00:00.000Z",
+            "lastSeenAt": "2026-06-26T10:00:00.000Z"
+          }
+        ],
         "createdAt": "2026-06-26T10:00:00.000Z",
         "updatedAt": "2026-06-26T10:00:00.000Z",
         "metadata": {
@@ -336,7 +360,7 @@ POST /session/:id/artifacts
 }
 ```
 
-`changes` 中的每一项都必须同步发布为一条 `artifact_changed` SSE event。这样即使一次 POST 触发 upsert 和 eviction，client 也能收到 created/updated 以及 removed 的完整增量。
+`changes` 中的每一项都必须同步发布为一条 `artifact_changed` SSE event。这样即使一次 POST 触发 upsert 和 eviction，client 也能收到 created/updated 以及 removed 的完整增量。同一次 mutation 内如果多个输入归一到同一个 identity，只能在 `changes` 中产生一条最终 change。
 
 安全：
 
@@ -371,6 +395,17 @@ export type DaemonSessionArtifactStorage =
   | 'external_url'
   | 'published';
 
+export interface DaemonSessionArtifactProvenance {
+  source: DaemonSessionArtifactSource;
+  toolCallId?: string;
+  toolName?: string;
+  hookName?: string;
+  extensionId?: string;
+  clientId?: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
 export interface DaemonSessionArtifact {
   id: string;
   kind: DaemonSessionArtifactKind;
@@ -391,6 +426,7 @@ export interface DaemonSessionArtifact {
   hookName?: string;
   extensionId?: string;
   clientId?: string;
+  provenance: DaemonSessionArtifactProvenance[];
   metadata?: Record<string, string | number | boolean | null>;
 }
 
@@ -498,6 +534,7 @@ export interface SessionArtifactInput extends ToolArtifact {
 - `source`：由入口上下文决定，tool result / ArtifactTool 为 `tool`，hook 为 `hook`，client POST 为 `client`。
 - `toolCallId` / `toolName`：由 tool call 上下文补入；hook/client 入口没有则不填。
 - `hookName` / `extensionId` / `clientId`：有上下文时补入，用于审计和 UI 分组。
+- `provenance`：首次登记时创建一条 provenance；同 identity 后续登记时按 provenance key 合并或追加，并刷新该 provenance 的 `lastSeenAt`。
 - `createdAt`：首次 upsert 时写入。
 - `updatedAt`：每次 upsert 时刷新。
 - `status`：workspace artifact 初始为 `available`，status cache 刷新后可变为 `missing`；managed / URL artifact 在 V1 不做本机 stat，始终为 `available`。
@@ -516,7 +553,7 @@ export interface SessionArtifactInput extends ToolArtifact {
 - `workspacePath` 只对 workspace 内文件对外展示，且必须是 workspace-relative path。
 - `managedId` 是 daemon/qwen-home 托管产物引用，不能是本机绝对路径。
 - `url` 只接受明确登记的 URL 或 ArtifactTool 发布 URL。
-- `workspacePath`、`managedId`、`url` 至少存在一个。
+- `workspacePath`、`managedId`、`url` 必须且只能存在一个；V1 拒绝同时携带多个定位字段的输入，避免同一逻辑资源按不同字段生成多个 identity。
 - 普通工具不得把 `~/.qwen`、`/tmp` 或其他本机绝对路径作为 `workspacePath` 返回。
 - `title` 必填，trim 后长度 1-200 字符，不允许 ASCII 控制字符；client 渲染时必须作为文本或 HTML escape。
 - `description` 是 UI 辅助文字，不进入模型上下文。
@@ -605,6 +642,7 @@ ToolNames.RECORD_ARTIFACT = 'record_artifact'
 
 - 模型显式登记非文件类产物。
 - skill / agent.md 可以要求模型在拼出业务 URL 后调用该工具。
+- 每次调用只登记一个 artifact；批量登记由模型多次调用工具完成，避免单次 tool call 出现部分成功/失败的反馈歧义。
 - 不做网络请求。
 - 不写 workspace 文件。
 - 只写 session artifact index。
@@ -646,11 +684,20 @@ interface RecordArtifactParams {
 
 ```ts
 return {
-  llmContent: 'Recorded artifact "用户画像资源详情".',
+  llmContent: {
+    recorded: true,
+    title: params.title,
+    location:
+      params.workspacePath ?? params.managedId ?? params.url,
+    note:
+      'The daemon will expose the assigned artifact id through artifact_changed and list APIs.',
+  },
   returnDisplay: 'Recorded artifact: 用户画像资源详情',
   artifacts: [params],
 };
 ```
+
+`record_artifact` 在返回前做参数级 validation；失败时返回工具错误，不产生 `ToolResult.artifacts`。因为单次调用只有一个 artifact，V1 不需要定义批量 partial success。server-assigned `id` 由 daemon store 生成，并通过 `artifact_changed` / `GET /session/:id/artifacts` 暴露给 client。
 
 权限建议：
 
@@ -728,6 +775,13 @@ return {
 }
 ```
 
+Transport 约定：
+
+- `qwen/notify/session/artifact-event` 是 ACP `extNotification`，不是 SSE event，也不是 client-facing HTTP route。
+- wire format 复用现有 `qwen/notify/session/*` 通知约定；例如 bridge 已有的 session notification demux 模式。
+- 发送方只能是已经处在 ACP session 通道内、且有能力发送 `extNotification` 的运行时或 extension bridge。`coreToolScheduler.ts` 本身不能直接向 daemon 主会话发送该通知。
+- `BridgeClient` 在现有 `extNotification` 处理分支按 notification name demux：命中 `qwen/notify/session/artifact-event` 后读取 payload，转换为 `SessionArtifactInput[]`，再进入统一 ingest pipeline。
+
 注意：`qwen/notify/session/artifact-event` 只是 explicit artifacts 的传输 envelope，不应形成第二套 store/validation/dedupe 管道。BridgeClient 必须把 `_meta.artifacts`、hook artifacts 与 `artifact-event.artifacts` 都转换为同一个 `SessionArtifactInput[]`，调用同一个 `ingestArtifacts()` / `SessionArtifactStore.upsertMany()`，复用同一套 validation、normalization、enrichment、eviction 和 `artifact_changed` 发布逻辑。ACP 主会话当前没有 PostToolBatch callsite，不能把 `coreToolScheduler.ts` 的 batch hook 当成 daemon artifacts 面板的默认来源；若后续要支持 daemon 主会话 batch artifacts，必须先增加真实调用点和测试。
 
 ### 6.5 Client / Extension 直接插入
@@ -754,11 +808,19 @@ POST /session/:id/artifacts
 
 artifact identity：
 
-- workspace 文件：`sessionId + ':' + source + ':workspace:' + normalizedWorkspacePath`
-- managed 文件：`sessionId + ':' + source + ':managed:' + managedId`
-- external / published URL：`sessionId + ':' + source + ':url:' + identityUrl`
+- workspace 文件：`sessionId + ':workspace:' + normalizedWorkspacePath`
+- managed 文件：`sessionId + ':managed:' + managedId`
+- external / published URL：`sessionId + ':url:' + identityUrl`
 
-`source` 是 identity 的一部分。tool、hook、client 对同一 URL 或路径的登记应成为不同 artifact，避免低信任入口覆盖高信任入口的标题、metadata 或 provenance。
+identity 只描述资源位置，不包含 `source`。tool、hook、client 对同一 URL 或路径的登记合并成一条 artifact，避免右侧面板重复展示同一资源。来源信息进入 `provenance[]`，不参与资源去重。
+
+输入必须且只能携带一个定位字段：
+
+- `workspacePath`
+- `managedId`
+- `url`
+
+如果输入同时携带多个定位字段，V1 直接拒绝，而不是尝试按优先级猜测 identity。这样可以避免一个 artifact 先按 `workspacePath` 去重、后续又按 `url` 去重而产生重复。
 
 对外 id：
 
@@ -793,20 +855,31 @@ artifact identity：
 - 同 identity 再登记：`updated`
 - `createdAt` 保持不变。
 - `updatedAt` 更新。
-- 同一批输入中重复 identity 按数组顺序处理，后者覆盖前者。
-- 同 identity 必然同 source；不同 source 的同 URL / path 不互相覆盖。
-- `source`、`toolCallId`、`toolName`、`hookName`、`extensionId`、`clientId` 等 provenance 字段首次写入后冻结，不以后写值覆盖。
-- `title`、`description`、`mimeType`、`sizeBytes` 可由同 identity 的后续 upsert 更新。
-- `metadata` 做浅合并，后写同名 key 覆盖先写；metadata 不承载 secret 或权限凭证。
+- 同一次 `upsertMany()` 内先按 identity 合并输入；每个最终 identity 只在 `changes[]` 里产生一条 change。若该 identity 在本批之前不存在则为 `created`，否则为 `updated`。
+- `source`、`toolCallId`、`toolName`、`hookName`、`extensionId`、`clientId` 写入 `provenance[]`。provenance key 使用这些字段的组合；同 key 刷新 `lastSeenAt`，不同 key 追加新条目。
+- 顶层 `source` / `toolCallId` / `toolName` / `hookName` / `extensionId` / `clientId` 是 canonical provenance，用于兼容简单 UI；完整审计必须看 `provenance[]`。
+- canonical provenance 选择最高信任来源；同信任级别保留首次写入者。
+- 展示字段覆盖按信任级别处理：更高信任来源可以更新 `title`、`description`、`mimeType`、`sizeBytes`；同 provenance key 可以更新自己的展示字段；更低信任来源不能覆盖已有非空展示字段。
+- `metadata` 做浅合并；更低信任来源只能添加新 key，不能覆盖已有 key。metadata 不承载 secret 或权限凭证。
 - 实现应在单个 `SessionArtifactStore.upsertMany()` 内同步处理，避免异步读改写竞态。
+
+信任级别从高到低：
+
+1. client 手动登记。
+2. `ArtifactTool` published artifact。
+3. 其他 tool / `record_artifact`。
+4. hook / extension 自动登记。
 
 保留策略：
 
 - 每 session 最多 200 个 artifacts。
 - 返回 `createdAt` 升序。
-- 超出时按 `updatedAt` 升序裁掉最久未更新项，避免频繁复用的早期 artifact 被一次性低价值输入挤掉。
-- 裁剪必须为每个被移除 artifact 发送 `artifact_changed` / `removed`，或发送一次 `artifacts_trimmed` 让 client 重新拉 snapshot；V1 推荐发送逐条 `removed`，避免 client 长期保留 stale state。
-- 后续可增加 per-source quota，避免单个工具或 hook 挤掉所有高价值 artifacts。
+- 超出时按 retention class 选择驱逐对象，再按 artifact 的 `lastSeenAt` 升序裁掉最久未观察到的项。
+- retention class 使用该 artifact 所有 provenance 中的最高信任级别；一个被 client 手动登记过的资源不会因为后续 hook spam 而降级。
+- `lastSeenAt` 使用 `provenance[].lastSeenAt` 的最大值。
+- 重复 upsert 只在同 retention class 内影响排序，不能让低信任高频 artifact 挤掉高信任低频 artifact。
+- 裁剪必须为每个被移除 artifact 发送 `artifact_changed` / `removed`。V1 不提供其它裁剪事件。
+- 后续如需要更强防刷，可在此基础上增加 per-producer quota。
 
 ### 7.2 V1 生命周期限制
 
@@ -901,9 +974,10 @@ GET 行为：
 - workspace artifact 维护内部 status cache，例如 `lastStatAt`、`lastKnownSizeBytes`、`lastKnownStatus`。
 - upsert 时做一次 best-effort stat。
 - GET 默认使用 cache；仅当 `lastStatAt` 过期时按 TTL 刷新，例如 5-30 秒，并限制并发 stat 数量。
-- stat 失败：把 store 中状态更新为 `status: 'missing'`，不删除 artifact。
-- stat 成功：如果此前是 `missing`，把 store 中状态恢复为 `status: 'available'`。
-- status cache 刷新导致状态翻转时，发布 `artifact_changed` / `updated`；V1 不监听文件系统，因此该事件只在 upsert、GET TTL refresh 或未来显式 refresh 触发时产生。
+- stat 失败：GET 返回 `status: 'missing'`，不删除 artifact。
+- stat 成功：如果此前 cache 是 `missing`，GET 返回 `status: 'available'`。
+- GET 可以静默刷新 status cache，但不得因为读请求发布 `artifact_changed`；V1 status 对 SSE 客户端是最终一致的。
+- 如果后续需要实时 status 事件，应由后台 refresh 或显式 refresh mutation 发布 `artifact_changed` / `updated`，不要放在 GET 热读路径。
 - managed / URL artifact 不探测本机路径，始终返回 `status: 'available'`。
 
 ### 8.5 Phase C-3: SDK list/event support
@@ -961,17 +1035,9 @@ GET 行为：
   - 增加 `POST /session/:id/artifacts`，走 `mutate({ strict: true })`。
   - validate body。
   - source 设置为 `client`。
-  - 调用 bridge upsert。
+  - 转换为单元素 `SessionArtifactInput[]`，调用 bridge 的 `addSessionArtifacts()`。
   - 发布 `artifact_changed`。
-- Bridge interface 增加：
-
-```ts
-addSessionArtifact(
-  sessionId: string,
-  artifact: SessionArtifactInput,
-  source: 'client',
-): DaemonSessionArtifactMutationResult;
-```
+- 不新增单数 bridge mutation；所有入口都走 `addSessionArtifacts()` / `upsertMany()`，避免 validation、coalescing、eviction 行为漂移。
 
 - SDK 增加：
   - `DaemonClient.addSessionArtifact(sessionId, artifact, clientId?)`
@@ -1007,15 +1073,15 @@ addSessionArtifact(
 - 不允许 nested object/array，避免 UI 和持久化复杂化。
 - 不放 secret、token、cookie、signed URL、私钥、访问凭证。
 - V1 不提供 `visibility`、`sensitivity`、`expiresAt`、`sourceId` 等无消费者字段；artifact visibility 固定为当前 session-local 语义。
-- audit 维度通过 `source`、`toolCallId`、`toolName`、`hookName`、`extensionId`、`clientId`、`createdAt`、`updatedAt` 承载。
-- provenance 字段首次写入后冻结；展示字段和 metadata 的更新不能改写来源。
+- audit 维度通过 `provenance[]`、canonical `source` / `toolCallId` / `toolName` / `hookName` / `extensionId` / `clientId`、`createdAt`、`updatedAt` 承载。
+- 展示字段和 metadata 的更新按 Section 7 的信任级别处理；低信任来源不能改写高信任来源的展示字段或已有 metadata key。
 
 ### 9.4 Anti-spam
 
 - 每 session 最多 200 个 artifacts。
-- `record_artifact` 可以每次 tool call 最多登记 10 个 artifacts。
+- `record_artifact` 每次 tool call 只登记 1 个 artifact。
 - `POST /session/:id/artifacts` 走现有 rate limit / mutation gate。
-- eviction 必须通知 client：逐条 `removed` event 或 `artifacts_trimmed` resync event。
+- eviction 必须逐条发送 `artifact_changed` / `removed` event。
 - Client 可按 source/toolName 分组或折叠。
 
 ## 10. 与“普通链接”的边界
@@ -1152,18 +1218,20 @@ cd packages/cli && npx vitest run src/acp-integration/session/Session.test.ts
 - `ToolArtifact` 到 `DaemonSessionArtifact` 的 enrichment。
 - `SessionArtifactInput` 是所有入口统一的内部输入类型。
 - 默认 `kind` / `storage` 推断。
-- workspacePath / managedId / URL identity 去重，且 identity 包含 source，跨 source 不互相覆盖。
+- workspacePath / managedId / URL identity 去重，且 identity 不包含 source，跨 source 登记同一资源会合并为一条 artifact。
+- 同时携带多个定位字段的 artifact 被拒绝。
 - URL validation：scheme/host lowercase、default port 归一、fragment 保留、query 顺序保留、userinfo rejection/removal。
 - `url` 保存清理后的可点击 URL，identity 用内部 `identityUrl`，两者不混用。
 - Path validation：`../../etc/passwd`、workspace 外绝对路径、symlink escape 均被拒绝。
 - Title/description validation：长度限制、trim、控制字符拒绝。
 - Metadata validation：大小限制、primitive-only、nested object/array 拒绝。
-- 同 identity upsert 不覆盖 provenance 字段，只更新展示字段和 metadata。
-- 上限按 `updatedAt` 裁剪，且会发送 removed event 或 trimmed resync event。
+- 同 identity upsert 会维护 `provenance[]`，并按信任级别控制展示字段和 metadata 覆盖。
+- 同一批内重复 identity 在 `changes[]` 中只产生一条最终 change。
+- 上限按 retention class + `lastSeenAt` 裁剪，且逐条发送 removed event。
 - `_meta.artifacts` 被写入 store。
 - `artifact_changed` 发布。
 - malformed artifact 被忽略，不影响原始 event。
-- `upsertMany()` / `addSessionArtifact()` 返回包含 eviction changes 的 `DaemonSessionArtifactMutationResult`。
+- `upsertMany()` / `addSessionArtifacts()` 返回包含 eviction changes 的 `DaemonSessionArtifactMutationResult`。
 
 命令：
 
@@ -1182,7 +1250,7 @@ cd packages/acp-bridge && npx vitest run src/bridgeClient.test.ts
 - envelope 不返回宿主机绝对 `workspaceCwd`。
 - 未知 session 返回现有错误。
 - workspace artifact GET TTL refresh 时 best-effort stat，缺失文件返回 `status: 'missing'`，文件恢复后返回 `status: 'available'`。
-- status 翻转会更新 store 并发送 `artifact_changed` / `updated`；managed / URL artifact 不做本机 stat。
+- GET status refresh 不发布 `artifact_changed`；managed / URL artifact 不做本机 stat。
 - GET 使用 status cache / TTL，避免每次热读对所有 artifacts 做同步 stat。
 
 命令：
@@ -1211,10 +1279,11 @@ cd packages/sdk-typescript && npx vitest run src/daemon/events.test.ts
 `record_artifact`：
 
 - 校验 title / workspacePath / managedId / url。
-- 不允许空 `workspacePath + managedId + url`。
+- 不允许空 `workspacePath + managedId + url`，也不允许同时传多个定位字段。
 - 不允许不支持的 URL scheme。
 - URL userinfo 被拒绝或清除。
 - 返回 `ToolResult.artifacts`。
+- `llmContent` 返回结构化登记结果；每次 tool call 只登记一个 artifact。
 
 hook artifacts：
 
@@ -1233,6 +1302,7 @@ client POST / SDK add：
 - `POST` 返回 `DaemonSessionArtifactMutationResult`，包含 created/updated 以及 eviction removed changes。
 - `POST` 在未授权/无 mutation token 时被拒绝。
 - `POST` 对 workspace 外 path、path traversal、symlink escape 返回 400。
+- `POST` 通过 bridge `addSessionArtifacts()` 单一路径写入。
 - `DaemonClient.addSessionArtifact()` body 正确。
 
 ### 13.7 跨包集成测试
