@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { GenerateContentParameters } from '@google/genai';
 import type Anthropic from '@anthropic-ai/sdk';
 import type OpenAI from 'openai';
@@ -50,6 +51,21 @@ export interface RuntimeToolSchemaDiagnostics {
   schemaBytes: number;
 }
 
+export type OpenAICacheStabilityProvider = 'deepseek' | 'openai-compatible';
+
+export interface OpenAICacheStabilityDiagnostics {
+  provider?: OpenAICacheStabilityProvider;
+  toolNames: string[];
+  toolNameSequenceHash: string;
+  toolNameSetHash: string;
+  toolSchemaHash: string;
+  canonicalToolManifestHash: string;
+}
+
+export interface OpenAIWireRequestDiagnosticsOptions {
+  provider?: OpenAICacheStabilityProvider;
+}
+
 export interface OpenAIWireRequestDiagnostics {
   index?: number;
   timestamp?: string;
@@ -60,6 +76,7 @@ export interface OpenAIWireRequestDiagnostics {
   messageBytesByRole: Record<string, number>;
   toolsCount: number;
   toolSchemaBytes: number;
+  cacheStability?: OpenAICacheStabilityDiagnostics;
   topLevelKeys: string[];
 }
 
@@ -182,6 +199,7 @@ export class RuntimeDiagnosticsCollector {
 
   recordOpenAIWireRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
+    options: OpenAIWireRequestDiagnosticsOptions = {},
   ): void {
     if (!this.enabled) {
       return;
@@ -191,7 +209,7 @@ export class RuntimeDiagnosticsCollector {
     this.openaiWireRequests.push({
       index: this.openAIWireRequestIndex,
       timestamp: this.now(),
-      ...summarizeOpenAIWireRequest(request),
+      ...summarizeOpenAIWireRequest(request, options),
     });
   }
 
@@ -266,6 +284,12 @@ export class RuntimeDiagnosticsCollector {
       openaiWireRequests: this.openaiWireRequests.map((request) => ({
         ...request,
         messageBytesByRole: { ...request.messageBytesByRole },
+        cacheStability: request.cacheStability
+          ? {
+              ...request.cacheStability,
+              toolNames: [...request.cacheStability.toolNames],
+            }
+          : undefined,
         topLevelKeys: [...request.topLevelKeys],
       })),
       anthropicWireRequests: this.anthropicWireRequests.map((request) => ({
@@ -300,6 +324,7 @@ export const runtimeDiagnostics = new RuntimeDiagnosticsCollector();
 
 export function summarizeOpenAIWireRequest(
   request: OpenAI.Chat.ChatCompletionCreateParams,
+  options: OpenAIWireRequestDiagnosticsOptions = {},
 ): OpenAIWireRequestDiagnostics {
   const requestRecord = asRecord(request);
   const messages = Array.isArray(requestRecord['messages'])
@@ -330,6 +355,7 @@ export function summarizeOpenAIWireRequest(
     messageBytesByRole,
     toolsCount: tools.length,
     toolSchemaBytes: utf8Bytes(tools),
+    cacheStability: summarizeOpenAIToolCacheStability(tools, options),
     topLevelKeys: Object.keys(requestRecord).sort(),
   };
 }
@@ -499,6 +525,106 @@ function summarizeToolSchemas(tools: unknown): RuntimeToolSchemaDiagnostics {
     functionDeclarationCount,
     schemaBytes: utf8Bytes(toolList),
   };
+}
+
+function summarizeOpenAIToolCacheStability(
+  tools: unknown[],
+  options: OpenAIWireRequestDiagnosticsOptions,
+): OpenAICacheStabilityDiagnostics {
+  const toolNames = extractOpenAIToolNames(tools);
+  return {
+    provider: options.provider,
+    toolNames,
+    toolNameSequenceHash: hashStableJson(toolNames),
+    toolNameSetHash: hashStableJson(Array.from(new Set(toolNames)).sort()),
+    toolSchemaHash: hashString(safeStringify(tools)),
+    canonicalToolManifestHash: hashStableJson(
+      buildCanonicalOpenAIToolManifest(tools),
+    ),
+  };
+}
+
+function extractOpenAIToolNames(tools: unknown[]): string[] {
+  const names: string[] = [];
+  for (const tool of tools) {
+    const toolRecord = asRecord(tool);
+    const fn = asOptionalRecord(toolRecord['function']);
+    const name = fn && typeof fn['name'] === 'string' ? fn['name'] : undefined;
+    if (name) {
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+function buildCanonicalOpenAIToolManifest(tools: unknown[]): Array<{
+  name: string;
+  descriptionHash: string;
+  parametersHash: string;
+}> {
+  const manifest: Array<{
+    name: string;
+    descriptionHash: string;
+    parametersHash: string;
+  }> = [];
+  for (const tool of tools) {
+    const toolRecord = asRecord(tool);
+    const fn = asOptionalRecord(toolRecord['function']);
+    if (!fn || typeof fn['name'] !== 'string') {
+      continue;
+    }
+    manifest.push({
+      name: fn['name'],
+      descriptionHash: hashString(
+        typeof fn['description'] === 'string' ? fn['description'] : '',
+      ),
+      parametersHash: hashStableJson(fn['parameters']),
+    });
+  }
+  manifest.sort((a, b) => a.name.localeCompare(b.name));
+  return manifest;
+}
+
+function hashStableJson(value: unknown): string {
+  return hashString(stableStringify(value));
+}
+
+function hashString(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function stableStringify(value: unknown): string {
+  try {
+    return JSON.stringify(toStableJsonValue(value)) ?? '';
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+function toStableJsonValue(
+  value: unknown,
+  seen = new WeakSet<object>(),
+): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (seen.has(value)) {
+    return '[Circular]';
+  }
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => toStableJsonValue(item, seen));
+    }
+    const record = value as Record<string, unknown>;
+    const stableRecord: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      stableRecord[key] = toStableJsonValue(record[key], seen);
+    }
+    return stableRecord;
+  } finally {
+    seen.delete(value);
+  }
 }
 
 function toJsonSafeRequest(request: GenerateContentParameters): unknown {
