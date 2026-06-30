@@ -479,6 +479,46 @@ describe('configCommand', () => {
         content: expect.not.stringContaining('secret-proxy'),
       });
     });
+
+    it('masks sensitive value in write confirmation message', async () => {
+      const { ctx } = createMockContext({});
+      const result = await configCommand.action!(
+        ctx,
+        'proxy=http://secret-proxy:8080',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.not.stringContaining('secret-proxy'),
+      });
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('http****'),
+      });
+    });
+  });
+
+  describe('whitespace handling', () => {
+    it('trims whitespace from value after = sign', async () => {
+      const { ctx, setValueMock } = createMockContext({});
+      const result = await configCommand.action!(
+        ctx,
+        'tools.approvalMode= auto ',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('auto'),
+      });
+      expect(setValueMock).toHaveBeenCalledWith(
+        'User',
+        'tools.approvalMode',
+        'auto',
+      );
+    });
   });
 
   describe('setValue error handling', () => {

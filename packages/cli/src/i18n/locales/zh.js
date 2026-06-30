@@ -655,6 +655,7 @@ export default {
     '（此设置需要重启才能生效。）',
   '(Security-sensitive setting — verify you are not exposing credentials.)':
     '（安全敏感设置 — 请确认您没有泄露凭据。）',
+  '(empty)': '（空）',
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   Settings: '设置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':

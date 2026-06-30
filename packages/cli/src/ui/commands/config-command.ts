@@ -43,9 +43,9 @@ function isSensitiveKey(key: string): boolean {
 }
 
 function maskValue(value: unknown): string {
-  if (value === undefined) return '(not set)';
+  if (value === undefined) return t('(not set)');
   if (typeof value === 'string') {
-    if (!value) return '(empty)';
+    if (!value) return t('(empty)');
     if (value.length <= 4) return '****';
     return `${value.slice(0, 4)}****`;
   }
@@ -213,8 +213,8 @@ function coerceValue(
 }
 
 function formatValue(value: unknown): string {
-  if (value === undefined) return '(not set)';
-  if (typeof value === 'string') return value || '(empty)';
+  if (value === undefined) return t('(not set)');
+  if (typeof value === 'string') return value || t('(empty)');
   return JSON.stringify(value);
 }
 
@@ -291,7 +291,7 @@ export const configCommand: SlashCommand = {
     const eqIndex = trimmed.indexOf('=');
     const isToggle = eqIndex === -1;
     const key = isToggle ? trimmed : trimmed.slice(0, eqIndex).trim();
-    const rawValue = isToggle ? undefined : trimmed.slice(eqIndex + 1);
+    const rawValue = isToggle ? undefined : trimmed.slice(eqIndex + 1).trim();
 
     const def = getSettingDefinition(key);
     if (!def) {
@@ -346,9 +346,12 @@ export const configCommand: SlashCommand = {
       };
     }
 
+    const displayValue = isSensitiveKey(key)
+      ? maskValue(result.value)
+      : JSON.stringify(result.value);
     let message = t('Set {{key}} = {{value}}', {
       key,
-      value: JSON.stringify(result.value),
+      value: displayValue,
     });
     if (def.requiresRestart) {
       message += '\n' + t('(This setting requires a restart to take effect.)');
