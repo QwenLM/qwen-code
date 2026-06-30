@@ -1081,6 +1081,10 @@ function convertOpenAITextToParts(
   return parseTaggedThinkingText(text);
 }
 
+function hasThoughtPart(parts: Part[]): boolean {
+  return parts.some((part) => part.thought === true);
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -1093,26 +1097,23 @@ export function convertOpenAIResponseToGemini(
 
   if (choice) {
     const parts: Part[] = [];
+    const textParts = choice.message.content
+      ? convertOpenAITextToParts(choice.message.content, requestContext)
+      : [];
 
     // Handle reasoning content (thoughts).
-    // When taggedThinkingTags is enabled, thought content is already
-    // extracted from the text content via convertOpenAITextToParts.
-    // Skip reasoning_content extraction to avoid duplicating thought parts.
-    if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
-      const reasoningText =
-        (choice.message as ExtendedCompletionMessage).reasoning_content ??
-        (choice.message as ExtendedCompletionMessage).reasoning;
-      if (reasoningText) {
-        parts.push({ text: reasoningText, thought: true });
-      }
+    // Tagged thinking providers may put thoughts in content, while other
+    // responses still use reasoning_content. Preserve the separate reasoning
+    // channel unless content parsing already produced thought parts.
+    const reasoningText =
+      (choice.message as ExtendedCompletionMessage).reasoning_content ??
+      (choice.message as ExtendedCompletionMessage).reasoning;
+    if (reasoningText && !hasThoughtPart(textParts)) {
+      parts.push({ text: reasoningText, thought: true });
     }
 
     // Handle text content
-    if (choice.message.content) {
-      parts.push(
-        ...convertOpenAITextToParts(choice.message.content, requestContext),
-      );
-    }
+    parts.push(...textParts);
 
     // Handle tool calls
     if (choice.message.tool_calls) {
@@ -1224,29 +1225,12 @@ export function convertOpenAIChunkToGemini(
 
   if (choice) {
     const parts: Part[] = [];
+    let contentParts: Part[] = [];
 
     // Handle reasoning content (thoughts).
-    // When taggedThinkingTags is enabled, thought content is already
-    // extracted from the text content via convertOpenAITextToParts.
-    // Skip reasoning_content extraction to avoid duplicating thought parts.
-    if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
-      const reasoningText =
-        (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
-        (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
-      if (reasoningText) {
-        const normalizedReasoningText = normalizeStreamingTextDelta(
-          reasoningText,
-          (requestContext.reasoningDeltaState ??= {
-            emittedText: '',
-            emittedLength: 0,
-            cumulativeMode: false,
-          }),
-        );
-        if (normalizedReasoningText) {
-          parts.push({ text: normalizedReasoningText, thought: true });
-        }
-      }
-    }
+    const reasoningText =
+      (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
+      (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
@@ -1261,18 +1245,31 @@ export function convertOpenAIChunkToGemini(
       // Skip empty-string push mid-stream; still call on finish_reason to
       // flush any buffered tagged-thinking content.
       if (normalizedContent || choice.finish_reason) {
-        parts.push(
-          ...convertOpenAITextToParts(
-            normalizedContent,
-            requestContext,
-            Boolean(choice.finish_reason),
-          ),
+        contentParts = convertOpenAITextToParts(
+          normalizedContent,
+          requestContext,
+          Boolean(choice.finish_reason),
         );
       }
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
-      parts.push(...convertOpenAITextToParts('', requestContext, true));
+      contentParts = convertOpenAITextToParts('', requestContext, true);
     }
+
+    if (reasoningText) {
+      const normalizedReasoningText = normalizeStreamingTextDelta(
+        reasoningText,
+        (requestContext.reasoningDeltaState ??= {
+          emittedText: '',
+          emittedLength: 0,
+          cumulativeMode: false,
+        }),
+      );
+      if (normalizedReasoningText && !hasThoughtPart(contentParts)) {
+        parts.push({ text: normalizedReasoningText, thought: true });
+      }
+    }
+    parts.push(...contentParts);
 
     // Handle tool calls using the stream-local parser
     if (choice.delta?.tool_calls) {

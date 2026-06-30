@@ -3816,6 +3816,97 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('should convert GLM inline <think> content to thought parts', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-glm-1',
+          created: 123,
+          model: 'glm-5.2',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                reasoning_content: '',
+                content:
+                  '<think>The user is asking a simple logic puzzle.</think>LEAK_CHECK_FINAL: prize is in B',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        {
+          text: 'The user is asking a simple logic puzzle.',
+          thought: true,
+        },
+        { text: 'LEAK_CHECK_FINAL: prize is in B' },
+      ]);
+    });
+
+    it('should preserve reasoning_content when tagged parsing finds no thinking tags', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-glm-2',
+          created: 123,
+          model: 'glm-5.2',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                reasoning_content: 'separate reasoning channel',
+                content: 'final answer',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'separate reasoning channel', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should not duplicate reasoning_content when content already has tagged thinking', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-glm-3',
+          created: 123,
+          model: 'glm-5.2',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                reasoning_content: 'duplicate reasoning channel',
+                content: '<think>tagged reasoning</think>final answer',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        withTaggedThinkingOptions(),
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'tagged reasoning', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
     it('should preserve ordering around <thinking> blocks', () => {
       const response = converter.convertOpenAIResponseToGemini(
         {
