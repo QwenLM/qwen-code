@@ -1876,6 +1876,8 @@ export default {
     'Ctrl+O für vollständige Tool-Ausgabe drücken',
   'Switch to plan mode or exit plan mode':
     'In den Plan-Modus wechseln oder den Plan-Modus verlassen',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Legt fest, wie intensiv schlussfolgerungsfähige Modelle denken ({{tiers}}); je nach Anbieter zugeordnet und begrenzt.',
   'Exited plan mode. Previous approval mode restored.':
     'Plan-Modus verlassen. Vorheriger Genehmigungsmodus wiederhergestellt.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

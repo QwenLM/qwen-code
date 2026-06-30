@@ -1413,6 +1413,8 @@ export default {
   'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '推論対応モデルの思考の強さを設定します（{{tiers}}）。プロバイダーごとにマッピング・制限されます。',
   'Exited plan mode. Previous approval mode restored.':
     'プランモードを終了しました。以前の承認モードに戻りました。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
