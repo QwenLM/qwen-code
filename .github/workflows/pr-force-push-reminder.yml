@@ -7,13 +7,17 @@ on:
 
 permissions:
   contents: 'read'
+  issues: 'write'
   pull-requests: 'write'
 
-# One in-flight check per PR; a newer push supersedes the previous one so we
-# never post the reminder twice for a rapid burst of force-pushes.
+# Serialize runs per PR without cancelling: a run that already detected a
+# force-push must be allowed to finish and post, while later pushes queue
+# behind it and then no-op via the once-per-PR marker. Cancelling in-progress
+# runs could silently drop a reminder when a force-push is immediately
+# followed by a normal push (the cancelling run sees 'ahead' and exits).
 concurrency:
   group: 'pr-force-push-reminder-${{ github.event.pull_request.number }}'
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   remind-on-force-push:
