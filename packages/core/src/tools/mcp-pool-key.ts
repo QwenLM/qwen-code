@@ -115,9 +115,9 @@ function sortedEntries(
  *
  * Excluded fields (per-session filter / metadata; do NOT change the
  * underlying transport):
- *   includeTools, excludeTools, trust, alwaysLoadTools, description,
- *   extensionName, discoveryTimeoutMs (operational tuning; honored from the
- *   first acquire's config but not in the key — see TODO below)
+ *   includeTools, excludeTools, trust, description, extensionName,
+ *   discoveryTimeoutMs (operational tuning; honored from the first
+ *   acquire's config but not in the key — see TODO below)
  *
  * TODO(follow-up): if two sessions race-acquire the same key with
  * different discoveryTimeoutMs values, the first wins. This matches

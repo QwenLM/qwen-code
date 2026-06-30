@@ -128,7 +128,6 @@ import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
@@ -7461,18 +7460,6 @@ class QwenAgent implements Agent {
 
     const settings = this.settings.merged;
 
-    // CDP tunnel (Plan C, #5626): auto-register chrome-devtools-mcp when the
-    // daemon forwarded the tunnel flag, so the agent can drive the real browser.
-    const cdpTunnelMcp = buildCdpTunnelMcpServer();
-    // Don't clobber a `chrome-devtools` server the user configured themselves.
-    if (
-      cdpTunnelMcp &&
-      !sessionMcpServers['chrome-devtools'] &&
-      !settings.mcpServers?.['chrome-devtools']
-    ) {
-      sessionMcpServers['chrome-devtools'] = cdpTunnelMcp;
-    }
-
     const argvForSession = {
       ...this.argv,
       ...(resume ? { resume: sessionId } : { sessionId }),
@@ -7834,78 +7821,4 @@ function diffSettingsKeys(
     }
   }
   return changed;
-}
-
-/**
- * CDP tunnel auto-wiring (Plan C, issue #5626).
- *
- * Builds the `chrome-devtools` session MCP server entry when the daemon runs
- * with the CDP-tunnel flag. The daemon forwards `QWEN_SERVE_CDP_TUNNEL_OVER_WS`
- * + `QWEN_SERVE_CDP_TUNNEL_PORT` into this child's env; we point the patched
- * chrome-devtools-mcp at the daemon's `/cdp` endpoint.
- *
- * Returns `undefined` when the flag is off, the port is missing/invalid, or
- * chrome-devtools-mcp can't be resolved. `trust` is left unset so the tools
- * default to 'ask' — no silent auto-approval of browser control.
- */
-export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
-  if (process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] !== '1') return undefined;
-  // Auth-gated `/cdp`: the daemon requires a bearer token on the tunnel, but
-  // this ACP child can't inherit QWEN_SERVER_TOKEN (the spawn path scrubs it)
-  // and chrome-devtools-mcp is launched with `--wsEndpoint` only — it has no way
-  // to send `--wsHeaders` auth. Auto-registering the browser tools here would
-  // surface tools that can't connect, so skip with a clear diagnostic instead.
-  if (process.env['QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED'] === '1') {
-    process.stderr.write(
-      'qwen serve: browser tools (chrome-devtools-mcp) disabled — the /cdp ' +
-        'tunnel requires bearer auth, which is not yet supported for the ' +
-        'auto-registered browser MCP server.\n',
-    );
-    return undefined;
-  }
-  const port = Number(process.env['QWEN_SERVE_CDP_TUNNEL_PORT']);
-  if (!Number.isInteger(port) || port <= 0) {
-    // Don't disable the browser tools silently — the most common cause is an
-    // ephemeral `--port 0` daemon, whose real port is bound too late to thread
-    // into this child's (frozen) env. Tell the operator how to enable them.
-    process.stderr.write(
-      'qwen serve: browser tools (chrome-devtools-mcp) disabled — no valid ' +
-        `/cdp tunnel port (QWEN_SERVE_CDP_TUNNEL_PORT=${
-          process.env['QWEN_SERVE_CDP_TUNNEL_PORT'] ?? '<unset>'
-        }). Start the daemon with a fixed --port (ephemeral --port 0 is not ` +
-        'supported for the CDP tunnel).\n',
-    );
-    return undefined;
-  }
-  try {
-    const requireFromHere = createRequire(import.meta.url);
-    const pkgJsonPath = requireFromHere.resolve(
-      'chrome-devtools-mcp/package.json',
-    );
-    const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
-      bin?: string | Record<string, string>;
-    };
-    const binRel =
-      typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin ?? {})[0];
-    if (!binRel) return undefined;
-    const pkgDir = path.dirname(pkgJsonPath);
-    const binPath = path.resolve(pkgDir, binRel);
-    // Containment: refuse to execute a bin path that escapes the package dir
-    // (a malformed/hostile `bin` field with `../` segments).
-    const binRelToPkg = path.relative(pkgDir, binPath);
-    if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
-      return undefined;
-    }
-    return Object.assign(
-      new MCPServerConfig(process.execPath, [
-        binPath,
-        '--wsEndpoint',
-        `ws://127.0.0.1:${port}/cdp`,
-      ]),
-      { alwaysLoadTools: true },
-    );
-  } catch {
-    // chrome-devtools-mcp not installed in this build — skip auto-wiring.
-    return undefined;
-  }
 }

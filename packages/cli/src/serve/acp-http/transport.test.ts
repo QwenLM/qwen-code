@@ -43,6 +43,7 @@ import {
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
+import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -325,22 +326,34 @@ class FakeBridge {
   async getWorkspaceMcpResourcesStatus(serverName: string) {
     return { v: 1, serverName, resources: [] };
   }
-  async addRuntimeMcpServer(name: string) {
+  runtimeMcpAdds: Array<{
+    name: string;
+    config: Record<string, unknown>;
+    originatorClientId: string;
+  }> = [];
+  runtimeMcpRemoves: Array<{ name: string; originatorClientId: string }> = [];
+  async addRuntimeMcpServer(
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId: string,
+  ) {
+    this.runtimeMcpAdds.push({ name, config, originatorClientId });
     return {
       name,
       transport: 'stdio',
       replaced: false,
       shadowedSettings: false,
       toolCount: 0,
-      originatorClientId: 'c',
+      originatorClientId,
     };
   }
-  async removeRuntimeMcpServer(name: string) {
+  async removeRuntimeMcpServer(name: string, originatorClientId: string) {
+    this.runtimeMcpRemoves.push({ name, originatorClientId });
     return {
       name,
       removed: true,
       wasShadowingSettings: false,
-      originatorClientId: 'c',
+      originatorClientId,
     };
   }
   publishWorkspaceEvent(event: BridgeEvent) {
@@ -3717,6 +3730,7 @@ describe('ACP WebSocket transport security', () => {
       token?: string;
       allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
+      cdpTunnelOverWs?: boolean;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -3731,6 +3745,12 @@ describe('ACP WebSocket transport security', () => {
         allowedOrigins: opts.allowedOrigins,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        ...(opts.cdpTunnelOverWs
+          ? {
+              cdpTunnelOverWs: true,
+              cdpTunnelRegistry: new CdpTunnelRegistry(),
+            }
+          : {}),
       });
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
@@ -3828,6 +3848,41 @@ describe('ACP WebSocket transport security', () => {
       { Authorization: 'Bearer secret-token-123' },
     );
     expect(result.code).toBe(101);
+  });
+
+  it('dynamically registers chrome-devtools MCP for an active CDP bridge', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' },
+      },
+    });
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpAdds[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: expect.any(String),
+    });
+    expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
+      command: process.execPath,
+      args: expect.arrayContaining([
+        expect.stringContaining('chrome-devtools-mcp'),
+        '--wsEndpoint',
+        `ws://127.0.0.1:${port}/cdp`,
+      ]),
+    });
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
+    });
   });
 
   it('rejects WS upgrade with a loopback Origin header on a different port', async () => {

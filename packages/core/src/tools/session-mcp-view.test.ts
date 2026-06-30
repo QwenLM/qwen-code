@@ -229,24 +229,6 @@ describe('SessionMcpView', () => {
     expect(tools.registerTool).toHaveBeenCalledTimes(1);
   });
 
-  it('applyTools applies alwaysLoadTools per session', () => {
-    const { tools, prompts, resources } = mkRegistries();
-    const view = new SessionMcpView(tools, prompts, resources, 'sid', 'srv', {
-      command: 'node',
-      alwaysLoadTools: true,
-    } as MCPServerConfig);
-
-    view.applyTools([mkTool('srv', 'list_pages')]);
-
-    const registered = [
-      ...(
-        tools as unknown as { _toolMap: Map<string, DiscoveredMCPTool> }
-      )._toolMap.values(),
-    ];
-    expect(registered[0].shouldDefer).toBe(true);
-    expect(registered[0].alwaysLoad).toBe(true);
-  });
-
   it('applyTools continues when one registration fails', () => {
     const toolMap = new Map<string, DiscoveredMCPTool>();
     const tools = {

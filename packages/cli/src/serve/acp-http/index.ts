@@ -6,6 +6,8 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import { createRequire } from 'node:module';
+import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -52,6 +54,43 @@ const CDP_PATH = '/cdp';
  * packages can't share a module).
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+const requireFromHere = createRequire(import.meta.url);
+
+function buildChromeDevToolsMcpRuntimeConfig(
+  localPort: number | undefined,
+): Record<string, unknown> | undefined {
+  if (
+    localPort === undefined ||
+    !Number.isInteger(localPort) ||
+    localPort <= 0
+  ) {
+    return undefined;
+  }
+  try {
+    const pkgJsonPath = requireFromHere.resolve(
+      'chrome-devtools-mcp/package.json',
+    );
+    const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
+      bin?: string | Record<string, string>;
+    };
+    const binRel =
+      typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin ?? {})[0];
+    if (!binRel) return undefined;
+    const pkgDir = path.dirname(pkgJsonPath);
+    const binPath = path.resolve(pkgDir, binRel);
+    const binRelToPkg = path.relative(pkgDir, binPath);
+    if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
+      return undefined;
+    }
+    return {
+      command: process.execPath,
+      args: [binPath, '--wsEndpoint', `ws://127.0.0.1:${localPort}/cdp`],
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Browsers cannot set an `Authorization` header on a WebSocket, so the Web
@@ -288,6 +327,87 @@ export function mountAcpHttp(
     },
     opts.maxConnections,
   );
+  let cdpMcpRegistered = false;
+  let cdpMcpRegistering: Promise<void> | undefined;
+
+  async function removeChromeDevToolsMcp(
+    originatorClientId: string,
+  ): Promise<void> {
+    if (!cdpMcpRegistered) return;
+    cdpMcpRegistered = false;
+    try {
+      await bridge.removeRuntimeMcpServer(
+        CHROME_DEVTOOLS_MCP_SERVER_NAME,
+        originatorClientId,
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to remove ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  function removeChromeDevToolsMcpIfUnused(originatorClientId: string): void {
+    if (opts.cdpTunnelRegistry?.hasActive()) return;
+    void (async () => {
+      if (cdpMcpRegistering) await cdpMcpRegistering;
+      if (opts.cdpTunnelRegistry?.hasActive()) return;
+      await removeChromeDevToolsMcp(originatorClientId);
+    })();
+  }
+
+  function ensureChromeDevToolsMcpRegistered(
+    localPort: number | undefined,
+    originatorClientId: string,
+  ): void {
+    if (opts.token) return;
+    if (cdpMcpRegistered || cdpMcpRegistering) return;
+    const runtimeConfig = buildChromeDevToolsMcpRuntimeConfig(localPort);
+    if (!runtimeConfig) return;
+    cdpMcpRegistering = (async () => {
+      try {
+        const result = await bridge.addRuntimeMcpServer(
+          CHROME_DEVTOOLS_MCP_SERVER_NAME,
+          runtimeConfig,
+          originatorClientId,
+        );
+        if ((result as { skipped?: boolean }).skipped) {
+          writeStderrLine(
+            `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped: ${
+              (result as { reason?: string }).reason ?? 'unknown'
+            }`,
+          );
+          return;
+        }
+        if ((result as { shadowedSettings?: boolean }).shadowedSettings) {
+          await bridge
+            .removeRuntimeMcpServer(
+              CHROME_DEVTOOLS_MCP_SERVER_NAME,
+              originatorClientId,
+            )
+            .catch(() => {});
+          writeStderrLine(
+            `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped because settings already define it`,
+          );
+          return;
+        }
+        cdpMcpRegistered = true;
+        if (!opts.cdpTunnelRegistry?.hasActive()) {
+          await removeChromeDevToolsMcp(originatorClientId);
+        }
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to add ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      } finally {
+        cdpMcpRegistering = undefined;
+      }
+    })();
+  }
 
   // ── POST /acp ──────────────────────────────────────────────────────
   app.post(path, async (req: Request, res: Response) => {
@@ -609,6 +729,7 @@ export function mountAcpHttp(
       const rawAddr =
         (socket as unknown as { remoteAddress?: string }).remoteAddress ??
         'ws-unknown';
+      const localPort = (socket as { localPort?: number }).localPort;
       const logReject = (reason: string) => {
         writeStderrLine(
           `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
@@ -651,7 +772,6 @@ export function mountAcpHttp(
       // the REST middleware does; extract port from the socket.
       if (fromLoopback) {
         const host = (req.headers['host'] ?? '').toLowerCase();
-        const localPort = (socket as { localPort?: number }).localPort;
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
@@ -672,7 +792,6 @@ export function mountAcpHttp(
       const origin = req.headers['origin'];
       if (origin) {
         try {
-          const localPort = (socket as { localPort?: number }).localPort;
           const isLoopbackOrigin = isSameLoopbackOrigin(origin, localPort);
           // `--allow-origin` allowlist (same match semantics as the REST
           // `allowOriginCors`): lets an explicitly permitted non-loopback
@@ -786,6 +905,9 @@ export function mountAcpHttp(
           if (cdpBridgeUnregister) {
             cdpBridgeUnregister();
             cdpBridgeUnregister = undefined;
+            removeChromeDevToolsMcpIfUnused(
+              connRef?.connectionId ?? 'cdp-bridge',
+            );
           }
         });
 
@@ -1122,6 +1244,7 @@ export function mountAcpHttp(
               };
               cdpBridgeUnregister =
                 opts.cdpTunnelRegistry.register(cdpEndpoint);
+              ensureChromeDevToolsMcpRegistered(localPort, conn.connectionId);
               writeStderrLine(
                 `qwen serve: /acp connection ${conn.connectionId.slice(0, 8)} registered as CDP bridge`,
               );
