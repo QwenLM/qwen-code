@@ -3431,8 +3431,11 @@ describe('useGeminiStream', () => {
       await submitPromise;
     });
 
+    const staleCompletedOnComplete = staleOnComplete as
+      | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
+      | null;
     await act(async () => {
-      await staleOnComplete?.([fastToolAfterCancel]);
+      await staleCompletedOnComplete?.([fastToolAfterCancel]);
     });
 
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
