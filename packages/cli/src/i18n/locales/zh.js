@@ -1344,8 +1344,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
-    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
   "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
     "⚠ '{{model}}' 不是已知的图像能力模型；视觉桥接处理图片时可能会失败。",
   'Set a lighter model for prompt suggestions and speculative execution':
