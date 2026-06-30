@@ -1468,7 +1468,6 @@ describe('runQwenServe startup observability', () => {
         workspace: tmpDir,
         maxSessions: 1,
         serveWebShell: false,
-        allowOrigins: ['chrome-extension://qwen-test-extension'],
       },
       { bridge: makeFakeBridge() },
     );
@@ -1486,9 +1485,6 @@ describe('runQwenServe startup observability', () => {
       );
       expect(stderrWrites.join('')).toContain(
         'qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth.',
-      );
-      expect(stderrWrites.join('')).toContain(
-        'qwen serve: CDP tunnel (/cdp) auto-enabled; a connected client can drive browser tabs.',
       );
 
       expect(await readStartup(handle)).toMatchObject({

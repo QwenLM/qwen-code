@@ -1115,10 +1115,6 @@ export async function runQwenServe(
         (cdpTunnelOverWsEnv !== undefined ||
           hasChromeExtensionOrigin(optsIn.allowOrigins))),
   };
-  const cdpTunnelAutoEnabled =
-    optsIn.cdpTunnelOverWs === undefined &&
-    cdpTunnelOverWsEnv === undefined &&
-    opts.cdpTunnelOverWs === true;
   validateRateLimitOptions(opts);
 
   // Catch the `--hostname localhost:4170` / `127.0.0.1:4170`
@@ -2039,13 +2035,6 @@ export async function runQwenServe(
             'on every route, including loopback /health).',
         );
       }
-      if (cdpTunnelAutoEnabled) {
-        writeStderrLine(
-          `qwen serve: CDP tunnel (/cdp) auto-enabled; a connected client can drive browser tabs. ` +
-            `Set ${QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV}=0 to disable.`,
-        );
-      }
-
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
