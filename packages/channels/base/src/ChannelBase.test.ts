@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ChannelConfig, Envelope } from './types.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
@@ -113,6 +116,13 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
   };
 }
 
+function groupHistoryPath(): string {
+  return join(
+    mkdtempSync(join(tmpdir(), 'qwen-channel-history-')),
+    'history.jsonl',
+  );
+}
+
 describe('ChannelBase', () => {
   let bridge: ChannelAgentBridge;
 
@@ -162,6 +172,435 @@ describe('ChannelBase', () => {
       });
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+  });
+
+  describe('group history backfill', () => {
+    it('does not record unmentioned group messages when groupHistoryLimit is absent', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      });
+
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: false, text: 'background' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '@bot current' }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toBe('[User 1] @bot current');
+    });
+
+    it('injects authorized unmentioned group messages on the next trigger', async () => {
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          senderId: 'u1',
+          senderName: 'Alice',
+          text: 'first background',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          senderId: 'u2',
+          senderName: 'Bob',
+          text: 'second background',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'u3',
+          senderName: 'Carol',
+          text: '@bot summarize',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toBe(
+        '[Chat messages since your last reply - for context]\n[Alice] first background\n[Bob] second background\n\n[Current message - respond to this]\n[Carol] @bot summarize',
+      );
+    });
+
+    it('persists group history across channel instances', async () => {
+      const historyPath = groupHistoryPath();
+      const config = {
+        groupPolicy: 'open' as const,
+        groupHistoryLimit: 10,
+        groups: { '*': { requireMention: true } },
+      };
+
+      const first = createChannel(config, { groupHistoryPath: historyPath });
+      await first.handleInbound(
+        envelope({ isGroup: true, isMentioned: false, text: 'persisted' }),
+      );
+
+      const second = createChannel(config, { groupHistoryPath: historyPath });
+      await second.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '@bot current' }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toContain('[User 1] persisted');
+    });
+
+    it('does not cache unmentioned messages from unauthorized senders', async () => {
+      const ch = createChannel(
+        {
+          senderPolicy: 'allowlist',
+          allowedUsers: ['allowed'],
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          senderId: 'stranger',
+          senderName: 'Stranger',
+          text: 'poison',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'allowed',
+          senderName: 'Allowed',
+          text: '@bot current',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).not.toContain('poison');
+      expect(prompt).toBe('[Allowed] @bot current');
+    });
+
+    it('does not cache messages from groups rejected by groupPolicy', async () => {
+      const historyPath = groupHistoryPath();
+      const restricted = createChannel(
+        {
+          groupPolicy: 'allowlist',
+          groupHistoryLimit: 10,
+          groups: { chat1: { requireMention: true } },
+        },
+        { groupHistoryPath: historyPath },
+      );
+
+      await restricted.handleInbound(
+        envelope({
+          chatId: 'chat2',
+          isGroup: true,
+          isMentioned: false,
+          text: 'rejected background',
+        }),
+      );
+
+      const open = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: historyPath },
+      );
+      await open.handleInbound(
+        envelope({
+          chatId: 'chat2',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot current',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).not.toContain('rejected background');
+      expect(prompt).toBe('[User 1] @bot current');
+    });
+
+    it('uses group-level groupHistoryLimit over channel-level limit', async () => {
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 5,
+          groups: {
+            chat1: { requireMention: true, groupHistoryLimit: 1 },
+          },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: false, text: 'old' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: false, text: 'new' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '@bot current' }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).not.toContain('old');
+      expect(prompt).toContain('[User 1] new');
+    });
+
+    it('keeps group-specific history separate', async () => {
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'chat1',
+          isGroup: true,
+          isMentioned: false,
+          text: 'chat one background',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          chatId: 'chat2',
+          isGroup: true,
+          isMentioned: false,
+          text: 'chat two background',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          chatId: 'chat1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot current',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toContain('chat one background');
+      expect(prompt).not.toContain('chat two background');
+    });
+
+    it('keeps thread-specific group history separate', async () => {
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          sessionScope: 'thread',
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          threadId: 't1',
+          text: 'thread one background',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          threadId: 't2',
+          text: 'thread two background',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          threadId: 't1',
+          text: '@bot current',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toContain('thread one background');
+      expect(prompt).not.toContain('thread two background');
+    });
+
+    it('keeps opaque chat and thread IDs from colliding', async () => {
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          sessionScope: 'thread',
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'a:b',
+          threadId: 'c',
+          isGroup: true,
+          isMentioned: false,
+          text: 'first key background',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          chatId: 'a',
+          threadId: 'b:c',
+          isGroup: true,
+          isMentioned: false,
+          text: 'second key background',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          chatId: 'a:b',
+          threadId: 'c',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot current',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toContain('first key background');
+      expect(prompt).not.toContain('second key background');
+    });
+
+    it('keeps recognized agent slash commands verbatim when history is pending', async () => {
+      (
+        bridge as unknown as {
+          availableCommands: Array<{ name: string; description: string }>;
+        }
+      ).availableCommands = [{ name: 'compress', description: 'Compress' }];
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: false, text: 'background' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '/compress' }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toBe('/compress');
+    });
+
+    it('clears pending group history on /clear', async () => {
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '@bot start' }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          text: 'background before clear',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '/clear' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '@bot current' }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(prompt).not.toContain('background before clear');
+      expect(prompt).toBe('[User 1] @bot current');
+    });
+
+    it('clears pending history when a prompt for that group finishes', async () => {
+      let resolvePrompt: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            resolvePrompt = resolve;
+          }),
+      );
+      const historyPath = groupHistoryPath();
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: historyPath },
+      );
+
+      const active = ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '@bot current' }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          text: 'during active turn',
+        }),
+      );
+      resolvePrompt('done');
+      await active;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'agent response',
+      );
+
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '@bot next' }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(prompt).not.toContain('during active turn');
+      expect(prompt).toBe('[User 1] @bot next');
     });
   });
 
