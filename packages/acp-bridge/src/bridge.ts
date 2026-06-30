@@ -3158,6 +3158,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         err.name === 'AbortError' &&
                         pendingEntry.state === 'queued'
                       ) {
+                        writeStderrLine(
+                          `sendPrompt: queued prompt removed before agent forward for session ${sessionId}`,
+                        );
                         return;
                       }
                       writeStderrLine(

@@ -168,11 +168,11 @@ export function useQueuedPrompts({
         const existingIndex = next.findIndex(
           (p) => p.serverPromptId === serverPrompt.promptId,
         );
-        const shouldHidePrompt =
-          serverPrompt.state === 'running' ||
-          displayedServerPromptIdsRef.current.has(serverPrompt.promptId);
+        const hasDisplayedPrompt = displayedServerPromptIdsRef.current.has(
+          serverPrompt.promptId,
+        );
         if (existingIndex !== -1) {
-          if (shouldHidePrompt) {
+          if (hasDisplayedPrompt) {
             next.splice(existingIndex, 1);
             continue;
           }
@@ -189,9 +189,9 @@ export function useQueuedPrompts({
             p.serverState === 'submitting' &&
             p.text === serverPrompt.text,
         );
-        if (submittingMatches.length >= 1) {
+        if (submittingMatches.length === 1) {
           const submittingIndex = next.indexOf(submittingMatches[0]!);
-          if (shouldHidePrompt) {
+          if (hasDisplayedPrompt) {
             next.splice(submittingIndex, 1);
             continue;
           }
@@ -202,7 +202,7 @@ export function useQueuedPrompts({
           };
           continue;
         }
-        if (shouldHidePrompt) {
+        if (serverPrompt.state === 'running' || hasDisplayedPrompt) {
           continue;
         }
         next.push({
@@ -809,6 +809,9 @@ export function useQueuedPrompts({
     for (const prompt of [...submittingPrompts].reverse()) {
       restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
     }
+    // Restore submitting prompts before aborting their admission requests, then
+    // clear the local ref synchronously so abort catch handlers do not restore
+    // the same text again.
     for (const controller of submitAbortControllersRef.current) {
       controller.abort();
     }
