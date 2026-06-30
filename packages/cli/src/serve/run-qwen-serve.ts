@@ -476,6 +476,23 @@ function channelSelectionPidfileNames(
   return selection.mode === 'all' ? ['all'] : [...selection.names];
 }
 
+function writeServeChannelReservation(
+  channelServicePidfile: ChannelServicePidfile,
+  channels: string[],
+): void {
+  if (channelServicePidfile.reserveServeServiceInfo) {
+    channelServicePidfile.reserveServeServiceInfo({
+      channels,
+      servePid: process.pid,
+    });
+    return;
+  }
+  channelServicePidfile.writeServeServiceInfo({
+    channels,
+    servePid: process.pid,
+  });
+}
+
 function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
@@ -1234,17 +1251,7 @@ export async function runQwenServe(
       );
     }
     try {
-      if (channelServicePidfile.reserveServeServiceInfo) {
-        channelServicePidfile.reserveServeServiceInfo({
-          channels: channelPidfileNames,
-          servePid: process.pid,
-        });
-      } else {
-        channelServicePidfile.writeServeServiceInfo({
-          channels: channelPidfileNames,
-          servePid: process.pid,
-        });
-      }
+      writeServeChannelReservation(channelServicePidfile, channelPidfileNames);
       channelPidfileReserved = true;
     } catch (err) {
       if (err && typeof err === 'object' && 'code' in err) {
@@ -1258,9 +1265,26 @@ export async function runQwenServe(
               `Channel service is already running under ${owner} (PID ${info.pid}). Stop it before starting qwen serve --channel.`,
             );
           }
-          throw new Error(
-            'Channel service is already starting. Retry after the current startup finishes.',
-          );
+          try {
+            writeServeChannelReservation(
+              channelServicePidfile,
+              channelPidfileNames,
+            );
+            channelPidfileReserved = true;
+            return;
+          } catch (retryErr) {
+            if (
+              retryErr &&
+              typeof retryErr === 'object' &&
+              'code' in retryErr &&
+              (retryErr as { code?: unknown }).code === 'EEXIST'
+            ) {
+              throw new Error(
+                'Channel service is already starting. Retry after the current startup finishes.',
+              );
+            }
+            throw retryErr;
+          }
         }
       }
       throw err;

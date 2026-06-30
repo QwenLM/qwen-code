@@ -322,8 +322,11 @@ export async function runChannelDaemonWorker(
       channels: connected,
       async close() {
         disconnectAll();
-        bridge.stop();
-        router.clearAll();
+        try {
+          bridge.stop();
+        } finally {
+          router.clearAll();
+        }
       },
     };
   } catch (err) {
@@ -345,6 +348,31 @@ function readRequiredEnv(name: string): string {
   return value;
 }
 
+function scrubDaemonWorkerEnv(): void {
+  delete process.env[CHANNEL_DAEMON_WORKER_SENTINEL];
+  delete process.env[QWEN_DAEMON_TOKEN_ENV];
+  delete process.env[QWEN_DAEMON_URL_ENV];
+  delete process.env[QWEN_DAEMON_WORKSPACE_ENV];
+  delete process.env[QWEN_SERVER_TOKEN_ENV];
+}
+
+function readDaemonWorkerEnv(): {
+  daemonToken: string | undefined;
+  daemonUrl: string;
+  workspace: string;
+} {
+  const daemonToken = process.env[QWEN_DAEMON_TOKEN_ENV];
+  try {
+    return {
+      daemonToken,
+      daemonUrl: readRequiredEnv(QWEN_DAEMON_URL_ENV),
+      workspace: readRequiredEnv(QWEN_DAEMON_WORKSPACE_ENV),
+    };
+  } finally {
+    scrubDaemonWorkerEnv();
+  }
+}
+
 export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
   command: 'daemon-worker',
   describe: false,
@@ -359,17 +387,15 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       if (process.env[CHANNEL_DAEMON_WORKER_SENTINEL] !== '1') {
         throw new Error('daemon-worker is an internal qwen serve command.');
       }
-      const daemonToken = process.env[QWEN_DAEMON_TOKEN_ENV];
-      delete process.env[QWEN_DAEMON_TOKEN_ENV];
-      delete process.env[QWEN_SERVER_TOKEN_ENV];
+      const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
       const selection = normalizeServeChannelSelection(argv.channel);
       if (!selection) {
         throw new Error('--channel is required.');
       }
       const handle = await runChannelDaemonWorker({
-        daemonUrl: readRequiredEnv(QWEN_DAEMON_URL_ENV),
+        daemonUrl,
         daemonToken,
-        workspace: readRequiredEnv(QWEN_DAEMON_WORKSPACE_ENV),
+        workspace,
         selection,
         sendReady: (ready) => {
           process.send?.({ type: 'ready', ...ready });

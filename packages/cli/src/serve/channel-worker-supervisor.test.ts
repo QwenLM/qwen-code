@@ -23,6 +23,7 @@ class FakeChild extends EventEmitter implements ChannelWorkerChild {
 
 describe('createChannelWorkerSupervisor', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
   });
 
@@ -338,6 +339,41 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'failed',
       exitCode: 1,
       error: expect.stringContaining('Channel worker exited before ready'),
+    });
+  });
+
+  it('does not report stopped when the worker ignores SIGKILL', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+
+    const stopped = supervisor.stop();
+    await Promise.resolve();
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    await vi.advanceTimersByTimeAsync(2_000);
+    await stopped;
+
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'failed',
+      signal: 'SIGKILL',
+      error: 'Channel worker did not exit after SIGKILL.',
     });
   });
 });

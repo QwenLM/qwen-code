@@ -364,7 +364,15 @@ export function createChannelWorkerSupervisor(
       if (!(await exited)) {
         const killed = waitForExit(child, 2_000);
         child.kill('SIGKILL');
-        await killed;
+        if (!(await killed)) {
+          snapshot = {
+            ...snapshot,
+            state: 'failed',
+            signal: 'SIGKILL',
+            error: 'Channel worker did not exit after SIGKILL.',
+          };
+          return;
+        }
       }
       snapshot = { ...snapshot, state: 'stopped' };
     },

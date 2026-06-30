@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockCanonicalizeWorkspace = vi.hoisted(() => vi.fn((p: string) => p));
 const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
@@ -99,6 +99,7 @@ vi.mock('@qwen-code/channel-base', () => ({
 import {
   createDaemonChannelBridgeFacade,
   createDaemonSessionFactory,
+  daemonWorkerCommand,
   runChannelDaemonWorker,
 } from './daemon-worker.js';
 
@@ -170,6 +171,17 @@ beforeEach(() => {
   mockLoadChannelsFromExtensions.mockResolvedValue(0);
   mockParseConfiguredChannels.mockResolvedValue([parsedTelegram]);
 });
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
+
+function mockProcessExit(): void {
+  vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    throw new Error(`process.exit ${code ?? 0}`);
+  }) as never);
+}
 
 describe('createDaemonSessionFactory', () => {
   it('creates and loads daemon sessions with thread session scope', async () => {
@@ -501,5 +513,78 @@ describe('runChannelDaemonWorker', () => {
         loadDaemonSdk: async () => sdk,
       }),
     ).rejects.toThrow('must use daemon workspace "/workspace"');
+  });
+
+  it('clears router state even when bridge stop fails during close', async () => {
+    const sdk = createSdk();
+    mockBridgeStop.mockImplementationOnce(() => {
+      throw new Error('stop boom');
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    await expect(handle.close()).rejects.toThrow('stop boom');
+    expect(mockRouterClearAll).toHaveBeenCalled();
+  });
+});
+
+describe('daemonWorkerCommand', () => {
+  it('rejects direct user invocation without the internal sentinel', async () => {
+    mockProcessExit();
+
+    await expect(
+      daemonWorkerCommand.handler({ channel: ['telegram'], _: [], $0: 'qwen' }),
+    ).rejects.toThrow('process.exit 1');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] daemon worker failed: daemon-worker is an internal qwen serve command.',
+    );
+  });
+
+  it('scrubs daemon connection env before validating channel selection', async () => {
+    mockProcessExit();
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    await expect(
+      daemonWorkerCommand.handler({ channel: [' '], _: [], $0: 'qwen' }),
+    ).rejects.toThrow('process.exit 1');
+
+    expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_URL']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_WORKSPACE']).toBeUndefined();
+    expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] daemon worker failed: --channel requires a non-empty channel name.',
+    );
+  });
+
+  it('scrubs daemon connection env when required env validation fails', async () => {
+    mockProcessExit();
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    await expect(
+      daemonWorkerCommand.handler({ channel: ['telegram'], _: [], $0: 'qwen' }),
+    ).rejects.toThrow('process.exit 1');
+
+    expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_WORKSPACE']).toBeUndefined();
+    expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] daemon worker failed: QWEN_DAEMON_URL is required.',
+    );
   });
 });

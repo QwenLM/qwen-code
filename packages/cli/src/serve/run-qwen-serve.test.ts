@@ -28,7 +28,10 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
-import type { ChannelWorkerSnapshot , CreateChannelWorkerSupervisorOptions } from './channel-worker-supervisor.js';
+import type {
+  ChannelWorkerSnapshot,
+  CreateChannelWorkerSupervisorOptions,
+} from './channel-worker-supervisor.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
@@ -1588,6 +1591,52 @@ describe('runQwenServe channel worker supervisor', () => {
 
     expect(workerFactory).not.toHaveBeenCalled();
     expect(pidfile.reserveServeServiceInfo).not.toHaveBeenCalled();
+  });
+
+  it('retries channel pidfile reservation after an EEXIST stale file cleanup', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-stale-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const eexist = new Error('EEXIST') as NodeJS.ErrnoException;
+    eexist.code = 'EEXIST';
+    pidfile.reserveServeServiceInfo
+      .mockImplementationOnce(() => {
+        throw eexist;
+      })
+      .mockImplementationOnce(() => undefined);
+    pidfile.readServiceInfo.mockReturnValueOnce(null).mockReturnValueOnce(null);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    await handle.close();
+
+    expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledTimes(2);
+    expect(pidfile.writeServeServiceInfo).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      servePid: process.pid,
+      workerPid: 1234,
+    });
   });
 });
 
