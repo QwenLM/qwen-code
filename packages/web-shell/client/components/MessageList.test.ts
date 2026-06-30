@@ -388,6 +388,10 @@ describe('getTurnTimelineNode', () => {
 });
 
 describe('getSessionTimelineEntries', () => {
+  it('returns no entries for an empty transcript', () => {
+    expect(getSessionTimelineEntries([])).toEqual([]);
+  });
+
   it('builds one entry per user turn', () => {
     expect(
       getSessionTimelineEntries([
@@ -436,6 +440,27 @@ describe('getSessionTimelineEntries', () => {
     ]);
   });
 
+  it('keeps streaming assistant content in the active turn detail', () => {
+    expect(
+      getSessionTimelineEntries([
+        makeUserMessage('u1'),
+        {
+          ...makeAssistantMessage('stream'),
+          content: 'draft',
+          isStreaming: true,
+        },
+      ]),
+    ).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'draft',
+        timestamp: undefined,
+        nodeKinds: ['commentary'],
+      },
+    ]);
+  });
+
   it('handles empty assistant content and user shell turns', () => {
     const entries = getSessionTimelineEntries([
       makeUserShellMessage('shell'),
@@ -449,6 +474,18 @@ describe('getSessionTimelineEntries', () => {
         detail: '2 tool calls',
         timestamp: undefined,
         nodeKinds: ['tool'],
+      },
+    ]);
+  });
+
+  it('keeps a single prompt turn as no activity', () => {
+    expect(getSessionTimelineEntries([makeUserMessage('u1')])).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'No activity',
+        timestamp: undefined,
+        nodeKinds: [],
       },
     ]);
   });
