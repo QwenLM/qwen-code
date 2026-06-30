@@ -1,7 +1,14 @@
-import type { ChannelCronJob, ChannelCronStore } from './ChannelCronStore.js';
+import type {
+  ChannelCronJob,
+  ChannelCronJobPatch,
+  ChannelCronStore,
+} from './ChannelCronStore.js';
 
 export interface ChannelRoutineRunner {
-  runScheduledPrompt(job: ChannelCronJob): Promise<void>;
+  runScheduledPrompt(
+    job: ChannelCronJob,
+    options?: { timeoutMs?: number },
+  ): Promise<void>;
 }
 
 export interface ChannelCronSchedulerOptions {
@@ -25,7 +32,6 @@ export class ChannelCronScheduler {
   private timer: ReturnType<typeof setInterval> | undefined;
   private runningTick: Promise<void> | undefined;
   private readonly inFlightJobs = new Set<string>();
-  private readonly timedOutJobs = new Set<string>();
 
   constructor(options: ChannelCronSchedulerOptions) {
     this.store = options.store;
@@ -51,9 +57,12 @@ export class ChannelCronScheduler {
   }
 
   stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
+    if (this.timer) {
+      clearInterval(this.timer);
+    }
     this.timer = undefined;
+    this.runningTick = undefined;
+    this.inFlightJobs.clear();
   }
 
   async tick(): Promise<void> {
@@ -94,9 +103,7 @@ export class ChannelCronScheduler {
     try {
       await this.fire(job, now);
     } finally {
-      if (!this.timedOutJobs.has(job.id)) {
-        this.inFlightJobs.delete(job.id);
-      }
+      this.inFlightJobs.delete(job.id);
     }
   }
 
@@ -108,33 +115,21 @@ export class ChannelCronScheduler {
     const latestJob = await this.findJob(job.id);
     if (!latestJob?.enabled) return;
 
-    let run: Promise<void> | undefined;
     try {
-      run = channel.runScheduledPrompt(latestJob);
-      await this.withTimeout(run, latestJob.id);
-      await this.store.update(latestJob.id, {
+      await channel.runScheduledPrompt(latestJob, {
+        timeoutMs: this.jobTimeoutMs,
+      });
+      const patch: ChannelCronJobPatch = {
         lastFiredAt: now.toISOString(),
         lastStatus: 'ok',
         lastError: undefined,
         consecutiveFailures: 0,
-      });
+      };
       if (!latestJob.recurring) {
-        await this.store.disable(latestJob.id);
+        patch.enabled = false;
       }
+      await this.store.update(latestJob.id, patch);
     } catch (err) {
-      if (
-        run !== undefined &&
-        err instanceof Error &&
-        err.message === 'scheduled job timed out'
-      ) {
-        this.timedOutJobs.add(latestJob.id);
-        run
-          .catch(() => undefined)
-          .finally(() => {
-            this.timedOutJobs.delete(latestJob.id);
-            this.inFlightJobs.delete(latestJob.id);
-          });
-      }
       await this.recordFailure(
         latestJob,
         now,
@@ -146,26 +141,6 @@ export class ChannelCronScheduler {
   private async findJob(id: string): Promise<ChannelCronJob | undefined> {
     const jobs = await this.store.list();
     return jobs.find((job) => job.id === id);
-  }
-
-  private async withTimeout(run: Promise<void>, jobId: string): Promise<void> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        run,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            reject(new Error('scheduled job timed out'));
-          }, this.jobTimeoutMs);
-          timer.unref?.();
-        }),
-      ]);
-    } catch (err) {
-      process.stderr.write(`[scheduler] job ${jobId} failed: ${err}\n`);
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
   }
 
   private async recordFailure(

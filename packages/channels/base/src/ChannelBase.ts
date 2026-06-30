@@ -59,6 +59,10 @@ export interface ChannelScheduleController {
   validateCron(cron: string): void;
 }
 
+export interface ChannelScheduledPromptOptions {
+  timeoutMs?: number;
+}
+
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
 type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
 type ActivePrompt = {
@@ -235,7 +239,10 @@ export abstract class ChannelBase {
     }
   }
 
-  async runScheduledPrompt(job: ChannelCronJob): Promise<void> {
+  async runScheduledPrompt(
+    job: ChannelCronJob,
+    options: ChannelScheduledPromptOptions = {},
+  ): Promise<void> {
     if (!this.supportsProactiveSend()) {
       throw new Error('Channel does not support proactive scheduled messages.');
     }
@@ -303,7 +310,14 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
 
       try {
-        const response = await promptBridge.prompt(sessionId, promptText, {});
+        const response = await this.runScheduledBridgePrompt(
+          promptBridge,
+          sessionId,
+          promptText,
+          promptState,
+          job.id,
+          options.timeoutMs,
+        );
         if (!promptState.cancelled && response) {
           await this.pushProactive(job.target, response);
         }
@@ -353,6 +367,47 @@ export abstract class ChannelBase {
       current.catch(() => {}),
     );
     await current;
+  }
+
+  private async runScheduledBridgePrompt(
+    promptBridge: ChannelAgentBridge,
+    sessionId: string,
+    promptText: string,
+    promptState: ActivePrompt,
+    jobId: string,
+    timeoutMs: number | undefined,
+  ): Promise<string> {
+    const prompt = promptBridge.prompt(sessionId, promptText, {});
+    if (timeoutMs === undefined) {
+      return prompt;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        prompt,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error('scheduled job timed out'));
+          }, timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'scheduled job timed out') {
+        promptState.cancelled = true;
+        void promptBridge.cancelSession(sessionId).catch((cancelErr) => {
+          process.stderr.write(
+            `[${this.name}] cancelSession failed for timed out scheduled job ${jobId} in session ${sessionId}: ${
+              cancelErr instanceof Error ? cancelErr.message : cancelErr
+            }\n`,
+          );
+        });
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
