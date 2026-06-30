@@ -299,6 +299,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   getAutoMemoryRoot: vi.fn(
     (projectRoot: string) => `${projectRoot}/.qwen/memory`,
   ),
+  getUserAutoMemoryRoot: vi.fn(() => '/tmp/user-memory'),
   QwenOAuth2Event: {},
   qwenOAuth2Events: { on: vi.fn(), off: vi.fn() },
   MCPDiscoveryState: {
@@ -352,6 +353,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   SessionService: vi.fn(),
   Storage: {
     getGlobalQwenDir: vi.fn(() => '/tmp/qwen-global-test'),
+    getGlobalTempDir: vi.fn(() => '/tmp/qwen-global-temp'),
+    getUserExtensionsDir: vi.fn(() => '/tmp/qwen-extensions'),
   },
   parseRule: vi.fn((raw: string) => {
     const trimmed = raw.trim();
@@ -602,6 +605,7 @@ import {
 } from '../config/permission-settings.js';
 import { loadCliConfig } from '../config/config.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
+import { AcpFileSystemService } from './service/filesystem.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
   SERVE_STATUS_EXT_METHODS,
@@ -1216,6 +1220,78 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('configures ACP file system fallback roots for read_file allowed local roots', async () => {
+    const fsCapabilities = { readTextFile: true, writeTextFile: true };
+    const fallbackFileSystem = {};
+    const innerConfig = {
+      ...makeInnerConfig(),
+      getTargetDir: vi.fn().mockReturnValue('/project'),
+      getSessionId: vi.fn().mockReturnValue('session-with-fs'),
+      getFileSystemService: vi.fn().mockReturnValue(fallbackFileSystem),
+      setFileSystemService: vi.fn(),
+      storage: {
+        getProjectTempDir: vi.fn().mockReturnValue('/project/.qwen/tmp'),
+        getProjectDir: vi.fn().mockReturnValue('/project'),
+        getUserSkillsDirs: vi.fn().mockReturnValue(['/home/test/.qwen/skills']),
+      },
+    };
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('session-with-fs'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const fakeConn = {
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as AgentSideConnectionLike;
+    const agent = capturedAgentFactory!(fakeConn) as AgentLike;
+
+    await agent.initialize({ clientCapabilities: { fs: fsCapabilities } });
+    await agent.newSession({ cwd: '/project', mcpServers: [] });
+
+    expect(AcpFileSystemService).toHaveBeenCalledWith(
+      fakeConn,
+      'session-with-fs',
+      fsCapabilities,
+      fallbackFileSystem,
+      {
+        localReadRoots: [
+          '/project/.qwen/tmp',
+          path.join('/project', 'subagents'),
+          '/tmp/qwen-global-temp',
+          '/project/.qwen/memory',
+          '/tmp/user-memory',
+          '/home/test/.qwen/skills',
+          '/tmp/qwen-extensions',
+        ],
+      },
+    );
+    expect(innerConfig.setFileSystemService).toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

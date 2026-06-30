@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
@@ -99,20 +98,21 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
-   * so that external file reads require user confirmation.
+   * Returns 'ask' for paths outside the workspace/qwen-managed temp/userSkills
+   * directories, so that external file reads require user confirmation.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const filePath = path.resolve(this.params.file_path);
     const workspaceContext = this.config.getWorkspaceContext();
 
+    // SYNC: Keep these roots and the auto-memory check below aligned with
+    // AcpAgent.setupFileSystem's localReadRoots.
     const allowedRoots = [
       this.config.storage.getProjectTempDir(),
       // Background subagent transcripts live under <projectDir>/subagents/ and
       // are advertised to the model as polling targets via read_file.
       path.join(this.config.storage.getProjectDir(), 'subagents'),
       Storage.getGlobalTempDir(),
-      os.tmpdir(),
       ...this.config.storage.getUserSkillsDirs(),
       Storage.getUserExtensionsDir(),
     ];

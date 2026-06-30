@@ -20,6 +20,7 @@ import {
   findProviderById,
   getAllGeminiMdFilenames,
   getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   getScopedEnvContents,
@@ -7735,6 +7736,19 @@ class QwenAgent implements Agent {
       config.getSessionId(),
       this.clientCapabilities.fs,
       config.getFileSystemService(),
+      {
+        // SYNC: Mirrors ReadFileTool's default allowed local roots, including
+        // auto-memory roots, so ACP-local read fallback follows the same policy.
+        localReadRoots: [
+          config.storage.getProjectTempDir(),
+          path.join(config.storage.getProjectDir(), 'subagents'),
+          Storage.getGlobalTempDir(),
+          getAutoMemoryRoot(config.getTargetDir()),
+          getUserAutoMemoryRoot(),
+          ...config.storage.getUserSkillsDirs(),
+          Storage.getUserExtensionsDir(),
+        ],
+      },
     );
     config.setFileSystemService(acpFileSystemService);
   }

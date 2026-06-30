@@ -12,6 +12,7 @@ import express, {
   type Application,
   type NextFunction,
   type Request,
+  type RequestHandler,
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
@@ -32,6 +33,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import {
   allowOriginCors,
@@ -94,6 +96,10 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
+// Let the first /health response flush before evaluating the runtime graph.
+const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
+// Keep manual/non-probed starts moving; health probes cancel this fallback.
+const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 20;
@@ -495,6 +501,12 @@ export interface RunQwenServeDeps {
    */
   resolveOnListen?: boolean;
   /**
+   * Internal serve fast-path mode: keep bootstrap /health responsive before
+   * starting the heavier runtime graph. A fallback timer still starts runtime
+   * when no health probe arrives. Only applies with resolveOnListen.
+   */
+  deferRuntimeUntilFirstHealth?: boolean;
+  /**
    * Bounds background runtime mounting after the listener is ready. Defaults to
    * QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS, then 120s. Use 0 to disable.
    */
@@ -801,6 +813,15 @@ export async function waitForRuntimeStartingForShutdown(
   });
 }
 
+const BOOTSTRAP_HEALTH_PATH = '/health';
+const BOOTSTRAP_CAPABILITIES_PATH = '/capabilities';
+const BOOTSTRAP_DAEMON_STATUS_PATH = '/daemon/status';
+const BOOTSTRAP_SERVE_PATHS = new Set([
+  BOOTSTRAP_HEALTH_PATH,
+  BOOTSTRAP_CAPABILITIES_PATH,
+  BOOTSTRAP_DAEMON_STATUS_PATH,
+]);
+
 function createBootstrapServeApp(input: {
   opts: ServeOptions;
   getPort: () => number;
@@ -811,6 +832,7 @@ function createBootstrapServeApp(input: {
   sessionShellCommandEnabled: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   getRuntimeError: () => string | undefined;
+  onHealthServed?: () => void;
 }): Application {
   const {
     opts,
@@ -822,6 +844,7 @@ function createBootstrapServeApp(input: {
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError,
+    onHealthServed,
   } = input;
   const app = express();
 
@@ -843,21 +866,24 @@ function createBootstrapServeApp(input: {
       return;
     }
 
+    if (onHealthServed) {
+      res.once('finish', onHealthServed);
+    }
     res.status(200).json({ status: 'ok' });
   };
   const loopback = isLoopbackBind(opts.hostname);
   const exposeHealthPreAuth = loopback && !opts.requireAuth;
   if (exposeHealthPreAuth) {
-    app.get('/health', healthHandler);
+    app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
   }
 
   app.use(bearerAuth(opts.token));
 
   if (!exposeHealthPreAuth) {
-    app.get('/health', healthHandler);
+    app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
   }
 
-  app.get('/capabilities', (_req: Request, res: Response): void => {
+  app.get(BOOTSTRAP_CAPABILITIES_PATH, (_req: Request, res: Response): void => {
     res.status(200).json(
       createBootstrapCapabilities({
         opts,
@@ -869,7 +895,7 @@ function createBootstrapServeApp(input: {
     );
   });
 
-  app.get('/daemon/status', (req: Request, res: Response): void => {
+  app.get(BOOTSTRAP_DAEMON_STATUS_PATH, (req: Request, res: Response): void => {
     const detail = parseDaemonStatusDetail(req.query['detail']);
     if (!detail.ok || !detail.detail) {
       res.status(400).json({
@@ -1008,18 +1034,90 @@ function createBootstrapServeApp(input: {
 function createDelegatingServeApp(
   bootstrapApp: Application,
   getRuntimeApp: () => Application | undefined,
+  options: {
+    waitForDeferredRuntimeRoutes?: boolean;
+    startRuntime?: () => void;
+    runtimeReady?: Promise<void>;
+    authenticateDeferredRuntimeRequest?: RequestHandler;
+  } = {},
 ): Application {
   const app = express();
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const target = getRuntimeApp() ?? bootstrapApp;
-    const handler = target as unknown as (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-    ) => void;
-    handler(req, res, next);
+    const dispatch = async (): Promise<void> => {
+      let target = getRuntimeApp();
+      if (
+        !target &&
+        options.waitForDeferredRuntimeRoutes === true &&
+        !isBootstrapServeRoute(req) &&
+        !isCorsPreflightRequest(req) &&
+        options.startRuntime &&
+        options.runtimeReady
+      ) {
+        if (
+          options.authenticateDeferredRuntimeRequest &&
+          !runSynchronousRequestGate(
+            options.authenticateDeferredRuntimeRequest,
+            req,
+            res,
+            next,
+          )
+        ) {
+          return;
+        }
+        options.startRuntime();
+        try {
+          await options.runtimeReady;
+        } catch {
+          // Fall through to the bootstrap app so it can report the startup error.
+        }
+        target = getRuntimeApp();
+      }
+      const handler = (target ?? bootstrapApp) as unknown as (
+        req: Request,
+        res: Response,
+        next: NextFunction,
+      ) => void;
+      handler(req, res, next);
+    };
+    void dispatch().catch(next);
   });
   return app;
+}
+
+function isBootstrapServeRoute(req: Request): boolean {
+  const path =
+    req.path.length > 1 && req.path.endsWith('/')
+      ? req.path.slice(0, -1)
+      : req.path;
+  return BOOTSTRAP_SERVE_PATHS.has(path);
+}
+
+function isCorsPreflightRequest(req: Request): boolean {
+  return (
+    req.method === 'OPTIONS' &&
+    Boolean(req.headers.origin) &&
+    Boolean(
+      req.headers['access-control-request-method'] ||
+        req.headers['access-control-request-headers'],
+    )
+  );
+}
+
+function runSynchronousRequestGate(
+  handler: RequestHandler,
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): boolean {
+  let passed = false;
+  handler(req, res, (err?: unknown) => {
+    if (err) {
+      next(err);
+      return;
+    }
+    passed = true;
+  });
+  return passed;
 }
 
 /**
@@ -1503,6 +1601,10 @@ export async function runQwenServe(
   let markRuntimeReady!: () => void;
   let markRuntimeFailed!: (err: Error) => void;
   let runtimeStartupSettled = false;
+  let startRuntimeAfterHealth: (() => void) | undefined;
+  let startRuntimeForRequest: (() => void) | undefined;
+  const deferRuntimeUntilFirstHealth =
+    deps.resolveOnListen === true && deps.deferRuntimeUntilFirstHealth === true;
   const runtimeReady = new Promise<void>((resolve, reject) => {
     markRuntimeReady = resolve;
     markRuntimeFailed = reject;
@@ -1890,9 +1992,18 @@ export async function runQwenServe(
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError: () => runtimeStartupError,
+    onHealthServed: deferRuntimeUntilFirstHealth
+      ? () => startRuntimeAfterHealth?.()
+      : undefined,
   });
   const app =
-    runtimeApp ?? createDelegatingServeApp(bootstrapApp, () => runtimeApp);
+    runtimeApp ??
+    createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
+      waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
+      startRuntime: () => startRuntimeForRequest?.(),
+      runtimeReady,
+      authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
+    });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that
@@ -2023,6 +2134,8 @@ export async function runQwenServe(
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
+      let runtimeStartAfterHealthTimer: NodeJS.Timeout | undefined;
+      let runtimeStartFallbackTimer: NodeJS.Timeout | undefined;
       const runtimeStartupTimeoutMs = resolveRuntimeStartupTimeoutMs(
         deps.runtimeStartupTimeoutMs,
       );
@@ -2030,6 +2143,31 @@ export async function runQwenServe(
         if (!runtimeStartupTimer) return;
         clearTimeout(runtimeStartupTimer);
         runtimeStartupTimer = undefined;
+      };
+      const clearRuntimeStartFallbackTimer = (): void => {
+        if (!runtimeStartFallbackTimer) return;
+        clearTimeout(runtimeStartFallbackTimer);
+        runtimeStartFallbackTimer = undefined;
+      };
+      const clearRuntimeStartAfterHealthTimer = (): void => {
+        if (!runtimeStartAfterHealthTimer) return;
+        clearTimeout(runtimeStartAfterHealthTimer);
+        runtimeStartAfterHealthTimer = undefined;
+      };
+      const cancelDeferredRuntimeStartup = (): void => {
+        if (
+          !deferRuntimeUntilFirstHealth ||
+          runtimeStarting ||
+          runtimeStartupSettled
+        )
+          return;
+        daemonLog.info(
+          'deferred runtime: cancelled, server closed before startup',
+        );
+        runtimeStartupSettled = true;
+        const error = new Error(RUNTIME_STARTUP_CANCELLED_MESSAGE);
+        runtimeStartupError = error.message;
+        markRuntimeFailed(error);
       };
       const shutdownBridgeAfterFailedStartup = async (
         bridge: AcpSessionBridge | undefined,
@@ -2098,6 +2236,8 @@ export async function runQwenServe(
       };
       const startRuntime = (): void => {
         if (runtimeStarting) return;
+        clearRuntimeStartAfterHealthTimer();
+        clearRuntimeStartFallbackTimer();
         runtimeStarting = buildRuntime()
           .then(async (runtime) => {
             if (runtimeStartupSettled) {
@@ -2136,6 +2276,37 @@ export async function runQwenServe(
           }, runtimeStartupTimeoutMs);
           runtimeStartupTimer.unref();
         }
+      };
+      startRuntimeForRequest = startRuntime;
+      const scheduleRuntimeStartFallback = (): void => {
+        if (shuttingDown || runtimeStarting || runtimeStartFallbackTimer)
+          return;
+        daemonLog.info(
+          `deferred runtime: scheduling fallback start in ${FAST_PATH_RUNTIME_START_FALLBACK_MS}ms`,
+        );
+        runtimeStartFallbackTimer = setTimeout(() => {
+          runtimeStartFallbackTimer = undefined;
+          if (shuttingDown) return;
+          daemonLog.info('deferred runtime: fallback timer fired, starting');
+          startRuntime();
+        }, FAST_PATH_RUNTIME_START_FALLBACK_MS);
+        runtimeStartFallbackTimer.unref();
+      };
+      startRuntimeAfterHealth = (): void => {
+        if (shuttingDown || runtimeStarting || runtimeStartAfterHealthTimer) {
+          return;
+        }
+        clearRuntimeStartFallbackTimer();
+        daemonLog.info(
+          `deferred runtime: health served, scheduling start in ${FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS}ms`,
+        );
+        runtimeStartAfterHealthTimer = setTimeout(() => {
+          runtimeStartAfterHealthTimer = undefined;
+          if (shuttingDown) return;
+          daemonLog.info('deferred runtime: health timer fired, starting');
+          startRuntime();
+        }, FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS);
+        runtimeStartAfterHealthTimer.unref();
       };
 
       // Forward declaration so handle.close can detach the listener after
@@ -2194,6 +2365,9 @@ export async function runQwenServe(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
+            clearRuntimeStartAfterHealthTimer();
+            clearRuntimeStartFallbackTimer();
+            cancelDeferredRuntimeStartup();
             // NOTE: the SIGINT/SIGTERM handlers stay attached during the
             // drain. Their `if (shuttingDown) return` guard makes a second
             // signal a no-op. Detaching them up front would leave Node's
@@ -2402,6 +2576,8 @@ export async function runQwenServe(
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef);
         }
+      } else if (deferRuntimeUntilFirstHealth) {
+        scheduleRuntimeStartFallback();
       } else {
         startRuntime();
       }

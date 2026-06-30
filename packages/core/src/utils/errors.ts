@@ -10,6 +10,8 @@ interface GaxiosError {
   };
 }
 
+const MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH = 1000;
+
 export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
@@ -72,21 +74,68 @@ function describeSingleError(err: unknown): string | undefined {
     }
     return msg || codeStr || (err.name !== 'Error' ? err.name : undefined);
   }
-  if (err && typeof err === 'object' && 'code' in err) {
-    const code = (err as { code?: unknown }).code;
-    if (typeof code === 'string' && code) return code;
+  if (err && typeof err === 'object' && !Array.isArray(err)) {
+    const rec = err as Record<string, unknown>;
+    const code = rec['code'];
+    const codeStr =
+      typeof code === 'string' && code
+        ? code
+        : typeof code === 'number'
+          ? String(code)
+          : undefined;
+    const message = rec['message'];
+    const msg =
+      typeof message === 'string' && message.trim()
+        ? message.trim()
+        : undefined;
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr;
   }
   const str = String(err);
   return str && str !== '[object Object]' ? str : undefined;
+}
+
+function truncateStringifiedErrorMessage(message: string): string {
+  if (message.length <= MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH) {
+    return message;
+  }
+  return `${message.slice(0, MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH - 3)}...`;
 }
 
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     const detail = describeErrorCause(error.cause);
     if (detail && detail !== error.message) {
-      return `${error.message} (cause: ${detail})`;
+      return truncateStringifiedErrorMessage(
+        `${error.message} (cause: ${detail})`,
+      );
     }
     return error.message;
+  }
+  if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
+    const { message, cause } = error as {
+      message?: unknown;
+      cause?: unknown;
+    };
+    if (typeof message === 'string' && message.trim()) {
+      const detail = describeErrorCause(cause);
+      const result =
+        detail && detail !== message
+          ? `${message} (cause: ${detail})`
+          : message;
+      return truncateStringifiedErrorMessage(result);
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      return serialized
+        ? truncateStringifiedErrorMessage(serialized)
+        : String(error);
+    } catch {
+      const detail = describeSingleError(error);
+      return detail ? truncateStringifiedErrorMessage(detail) : String(error);
+    }
   }
   try {
     return String(error);
