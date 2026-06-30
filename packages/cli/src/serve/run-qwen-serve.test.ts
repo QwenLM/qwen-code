@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import express from 'express';
 import {
   createLazyBridgeProxy,
   extractContextFilename,
@@ -875,6 +876,56 @@ describe('runQwenServe runtime startup failures', () => {
         timeout: 500,
       });
       await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('starts deferred runtime for the first runtime route and serves that request', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-route-start-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const app = express();
+      app.post('/session', (_req, res) => {
+        res.status(201).json({ sessionId: 'session-1' });
+      });
+      return app;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      expect(createBridge).not.toHaveBeenCalled();
+      const res = await fetch(`${handle.url}/session`, { method: 'POST' });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ sessionId: 'session-1' });
       expect(createBridge).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {

@@ -1024,18 +1024,52 @@ function createBootstrapServeApp(input: {
 function createDelegatingServeApp(
   bootstrapApp: Application,
   getRuntimeApp: () => Application | undefined,
+  options: {
+    waitForDeferredRuntimeRoutes?: boolean;
+    startRuntime?: () => void;
+    runtimeReady?: Promise<void>;
+  } = {},
 ): Application {
   const app = express();
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const target = getRuntimeApp() ?? bootstrapApp;
-    const handler = target as unknown as (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-    ) => void;
-    handler(req, res, next);
+    const dispatch = async (): Promise<void> => {
+      let target = getRuntimeApp();
+      if (
+        !target &&
+        options.waitForDeferredRuntimeRoutes === true &&
+        !isBootstrapServeRoute(req) &&
+        options.startRuntime &&
+        options.runtimeReady
+      ) {
+        options.startRuntime();
+        try {
+          await options.runtimeReady;
+        } catch {
+          // Fall through to the bootstrap app so it can report the startup error.
+        }
+        target = getRuntimeApp();
+      }
+      const handler = (target ?? bootstrapApp) as unknown as (
+        req: Request,
+        res: Response,
+        next: NextFunction,
+      ) => void;
+      handler(req, res, next);
+    };
+    void dispatch().catch(next);
   });
   return app;
+}
+
+function isBootstrapServeRoute(req: Request): boolean {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return false;
+  }
+  return (
+    req.path === '/health' ||
+    req.path === '/capabilities' ||
+    req.path === '/daemon/status'
+  );
 }
 
 /**
@@ -1520,6 +1554,7 @@ export async function runQwenServe(
   let markRuntimeFailed!: (err: Error) => void;
   let runtimeStartupSettled = false;
   let startRuntimeAfterHealth: (() => void) | undefined;
+  let startRuntimeForRequest: (() => void) | undefined;
   const deferRuntimeUntilFirstHealth =
     deps.resolveOnListen === true && deps.deferRuntimeUntilFirstHealth === true;
   const runtimeReady = new Promise<void>((resolve, reject) => {
@@ -1914,7 +1949,12 @@ export async function runQwenServe(
       : undefined,
   });
   const app =
-    runtimeApp ?? createDelegatingServeApp(bootstrapApp, () => runtimeApp);
+    runtimeApp ??
+    createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
+      waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
+      startRuntime: () => startRuntimeForRequest?.(),
+      runtimeReady,
+    });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that
@@ -2188,6 +2228,7 @@ export async function runQwenServe(
           runtimeStartupTimer.unref();
         }
       };
+      startRuntimeForRequest = startRuntime;
       const scheduleRuntimeStartFallback = (): void => {
         if (shuttingDown || runtimeStarting || runtimeStartFallbackTimer)
           return;
