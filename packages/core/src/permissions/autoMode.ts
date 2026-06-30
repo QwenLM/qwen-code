@@ -277,7 +277,7 @@ export function shouldClassifyAllShellForAutoMode(
   config: Config,
 ): boolean {
   if (!SHELL_LIKE_TOOL_NAMES.has(toolName)) return false;
-  return config.getAutoModeSettings().classifyAllShell === true;
+  return config.getAutoModeSettings()?.classifyAllShell === true;
 }
 
 /**
