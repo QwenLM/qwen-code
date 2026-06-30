@@ -221,7 +221,7 @@ function mockProcessExitNoThrow() {
     .mockImplementation((() => undefined) as never);
 }
 
-function stubProcessSend(send: NodeJS.Process['send']): () => void {
+function stubProcessSend(send: NodeJS.Process['send'] | undefined): () => void {
   const descriptor = Object.getOwnPropertyDescriptor(process, 'send');
   Object.defineProperty(process, 'send', {
     configurable: true,
@@ -462,6 +462,9 @@ describe('runChannelDaemonWorker', () => {
 
     expect(mockSanitizeLogText).toHaveBeenCalledWith(unsafeName, 128);
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] Connecting "evil channel"...',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       '[Channel] "evil channel" connected.',
     );
   });
@@ -502,6 +505,20 @@ describe('runChannelDaemonWorker', () => {
     ).rejects.toThrow('Channel "missing" not found in settings.');
   });
 
+  it('rejects daemon URLs that are not http loopback URLs', async () => {
+    const sdk = createSdk();
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://attacker.example:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow('QWEN_DAEMON_URL must use an http loopback URL.');
+    expect(sdk.DaemonClient).not.toHaveBeenCalled();
+  });
+
   it('fails fast when no channels are configured', async () => {
     const sdk = createSdk();
     mockLoadChannelsConfig.mockReturnValueOnce({});
@@ -514,6 +531,27 @@ describe('runChannelDaemonWorker', () => {
         loadDaemonSdk: async () => sdk,
       }),
     ).rejects.toThrow('No channels configured in settings.json.');
+  });
+
+  it('fails fast when daemon capabilities report a different workspace', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/other-workspace',
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow('does not match worker workspace');
+    expect(mockLoadSettings).not.toHaveBeenCalled();
   });
 
   it('stops the bridge when adapter creation fails before ready', async () => {
@@ -530,6 +568,26 @@ describe('runChannelDaemonWorker', () => {
     ).rejects.toThrow('adapter boom');
 
     expect(mockBridgeStop).toHaveBeenCalled();
+  });
+
+  it('clears router state when startup rollback bridge stop fails', async () => {
+    const sdk = createSdk();
+    mockCreateChannel.mockRejectedValueOnce(new Error('adapter boom'));
+    mockBridgeStop.mockImplementationOnce(() => {
+      throw new Error('stop boom');
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow('adapter boom');
+
+    expect(mockBridgeStop).toHaveBeenCalled();
+    expect(mockRouterClearAll).toHaveBeenCalled();
   });
 
   it('does not repopulate daemon-private env from worker settings loads', async () => {
@@ -633,17 +691,76 @@ describe('daemonWorkerCommand', () => {
     );
   });
 
+  it('rejects the legacy static internal sentinel', async () => {
+    mockProcessExit();
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      await expect(
+        daemonWorkerCommand.handler({
+          channel: ['telegram'],
+          _: [],
+          $0: 'qwen',
+        }),
+      ).rejects.toThrow('process.exit 1');
+    } finally {
+      restoreSend();
+    }
+
+    expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_URL']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_WORKSPACE']).toBeUndefined();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] daemon worker failed: daemon-worker is an internal qwen serve command.',
+    );
+  });
+
+  it('rejects internal sentinel without parent IPC', async () => {
+    mockProcessExit();
+    const restoreSend = stubProcessSend(undefined);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      await expect(
+        daemonWorkerCommand.handler({
+          channel: ['telegram'],
+          _: [],
+          $0: 'qwen',
+        }),
+      ).rejects.toThrow('process.exit 1');
+    } finally {
+      restoreSend();
+    }
+
+    expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_URL']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_WORKSPACE']).toBeUndefined();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] daemon worker failed: daemon-worker is an internal qwen serve command.',
+    );
+  });
+
   it('scrubs daemon connection env before validating channel selection', async () => {
     mockProcessExit();
-    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
     vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
     vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
 
-    await expect(
-      daemonWorkerCommand.handler({ channel: [' '], _: [], $0: 'qwen' }),
-    ).rejects.toThrow('process.exit 1');
+    try {
+      await expect(
+        daemonWorkerCommand.handler({ channel: [' '], _: [], $0: 'qwen' }),
+      ).rejects.toThrow('process.exit 1');
+    } finally {
+      restoreSend();
+    }
 
     expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
@@ -657,14 +774,23 @@ describe('daemonWorkerCommand', () => {
 
   it('scrubs daemon connection env when required env validation fails', async () => {
     mockProcessExit();
-    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
     vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
     vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
 
-    await expect(
-      daemonWorkerCommand.handler({ channel: ['telegram'], _: [], $0: 'qwen' }),
-    ).rejects.toThrow('process.exit 1');
+    try {
+      await expect(
+        daemonWorkerCommand.handler({
+          channel: ['telegram'],
+          _: [],
+          $0: 'qwen',
+        }),
+      ).rejects.toThrow('process.exit 1');
+    } finally {
+      restoreSend();
+    }
 
     expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
@@ -679,7 +805,7 @@ describe('daemonWorkerCommand', () => {
     const exit = mockProcessExitNoThrow();
     const send = vi.fn();
     const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
-    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
     vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
@@ -712,7 +838,7 @@ describe('daemonWorkerCommand', () => {
   it('exits cleanly when the parent IPC disconnects', async () => {
     const exit = mockProcessExitNoThrow();
     const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
-    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
     vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
 
@@ -739,7 +865,7 @@ describe('daemonWorkerCommand', () => {
   it('force exits when a second signal arrives during shutdown', async () => {
     const exit = mockProcessExitNoThrow();
     const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
-    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
     vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
 

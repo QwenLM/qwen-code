@@ -74,7 +74,7 @@ describe('createChannelWorkerSupervisor', () => {
           QWEN_DAEMON_TOKEN: 'secret-token',
           QWEN_DAEMON_WORKSPACE: '/workspace',
           QWEN_CODE_NO_RELAUNCH: 'true',
-          QWEN_CHANNEL_DAEMON_WORKER: '1',
+          QWEN_CHANNEL_DAEMON_WORKER: expect.any(String),
         }),
         cwd: '/workspace',
       }),
@@ -89,6 +89,7 @@ describe('createChannelWorkerSupervisor', () => {
     expect(env).toHaveProperty('GITHUB_TOKEN', 'github-secret');
     expect(env).toHaveProperty('TELEGRAM_BOT_TOKEN', 'telegram-secret');
     expect(env).toHaveProperty('HTTPS_PROXY', 'http://proxy.example.com:8080');
+    expect(env['QWEN_CHANNEL_DAEMON_WORKER']).not.toBe('1');
     const argv = spawnWorker.mock.calls[0]![1];
     expect(argv).not.toContain('secret-token');
     expect(supervisor.snapshot()).toMatchObject({

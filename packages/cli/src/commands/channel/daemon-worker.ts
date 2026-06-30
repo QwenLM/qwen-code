@@ -22,6 +22,7 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
@@ -205,9 +206,22 @@ function validateChannelWorkspaces(
   }
 }
 
+function validateDaemonWorkerUrl(daemonUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(daemonUrl);
+  } catch {
+    throw new Error(`${QWEN_DAEMON_URL_ENV} must be a valid URL.`);
+  }
+  if (parsed.protocol !== 'http:' || !isLoopbackBind(parsed.hostname)) {
+    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http loopback URL.`);
+  }
+}
+
 export async function runChannelDaemonWorker(
   opts: RunChannelDaemonWorkerOptions,
 ): Promise<ChannelDaemonWorkerHandle> {
+  validateDaemonWorkerUrl(opts.daemonUrl);
   const sdk = await (opts.loadDaemonSdk ?? loadDaemonSdk)();
   const client = new sdk.DaemonClient({
     baseUrl: opts.daemonUrl,
@@ -263,20 +277,22 @@ export async function runChannelDaemonWorker(
     }
   };
 
+  let router: SessionRouter | undefined;
   try {
     const bridgeFacade = createDaemonChannelBridgeFacade(bridge, {
       exposeShellCommand: capabilities.features.includes(
         SESSION_SHELL_COMMAND_FEATURE,
       ),
     });
-    const router = new SessionRouter(
+    const createdRouter = new SessionRouter(
       bridgeFacade,
       daemonWorkspace,
       'user',
       undefined,
     );
+    router = createdRouter;
     for (const { name, config } of parsed) {
-      router.setChannelScope(name, config.sessionScope);
+      createdRouter.setChannelScope(name, config.sessionScope);
     }
 
     for (const { name, config } of parsed) {
@@ -284,21 +300,21 @@ export async function runChannelDaemonWorker(
         name,
         await createChannel(name, config, bridgeFacade, {
           ...(proxy ? { proxy } : {}),
-          router,
+          router: createdRouter,
         }),
       );
     }
-    registerToolCallDispatch(bridgeFacade, router, channels);
-    registerSessionCleanup(bridgeFacade, router, channels);
+    registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerSessionCleanup(bridgeFacade, createdRouter, channels);
 
     for (const [name, channel] of channels) {
+      const safeName = sanitizeLogText(name, 128);
+      writeStdoutLine(`[Channel] Connecting "${safeName}"...`);
       try {
         await channel.connect();
         connected.push(name);
-        const safeName = sanitizeLogText(name, 128);
         writeStdoutLine(`[Channel] "${safeName}" connected.`);
       } catch (err) {
-        const safeName = sanitizeLogText(name, 128);
         const safeMessage = sanitizeLogText(
           err instanceof Error ? err.message : String(err),
           512,
@@ -327,7 +343,7 @@ export async function runChannelDaemonWorker(
         try {
           bridge.stop();
         } finally {
-          router.clearAll();
+          createdRouter.clearAll();
         }
       },
     };
@@ -337,6 +353,8 @@ export async function runChannelDaemonWorker(
       bridge.stop();
     } catch {
       // best-effort during startup rollback
+    } finally {
+      router?.clearAll();
     }
     throw err;
   }
@@ -379,6 +397,14 @@ function readDaemonWorkerEnv(): {
   }
 }
 
+function assertInternalDaemonWorkerInvocation(): void {
+  const sentinel = process.env[CHANNEL_DAEMON_WORKER_SENTINEL];
+  if (!sentinel || sentinel === '1' || typeof process.send !== 'function') {
+    scrubDaemonWorkerEnv();
+    throw new Error('daemon-worker is an internal qwen serve command.');
+  }
+}
+
 export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
   command: 'daemon-worker',
   describe: false,
@@ -390,9 +416,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     }),
   handler: async (argv) => {
     try {
-      if (process.env[CHANNEL_DAEMON_WORKER_SENTINEL] !== '1') {
-        throw new Error('daemon-worker is an internal qwen serve command.');
-      }
+      assertInternalDaemonWorkerInvocation();
       const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
       const selection = normalizeServeChannelSelection(argv.channel);
       if (!selection) {

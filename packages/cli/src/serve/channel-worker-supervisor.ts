@@ -1,5 +1,6 @@
 import { fork } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { channelSelectionNames } from './channel-selection.js';
 import type { ServeChannelSelection } from './types.js';
 import {
@@ -148,7 +149,7 @@ function createWorkerEnv(opts: {
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
-  env[CHANNEL_DAEMON_WORKER_SENTINEL] = '1';
+  env[CHANNEL_DAEMON_WORKER_SENTINEL] = randomUUID();
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
   env[QWEN_DAEMON_WORKSPACE_ENV] = opts.workspace;
   delete env[QWEN_SERVER_TOKEN_ENV];
