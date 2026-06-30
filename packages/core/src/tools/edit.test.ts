@@ -451,6 +451,30 @@ describe('EditTool', () => {
       ).rejects.toThrow();
     });
 
+    it('should surface plain object read errors without object stringification', async () => {
+      fs.writeFileSync(filePath, 'some old content here');
+      seedPriorRead(filePath);
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
+        message: 'Plain object read error',
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+      const invocation = tool.build(params);
+      const err = await invocation
+        .getConfirmationDetails(new AbortController().signal)
+        .catch((error: unknown) => error);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain(
+        'Error preparing edit: Plain object read error',
+      );
+      expect((err as Error).message).not.toContain('[object Object]');
+    });
+
     it('should request confirmation for creating a new file (empty old_string)', async () => {
       const newFileName = 'new_file.txt';
       const newFilePath = path.join(rootDir, newFileName);
@@ -1072,6 +1096,28 @@ describe('EditTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
       expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_CHANGE);
+    });
+
+    it('should return EDIT_PREPARATION_FAILURE with plain object read error messages', async () => {
+      fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
+        message: 'Plain object read error',
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_PREPARATION_FAILURE);
+      expect(result.llmContent).toContain(
+        'Error preparing edit: Plain object read error',
+      );
+      expect(result.llmContent).not.toContain('[object Object]');
     });
 
     it('should throw INVALID_PARAMETERS error for relative path', async () => {

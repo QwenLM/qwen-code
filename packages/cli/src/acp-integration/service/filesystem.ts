@@ -102,6 +102,21 @@ async function resolveRealPath(value: string): Promise<string | undefined> {
   }
 }
 
+async function resolveNearestExistingParent(
+  filePath: string,
+): Promise<string | undefined> {
+  let current = path.dirname(path.resolve(filePath));
+
+  while (true) {
+    const realCurrent = await resolveRealPath(current);
+    if (realCurrent) return realCurrent;
+
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
 export class AcpFileSystemService implements FileSystemService {
   constructor(
     private readonly connection: AgentSideConnection,
@@ -150,6 +165,10 @@ export class AcpFileSystemService implements FileSystemService {
             path: fallbackPath,
           });
         } catch (fallbackError) {
+          if (getErrorCode(fallbackError) === 'ENOENT') {
+            throw fallbackError;
+          }
+
           debugLogger.warn('Local read fallback failed after ACP error', {
             path: params.path,
             resolvedPath: fallbackPath,
@@ -205,12 +224,17 @@ export class AcpFileSystemService implements FileSystemService {
   private async getLocalReadFallbackPath(
     filePath: string,
   ): Promise<string | undefined> {
-    const realFilePath = await resolveRealPath(filePath);
-    if (!realFilePath) return undefined;
+    const normalizedFilePath = path.resolve(filePath);
+    const realFilePath = await resolveRealPath(normalizedFilePath);
+    const comparisonPath =
+      realFilePath ?? (await resolveNearestExistingParent(normalizedFilePath));
+    if (!comparisonPath) return undefined;
 
     for (const root of this.options.localReadRoots ?? []) {
       const realRoot = await resolveRealPath(root);
-      if (realRoot && isSubpath(realRoot, realFilePath)) return realFilePath;
+      if (realRoot && isSubpath(realRoot, comparisonPath)) {
+        return realFilePath ?? normalizedFilePath;
+      }
     }
     return undefined;
   }

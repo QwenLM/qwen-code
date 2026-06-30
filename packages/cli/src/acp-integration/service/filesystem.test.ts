@@ -519,63 +519,117 @@ describe('AcpFileSystemService', () => {
       });
     });
 
-    it('does not fall back to local reads outside configured roots', async () => {
-      const localRoot = path.join(os.tmpdir(), 'acp-local-read-root');
-      const filePath = path.join(os.tmpdir(), 'outside-local-root.md');
-      const pathOutsideWorkspaceError = createLocalReadFallbackError(filePath);
-      const client = {
-        readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
-      } as unknown as AgentSideConnection;
-      const fallback = createFallback();
+    it('falls back to local reads for missing files under allowed local roots', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const localRoot = path.join(tempRoot, 'skills');
+        const filePath = path.join(localRoot, 'missing.md');
+        await fs.mkdir(localRoot, { recursive: true });
 
-      const svc = new AcpFileSystemService(
-        client,
-        'session-2e',
-        { readTextFile: true, writeTextFile: true },
-        fallback,
-        { localReadRoots: [localRoot] },
-      );
+        const pathOutsideWorkspaceError =
+          createLocalReadFallbackError(filePath);
+        const client = {
+          readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+        } as unknown as AgentSideConnection;
+        const fallback = createFallback();
+        const missingFileError = Object.assign(
+          new Error(`File not found: ${filePath}`),
+          {
+            code: 'ENOENT',
+            errno: -2,
+            path: filePath,
+          },
+        );
+        (fallback.readTextFile as ReturnType<typeof vi.fn>).mockRejectedValue(
+          missingFileError,
+        );
 
-      const err = await svc
-        .readTextFile({ path: filePath })
-        .catch((e: unknown) => e);
+        const svc = new AcpFileSystemService(
+          client,
+          'session-2d-missing-local-file',
+          { readTextFile: true, writeTextFile: true },
+          fallback,
+          { localReadRoots: [localRoot] },
+        );
 
-      expect(err).toBeInstanceOf(Error);
-      expect(err).toMatchObject({
-        cause: pathOutsideWorkspaceError,
-        message: `path escapes workspace: ${filePath}`,
+        await expect(svc.readTextFile({ path: filePath })).rejects.toBe(
+          missingFileError,
+        );
+        expect(fallback.readTextFile).toHaveBeenCalledWith({
+          path: filePath,
+        });
       });
-      expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
-      expect(fallback.readTextFile).not.toHaveBeenCalled();
+    });
+
+    it('does not fall back to local reads outside configured roots', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const localRoot = path.join(tempRoot, 'allowed');
+        const outsideRoot = path.join(tempRoot, 'outside');
+        const filePath = path.join(outsideRoot, 'outside-local-root.md');
+        await fs.mkdir(localRoot, { recursive: true });
+        await fs.mkdir(outsideRoot, { recursive: true });
+        await fs.writeFile(filePath, 'outside local root', 'utf8');
+
+        const pathOutsideWorkspaceError =
+          createLocalReadFallbackError(filePath);
+        const client = {
+          readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+        } as unknown as AgentSideConnection;
+        const fallback = createFallback();
+
+        const svc = new AcpFileSystemService(
+          client,
+          'session-2e',
+          { readTextFile: true, writeTextFile: true },
+          fallback,
+          { localReadRoots: [localRoot] },
+        );
+
+        const err = await svc
+          .readTextFile({ path: filePath })
+          .catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(Error);
+        expect(err).toMatchObject({
+          cause: pathOutsideWorkspaceError,
+          message: `path escapes workspace: ${filePath}`,
+        });
+        expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
+        expect(fallback.readTextFile).not.toHaveBeenCalled();
+      });
     });
 
     it('ignores empty configured local read roots', async () => {
-      const filePath = path.join(process.cwd(), 'outside-workspace.md');
-      const pathOutsideWorkspaceError = createLocalReadFallbackError(filePath);
-      const client = {
-        readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
-      } as unknown as AgentSideConnection;
-      const fallback = createFallback();
+      await withTempRoot(async (tempRoot) => {
+        const filePath = path.join(tempRoot, 'outside-workspace.md');
+        await fs.writeFile(filePath, 'outside workspace', 'utf8');
 
-      const svc = new AcpFileSystemService(
-        client,
-        'session-2f',
-        { readTextFile: true, writeTextFile: true },
-        fallback,
-        { localReadRoots: [''] },
-      );
+        const pathOutsideWorkspaceError =
+          createLocalReadFallbackError(filePath);
+        const client = {
+          readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+        } as unknown as AgentSideConnection;
+        const fallback = createFallback();
 
-      const err = await svc
-        .readTextFile({ path: filePath })
-        .catch((e: unknown) => e);
+        const svc = new AcpFileSystemService(
+          client,
+          'session-2f',
+          { readTextFile: true, writeTextFile: true },
+          fallback,
+          { localReadRoots: [''] },
+        );
 
-      expect(err).toBeInstanceOf(Error);
-      expect(err).toMatchObject({
-        cause: pathOutsideWorkspaceError,
-        message: `path escapes workspace: ${filePath}`,
+        const err = await svc
+          .readTextFile({ path: filePath })
+          .catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(Error);
+        expect(err).toMatchObject({
+          cause: pathOutsideWorkspaceError,
+          message: `path escapes workspace: ${filePath}`,
+        });
+        expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
+        expect(fallback.readTextFile).not.toHaveBeenCalled();
       });
-      expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
-      expect(fallback.readTextFile).not.toHaveBeenCalled();
     });
 
     it('uses fallback when readTextFile capability is disabled', async () => {
