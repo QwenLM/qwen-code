@@ -412,6 +412,9 @@ export function SettingsDialog({
   // need config + settings from the command context, both available as props.
   useEffect(() => {
     if (activeTab !== 'status') {
+      // Clear stale info when leaving so a revisit shows the loading line and
+      // refetches, rather than briefly flashing the previous visit's data.
+      setSystemInfo(null);
       return;
     }
     let cancelled = false;
@@ -632,6 +635,40 @@ export function SettingsDialog({
             CONFIG_TAB_ORDER.length;
           return CONFIG_TAB_ORDER[next];
         });
+      };
+
+      // Apply restart-required settings and ask the host to restart. Shared so
+      // the `r` affordance fires from the settings list, where a bare `r` is
+      // otherwise consumed by the implicit-search branch before the restart
+      // handler below can run.
+      const applyRestart = () => {
+        // Only save settings that require restart (non-restart settings were
+        // already saved immediately).
+        const restartRequiredSet = new Set(
+          getRestartRequiredFromModified(modifiedSettings),
+        );
+
+        if (restartRequiredSet.size > 0) {
+          saveModifiedSettings(
+            restartRequiredSet,
+            pendingSettings,
+            settings,
+            selectedScope,
+          );
+
+          // Remove saved keys from global pending changes
+          setGlobalPendingChanges((prev) => {
+            if (prev.size === 0) return prev;
+            const next = new Map(prev);
+            for (const key of restartRequiredSet) {
+              next.delete(key);
+            }
+            return next;
+          });
+        }
+
+        setRestartRequiredSettings(new Set()); // Clear restart-required settings
+        if (onRestartRequest) onRestartRequest();
       };
 
       // While the top tab bar has focus, keys only drive tab switching.
@@ -1011,6 +1048,13 @@ export function SettingsDialog({
           // Editing the query moves focus up into the search box.
           setFocusZone('search');
           setSearchQuery((q) => removeLastGrapheme(q));
+        } else if (showRestartPrompt && name === 'r') {
+          // Restart must win over the implicit-search-entry gesture: handle it
+          // here, before isPrintableSearchChar consumes `r`. Without this, the
+          // "Press r to exit" affordance shown while a restart prompt is active
+          // would only filter the list instead of restarting.
+          applyRestart();
+          return;
         } else if (isPrintableSearchChar(key)) {
           // Typing a printable key jumps to the search box and filters.
           // (Digits are handled by the number-edit branch above, which routes
@@ -1021,46 +1065,11 @@ export function SettingsDialog({
           // so it never reaches here).
           setFocusZone('search');
           setSearchQuery((q) => q + key.sequence);
-          // Consume the keypress: without this return, a printable char in the
-          // list zone falls through to the restart handler below, so typing `r`
-          // while a restart prompt is showing would trigger onRestartRequest /
-          // process exit instead of filtering. (The "Press r" affordance is
-          // unaffected from other zones; see the focus-zone routing above.)
+          // Consume the keypress so a printable char in the list zone only
+          // filters. (When a restart prompt is showing, `r` is handled by the
+          // dedicated branch above before reaching here.)
           return;
         }
-      }
-      if (showRestartPrompt && mode === 'settings' && name === 'r') {
-        // Guard on settings mode: this handler sits after the editing block but
-        // outside the `mode === 'settings'` guard, so without this check `r`
-        // would trigger a restart/exit while the ScopeSelector is open (it does
-        // not handle `r`). activeTab === 'settings' is already guaranteed by the
-        // non-settings-tab early returns above.
-        // Only save settings that require restart (non-restart settings were already saved immediately)
-        const restartRequiredSettings =
-          getRestartRequiredFromModified(modifiedSettings);
-        const restartRequiredSet = new Set(restartRequiredSettings);
-
-        if (restartRequiredSet.size > 0) {
-          saveModifiedSettings(
-            restartRequiredSet,
-            pendingSettings,
-            settings,
-            selectedScope,
-          );
-
-          // Remove saved keys from global pending changes
-          setGlobalPendingChanges((prev) => {
-            if (prev.size === 0) return prev;
-            const next = new Map(prev);
-            for (const key of restartRequiredSet) {
-              next.delete(key);
-            }
-            return next;
-          });
-        }
-
-        setRestartRequiredSettings(new Set()); // Clear restart-required settings
-        if (onRestartRequest) onRestartRequest();
       }
       if (name === 'escape') {
         if (editingKey) {
@@ -1111,8 +1120,10 @@ export function SettingsDialog({
                 availableTerminalHeight != null
                   ? // Outer Box: border (2) + padding (2) = 4 rows, plus the
                     // ConfigTabBar (1) and the height-1 spacer (1) above the
-                    // embedded dashboard = 6 rows of chrome in total.
-                    availableTerminalHeight - 6
+                    // embedded dashboard = 6 rows of chrome in total. Clamp at
+                    // the source so a very short terminal can't pass a negative
+                    // height down through StatsDialog.
+                    Math.max(3, availableTerminalHeight - 6)
                   : undefined
               }
             />

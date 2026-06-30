@@ -37,6 +37,10 @@ const EFFICIENCY_CHROME_ROWS = 24;
 // The tool leaderboard, when present, adds its data rows plus 3 fixed rows
 // (title + column header + marginBottom); when empty it renders nothing.
 const TOOL_LEADERBOARD_FIXED_ROWS = 3;
+// The Code Impact section, rendered only when there are line changes, occupies
+// one row below the model table. Subtract it when present so the model list
+// can't overestimate its available space and overflow the host view.
+const CODE_IMPACT_ROWS = 1;
 
 const StatsTabs: React.FC<{ activeTab: StatsTab; hint?: string }> = ({
   activeTab,
@@ -270,6 +274,10 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
                           (data.toolLeaderboard.length > 0
                             ? data.toolLeaderboard.length +
                               TOOL_LEADERBOARD_FIXED_ROWS
+                            : 0) -
+                          (data.report.files.linesAdded > 0 ||
+                          data.report.files.linesRemoved > 0
+                            ? CODE_IMPACT_ROWS
                             : 0),
                       )
                     : undefined
