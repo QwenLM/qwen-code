@@ -14,7 +14,7 @@ import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  getSubagentPlanToolUnavailableMessage,
+  buildSubagentPlanToolBlockedResult,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 
@@ -69,17 +69,11 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.ENTER_PLAN_MODE)) {
-      const message = getSubagentPlanToolUnavailableMessage(
+      return buildSubagentPlanToolBlockedResult(
         ToolNames.ENTER_PLAN_MODE,
+        'EnterPlanModeTool',
+        debugLogger,
       );
-      debugLogger.warn(
-        `[EnterPlanModeTool] Blocked plan lifecycle tool call from subagent: ${ToolNames.ENTER_PLAN_MODE}`,
-      );
-      return {
-        llmContent: message,
-        returnDisplay: message,
-        error: { message },
-      };
     }
 
     // In headless (non-interactive) mode without ACP support, the gate

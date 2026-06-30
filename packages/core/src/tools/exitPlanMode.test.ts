@@ -377,6 +377,35 @@ describe('ExitPlanModeTool', () => {
       expect(permission).toBe('allow');
     });
 
+    it('allows by default inside teammate context to avoid approval UI', async () => {
+      const invocation = tool.build({ plan: 'Teammate plan' });
+
+      const permission = runWithTeammateIdentity(
+        {
+          agentId: 'agent@test',
+          agentName: 'agent',
+          teamName: 'test',
+          isTeamLead: false,
+        },
+        () => invocation.getDefaultPermission(),
+      );
+
+      await expect(permission).resolves.toBe('allow');
+    });
+
+    it('falls back to generic confirmation inside subagent context', async () => {
+      const invocation = tool.build({ plan: 'Subagent plan' });
+
+      const confirmation = await runWithAgentContext('agent-1', () =>
+        invocation.getConfirmationDetails(new AbortController().signal),
+      );
+
+      expect(confirmation.type).toBe('info');
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+    });
+
     it('rejects inside subagent context without saving or changing mode', async () => {
       approvalMode = ApprovalMode.PLAN;
       const invocation = tool.build({ plan: 'Subagent plan' });

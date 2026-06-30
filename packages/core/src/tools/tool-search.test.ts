@@ -661,11 +661,48 @@ describe('ToolSearchTool', () => {
       expect(String(result.llmContent)).toContain('return your plan');
       expect(result.error?.message).toContain('not available inside subagents');
       expect(result.error?.message).toContain('return your plan');
+      expect(String(result.returnDisplay)).toContain('1 unavailable');
       expect(String(result.llmContent)).not.toContain(`"name":"${toolName}"`);
       expect(registry.isDeferredToolRevealed(toolName)).toBe(false);
       expect(setToolsSpy).not.toHaveBeenCalled();
     },
   );
+
+  it('select: loads allowed tools while rejecting plan lifecycle tools inside subagent context', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.READ_FILE,
+        shouldDefer: false,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.ENTER_PLAN_MODE,
+        shouldDefer: false,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () =>
+      tool
+        .build({
+          query: `select:${ToolNames.READ_FILE},${ToolNames.ENTER_PLAN_MODE}`,
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.READ_FILE}"`,
+    );
+    expect(String(result.llmContent)).not.toContain(
+      `"name":"${ToolNames.ENTER_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).toContain(
+      'not available inside subagents',
+    );
+    expect(result.error?.message).toContain(ToolNames.ENTER_PLAN_MODE);
+    expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
+  });
 
   it('+must-word filters candidates whose name does not contain the required term', async () => {
     // Both tools would match on "send" in description; only one has "slack"
