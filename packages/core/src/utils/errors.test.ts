@@ -62,6 +62,15 @@ describe('getErrorMessage cause unwrapping', () => {
     ).toBe('fetch failed (cause: ECONNREFUSED)');
   });
 
+  it('surfaces message and numeric code from plain object causes', () => {
+    expect(
+      getErrorMessage({
+        message: 'fetch failed',
+        cause: { code: -32603, message: 'connection refused' },
+      }),
+    ).toBe('fetch failed (cause: -32603: connection refused)');
+  });
+
   it('bounds long messages from plain error-like objects', () => {
     const message = getErrorMessage({ message: 'x'.repeat(2000) });
 

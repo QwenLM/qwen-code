@@ -571,6 +571,49 @@ describe('AcpFileSystemService', () => {
       });
     });
 
+    it('re-throws ENOENT from local read fallback without wrapping it', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const localRoot = path.join(tempRoot, 'skills');
+        const filePath = path.join(localRoot, 'instructions.md');
+        await fs.mkdir(localRoot, { recursive: true });
+        await fs.writeFile(filePath, 'instructions', 'utf8');
+
+        const pathOutsideWorkspaceError =
+          createLocalReadFallbackError(filePath);
+        const client = {
+          readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+        } as unknown as AgentSideConnection;
+        const fallback = createFallback();
+        const fallbackError = Object.assign(
+          new Error(`File not found: ${filePath}`),
+          {
+            code: 'ENOENT',
+            errno: -2,
+            path: filePath,
+          },
+        );
+        (fallback.readTextFile as ReturnType<typeof vi.fn>).mockRejectedValue(
+          fallbackError,
+        );
+
+        const svc = new AcpFileSystemService(
+          client,
+          'session-2d-fallback-enoent',
+          { readTextFile: true, writeTextFile: true },
+          fallback,
+          { localReadRoots: [localRoot] },
+        );
+
+        await expect(svc.readTextFile({ path: filePath })).rejects.toBe(
+          fallbackError,
+        );
+        expect(fallback.readTextFile).toHaveBeenCalledWith({
+          path: await fs.realpath(filePath),
+        });
+        expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+      });
+    });
+
     it('does not fall back to local reads for missing files under allowed local roots', async () => {
       await withTempRoot(async (tempRoot) => {
         const localRoot = path.join(tempRoot, 'skills');
