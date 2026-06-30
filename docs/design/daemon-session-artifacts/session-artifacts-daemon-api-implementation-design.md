@@ -901,6 +901,7 @@ GET 行为：
   - 覆盖 core scheduler 的 PostToolUse / PostToolBatch artifacts 传播路径。
 - `packages/cli/src/acp-integration/session/Session.ts`
   - 覆盖 ACP session 的 PostToolUse artifacts 传播路径。
+- ACP session 不新增重复的 PostToolBatch hook callsite；batch artifacts 从 `coreToolScheduler.ts` 的 PostToolBatch 结果产生，再通过 `qwen/notify/session/artifact-event` 进入 bridge。
 - batch-level artifacts 通过 `qwen/notify/session/artifact-event` 发给 bridge。
 - BridgeClient 从 `qwen/notify/session/artifact-event` 提取 batch-level artifacts，走同一套 validation 和 upsert。
 
