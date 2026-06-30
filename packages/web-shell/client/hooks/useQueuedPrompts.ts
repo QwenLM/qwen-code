@@ -123,6 +123,7 @@ export function useQueuedPrompts({
   const completedPromptIdsRef = useRef<Set<string>>(new Set());
   const completedPromptIdOrderRef = useRef<string[]>([]);
   const latestStreamingStateRef = useRef(streamingState);
+  const refreshRequestSeqRef = useRef(0);
 
   latestSessionIdRef.current = sessionId;
   latestStreamingStateRef.current = streamingState;
@@ -202,10 +203,12 @@ export function useQueuedPrompts({
     async (targetSessionId = sessionId): Promise<boolean> => {
       if (!connected || !targetSessionId) return false;
       if (latestSessionIdRef.current !== targetSessionId) return false;
+      const requestSeq = ++refreshRequestSeqRef.current;
       try {
         const result = await sessionActions.getPendingPrompts({
           sessionId: targetSessionId,
         });
+        if (requestSeq !== refreshRequestSeqRef.current) return false;
         if (latestSessionIdRef.current !== targetSessionId) return false;
         syncServerQueuedPrompts(
           result.pendingPrompts.filter(
@@ -366,9 +369,7 @@ export function useQueuedPrompts({
         displayedServerPromptIdsRef.current.delete(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
-        if (event.type === 'turn_error') {
-          callback?.();
-        }
+        callback?.();
         completedPromptIdsRef.current.delete(promptId);
         completedPromptIdOrderRef.current =
           completedPromptIdOrderRef.current.filter((id) => id !== promptId);
@@ -376,6 +377,19 @@ export function useQueuedPrompts({
     }
     consumePendingPromptEvents(handled);
   }, [pendingPromptEvents, sessionId, clientId, store]);
+
+  const settleCompletionCallback = useCallback(
+    (promptId: string, onComplete: () => void) => {
+      if (completedPromptIdsRef.current.delete(promptId)) {
+        completedPromptIdOrderRef.current =
+          completedPromptIdOrderRef.current.filter((id) => id !== promptId);
+        onComplete();
+        return;
+      }
+      completionCallbacksRef.current.set(promptId, onComplete);
+    },
+    [],
+  );
 
   const enqueuePrompt = useCallback(
     (text: string, images?: PromptImage[], onComplete?: () => void) => {
@@ -411,7 +425,12 @@ export function useQueuedPrompts({
               .removePendingPrompt(result.promptId, {
                 sessionId: targetSessionId,
               })
-              .catch(() => {});
+              .catch((error: unknown) => {
+                console.warn(
+                  '[useQueuedPrompts] cleanup removePendingPrompt failed after session change',
+                  { targetSessionId, promptId: result.promptId, error },
+                );
+              });
             return;
           }
           if (latestStreamingStateRef.current === 'idle') {
@@ -428,15 +447,7 @@ export function useQueuedPrompts({
             queuedPromptsRef.current = next;
             setQueuedPrompts(next);
             if (onComplete) {
-              if (completedPromptIdsRef.current.delete(result.promptId)) {
-                completedPromptIdOrderRef.current =
-                  completedPromptIdOrderRef.current.filter(
-                    (id) => id !== result.promptId,
-                  );
-                onComplete();
-              } else {
-                completionCallbacksRef.current.set(result.promptId, onComplete);
-              }
+              settleCompletionCallback(result.promptId, onComplete);
             }
             return;
           }
@@ -467,15 +478,7 @@ export function useQueuedPrompts({
           queuedPromptsRef.current = updated;
           setQueuedPrompts(updated);
           if (onComplete) {
-            if (completedPromptIdsRef.current.delete(result.promptId)) {
-              completedPromptIdOrderRef.current =
-                completedPromptIdOrderRef.current.filter(
-                  (id) => id !== result.promptId,
-                );
-              onComplete();
-            } else {
-              completionCallbacksRef.current.set(result.promptId, onComplete);
-            }
+            settleCompletionCallback(result.promptId, onComplete);
           }
         })
         .catch((error: unknown) => {
@@ -497,6 +500,7 @@ export function useQueuedPrompts({
       reportError,
       restoreTextToEditor,
       sessionActions,
+      settleCompletionCallback,
       store,
       t,
     ],
@@ -534,6 +538,7 @@ export function useQueuedPrompts({
       const next = queuedPromptsRef.current.map((prompt) =>
         prompt.id === id ? { ...prompt, ...flags } : prompt,
       );
+      if (areQueuedPromptsEqual(next, queuedPromptsRef.current)) return;
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
     },

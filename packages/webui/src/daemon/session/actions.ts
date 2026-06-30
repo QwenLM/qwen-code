@@ -811,7 +811,11 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
-        return { removed: false };
+        return await session.client.removePendingPrompt(
+          opts.sessionId,
+          promptId,
+          session.clientId ? { clientId: session.clientId } : undefined,
+        );
       }
       return await session.removePendingPrompt(promptId);
     },

@@ -26,8 +26,11 @@ import type {
  * and consumers (e.g. web-shell) re-fetch the full queue via
  * `GET /session/:id/pending-prompts` when the version changes.
  *
- * This is intentionally simpler than `midTurnInjectedSidechannel`: a
- * monotonic counter plus a small bounded event buffer for completion callbacks.
+ * This is intentionally simpler than `midTurnInjectedSidechannel`: the web UI
+ * owns one active daemon event stream per browser runtime, so a monotonic
+ * counter plus a small bounded event buffer is enough for completion callbacks.
+ * Events still carry `sessionId` so consumers can ignore stale frames during
+ * session switches.
  */
 
 const versionListeners = new Set<() => void>();

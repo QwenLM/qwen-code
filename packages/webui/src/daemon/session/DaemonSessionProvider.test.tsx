@@ -107,6 +107,15 @@ interface MockClient {
   getWorkspaceAgent: () => Promise<unknown>;
   createWorkspaceAgent: () => Promise<unknown>;
   deleteWorkspaceAgent: () => Promise<void>;
+  getPendingPrompts: (
+    sessionId: string,
+    opts?: { clientId?: string },
+  ) => Promise<unknown>;
+  removePendingPrompt: (
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ) => Promise<{ removed: boolean }>;
   branchSession: (
     sessionId: string,
     req: { name?: string },
@@ -138,6 +147,8 @@ const sdkMocks = vi.hoisted(() => {
   const getWorkspaceAgent = vi.fn();
   const createWorkspaceAgent = vi.fn();
   const deleteWorkspaceAgent = vi.fn();
+  const getPendingPrompts = vi.fn();
+  const removePendingPrompt = vi.fn();
   const branchSession = vi.fn();
 
   class MockDaemonClient {
@@ -161,6 +172,8 @@ const sdkMocks = vi.hoisted(() => {
     getWorkspaceAgent = getWorkspaceAgent;
     createWorkspaceAgent = createWorkspaceAgent;
     deleteWorkspaceAgent = deleteWorkspaceAgent;
+    getPendingPrompts = getPendingPrompts;
+    removePendingPrompt = removePendingPrompt;
     branchSession = branchSession;
     dispose = vi.fn();
   }
@@ -194,6 +207,8 @@ const sdkMocks = vi.hoisted(() => {
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
+    getPendingPrompts,
+    removePendingPrompt,
     branchSession,
     reset() {
       sessions.length = 0;
@@ -270,6 +285,10 @@ const sdkMocks = vi.hoisted(() => {
       createWorkspaceAgent.mockResolvedValue({ ok: true });
       deleteWorkspaceAgent.mockReset();
       deleteWorkspaceAgent.mockResolvedValue(undefined);
+      getPendingPrompts.mockReset();
+      getPendingPrompts.mockResolvedValue({ pendingPrompts: [] });
+      removePendingPrompt.mockReset();
+      removePendingPrompt.mockResolvedValue({ removed: true });
       branchSession.mockReset();
       branchSession.mockResolvedValue({
         sessionId: 'branch-session',
@@ -1064,6 +1083,74 @@ describe('DaemonSessionProvider', () => {
       },
     ]);
     warn.mockRestore();
+  });
+
+  it('returns safe pending prompt results when no session is connected', async () => {
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    const providerActions = requireActions(actions);
+
+    await expect(providerActions.getPendingPrompts()).resolves.toEqual({
+      pendingPrompts: [],
+    });
+    await expect(
+      providerActions.removePendingPrompt('pending-1'),
+    ).resolves.toEqual({ removed: false });
+  });
+
+  it('routes stale-session pending prompt removal through the daemon client', async () => {
+    const session = createMockSession({
+      sessionId: 'session-current',
+      clientId: 'client-current',
+      removePendingPrompt: vi.fn(async () => ({ removed: true })),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.removePendingPrompt('pending-old', {
+        sessionId: 'session-old',
+      }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(session.removePendingPrompt).not.toHaveBeenCalled();
+    expect(sdkMocks.removePendingPrompt).toHaveBeenCalledWith(
+      'session-old',
+      'pending-old',
+      { clientId: 'client-current' },
+    );
+  });
+
+  it('rejects stale-session pending prompt refreshes', async () => {
+    const session = createMockSession({ sessionId: 'session-current' });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.getPendingPrompts({ sessionId: 'session-old' }),
+    ).rejects.toThrow('Session changed before pending prompts refresh');
   });
 
   it('keeps prompt loading active after non-blocking prompt acceptance', async () => {

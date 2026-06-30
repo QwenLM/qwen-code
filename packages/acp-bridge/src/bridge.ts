@@ -3156,7 +3156,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         'forward_failed',
                       );
                       cancelPendingForSession(sessionId);
-                      entry.connection.cancel({ sessionId }).catch(() => {});
+                      entry.connection.cancel({ sessionId }).catch((err) => {
+                        writeStderrLine(
+                          `[pending-prompt] cancel forward failed after prompt abort session=${sessionId}: ${extractErrorMessage(err)}`,
+                        );
+                      });
                     },
                   )
                   .catch(() => {});
@@ -3172,7 +3176,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     originatorClientId,
                   );
                   cancelPendingForSession(sessionId);
-                  entry.connection.cancel({ sessionId }).catch(() => {});
+                  entry.connection.cancel({ sessionId }).catch((err) => {
+                    writeStderrLine(
+                      `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
+                    );
+                  });
                 };
                 if (abortSignal.aborted) {
                   onAbort();

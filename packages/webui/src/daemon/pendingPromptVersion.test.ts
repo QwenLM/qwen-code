@@ -49,22 +49,48 @@ describe('pending prompt sidechannel', () => {
     expect(sidechannel.getPendingPromptVersion()).toBe(3);
   });
 
-  it('notifies event subscribers without bumping version for turn terminal events', async () => {
+  it.each(['turn_complete', 'turn_error'] as const)(
+    'notifies event subscribers without bumping version for %s events',
+    async (type) => {
+      const sidechannel = await loadModule();
+      const versionListener = vi.fn();
+      const eventListener = vi.fn();
+      sidechannel.subscribePendingPromptVersion(versionListener);
+      sidechannel.subscribePendingPromptEvents(eventListener);
+
+      sidechannel.publishPendingPromptEvent({
+        v: 1,
+        type,
+        data: { sessionId: 's-1', promptId: 'p-1' },
+      });
+
+      expect(eventListener).toHaveBeenCalledTimes(1);
+      expect(versionListener).not.toHaveBeenCalled();
+      expect(sidechannel.getPendingPromptVersion()).toBe(0);
+    },
+  );
+
+  it('stops notifying unsubscribed listeners', async () => {
     const sidechannel = await loadModule();
     const versionListener = vi.fn();
     const eventListener = vi.fn();
-    sidechannel.subscribePendingPromptVersion(versionListener);
-    sidechannel.subscribePendingPromptEvents(eventListener);
+    const unsubscribeVersion =
+      sidechannel.subscribePendingPromptVersion(versionListener);
+    const unsubscribeEvents =
+      sidechannel.subscribePendingPromptEvents(eventListener);
+
+    unsubscribeVersion();
+    unsubscribeEvents();
 
     sidechannel.publishPendingPromptEvent({
       v: 1,
-      type: 'turn_complete',
+      type: 'pending_prompt_added',
       data: { sessionId: 's-1', promptId: 'p-1' },
     });
 
-    expect(eventListener).toHaveBeenCalledTimes(1);
+    expect(eventListener).not.toHaveBeenCalled();
     expect(versionListener).not.toHaveBeenCalled();
-    expect(sidechannel.getPendingPromptVersion()).toBe(0);
+    expect(sidechannel.getPendingPromptVersion()).toBe(1);
   });
 
   it('rejects malformed pending prompt events', async () => {
