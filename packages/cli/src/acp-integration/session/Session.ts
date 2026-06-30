@@ -217,6 +217,7 @@ type RunToolResult = {
 
 type DaemonToolLoopState = {
   totalToolCalls: number;
+  invalidToolParamErrorCount: number;
   invalidToolParamErrors: Map<string, number>;
   loopDetected: boolean;
 };
@@ -226,10 +227,15 @@ const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
   'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.';
+const LOOP_DETECTED_SKIP_MESSAGE =
+  'Skipped because loop detection stopped the current turn before this tool call could run.';
+const LOOP_DETECTED_CONTEXT_MESSAGE =
+  'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
 
 function createDaemonToolLoopState(): DaemonToolLoopState {
   return {
     totalToolCalls: 0,
+    invalidToolParamErrorCount: 0,
     invalidToolParamErrors: new Map(),
     loopDetected: false,
   };
@@ -278,7 +284,8 @@ function recordDaemonInvalidToolParams(
 ): boolean {
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
-  const key = `${toolName}\0${error.message}`;
+  const key = toolName;
+  loopState.invalidToolParamErrorCount++;
   const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
   loopState.invalidToolParamErrors.set(key, count);
   if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
@@ -1901,7 +1908,7 @@ export class Session implements SessionContext {
                     toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
-                    await this.#preserveCancelledPermissionToolRun(
+                    await this.#preserveStoppedToolRun(
                       toolRun,
                       pendingSend.signal,
                     );
@@ -1911,6 +1918,13 @@ export class Session implements SessionContext {
                     toolRun,
                     pendingSend.signal,
                   );
+                  if (toolRun.loopDetected) {
+                    await this.#preserveStoppedToolRun(
+                      toolRun,
+                      pendingSend.signal,
+                    );
+                    return { stopReason: 'end_turn' };
+                  }
                 }
               }
 
@@ -2179,16 +2193,17 @@ export class Session implements SessionContext {
               toolLoopState,
             );
             if (toolRun.stopAfterPermissionCancel) {
-              await this.#preserveCancelledPermissionToolRun(
-                toolRun,
-                pendingSend.signal,
-              );
+              await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
               return { stopReason: 'end_turn' };
             }
             nextMessage = await this.#buildNextMessageAfterToolRun(
               toolRun,
               pendingSend.signal,
             );
+            if (toolRun.loopDetected) {
+              await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+              return { stopReason: 'end_turn' };
+            }
           }
         }
 
@@ -2353,7 +2368,7 @@ export class Session implements SessionContext {
     }
   }
 
-  async #preserveCancelledPermissionToolRun(
+  async #preserveStoppedToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
@@ -2362,6 +2377,9 @@ export class Session implements SessionContext {
         role: 'user',
         parts: [
           ...toolRun.parts,
+          ...(toolRun.loopDetected
+            ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
+            : []),
           ...(await this.#drainMidTurnUserMessages(abortSignal)),
         ],
       },
@@ -3071,16 +3089,17 @@ export class Session implements SessionContext {
                     toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
-                    await this.#preserveCancelledPermissionToolRun(
-                      toolRun,
-                      ac.signal,
-                    );
+                    await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
                   nextMessage = await this.#buildNextMessageAfterToolRun(
                     toolRun,
                     ac.signal,
                   );
+                  if (toolRun.loopDetected) {
+                    await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                    return;
+                  }
                 }
               }
             } catch (error) {
@@ -3388,10 +3407,7 @@ export class Session implements SessionContext {
                 toolLoopState,
               );
               if (toolRun.stopAfterPermissionCancel) {
-                await this.#preserveCancelledPermissionToolRun(
-                  toolRun,
-                  ac.signal,
-                );
+                await this.#preserveStoppedToolRun(toolRun, ac.signal);
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
               }
@@ -3399,6 +3415,11 @@ export class Session implements SessionContext {
                 toolRun,
                 ac.signal,
               );
+              if (toolRun.loopDetected) {
+                await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                return;
+              }
             }
           }
 
@@ -3882,17 +3903,20 @@ export class Session implements SessionContext {
     }
 
     let skippedToolCallCounter = 0;
-    const recordSkippedToolCall = async (fc: FunctionCall): Promise<Part> => {
+    const recordSkippedToolCall = async (
+      fc: FunctionCall,
+      message = PERMISSION_CANCEL_SKIP_MESSAGE,
+    ): Promise<Part> => {
       const toolName = fc.name ?? 'unknown_tool';
       const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
       const part: Part = {
         functionResponse: {
           id: callId,
           name: toolName,
-          response: { error: PERMISSION_CANCEL_SKIP_MESSAGE },
+          response: { error: message },
         },
       };
-      const error = new Error(PERMISSION_CANCEL_SKIP_MESSAGE);
+      const error = new Error(message);
       try {
         this.config.getChatRecordingService()?.recordToolResult([part], {
           callId,
@@ -3931,14 +3955,70 @@ export class Session implements SessionContext {
       onStopAfterPermissionCancel?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
-      const maxConcurrency = parsePositiveIntegerEnv(
+      const configuredMaxConcurrency = parsePositiveIntegerEnv(
         process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
         10,
       );
+      const maxConcurrency = toolLoopState
+        ? Math.min(
+            configuredMaxConcurrency,
+            DAEMON_INVALID_TOOL_PARAMS_THRESHOLD,
+          )
+        : configuredMaxConcurrency;
       const results: RunToolResult[] = new Array(calls.length);
       const executing = new Set<Promise<void>>();
-      for (let i = 0; i < calls.length; i++) {
+      const fillLoopSkippedFrom = async (startIndex: number) => {
+        for (let i = startIndex; i < calls.length; i++) {
+          if (results[i]) continue;
+          results[i] = {
+            parts: [
+              await recordSkippedToolCall(calls[i], LOOP_DETECTED_SKIP_MESSAGE),
+            ],
+            stopAfterPermissionCancel: false,
+            loopDetected: true,
+          };
+        }
+      };
+      const fillPermissionSkippedFrom = async (startIndex: number) => {
+        for (let i = startIndex; i < calls.length; i++) {
+          if (results[i]) continue;
+          results[i] = {
+            parts: [await recordSkippedToolCall(calls[i])],
+            stopAfterPermissionCancel: false,
+          };
+        }
+      };
+      let startIndex = 0;
+      if (
+        toolLoopState &&
+        calls.length > DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+      ) {
+        startIndex = DAEMON_INVALID_TOOL_PARAMS_THRESHOLD;
+        for (let i = 0; i < startIndex; i++) {
+          const r = await this.runTool(
+            runAbortSignal,
+            promptId,
+            calls[i],
+            onStopAfterPermissionCancel,
+            toolLoopState,
+          );
+          results[i] = r;
+          if (r.loopDetected) {
+            await fillLoopSkippedFrom(i + 1);
+            return results;
+          }
+          if (r.stopAfterPermissionCancel) {
+            await fillPermissionSkippedFrom(i + 1);
+            return results;
+          }
+        }
+      }
+      for (let i = startIndex; i < calls.length; i++) {
         const idx = i;
+        if (toolLoopState?.loopDetected) {
+          await fillLoopSkippedFrom(idx);
+          return results;
+        }
         if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
           results[idx] = {
             parts: [await recordSkippedToolCall(calls[idx])],
@@ -3962,6 +4042,22 @@ export class Session implements SessionContext {
         executing.add(p);
         if (executing.size >= maxConcurrency) {
           await Promise.race(executing);
+          if (results.some((result) => result?.loopDetected)) {
+            await Promise.all(executing);
+            await fillLoopSkippedFrom(idx + 1);
+            return results;
+          }
+          if (
+            toolLoopState &&
+            toolLoopState.invalidToolParamErrorCount > 0 &&
+            executing.size > 0
+          ) {
+            await Promise.all(executing);
+            if (results.some((result) => result?.loopDetected)) {
+              await fillLoopSkippedFrom(idx + 1);
+              return results;
+            }
+          }
         }
       }
       await Promise.all(executing);
@@ -4104,6 +4200,21 @@ export class Session implements SessionContext {
   ): Promise<RunToolResult> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
+    if (toolLoopState?.loopDetected) {
+      return {
+        parts: [
+          {
+            functionResponse: {
+              id: callId,
+              name: fc.name ?? 'unknown_tool',
+              response: { error: LOOP_DETECTED_SKIP_MESSAGE },
+            },
+          },
+        ],
+        stopAfterPermissionCancel: false,
+        loopDetected: true,
+      };
+    }
 
     const startTime = Date.now();
     let spanError: string | undefined;
@@ -4169,9 +4280,20 @@ export class Session implements SessionContext {
         error,
         errorType: undefined,
       });
+      const loopDetected =
+        !activeToolAbortSignal.aborted &&
+        !opts?.stopAfterPermissionCancel &&
+        recordDaemonInvalidToolParams(
+          this.config,
+          promptId,
+          toolLoopState,
+          toolName,
+          error,
+        );
       return {
         parts: errorParts,
         stopAfterPermissionCancel: opts?.stopAfterPermissionCancel ?? false,
+        loopDetected,
       };
     };
 

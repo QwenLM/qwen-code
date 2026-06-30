@@ -2349,9 +2349,35 @@ describe('Session', () => {
 
       it('stops an ACP prompt after repeated invalid tool parameters with fresh ids', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-        const build = vi.fn().mockImplementation(() => {
-          throw new Error('Parameter "questions" must be an array.');
-        });
+        const messageBus = {
+          request: vi.fn().mockResolvedValue({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([{ role: 'model', parts: [{ text: 'response' }] }]);
+        mockChat.getLastModelMessageText = vi.fn().mockReturnValue('response');
+        const build = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 1.');
+          })
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 2.');
+          })
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 3.');
+          });
         mockToolRegistry.getTool.mockReturnValue({
           name: 'ask_user_question',
           kind: core.Kind.Other,
@@ -2421,6 +2447,189 @@ describe('Session', () => {
 
         expect(build).toHaveBeenCalledTimes(3);
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        const stopHookCalls = messageBus.request.mock.calls.filter(
+          ([request]) =>
+            typeof request === 'object' &&
+            request !== null &&
+            'eventName' in request &&
+            request.eventName === 'Stop',
+        );
+        expect(stopHookCalls).toHaveLength(0);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors',
+          ),
+        );
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'ask_3',
+                name: 'ask_user_question',
+                response: expect.objectContaining({
+                  error: expect.stringContaining(
+                    'Parameter "questions" must be an array',
+                  ),
+                }),
+              }),
+            }),
+            expect.objectContaining({
+              text: expect.stringContaining(
+                'terminated because the model exceeded tool-call safety limits',
+              ),
+            }),
+          ],
+        });
+      });
+
+      it('stops early tool lookup errors after repeated invalid tool calls', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockReturnValue(undefined);
+        const functionCalls: FunctionCall[] = [
+          {
+            id: 'missing_1',
+            name: 'missing_tool',
+            args: { value: 'one' },
+          },
+          {
+            id: 'missing_2',
+            name: 'missing_tool',
+            args: { value: 'two' },
+          },
+          {
+            id: 'missing_3',
+            name: 'missing_tool',
+            args: { value: 'three' },
+          },
+        ];
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrorCount: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-missing-tool-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(mockToolRegistry.getTool).toHaveBeenCalledTimes(3);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors from missing_tool',
+          ),
+        );
+      });
+
+      it('stops an ACP prompt after exceeding the daemon tool-call cap', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const functionCalls = Array.from({ length: 101 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: `file_${index}.ts` },
+        }));
+        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: { functionCalls },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read many files' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after 101 tool calls in one turn.',
+          ),
+        );
+      });
+
+      it('does not start unstarted concurrent Agent calls after invalid parameter loop detection', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const build = vi.fn().mockImplementation(() => {
+          throw new Error('Invalid subagent_type: bad');
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.AGENT
+            ? {
+                name: core.ToolNames.AGENT,
+                kind: core.Kind.Think,
+                displayName: 'Agent',
+                description: 'Agent',
+                build,
+                canUpdateOutput: false,
+                isOutputMarkdown: true,
+              }
+            : undefined,
+        );
+        const functionCalls: FunctionCall[] = Array.from(
+          { length: 5 },
+          (_, index) => ({
+            id: `agent_${index}`,
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: `bad_${index}` },
+          }),
+        );
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrorCount: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-invalid-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(
+          result.parts
+            .slice(3)
+            .map((part) => part.functionResponse?.response?.['error']),
+        ).toEqual([
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+        ]);
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
             'Stopping ACP turn after repeated tool parameter errors',
