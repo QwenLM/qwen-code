@@ -278,6 +278,11 @@
               "description": "Whether to collapse history by default when resuming a session.",
               "type": "boolean",
               "default": false
+            },
+            "collapsePreviewCount": {
+              "description": "Number of most recent user turns to keep visible when collapsing history on resume. 0 collapses all restored history by default; -1 shows all restored history.",
+              "type": "number",
+              "default": 0
             }
           }
         },
@@ -1124,14 +1129,14 @@
           "type": "string"
         },
         "allowed": {
-          "description": "A list of MCP servers to allow.",
+          "description": "A list of MCP servers to allow. Supports glob patterns (e.g. \"*puppeteer*\").",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "excluded": {
-          "description": "A list of MCP servers to exclude.",
+          "description": "A list of MCP servers to exclude. Supports glob patterns (e.g. \"*puppeteer*\"). Takes precedence over mcp.allowed.",
           "type": "array",
           "items": {
             "type": "string"

@@ -39,6 +39,7 @@ import {
   type AnyDeclarativeTool,
   type DiscoveredMCPPrompt,
   createDebugLogger,
+  matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import { loadMcpApprovals } from '../../../config/mcpApprovals.js';
@@ -534,8 +535,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         ).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        // If server is not in exclusion list, add it
-        if (!currentExcluded.includes(server.name)) {
+        // If server is not already covered by an exclusion pattern, add it
+        if (!matchesAnyServerPattern(server.name, currentExcluded)) {
           const newExcluded = [...currentExcluded, server.name];
           settings.setValue(
             targetScope === 'user' ? SettingScope.User : SettingScope.Workspace,
@@ -580,8 +581,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         ).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        // If server is not in exclusion list, add it
-        if (!currentExcluded.includes(server.name)) {
+        // If server is not already covered by an exclusion pattern, add it
+        if (!matchesAnyServerPattern(server.name, currentExcluded)) {
           const newExcluded = [...currentExcluded, server.name];
           settings.setValue(
             scope === 'user' ? SettingScope.User : SettingScope.Workspace,

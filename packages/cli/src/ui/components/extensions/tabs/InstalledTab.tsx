@@ -26,6 +26,7 @@ import {
   mcpServerRequiresOAuth,
   MCPOAuthTokenStorage,
   createDebugLogger,
+  matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
 import {
   loadSettings,
@@ -566,7 +567,7 @@ export const InstalledTab = ({
           // Disable: add to excluded + disconnect.
           const excluded =
             settings.forScope(targetScope).settings.mcp?.excluded ?? [];
-          if (!excluded.includes(item.name)) {
+          if (!matchesAnyServerPattern(item.name, excluded)) {
             settings.setValue(targetScope, 'mcp.excluded', [
               ...excluded,
               item.name,
