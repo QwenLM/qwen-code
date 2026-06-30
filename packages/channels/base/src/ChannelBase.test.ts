@@ -1861,6 +1861,117 @@ describe('ChannelBase', () => {
       expect(reads).toBe(1);
     });
 
+    it('re-reads memory for a collect followup buffered after memory changes', async () => {
+      let memory = 'old memory';
+      let reads = 0;
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return memory;
+        }),
+        appendChannelMemory: vi
+          .fn()
+          .mockImplementation(async (_target: unknown, text: string) => {
+            memory = `${memory}\n${text}`;
+            return { changed: true };
+          }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      let resolveFirst!: (value: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let promptCalls = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        promptCalls += 1;
+        if (promptCalls === 1) return firstPrompt;
+        return 'coalesced response';
+      });
+      const ch = createChannel(
+        { allowedUsers: ['alice'], dispatchMode: 'collect' },
+        { channelMemory },
+      );
+
+      const first = ch.handleInbound(
+        envelope({ text: 'first', senderId: 'alice' }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+      await ch.handleInbound(
+        envelope({ text: '/remember-channel new memory', senderId: 'alice' }),
+      );
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      resolveFirst('first response');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const coalescedPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(reads).toBe(2);
+      expect(coalescedPrompt).toContain('new memory');
+      expect(coalescedPrompt).toContain('second');
+    });
+
+    it('drops a queued turn cleared during a slow memory read', async () => {
+      let resolveMemory: (value: string) => void = () => {};
+      const slowMemory = new Promise<string>((resolve) => {
+        resolveMemory = resolve;
+      });
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockReturnValue(slowMemory),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      const first = ch.handleInbound(
+        envelope({ text: 'first', senderId: 'alice' }),
+      );
+      await vi.waitFor(() =>
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+      );
+
+      await ch.handleInbound(envelope({ text: '/clear', senderId: 'alice' }));
+      resolveMemory('slow memory');
+      await first;
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(
+        ch.sent.some((message) => message.text.includes('Session cleared')),
+      ).toBe(true);
+    });
+
+    it('cleans up first-session context claim when memory read fails', async () => {
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('memory boom'))
+          .mockResolvedValueOnce('Use staging by default.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      await expect(
+        ch.handleInbound(envelope({ text: 'first', senderId: 'alice' })),
+      ).rejects.toThrow('memory boom');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toContain(
+        'Channel memory for this chat:\nUse staging by default.',
+      );
+      expect(promptText).toContain('Use repo conventions.');
+      expect(promptText).toContain('second');
+    });
+
     it('/remember-channel invalidates current session context after append', async () => {
       let memory = 'old memory';
       let reads = 0;

@@ -662,6 +662,31 @@ export abstract class ChannelBase {
     }
   }
 
+  private dropQueuedTurnIfStale(
+    sessionId: string,
+    generation: number,
+    envelope: Envelope,
+  ): boolean {
+    if ((this.sessionGenerations.get(sessionId) ?? 0) === generation) {
+      return false;
+    }
+
+    // Surface the drop — otherwise an unanswered queued message vanishes
+    // silently, making "my message was never answered" undiagnosable.
+    // envelope.text is attacker-controlled, so neutralize it with the shared
+    // log sanitizer: it renders newlines visibly and strips the C0/DEL controls
+    // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line
+    // break that could forge an extra [channel] log line), the Unicode line/
+    // paragraph separators U+2028/U+2029, and the bidi overrides — any of which
+    // would otherwise inject, overwrite, or reorder an operator's audit line.
+    // Same helper as the QQ audit log, so the defense can't drift between sites.
+    const loggedText = sanitizeLogText(envelope.text, 80);
+    process.stderr.write(
+      `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${loggedText})\n`,
+    );
+    return true;
+  }
+
   private isAuthorizedForChannelMemory(envelope: Envelope): boolean {
     return (
       this.config.allowedUsers.length > 0 &&
@@ -1094,11 +1119,6 @@ export abstract class ChannelBase {
       }
     }
 
-    const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
-    if (shouldPrependSessionContext) {
-      this.instructedSessions.add(sessionId);
-    }
-
     // Resolve dispatch mode: per-group override → channel config → default
     const groupCfg = envelope.isGroup
       ? this.config.groups[envelope.chatId] || this.config.groups['*']
@@ -1211,6 +1231,11 @@ export abstract class ChannelBase {
       }
     }
 
+    const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
+    if (shouldPrependSessionContext) {
+      this.instructedSessions.add(sessionId);
+    }
+
     // Run the prompt with per-session serialization. followup AND steer both chain
     // onto the existing queue tail; steer additionally best-effort cancelled the
     // running turn above so the tail resolves sooner. Chaining (rather than seeding
@@ -1231,38 +1256,33 @@ export abstract class ChannelBase {
       clearTimeout(steerWatchdog);
       // A /clear (or reset/new) while we were queued bumps the generation; the
       // captured session is cleared, so don't run the prompt against it.
-      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
-        // Surface the drop — otherwise an unanswered queued message vanishes
-        // silently, making "my message was never answered" undiagnosable.
-        // envelope.text is attacker-controlled, so neutralize it with the shared
-        // log sanitizer: it renders newlines visibly and strips the C0/DEL controls
-        // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line
-        // break that could forge an extra [channel] log line), the Unicode line/
-        // paragraph separators U+2028/U+2029, and the bidi overrides — any of which
-        // would otherwise inject, overwrite, or reorder an operator's audit line.
-        // Same helper as the QQ audit log, so the defense can't drift between sites.
-        const loggedText = sanitizeLogText(envelope.text, 80);
-        process.stderr.write(
-          `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${loggedText})\n`,
-        );
+      if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
         return;
       }
       if (shouldPrependSessionContext) {
-        const context: string[] = [];
-        const channelMemory = (
-          await this.channelMemory?.readChannelMemory(
-            this.channelMemoryTarget(envelope),
-          )
-        )?.trim();
-        if (channelMemory) {
-          context.push(`Channel memory for this chat:\n${channelMemory}`);
+        try {
+          const context: string[] = [];
+          const channelMemory = (
+            await this.channelMemory?.readChannelMemory(
+              this.channelMemoryTarget(envelope),
+            )
+          )?.trim();
+          if (channelMemory) {
+            context.push(`Channel memory for this chat:\n${channelMemory}`);
+          }
+          if (this.config.instructions) {
+            context.push(this.config.instructions);
+          }
+          if (context.length > 0) {
+            promptText = `${context.join('\n\n')}\n\n${promptText}`;
+          }
+        } catch (error) {
+          this.instructedSessions.delete(sessionId);
+          throw error;
         }
-        if (this.config.instructions) {
-          context.push(this.config.instructions);
-        }
-        if (context.length > 0) {
-          promptText = `${context.join('\n\n')}\n\n${promptText}`;
-        }
+      }
+      if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
+        return;
       }
       // Register this prompt as active
       let doneResolve: () => void = () => {};
