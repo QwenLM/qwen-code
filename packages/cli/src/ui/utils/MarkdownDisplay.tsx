@@ -14,6 +14,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
+import { MINIMUM_MAX_HEIGHT } from '../components/shared/MaxSizedBox.js';
 
 interface MarkdownDisplayProps {
   text: string;
@@ -559,6 +560,26 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         aligns={tableAligns}
         enableInlineMath={renderVisualBlocks}
       />,
+    );
+  }
+
+  // Bound the live (non-`<Static>`) markdown to the viewport budget. A long
+  // streaming message otherwise renders ALL its lines, pushing the non-`<Static>`
+  // frame past the terminal height — at which point ink clears the terminal and
+  // re-streams the entire transcript on every repaint (the top→bottom "scroll
+  // replay" seen on tab-switch in terminal multiplexers, since the live region
+  // re-renders every token). `overflow="hidden"` + `maxHeight` clips only when
+  // the content is genuinely taller than the budget (short messages render
+  // unpadded); the full message still renders uncapped once it commits to
+  // `<Static>`. Code blocks already self-truncate above, but plain prose / lists
+  // had no overall cap. Only applies while pending and when a budget is known
+  // (constrainHeight on, non-VP).
+  if (isPending && availableTerminalHeight !== undefined) {
+    const maxHeight = Math.max(MINIMUM_MAX_HEIGHT, availableTerminalHeight);
+    return (
+      <Box flexDirection="column" maxHeight={maxHeight} overflow="hidden">
+        {contentBlocks}
+      </Box>
     );
   }
 

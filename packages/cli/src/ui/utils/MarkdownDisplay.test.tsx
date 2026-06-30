@@ -83,6 +83,44 @@ describe('<MarkdownDisplay />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('clips a long pending message to availableTerminalHeight', () => {
+      // A long streaming message must NOT render all its lines: the live
+      // (non-<Static>) frame would exceed the terminal height and ink would
+      // clearTerminal + re-stream the whole transcript on every token (the
+      // top→bottom "scroll replay" seen on tab-switch in multiplexers). The
+      // pending markdown is clipped to availableTerminalHeight.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={10}
+        />,
+      );
+      const lineCount = (lastFrame() ?? '').split('\n').length;
+      expect(lineCount).toBeLessThanOrEqual(10);
+    });
+
+    it('does not pad a short pending message up to availableTerminalHeight', () => {
+      // maxHeight + overflow:hidden must clip only when content is too tall —
+      // a short pending message renders at its natural height, no blank rows.
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text="just one short line"
+          isPending={true}
+          availableTerminalHeight={20}
+        />,
+      );
+      const lineCount = (lastFrame() ?? '')
+        .replace(/\n+$/, '')
+        .split('\n').length;
+      expect(lineCount).toBeLessThan(20);
+    });
+
     it('renders unordered lists with different markers', () => {
       const text = `
 - item A
