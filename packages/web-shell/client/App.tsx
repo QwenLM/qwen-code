@@ -845,9 +845,15 @@ export function App({
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     const preventScroll = (e: TouchEvent) => {
-      // Allow native scrolling inside the drawer (e.g. the session list);
-      // only block touch scrolling on the page behind it.
-      if ((e.target as HTMLElement | null)?.closest('[data-mobile-drawer]')) {
+      // Allow native scrolling inside the drawer panel (e.g. the session list).
+      // The dim backdrop also lives under [data-mobile-drawer], so exclude it:
+      // a touchmove starting on the backdrop must still be blocked, otherwise
+      // iOS Safari scrolls the page behind the open drawer.
+      const el = e.target as HTMLElement | null;
+      if (
+        el?.closest('[data-mobile-drawer]') &&
+        !el.closest(`.${styles.mobileBackdrop}`)
+      ) {
         return;
       }
       e.preventDefault();
@@ -3884,7 +3890,7 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
-                  collapsed={sidebarCollapsed}
+                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
                   onCollapsedChange={handleSidebarCollapsedChange}
                   onOpenSettings={() => {
                     closeMobileDrawer();
