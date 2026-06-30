@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 describe('EnterPlanModeTool', () => {
   let tool: EnterPlanModeTool;
@@ -156,6 +157,21 @@ describe('EnterPlanModeTool', () => {
 
       expect(result.llmContent).toContain('Failed to enter plan mode');
       expect(result.llmContent).toContain('trust gate');
+    });
+
+    it('should reject when called from a subagent context', async () => {
+      const invocation = tool.build({});
+      const result = await runWithAgentContext('test-agent', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain(
+        'Cannot enter plan mode from a subagent context',
+      );
+      expect(result.returnDisplay).toBe(
+        'Plan mode unavailable in subagent context.',
+      );
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
     });
   });
 });

@@ -14,6 +14,9 @@ import {
 import { ToolConfirmationOutcome } from './tools.js';
 import { runPlanApprovalGate } from '../plan-gate/planApprovalGate.js';
 import type { GateDecision, MergedGateFinding } from '../plan-gate/types.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import type { TeammateIdentity } from '../agents/team/types.js';
 
 vi.mock('../plan-gate/planApprovalGate.js', async (importOriginal) => {
   const actual =
@@ -684,6 +687,40 @@ describe('ExitPlanModeTool', () => {
 
       // 'allow' → no user prompt; the gate runs inside execute() as designed.
       await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+    });
+  });
+
+  describe('agent-context guard', () => {
+    it('should reject exitPlanMode from a subagent context', async () => {
+      const invocation = tool.build({ plan: 'test plan' });
+      const result = await runWithAgentContext('test-agent', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain(
+        'Cannot exit plan mode from a subagent context',
+      );
+      expect(result.returnDisplay).toBe(
+        'Plan mode exit unavailable in subagent context.',
+      );
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+    });
+
+    it('should reject exitPlanMode from a teammate context', async () => {
+      const invocation = tool.build({ plan: 'test plan' });
+      const result = await runWithTeammateIdentity(
+        {
+          agentName: 'test-teammate',
+          teamName: 'test-team',
+          isTeamLead: false,
+        } as TeammateIdentity,
+        () => invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain(
+        'Cannot exit plan mode from a subagent context',
+      );
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
     });
   });
 });

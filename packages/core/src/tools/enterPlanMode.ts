@@ -14,6 +14,7 @@ import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { isTeammate } from '../agents/team/identity.js';
 
 const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
 
@@ -69,7 +70,10 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
     // parent session. Ordinary subagents are delegated workers — they
     // must not enter plan mode independently.
     const agentId = getCurrentAgentId();
-    if (agentId !== null) {
+    if (agentId !== null || isTeammate()) {
+      debugLogger.debug(
+        `Rejected: subagent/teammate ${agentId ?? 'teammate'} attempted enterPlanMode`,
+      );
       return {
         llmContent:
           'Cannot enter plan mode from a subagent context. Plan mode is owned by the parent session.',

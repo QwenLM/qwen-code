@@ -385,4 +385,19 @@ describe('AgentCore.prepareTools', () => {
 
     expect(getFunctionDeclarationsSpy).not.toHaveBeenCalled();
   });
+
+  it('filters inline FunctionDeclaration plan tools using full exclusion set', async () => {
+    // Inline FunctionDeclaration[] must be filtered by the full
+    // excludedFromSubagents set, not just the recursion guard. Plan mode
+    // tools are excluded from ordinary subagents.
+    const inlineDecl: FunctionDeclaration = {
+      name: 'enter_plan_mode',
+      description: 'enter plan mode inline',
+    } as FunctionDeclaration;
+    const { core } = buildAgentForTools({ tools: [inlineDecl] }, []);
+
+    const tools = await core.prepareTools();
+
+    expect(tools).toEqual([]);
+  });
 });

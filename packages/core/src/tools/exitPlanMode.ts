@@ -27,6 +27,7 @@ import {
 import type { EvidenceBundle } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { isTeammate } from '../agents/team/identity.js';
 
 const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
@@ -200,7 +201,10 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     // parent session. Ordinary subagents are delegated workers — they
     // must not exit plan mode independently. Return findings to the caller.
     const agentId = getCurrentAgentId();
-    if (agentId !== null) {
+    if (agentId !== null || isTeammate()) {
+      debugLogger.debug(
+        `Rejected: subagent/teammate ${agentId ?? 'teammate'} attempted exitPlanMode`,
+      );
       return {
         llmContent:
           'Cannot exit plan mode from a subagent context. Return your findings to the parent agent instead.',
