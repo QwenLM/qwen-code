@@ -14,7 +14,10 @@ import type {
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import { mountWorkspaceMemoryRememberRoutes } from './workspace-remember.js';
+import {
+  mountWorkspaceMemoryRememberRoutes,
+  WorkspaceRememberTaskLane,
+} from './workspace-remember.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 
@@ -166,6 +169,7 @@ function buildApp(
   app.use(express.json({ limit: '1mb' }));
   mountWorkspaceMemoryRememberRoutes(app, {
     bridge,
+    lane: new WorkspaceRememberTaskLane(bridge),
     mutate: createMutationGate(auth),
     parseClientId: (req, res) => {
       const raw = req.get('x-qwen-client-id');

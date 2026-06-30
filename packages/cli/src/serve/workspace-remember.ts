@@ -41,6 +41,7 @@ type WorkspaceMemoryRememberTaskRecord = WorkspaceMemoryRememberTaskSnapshot & {
 
 export interface WorkspaceRememberRouteDeps {
   bridge: AcpSessionBridge;
+  lane: WorkspaceRememberTaskLane;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
@@ -255,8 +256,6 @@ export function mountWorkspaceMemoryRememberRoutes(
   app: Application,
   deps: WorkspaceRememberRouteDeps,
 ): void {
-  const lane = new WorkspaceRememberTaskLane(deps.bridge);
-
   app.post(
     '/workspace/memory/remember',
     deps.mutate({ strict: true }),
@@ -311,7 +310,7 @@ export function mountWorkspaceMemoryRememberRoutes(
 
       let task: WorkspaceMemoryRememberTaskSnapshot;
       try {
-        task = lane.enqueue({
+        task = deps.lane.enqueue({
           content: content.trim(),
           contextMode: contextModeRaw,
           ...(originatorClientId ? { originatorClientId } : {}),
@@ -334,7 +333,7 @@ export function mountWorkspaceMemoryRememberRoutes(
     (req, res) => {
       const requesterClientId = validateOriginatorClientId(deps, req, res);
       if (requesterClientId === null) return;
-      const task = lane.get(req.params['taskId'], requesterClientId);
+      const task = deps.lane.get(req.params['taskId'], requesterClientId);
       if (!task) {
         res.status(404).json({
           error: 'Workspace memory remember task not found',

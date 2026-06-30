@@ -53,7 +53,7 @@ import {
 } from '../routes/workspace-setup-github.js';
 import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
 import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
-import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
+import type { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
@@ -427,18 +427,17 @@ export const ACP_PROTOCOL_VERSION = 1;
  */
 export class AcpDispatcher {
   private readonly agentManager;
-  private readonly workspaceRememberLane;
 
   constructor(
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
     private readonly workspace: DaemonWorkspaceService,
+    private readonly workspaceRememberLane: WorkspaceRememberTaskLane,
     private readonly fsFactory?: WorkspaceFileSystemFactory,
     private readonly deviceFlowRegistry?: DeviceFlowRegistry,
     private readonly sessionShellCommandEnabled: boolean = false,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
-    this.workspaceRememberLane = new WorkspaceRememberTaskLane(bridge);
   }
 
   private killOrphanSession(sessionId: string): void {

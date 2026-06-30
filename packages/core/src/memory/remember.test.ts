@@ -302,6 +302,25 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
   });
 
+  it('audits written paths before failed termination reasons', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'max turns exceeded',
+      filesTouched: [path.join(projectRoot, 'README.md')],
+      filesWritten: [path.join(projectRoot, 'README.md')],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember me.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_path_escape' });
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
   it('propagates failed and cancelled agent termination reasons', async () => {
     vi.mocked(runForkedAgent).mockResolvedValueOnce({
       status: 'failed',

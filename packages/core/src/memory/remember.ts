@@ -193,6 +193,9 @@ export async function runManagedRememberByAgent(params: {
     abortSignal: params.abortSignal,
   });
 
+  const filesWritten = result.filesWritten ?? [];
+  const touchedScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
+
   if (result.status === 'failed') {
     throw new Error(result.terminateReason || 'Remember agent failed');
   }
@@ -200,8 +203,6 @@ export async function runManagedRememberByAgent(params: {
     throw new Error(result.terminateReason || 'Remember agent cancelled');
   }
 
-  const filesWritten = result.filesWritten ?? [];
-  const touchedScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
   await Promise.all([
     touchedScopes.includes('project')
       ? rebuildManagedAutoMemoryIndex(params.projectRoot)

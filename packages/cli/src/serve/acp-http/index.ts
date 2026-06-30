@@ -16,6 +16,7 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
 import { AcpDispatcher } from './dispatch.js';
+import type { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import {
   ConnectionRegistry,
   type AcpConnection,
@@ -192,6 +193,8 @@ export interface MountAcpHttpOptions {
   allowedOrigins?: ParsedAllowOriginPatterns;
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
+  /** Shared lane for sessionless workspace remember tasks. */
+  workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
   checkRate?: (key: string, tier: RateLimitTier) => boolean;
   /**
@@ -285,6 +288,7 @@ export function mountAcpHttp(
     bridge,
     opts.boundWorkspace,
     opts.workspace,
+    opts.workspaceRememberLane,
     opts.fsFactory,
     opts.deviceFlowRegistry,
     opts.sessionShellCommandEnabled === true,
