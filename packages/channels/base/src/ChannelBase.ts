@@ -490,7 +490,6 @@ export abstract class ChannelBase {
         this.channelMemoryTarget(envelope),
         args.trim(),
       );
-      this.clearCurrentInstruction(envelope);
       await this.sendMessage(envelope.chatId, 'Channel memory updated.');
       return true;
     });
@@ -533,7 +532,6 @@ export abstract class ChannelBase {
       const result = await channelMemory.clearChannelMemory(
         this.channelMemoryTarget(envelope),
       );
-      this.clearCurrentInstruction(envelope);
       await this.sendMessage(
         envelope.chatId,
         result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
@@ -681,18 +679,6 @@ export abstract class ChannelBase {
       return undefined;
     }
     return this.channelMemory;
-  }
-
-  private clearCurrentInstruction(envelope: Envelope): void {
-    const sessionId = this.router.getSession(
-      this.name,
-      envelope.senderId,
-      envelope.chatId,
-      envelope.threadId,
-    );
-    if (sessionId) {
-      this.instructedSessions.delete(sessionId);
-    }
   }
 
   /**
