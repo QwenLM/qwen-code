@@ -4840,6 +4840,87 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('evicts the bridge session after a scheduled timeout', async () => {
+      let rejectLatePrompt: (error: Error) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((_resolve, reject) => {
+              rejectLatePrompt = reject;
+            }),
+        )
+        .mockResolvedValueOnce('second response');
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      vi.useFakeTimers();
+      try {
+        const scheduled = ch.runScheduledPrompt(
+          {
+            id: 'job-1',
+            channelName: 'test-chan',
+            target: {
+              channelName: 'test-chan',
+              senderId: 'alice',
+              chatId: 'chat1',
+              isGroup: false,
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            label: 'daily summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Alice',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+          },
+          { timeoutMs: 1000 },
+        );
+        const scheduledResult = scheduled.catch((error: unknown) => error);
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await expect(scheduledResult).resolves.toMatchObject({
+          message: 'scheduled job timed out',
+        });
+        rejectLatePrompt(new Error('late bridge failure'));
+        await Promise.resolve();
+
+        await ch.runScheduledPrompt({
+          id: 'job-2',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post again',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+        });
+
+        expect(bridge.newSession).toHaveBeenCalledTimes(2);
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-2',
+          '[Scheduled task "daily summary" set by Alice]\n\npost again',
+          {},
+        );
+        expect(ch.proactive).toEqual([
+          { chatId: 'chat1', text: 'second response' },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('does not push a scheduled response after the session is cancelled', async () => {
       let resolveScheduledPrompt: (value: string) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
