@@ -573,15 +573,19 @@ function broadcastTurnComplete(
   promptId: string | undefined,
   originatorClientId: string | undefined,
 ): void {
-  entry.events.publish({
-    type: 'turn_complete',
-    data: {
-      sessionId,
-      stopReason: promptResult.stopReason ?? 'end_turn',
-      ...(promptId ? { promptId } : {}),
-    },
-    ...(originatorClientId ? { originatorClientId } : {}),
-  });
+  try {
+    entry.events.publish({
+      type: 'turn_complete',
+      data: {
+        sessionId,
+        stopReason: promptResult.stopReason ?? 'end_turn',
+        ...(promptId ? { promptId } : {}),
+      },
+      ...(originatorClientId ? { originatorClientId } : {}),
+    });
+  } catch {
+    /* bus may be closed during session teardown */
+  }
 }
 
 /**
@@ -639,16 +643,20 @@ function broadcastTurnError(
   const message = extractErrorMessage(err);
   const code = extractErrorCode(err);
   entry.retryAllowed = true;
-  entry.events.publish({
-    type: 'turn_error',
-    data: {
-      sessionId,
-      message,
-      ...(code ? { code } : {}),
-      ...(promptId ? { promptId } : {}),
-    },
-    ...(originatorClientId ? { originatorClientId } : {}),
-  });
+  try {
+    entry.events.publish({
+      type: 'turn_error',
+      data: {
+        sessionId,
+        message,
+        ...(code ? { code } : {}),
+        ...(promptId ? { promptId } : {}),
+      },
+      ...(originatorClientId ? { originatorClientId } : {}),
+    });
+  } catch {
+    /* bus may be closed during session teardown */
+  }
 }
 
 function hasControlCharacter(value: string): boolean {
@@ -3244,15 +3252,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             // session starts immediately without `added`, so publishing
             // `completed` would produce an unpaired event.
             if (isQueued) {
-              entry.events.publish({
-                type: 'pending_prompt_completed',
-                data: {
-                  sessionId,
-                  promptId: pendingEntry.promptId,
-                  state: 'completed',
-                },
-                ...(originatorClientId ? { originatorClientId } : {}),
-              });
+              try {
+                entry.events.publish({
+                  type: 'pending_prompt_completed',
+                  data: {
+                    sessionId,
+                    promptId: pendingEntry.promptId,
+                    state: 'completed',
+                  },
+                  ...(originatorClientId ? { originatorClientId } : {}),
+                });
+              } catch {
+                /* bus may be closed during session teardown */
+              }
             }
           }
           releasePromptSlot();
