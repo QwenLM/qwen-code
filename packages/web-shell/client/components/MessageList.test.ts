@@ -8,6 +8,7 @@ import {
   getSessionTimelineRangeForIndexes,
   getTurnTimelineNode,
   getDisplayItemVirtualKey,
+  getTurnIdByDisplayIndex,
   groupParallelAgents,
   shouldUseVirtualScroll,
   VIRTUAL_SCROLL_THRESHOLD,
@@ -33,7 +34,8 @@ function collapseOf(
       : items.findIndex(
           (item) =>
             item.type === 'message' &&
-            item.message.role === 'user' &&
+            (item.message.role === 'user' ||
+              item.message.role === 'user_shell') &&
             item.message.id === idxOrTurnId,
         );
   if (idx < 0) return undefined;
@@ -125,6 +127,10 @@ function makeMultiToolGroup(id: string): Message {
 
 function makeUserMessage(id: string): Message {
   return { id, role: 'user', content: 'hello' };
+}
+
+function makeUserShellMessage(id: string): Message {
+  return { id, role: 'user_shell', command: 'npm test' };
 }
 
 function makeAssistantMessage(id: string): Message {
@@ -429,6 +435,23 @@ describe('getSessionTimelineEntries', () => {
       },
     ]);
   });
+
+  it('handles empty assistant content and user shell turns', () => {
+    const entries = getSessionTimelineEntries([
+      makeUserShellMessage('shell'),
+      { id: 'empty', role: 'assistant' } as Message,
+      makeMultiToolGroup('tools'),
+    ]);
+    expect(entries).toEqual([
+      {
+        id: 'shell',
+        label: 'npm test',
+        detail: '2 tool calls',
+        timestamp: undefined,
+        nodeKinds: ['tool'],
+      },
+    ]);
+  });
 });
 
 describe('getSessionTimelineRangeForIndexes', () => {
@@ -448,6 +471,7 @@ describe('getSessionTimelineRangeForIndexes', () => {
       entries.map((entry, index) => [entry.id, index]),
     );
     const visibleItems = groupParallelAgents(messages);
+    const turnIdByDisplayIndex = getTurnIdByDisplayIndex(visibleItems);
 
     expect(
       getSessionTimelineRangeForIndexes(
@@ -455,6 +479,7 @@ describe('getSessionTimelineRangeForIndexes', () => {
         [1, 2, 3, 4],
         entryIndexById,
         3,
+        turnIdByDisplayIndex,
       ),
     ).toEqual({
       startIndex: 0,
@@ -677,6 +702,22 @@ describe('applyTurnCollapse', () => {
     expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'a1']);
     expect(collapseOf(out, 0)?.collapsed).toBe(false);
     expect(collapseOf(out, 0)?.hiddenCount).toBe(1);
+  });
+
+  it('collapses a completed user shell turn', () => {
+    const items = groupParallelAgents([
+      makeUserShellMessage('shell'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['shell', 'tc-shell', 'a1']);
+    expect(collapseOf(out, 'shell')).toEqual({
+      turnId: 'shell',
+      collapsed: true,
+      hiddenCount: 1,
+      toolCallCount: 2,
+    });
   });
 
   it('collapsing the active turn folds to prompt + seam (no stranded line)', () => {
@@ -1395,5 +1436,22 @@ describe('findTurnIdForIndex', () => {
       makeUserMessage('u1'),
     ]);
     expect(findTurnIdForIndex(items, 0)).toBeNull();
+  });
+
+  it('precomputes turn ids for display rows', () => {
+    const items = groupParallelAgents([
+      makeAssistantMessage('pre'),
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeUserShellMessage('shell'),
+      makeMultiToolGroup('g2'),
+    ]);
+    expect(getTurnIdByDisplayIndex(items)).toEqual([
+      null,
+      'u1',
+      'u1',
+      'shell',
+      'shell',
+    ]);
   });
 });

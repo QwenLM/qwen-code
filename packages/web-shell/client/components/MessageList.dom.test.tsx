@@ -124,6 +124,11 @@ const toggleRow = (c: HTMLElement, turnId: string) =>
   toggle(c, turnId).closest('[role="button"]') as HTMLElement;
 const click = (el: Element) =>
   act(() => el.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+const nextFrame = () =>
+  act(
+    () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  );
 
 describe('MessageList — turn collapse (DOM)', () => {
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
@@ -207,7 +212,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(true);
   });
 
-  it('renders the session timeline in the left gutter without expanding turns', () => {
+  it('renders the session timeline in the left gutter without expanding turns', async () => {
     const c = mount([
       userMsg('u1'),
       thinkingMsg('think1'),
@@ -218,6 +223,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       userMsg('u2'),
       asstMsg('a2'),
     ]);
+    await nextFrame();
 
     const timeline = c.querySelector('[data-testid="session-timeline"]');
     expect(timeline).not.toBeNull();

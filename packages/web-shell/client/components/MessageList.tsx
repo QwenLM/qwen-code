@@ -63,7 +63,7 @@ interface MessageListProps {
 function getLastUserMessageId(messages: Message[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (msg.role === 'user') return msg.id;
+    if (isTurnStartMessage(msg)) return msg.id;
   }
   return null;
 }
@@ -443,6 +443,8 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
     case 'assistant':
       if (item.turnCollapse)
         return { kind: 'none', timestamp: message.timestamp };
+      if (!compactTimelineText(message.content, 1))
+        return { kind: 'none', timestamp: message.timestamp };
       return {
         kind: 'commentary',
         timestamp: message.timestamp,
@@ -485,8 +487,11 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
   }
 }
 
-function compactTimelineText(raw: string, maxLength: number): string {
-  const compact = raw.replace(/\s+/g, ' ').trim();
+function compactTimelineText(
+  raw: string | null | undefined,
+  maxLength: number,
+): string {
+  const compact = raw?.replace(/\s+/g, ' ').trim() ?? '';
   if (!compact) return '';
   return compact.length > maxLength
     ? `${compact.slice(0, maxLength - 1)}…`
@@ -575,7 +580,7 @@ export function getSessionTimelineEntries(
       const item = turnItems[i];
       if (
         item?.role === 'assistant' &&
-        item.content.trim().length > 0 &&
+        compactTimelineText(item.content, 1).length > 0 &&
         !item.isStreaming
       ) {
         finalAssistantIndex = i;
@@ -742,12 +747,30 @@ export function findTurnIdForIndex(
   return null;
 }
 
+export function getTurnIdByDisplayIndex(
+  items: readonly DisplayItem[],
+): Array<string | null> {
+  const turnIds: Array<string | null> = [];
+  let currentTurnId: string | null = null;
+  for (const item of items) {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
+      currentTurnId = item.message.id;
+    }
+    turnIds.push(currentTurnId);
+  }
+  return turnIds;
+}
+
 function timelineIndexForDisplayIndex(
   visibleItems: readonly DisplayItem[],
   index: number,
   entryIndexById: ReadonlyMap<string, number>,
+  turnIdByDisplayIndex?: readonly (string | null)[],
 ): number | null {
-  const turnId = findTurnIdForIndex(visibleItems, index);
+  const turnId =
+    turnIdByDisplayIndex === undefined
+      ? findTurnIdForIndex(visibleItems, index)
+      : (turnIdByDisplayIndex[index] ?? null);
   if (!turnId) return null;
   return entryIndexById.get(turnId) ?? null;
 }
@@ -757,6 +780,7 @@ export function getSessionTimelineRangeForIndexes(
   visibleItemIndexes: readonly number[],
   entryIndexById: ReadonlyMap<string, number>,
   currentItemIndex?: number | null,
+  turnIdByDisplayIndex = getTurnIdByDisplayIndex(visibleItems),
 ): SessionTimelineRange | null {
   let startIndex = Number.POSITIVE_INFINITY;
   let endIndex = -1;
@@ -769,6 +793,7 @@ export function getSessionTimelineRangeForIndexes(
       visibleItems,
       visibleItemIndex,
       entryIndexById,
+      turnIdByDisplayIndex,
     );
     if (timelineIndex === null) continue;
     startIndex = Math.min(startIndex, timelineIndex);
@@ -784,6 +809,7 @@ export function getSessionTimelineRangeForIndexes(
           visibleItems,
           currentItemIndex,
           entryIndexById,
+          turnIdByDisplayIndex,
         );
 
   return {
@@ -847,7 +873,7 @@ export function applyTurnCollapse(
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (item.type === 'message' && item.message.role === 'user') {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
       userIdxs.push(i);
     }
   }
@@ -1508,6 +1534,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const lastScrollTop = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedFollow = useRef(true);
     const prevLastUserMsgId = useRef<string | null>(null);
     const prevActiveExecutionKey = useRef<string | null>(null);
@@ -1543,6 +1570,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         pendingApproval?.toolCallId,
         collapseEnabled,
       ],
+    );
+    const visibleTurnIdByDisplayIndex = useMemo(
+      () => getTurnIdByDisplayIndex(visibleItems),
+      [visibleItems],
     );
 
     const containerRef = useRef<HTMLDivElement>(null);
@@ -1745,6 +1776,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         visibleItemIndexes,
         sessionTimelineEntryIndexById,
         currentItemIndex,
+        visibleTurnIdByDisplayIndex,
       );
       setSessionTimelineRange((prev) => {
         if (
@@ -1760,15 +1792,36 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       getScrollElement,
       headerOffset,
       sessionTimelineEntryIndexById,
+      visibleTurnIdByDisplayIndex,
       visibleItems,
     ]);
 
-    useLayoutEffect(() => {
-      updateSessionTimelineRange();
+    const scheduleSessionTimelineRangeUpdate = useCallback(() => {
+      if (sessionTimelineFrame.current !== null) {
+        cancelAnimationFrame(sessionTimelineFrame.current);
+      }
+      sessionTimelineFrame.current = requestAnimationFrame(() => {
+        sessionTimelineFrame.current = null;
+        updateSessionTimelineRange();
+      });
+    }, [updateSessionTimelineRange]);
+
+    useEffect(
+      () => () => {
+        if (sessionTimelineFrame.current !== null) {
+          cancelAnimationFrame(sessionTimelineFrame.current);
+          sessionTimelineFrame.current = null;
+        }
+      },
+      [],
+    );
+
+    useEffect(() => {
+      scheduleSessionTimelineRangeUpdate();
     }, [
+      scheduleSessionTimelineRangeUpdate,
       totalCount,
       totalVirtualSize,
-      updateSessionTimelineRange,
       useVirtualScroll,
       virtualItems.length,
     ]);
@@ -1892,11 +1945,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const handleScroll = useCallback(() => {
       const el = getScrollElement();
       if (!el) return;
-      requestAnimationFrame(updateSessionTimelineRange);
       if (scrollCooldown.current) {
         lastScrollTop.current = el.scrollTop;
         return;
       }
+      scheduleSessionTimelineRangeUpdate();
       const prev = lastScrollTop.current;
       const curr = el.scrollTop;
       lastScrollTop.current = curr;
@@ -1915,7 +1968,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       if (distanceFromBottom < 30) {
         setShouldFollow(true);
       }
-    }, [getScrollElement, setShouldFollow, updateSessionTimelineRange]);
+    }, [getScrollElement, scheduleSessionTimelineRangeUpdate, setShouldFollow]);
 
     useEffect(() => {
       const el = getScrollElement();
@@ -1943,7 +1996,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       const el = containerRef.current;
       if (!el) return;
       const observer = new ResizeObserver(() => {
-        requestAnimationFrame(updateSessionTimelineRange);
+        scheduleSessionTimelineRangeUpdate();
         if (catchingUpRef.current) return;
         if (!shouldFollow.current) return;
         requestAnimationFrame(() => {
@@ -1954,7 +2007,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       });
       observer.observe(el);
       return () => observer.disconnect();
-    }, [scrollToBottom, updateSessionTimelineRange]);
+    }, [scrollToBottom, scheduleSessionTimelineRangeUpdate]);
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
