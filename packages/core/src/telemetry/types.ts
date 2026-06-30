@@ -443,6 +443,8 @@ export enum LoopType {
   ALTERNATING_TOOL_CALL_PATTERN = 'alternating_tool_call_pattern',
   /** Total tool calls in a single turn exceeded the always-on hard cap, regardless of pattern. */
   TURN_TOOL_CALL_CAP = 'turn_tool_call_cap',
+  /** The same tool repeatedly failed schema validation with fresh tool-call ids. */
+  INVALID_TOOL_PARAMS_STAGNATION = 'invalid_tool_params_stagnation',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {
