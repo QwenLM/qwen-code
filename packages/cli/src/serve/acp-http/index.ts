@@ -139,10 +139,15 @@ const WS_READ_METHODS = new Set([
 function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
   if (!localPort) return false;
   const parsed = new URL(origin);
+  // Both schemes: under `--tls-cert/--tls-key` the loopback ACP client
+  // speaks https, so its Origin header carries `https://`.
   const allowed = new Set([
     `http://localhost:${localPort}`,
     `http://127.0.0.1:${localPort}`,
     `http://[::1]:${localPort}`,
+    `https://localhost:${localPort}`,
+    `https://127.0.0.1:${localPort}`,
+    `https://[::1]:${localPort}`,
   ]);
   return allowed.has(parsed.origin.toLowerCase());
 }

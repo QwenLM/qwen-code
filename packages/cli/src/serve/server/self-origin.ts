@@ -24,11 +24,19 @@ export function installSelfOriginStripMiddleware(
       const port = getPort();
       if (port !== cachedStripPort) {
         cachedStripPort = port;
+        // Both schemes: under `--tls-cert/--tls-key` the loopback web
+        // shell is served over https, so its same-origin requests carry
+        // an `https://` Origin. Loopback hosts are trusted as same-origin
+        // regardless of scheme.
         cachedSelfOrigins = new Set([
           `http://127.0.0.1:${port}`,
           `http://localhost:${port}`,
           `http://[::1]:${port}`,
           `http://host.docker.internal:${port}`,
+          `https://127.0.0.1:${port}`,
+          `https://localhost:${port}`,
+          `https://[::1]:${port}`,
+          `https://host.docker.internal:${port}`,
         ]);
       }
       if (cachedSelfOrigins.has(origin)) {
