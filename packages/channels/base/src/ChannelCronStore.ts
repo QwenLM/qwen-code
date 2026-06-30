@@ -91,6 +91,33 @@ export class ChannelCronStore {
     return job;
   }
 
+  async createForTarget(
+    input: ChannelCronJobInput,
+    maxEnabledJobs: number,
+  ): Promise<ChannelCronJob | undefined> {
+    let created: ChannelCronJob | undefined;
+    await this.updateJobs((jobs) => {
+      const enabledForTarget = jobs.filter(
+        (job) =>
+          job.enabled &&
+          job.channelName === input.channelName &&
+          sameTarget(job.target, input.target),
+      ).length;
+      if (enabledForTarget >= maxEnabledJobs) {
+        return jobs;
+      }
+      created = {
+        ...input,
+        id: this.idFactory(),
+        enabled: true,
+        createdAt: this.now().toISOString(),
+        consecutiveFailures: 0,
+      };
+      return [...jobs, created];
+    });
+    return created;
+  }
+
   async update(id: string, patch: ChannelCronJobPatch): Promise<boolean> {
     let found = false;
     await this.updateJobs((jobs) =>

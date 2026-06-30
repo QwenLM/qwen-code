@@ -244,6 +244,7 @@ describe('startCommand.handler', () => {
         proxy: settingsProxy,
         scheduleController: {
           create: expect.any(Function),
+          createForTarget: expect.any(Function),
           listForTarget: expect.any(Function),
           disable: expect.any(Function),
           validateCron: expect.any(Function),
