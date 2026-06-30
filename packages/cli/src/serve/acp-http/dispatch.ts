@@ -18,6 +18,15 @@ import {
   type SessionArchiveState,
   type SubagentLevel,
 } from '@qwen-code/qwen-code-core';
+// Import the permission error classes from the same module REST's
+// `sendPermissionVoteError` uses, so `instanceof` matches the class the bridge
+// actually throws (the core re-export is a distinct identity at runtime).
+import {
+  CancelSentinelCollisionError,
+  InvalidPermissionOptionError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
+} from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -71,9 +80,9 @@ import {
   archiveDaemonSessions,
   assertSessionLoadable,
   logSessionArchiveWarning,
+  SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
-import type { SessionArchiveCoordinator } from '../server/session-archive.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
@@ -82,7 +91,11 @@ import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSettingsPartialPersistError,
 } from '../workspace-service/types.js';
-import type { AcpConnection } from './connection-registry.js';
+import type {
+  AcpConnection,
+  ConnectionRegistry,
+  PendingClientRequestRef,
+} from './connection-registry.js';
 import {
   QWEN_META_KEY,
   QWEN_METHOD_NS,
@@ -106,7 +119,13 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+type PermissionResponse = Parameters<
+  HttpAcpBridge['respondToSessionPermission']
+>[2];
+
 const SESSION_SHELL_METHOD = `${QWEN_METHOD_NS}session/shell`;
+const INVALID_PERMISSION_OUTCOME_ERROR =
+  '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
 
 const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/heartbeat`,
@@ -190,6 +209,7 @@ const CONN_ROUTED_METHODS = new Set<string>([
   'session/list',
   'session/close',
   'session/fork',
+  'session/permission',
   ...ALL_QWEN_VENDOR_METHODS,
 ]);
 
@@ -285,6 +305,61 @@ function validatePrompt(params: Record<string, unknown>): void {
   ) {
     throw new AcpParamError('each `prompt` element must be an object');
   }
+}
+
+function parsePermissionResponse(
+  params: Record<string, unknown>,
+): PermissionResponse {
+  const outcome = params['outcome'];
+  if (!isObject(outcome)) {
+    throw new AcpParamError(INVALID_PERMISSION_OUTCOME_ERROR);
+  }
+  if (outcome['outcome'] !== 'cancelled') {
+    if (
+      outcome['outcome'] !== 'selected' ||
+      typeof outcome['optionId'] !== 'string' ||
+      outcome['optionId'].length === 0
+    ) {
+      throw new AcpParamError(INVALID_PERMISSION_OUTCOME_ERROR);
+    }
+  }
+
+  // Whitelist only the fields the bridge contract defines — a rebuilt `outcome`
+  // carrying just its validated keys, plus the ACP-reserved `_meta` passthrough
+  // — rather than forwarding client-supplied keys. The previous copy-all let a
+  // client inject arbitrary top-level args AND extra `outcome` sub-fields (e.g.
+  // `{ outcome: { outcome: 'selected', optionId: 'allow', force: true } }`) into
+  // the server-side bridge call; harmless today since the bridge reads only the
+  // discriminant + optionId, but a needless client-controlled surface.
+  const cleanOutcome =
+    outcome['outcome'] === 'cancelled'
+      ? { outcome: 'cancelled' as const }
+      : { outcome: 'selected' as const, optionId: outcome['optionId'] };
+  const response: Record<string, unknown> = { outcome: cleanOutcome };
+  // `answers` is the one non-ACP permission-response field the bridge honours
+  // (AskUserQuestion). Forward it under the same shape the bridge validates —
+  // an object map of string values — so dropping it doesn't silently leave the
+  // agent with no submitted answers.
+  const answers = params['answers'];
+  if (answers !== undefined) {
+    if (
+      isObject(answers) &&
+      Object.values(answers).every((value) => typeof value === 'string')
+    ) {
+      response['answers'] = answers;
+    } else {
+      // Present but malformed: the bridge would reject it anyway, so it is
+      // dropped — but log it, otherwise a client whose answers silently
+      // vanished (agent sees none) has no server-side signal to chase.
+      writeStderrLine(
+        'qwen serve: /acp session/permission dropping invalid `answers` (expected an object map of string values)',
+      );
+    }
+  }
+  if (isObject(params['_meta'])) {
+    response['_meta'] = params['_meta'];
+  }
+  return response as PermissionResponse;
 }
 
 /**
@@ -467,10 +542,11 @@ export class AcpDispatcher {
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
     private readonly workspace: DaemonWorkspaceService,
-    private readonly fsFactory: WorkspaceFileSystemFactory | undefined,
-    private readonly deviceFlowRegistry: DeviceFlowRegistry | undefined,
-    private readonly sessionShellCommandEnabled: boolean,
-    private readonly archiveCoordinator: SessionArchiveCoordinator,
+    private readonly fsFactory?: WorkspaceFileSystemFactory,
+    private readonly deviceFlowRegistry?: DeviceFlowRegistry,
+    private readonly sessionShellCommandEnabled: boolean = false,
+    private readonly registry?: ConnectionRegistry,
+    private readonly archiveCoordinator: SessionArchiveCoordinator = new SessionArchiveCoordinator(),
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -735,6 +811,44 @@ export class AcpDispatcher {
       ),
     );
     return false;
+  }
+
+  private findPendingClientRequest(
+    conn: AcpConnection,
+    id: string,
+  ): PendingClientRequestRef | undefined {
+    const req = conn.pending.get(id);
+    if (req) return { conn, id, req };
+    return this.registry?.findPendingClientRequest(id);
+  }
+
+  private dropResolvedPermission(conn: AcpConnection, id: string): void {
+    // Delete the exact resolved entry by its `conn.pending` map key. Under
+    // multi-client attach, sibling connections can hold their own pending
+    // entries sharing this one's `bridgeRequestId` (see
+    // ConnectionRegistry.findPendingPermission), so re-matching by
+    // `bridgeRequestId` could delete a sibling's entry and orphan the one we
+    // just resolved. The siblings' now-moot entries are reaped at teardown.
+    conn.pending.delete(id);
+  }
+
+  /**
+   * Drop ONLY the calling connection's own pending permission entry for
+   * `requestId`, never a sibling co-owner's. Under the consensus policy a vote
+   * (or an unexpected vote error) from connection B must not delete connection
+   * A's still-needed entry, which would stall the quorum. A connection that
+   * never streamed the request holds no entry, so this is a no-op for it.
+   */
+  private dropOwnPendingPermission(
+    conn: AcpConnection,
+    requestId: string,
+  ): void {
+    for (const [pid, preq] of conn.pending) {
+      if (preq.kind === 'permission' && preq.bridgeRequestId === requestId) {
+        conn.pending.delete(pid);
+        return;
+      }
+    }
   }
 
   /**
@@ -1129,6 +1243,297 @@ export class AcpDispatcher {
           this.archiveCoordinator.assertNotTransitioning(sessionId);
           validatePrompt(params);
           await this.handlePrompt(conn, sessionId, id, params, loopback);
+          return;
+        }
+
+        case 'session/permission': {
+          const requestId =
+            typeof params['requestId'] === 'string' ? params['requestId'] : '';
+          if (!requestId) {
+            // Every failure mode below logs to stderr: a stuck permission
+            // prompt is otherwise undebuggable from the server side (the
+            // legacy `resolveClientResponse` path logs its vote/cancel
+            // failures the same way).
+            writeStderrLine(
+              `qwen serve: /acp session/permission rejected: \`requestId\` is required`,
+            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`requestId` is required', {
+                  httpStatus: 400,
+                  requestId,
+                }),
+              );
+            }
+            return;
+          }
+          let response: PermissionResponse;
+          try {
+            response = parsePermissionResponse(params);
+          } catch (err) {
+            // Map the validation throw to a structured 400 here so it carries
+            // the same `{ httpStatus }` envelope as every other error path in
+            // this handler — the outer dispatcher catch would otherwise emit a
+            // plain INVALID_PARAMS with no httpStatus for SDK callers.
+            if (err instanceof AcpParamError) {
+              writeStderrLine(
+                `qwen serve: /acp session/permission invalid params (requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, err.message, {
+                    httpStatus: 400,
+                    requestId,
+                  }),
+                );
+              }
+              return;
+            }
+            throw err;
+          }
+          const sessionIdParam =
+            typeof params['sessionId'] === 'string' &&
+            params['sessionId'].length > 0
+              ? params['sessionId']
+              : undefined;
+          // Look up by the globally-unique `requestId` alone, then validate
+          // the client's `sessionId` against the pending entry instead of
+          // trusting it for routing. A mismatched `sessionId` previously fell
+          // through to `sessionIdParam`, which (a) routed `requireOwned` and
+          // the bridge vote at the wrong session and (b) left the real pending
+          // entry to leak until teardown. Reject the mismatch explicitly.
+          const pendingRef = this.registry?.findPendingPermission(requestId);
+          if (
+            sessionIdParam &&
+            pendingRef &&
+            sessionIdParam !== pendingRef.req.sessionId
+          ) {
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote rejected: requestId ${logSafe(requestId)} does not belong to session ${logSafe(sessionIdParam)}`,
+            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'requestId does not belong to the specified session',
+                  { httpStatus: 409, sessionId: sessionIdParam, requestId },
+                ),
+              );
+            }
+            return;
+          }
+          // Require a registry hit before voting when the registry is
+          // available. In the scoped `session/permission` route `sessionIdParam`
+          // is always set, so a miss (unknown/stale/already-resolved request)
+          // must NOT fall through to `sessionIdParam` and the bridge — that
+          // reports the bridge's `false` as a thrown 409, whereas
+          // DaemonClient/REST treat a missing request as `404 → false` (not an
+          // exception). Reserve 409 for a present entry the bridge still rejects.
+          if (this.registry && !pendingRef) {
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote dropped: no pending request for requestId ${logSafe(requestId)}`,
+            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, 'No pending permission request', {
+                  httpStatus: 404,
+                  requestId,
+                }),
+              );
+            }
+            return;
+          }
+          // The pending entry's own session is authoritative; fall back to the
+          // client's `sessionId` only when there is no registry to consult.
+          const sessionId = pendingRef?.req.sessionId ?? sessionIdParam;
+          if (!sessionId) {
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote dropped: no pending request for requestId ${logSafe(requestId)}`,
+            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, 'No pending permission request', {
+                  httpStatus: 404,
+                  requestId,
+                }),
+              );
+            }
+            return;
+          }
+          // Inline ownership check (not the shared `requireOwned`) so the
+          // rejection carries the same `{ httpStatus }` envelope as every other
+          // error path in this handler — SDK callers classify permission-vote
+          // failures by `error.data.httpStatus`, and this is the likeliest
+          // cross-connection failure (right session header, no `session/new` on
+          // this connection).
+          if (!conn.ownsSession(sessionId)) {
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote rejected: session ${logSafe(sessionId)} not owned by this connection (requestId ${logSafe(requestId)})`,
+            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'Session not owned by this connection',
+                  { httpStatus: 403, sessionId, requestId },
+                ),
+              );
+            }
+            return;
+          }
+          let accepted: boolean;
+          try {
+            accepted = this.bridge.respondToSessionPermission(
+              sessionId,
+              requestId,
+              response,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+          } catch (err) {
+            // Mirror REST's `sendPermissionVoteError` so ACP SDK callers get the
+            // same shapes for normal permission outcomes instead of a generic
+            // internal error from the outer dispatcher catch: a forged optionId
+            // is a 400 (the requestId is known, the option isn't), a
+            // policy-denied vote is a 403 (well-formed, authenticated, refused).
+            if (err instanceof InvalidPermissionOptionError) {
+              writeStderrLine(
+                `qwen serve: /acp session/permission invalid option (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, err.message, {
+                    httpStatus: 400,
+                    code: 'invalid_option_id',
+                    requestId: err.requestId,
+                    optionId: err.optionId,
+                  }),
+                );
+              }
+              return;
+            }
+            if (err instanceof PermissionForbiddenError) {
+              writeStderrLine(
+                `qwen serve: /acp session/permission forbidden (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, err.message, {
+                    httpStatus: 403,
+                    code: 'permission_forbidden',
+                    requestId: err.requestId,
+                    sessionId: err.sessionId,
+                    reason: err.reason,
+                  }),
+                );
+              }
+              return;
+            }
+            if (err instanceof PermissionPolicyNotImplementedError) {
+              // Operator's settings name a policy whose mediator hasn't landed
+              // in this build. 501 (not 500) so the SDK can say "daemon older
+              // than your settings expect; upgrade".
+              writeStderrLine(
+                `qwen serve: /acp session/permission policy not implemented (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INTERNAL_ERROR, err.message, {
+                    httpStatus: 501,
+                    code: 'permission_policy_not_implemented',
+                    policy: err.policy,
+                  }),
+                );
+              }
+              return;
+            }
+            if (err instanceof CancelSentinelCollisionError) {
+              // Agent/daemon contract violation (agent's option set includes
+              // the cancel sentinel), not a client mistake — 500 with a stable
+              // code so the SDK can distinguish it from unrelated internals.
+              writeStderrLine(
+                `qwen serve: /acp session/permission cancel-sentinel collision (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INTERNAL_ERROR, err.message, {
+                    httpStatus: 500,
+                    code: 'cancel_sentinel_collision',
+                    requestId: err.requestId,
+                    sentinel: err.sentinel,
+                  }),
+                );
+              }
+              return;
+            }
+            // Truly unexpected bridge/sessionCtx failure: the mediator may be
+            // left blocking the agent's prompt. Mirror the legacy
+            // `resolveClientResponse` path — cancel as a fallback (dropping the
+            // entry only if the cancel landed, else keep it for teardown to
+            // retry) — then rethrow so the outer dispatcher catch maps the
+            // error for the wire.
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote failed (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(errMsg(err))}`,
+            );
+            const cancelled = this.cancelAbandonedPermission(
+              { sessionId, bridgeRequestId: requestId },
+              pendingRef?.conn.sessions.get(sessionId)?.clientId,
+            );
+            // Drop only the VOTING connection's own entry (consistent with the
+            // success path) — never `pendingRef`, which may be a sibling/the
+            // originator. Deleting the originator's entry would stall a quorum
+            // still waiting on its vote. If the voter has no own entry, leave
+            // everything for teardown.
+            if (cancelled) {
+              this.dropOwnPendingPermission(conn, requestId);
+            }
+            throw err;
+          }
+          if (!accepted) {
+            // The bridge mediator had no outstanding request to resolve
+            // (already voted/cancelled — e.g. a duplicate or racing vote).
+            // Do NOT delete the registry entry here: matching the legacy
+            // `resolveClientResponse` contract, keep it until teardown's
+            // `abandonPendingForSession` releases the mediator. Deleting now
+            // would (a) conflate "no pending entry" with "bridge rejected a
+            // present vote" and (b) make a legitimate retry on another
+            // connection fail with a misleading "no pending" error.
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote not accepted by bridge (${logSafe(sessionId)}, requestId ${logSafe(requestId)})`,
+            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'Permission vote not accepted (request already resolved)',
+                  {
+                    httpStatus: 409,
+                    sessionId,
+                    requestId,
+                  },
+                ),
+              );
+            }
+            return;
+          }
+          // Drop ONLY the voting connection's own pending entry for this
+          // request — never the first registry-wide match (`pendingRef`), which
+          // may belong to a sibling connection. Under the consensus policy
+          // `respondToSessionPermission` returns true for an intermediate
+          // "recorded" vote, so deleting a sibling's entry here would drop a
+          // co-owner's still-needed outbound request and could stall the quorum
+          // until timeout/teardown. A cross-connection voter that never streamed
+          // the request has no own entry — leave the originator's for teardown.
+          this.dropOwnPendingPermission(conn, requestId);
+          // Log the success too (every failure branch logs): an operator
+          // grepping a stuck prompt can then tell "vote accepted here" apart
+          // from "vote never arrived" or "vote landed on another connection".
+          writeStderrLine(
+            `qwen serve: /acp session/permission vote accepted (${logSafe(sessionId)}, requestId ${logSafe(requestId)}, connection ${logSafe(conn.connectionId.slice(0, 8))})`,
+          );
+          this.replyConn(conn, id, {});
           return;
         }
 
@@ -3176,29 +3581,50 @@ export class AcpDispatcher {
     msg: JsonRpcResponse,
     fromLoopback: boolean,
   ): void {
-    // Our outbound request ids are strings (`_qwen_perm_N`); a client echoes
+    // Our outbound request ids are strings (`_qwen_perm_<conn>_N`); a client echoes
     // the same id verbatim. Anything else can't match a pending entry.
     const id = msg.id;
     if (typeof id !== 'string') return;
-    const pending = conn.pending.get(id);
-    if (!pending) return;
+    const pendingRef = this.findPendingClientRequest(conn, id);
+    if (!pendingRef) return;
+    const pendingConn = pendingRef.conn;
+    const pending = pendingRef.req;
+    if (pendingConn !== conn && !conn.ownsSession(pending.sessionId)) {
+      // Mirror the `session/permission` handler: never drop a cross-connection
+      // vote silently. The POST already returned 202, so without a log line the
+      // operator has no grep-friendly signal to correlate against a permission
+      // prompt that stays blocked until teardown's `abandonPendingForSession`.
+      writeStderrLine(
+        `qwen serve: /acp permission vote dropped: responding connection ${logSafe(
+          conn.connectionId.slice(0, 8),
+        )} does not own session ${logSafe(pending.sessionId)} (requestId ${logSafe(
+          pending.bridgeRequestId,
+        )})`,
+      );
+      return;
+    }
     // NOTE: do NOT delete the pending entry yet. Keep it until either the
     // bridge vote OR the cancel fallback runs — if both somehow fail, the
     // entry survives so a later session/connection teardown
     // (`abandonPendingForSession`) can still release the mediator.
 
-    // A client error response is a cancellation; otherwise pass the result
-    // through. The cast defers shape validation to the bridge, so a
-    // MALFORMED result (e.g. `{}` with no `outcome`) makes the mediator
-    // throw — caught below, where we fall back to an explicit cancel so the
-    // mediator is always released. The pending entry is dropped only after a
-    // successful vote/cancel (see the NOTE above), so a double-failure leaves
-    // it for teardown to retry.
-    const vote =
-      'error' in msg
-        ? { outcome: { outcome: 'cancelled' } }
-        : (msg as { result: unknown }).result;
     try {
+      // A client error response is a cancellation; otherwise validate +
+      // whitelist the result through the SAME `parsePermissionResponse` the
+      // `session/permission` handler uses. This PR widened this path to any
+      // co-owning connection (via `findPendingClientRequest`), so without the
+      // shared validator a co-owner could inject arbitrary top-level args and
+      // extra `outcome` sub-fields straight to the bridge. A malformed result
+      // throws here (as the old direct cast made the bridge throw) and is
+      // caught below, where the cancel fallback always releases the mediator.
+      const vote =
+        'error' in msg
+          ? { outcome: { outcome: 'cancelled' } }
+          : parsePermissionResponse(
+              isObject((msg as { result: unknown }).result)
+                ? (msg as { result: Record<string, unknown> }).result
+                : {},
+            );
       this.bridge.respondToSessionPermission(
         pending.sessionId,
         pending.bridgeRequestId,
@@ -3207,7 +3633,7 @@ export class AcpDispatcher {
         >[2],
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
-      conn.pending.delete(id); // vote landed — safe to drop
+      this.dropResolvedPermission(pendingConn, id);
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
@@ -3218,9 +3644,9 @@ export class AcpDispatcher {
       // permanently stuck with no recovery path.
       const cancelled = this.cancelAbandonedPermission(
         pending,
-        conn.sessions.get(pending.sessionId)?.clientId,
+        pendingConn.sessions.get(pending.sessionId)?.clientId,
       );
-      if (cancelled) conn.pending.delete(id);
+      if (cancelled) this.dropResolvedPermission(pendingConn, id);
     }
   }
 

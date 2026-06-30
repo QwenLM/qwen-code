@@ -262,6 +262,35 @@ export interface MidTurnQueueEntry {
   originatorClientId?: string;
 }
 
+/**
+ * Internal record for a prompt accepted into the per-session FIFO queue.
+ * Lives on `SessionEntry.pendingPromptList` so the daemon can report
+ * pending prompts and let callers remove specific items. The
+ * `abortController` is wired to the caller's signal (if any) so
+ * `removePendingPrompt` can cancel a queued-but-not-yet-started prompt.
+ */
+export interface PendingPromptEntry {
+  promptId: string;
+  queuedAt: number;
+  originatorClientId?: string;
+  text: string;
+  abortController: AbortController;
+  state: 'queued' | 'running';
+}
+
+/**
+ * Public projection of `PendingPromptEntry` returned by
+ * `getPendingPrompts` and the HTTP API. Omits the internal
+ * `abortController` and raw prompt content blocks.
+ */
+export interface PendingPromptSummary {
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
 export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
@@ -379,6 +408,29 @@ export interface AcpSessionBridge {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<PromptResponse>;
+
+  /**
+   * Return the pending prompt queue for a session. Includes the currently
+   * running prompt (state `'running'`) and any prompts waiting in the FIFO
+   * (state `'queued'`). Throws `SessionNotFoundError` for unknown ids.
+   */
+  getPendingPrompts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): readonly PendingPromptSummary[];
+
+  /**
+   * Remove a specific prompt from the pending queue. For `queued` prompts,
+   * aborts them so the FIFO skips dispatch. For `running` prompts, aborts
+   * the in-flight turn (equivalent to cancel). Returns `{ removed: false }`
+   * when the promptId is not found. Throws `SessionNotFoundError` for
+   * unknown session ids.
+   */
+  removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    context?: BridgeClientRequestContext,
+  ): { removed: boolean };
 
   /**
    * Cancel the in-flight prompt on the session. Throws

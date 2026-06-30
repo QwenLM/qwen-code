@@ -12,7 +12,7 @@ import type {
   ToolInvocation,
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
-import type { Config } from '../config/config.js';
+import { type Config, matchesAnyServerPattern } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -449,7 +449,7 @@ export class ToolRegistry {
         // while isMcpServerDisabled still returns false, mis-reporting
         // an intentional disable as a connectivity failure.
         const currentExcluded = this.config.getExcludedMcpServers() || [];
-        if (!currentExcluded.includes(serverName)) {
+        if (!matchesAnyServerPattern(serverName, currentExcluded)) {
           this.config.setExcludedMcpServers([...currentExcluded, serverName]);
         }
       } finally {

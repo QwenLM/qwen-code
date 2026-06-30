@@ -205,6 +205,54 @@ describe('cdCommand', () => {
     });
   });
 
+  it('resolves a Windows-style home-relative path from the home directory', async () => {
+    const missingName = `qwen-cd-missing-${process.pid}-${Date.now()}`;
+    const expectedPath = path.normalize(path.join(os.homedir(), missingName));
+
+    const result = (await cdCommand.action?.(
+      context,
+      `~\\${missingName}`,
+    )) as MessageActionReturn;
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: `Couldn't find a directory at ${expectedPath}.`,
+    });
+    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+  });
+
+  it('moves to a Windows-style home-relative directory', async () => {
+    const homeSubdir = fs.mkdtempSync(
+      path.join(os.homedir(), `qwen-cd-ok-${process.pid}-`),
+    );
+
+    try {
+      const result = (await cdCommand.action?.(
+        context,
+        `~\\${path.basename(homeSubdir)}`,
+      )) as MessageActionReturn;
+      const realCurrentDir = await realpath(currentDir);
+      const realHomeSubdir = await realpath(homeSubdir);
+
+      expect(relocateWorkingDirectory).toHaveBeenCalledWith(
+        realHomeSubdir,
+        realHomeSubdir,
+      );
+      expect(addWorkingDirectoryChangedContext).toHaveBeenCalledWith(
+        realCurrentDir,
+        realHomeSubdir,
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: `Moved to ${realHomeSubdir}.`,
+      });
+    } finally {
+      fs.rmSync(homeSubdir, { recursive: true, force: true });
+    }
+  });
+
   it('moves to a path with escaped spaces', async () => {
     const spacedDir = path.join(tmpDir, 'space dir');
     fs.mkdirSync(spacedDir);

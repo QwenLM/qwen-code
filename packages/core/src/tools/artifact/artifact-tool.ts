@@ -223,7 +223,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     const llmContent = `Published artifact "${title}" to ${url}. Share or open this URL to view the interactive page. Re-run Artifact with the same file path to update it.`;
     return {
       llmContent,
-      returnDisplay: `📄 Published artifact **${title}**\n\n${url}`,
+      returnDisplay: `Published artifact **${title}**\n\n${url}`,
       resultFilePaths: filePath ? [filePath] : undefined,
     };
   }
