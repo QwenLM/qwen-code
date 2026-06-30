@@ -2549,7 +2549,7 @@ describe('Session', () => {
           'read_after_loop',
         ]);
         expect(result.parts[4].functionResponse?.response?.['error']).toEqual(
-          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
         );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
@@ -2653,7 +2653,7 @@ describe('Session', () => {
         ).toEqual([
           'Skipped because loop detection stopped the current turn before this tool call could run.',
           'Skipped because loop detection stopped the current turn before this tool call could run.',
-          'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
         ]);
         expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
           'agent_0',

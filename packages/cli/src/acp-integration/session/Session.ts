@@ -3938,10 +3938,14 @@ export class Session implements SessionContext {
       return part;
     };
 
-    const appendSkippedAfter = async (parts: Part[], fc: FunctionCall) => {
+    const appendSkippedAfter = async (
+      parts: Part[],
+      fc: FunctionCall,
+      message = PERMISSION_CANCEL_SKIP_MESSAGE,
+    ) => {
       const startIndex = dedupedFunctionCalls.indexOf(fc) + 1;
       for (const remainingCall of dedupedFunctionCalls.slice(startIndex)) {
-        parts.push(await recordSkippedToolCall(remainingCall));
+        parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
 
@@ -4107,7 +4111,11 @@ export class Session implements SessionContext {
           shouldStopForLoop ||= r.loopDetected === true;
         }
         if (shouldStopForLoop) {
-          await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
+          await appendSkippedAfter(
+            parts,
+            batch.calls[batch.calls.length - 1],
+            LOOP_DETECTED_SKIP_MESSAGE,
+          );
           return {
             parts,
             stopAfterPermissionCancel: false,
@@ -4133,7 +4141,7 @@ export class Session implements SessionContext {
           );
           parts.push(...r.parts);
           if (r.loopDetected) {
-            await appendSkippedAfter(parts, fc);
+            await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
             return {
               parts,
               stopAfterPermissionCancel: false,
