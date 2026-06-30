@@ -308,6 +308,39 @@ export function registerSessionRoutes(
     }
   });
 
+  app.post('/session/:id/cd', mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    const targetPath = body['path'];
+    if (
+      typeof targetPath !== 'string' ||
+      targetPath.length === 0 ||
+      !path.isAbsolute(targetPath)
+    ) {
+      res.status(400).json({
+        error: '`path` is required and must be an absolute path',
+        code: 'invalid_path',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.changeSessionCwd(
+        sessionId,
+        { path: targetPath },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/cd',
+        sessionId,
+      });
+    }
+  });
+
   app.get('/session/:id/status', (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
@@ -465,6 +498,40 @@ export function registerSessionRoutes(
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'POST /session/:id/goal/clear',
+          sessionId,
+        });
+      }
+    },
+  );
+
+  app.post(
+    '/session/:id/continue',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const sessionId = req.params['id'];
+      if (!sessionId) {
+        res
+          .status(400)
+          .json({ error: '`sessionId` route parameter is required' });
+        return;
+      }
+      // Forward the originator and a generated promptId so the bridge can
+      // attribute and correlate the continuation turn (it now runs through the
+      // prompt-admission path, same as POST /session/:id/prompt). The accepted
+      // response echoes promptId + lastEventId as the replay/correlation anchor.
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      const promptId = crypto.randomUUID();
+      try {
+        res.status(200).json(
+          await bridge.continueSession(sessionId, {
+            ...(clientId !== undefined ? { clientId } : {}),
+            promptId,
+          }),
+        );
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/continue',
           sessionId,
         });
       }

@@ -118,8 +118,9 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   // the Config snapshot: Config is frozen at startup and never reflects a
   // setValue() write, so reopening the dialog would otherwise show stale state.
   const bareMode = config.getBareMode();
+  const safeMode = config.isSafeMode();
   const readToggle = (value: boolean | undefined): boolean =>
-    !bareMode && (value ?? true);
+    !bareMode && !safeMode && (value ?? true);
   const [autoMemoryOn, setAutoMemoryOn] = useState(() =>
     readToggle(loadedSettings.merged.memory?.enableManagedAutoMemory),
   );

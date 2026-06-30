@@ -45,6 +45,29 @@
   color: var(--muted-foreground);
 }
 
+.fullText {
+  display: inline;
+}
+
+.compactText {
+  display: none;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 599px) {
+  .fullText {
+    display: none;
+  }
+
+  .compactText {
+    display: inline;
+  }
+
+  .summary {
+    padding: 6px 12px;
+  }
+}
+
 .detail {
   position: absolute;
   bottom: calc(100% + 8px);

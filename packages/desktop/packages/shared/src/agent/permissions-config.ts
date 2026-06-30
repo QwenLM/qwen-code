@@ -514,7 +514,8 @@ export function loadRawSourcePermissions(workspaceRootPath: string, sourceSlug: 
     const json = safeJsonParse(content);
     const result = PermissionsConfigSchema.safeParse(json);
     return result.success ? result.data : null;
-  } catch {
+  } catch (error) {
+    debug('[Permissions] Error loading raw source permissions:', error);
     return null;
   }
 }

@@ -53,6 +53,12 @@ import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
+import {
+  rebuildTeamAutoMemoryIndex,
+  TeamMemoryRootSecurityError,
+} from '../memory/indexer.js';
+import { syncTeamMemory } from '../memory/team-memory-sync.js';
+import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
@@ -147,6 +153,20 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
   readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('../memory/indexer.js', async (importActual) => ({
+  // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
+  // gate distinguishes via instanceof) and override only the rebuild.
+  ...(await importActual<typeof import('../memory/indexer.js')>()),
+  rebuildTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('../memory/team-memory-sync.js', () => ({
+  syncTeamMemory: vi
+    .fn()
+    .mockResolvedValue({ committed: false, pulled: false, pushed: false }),
+}));
+vi.mock('../memory/team-memory-git-status.js', () => ({
+  getTeamMemoryShareabilityWarning: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('../hooks/index.js', () => {
@@ -392,6 +412,96 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('getTeamMemoryEnabled', () => {
+    const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM'] = prevEnv;
+      }
+    });
+
+    it('is off by default and follows the enableTeamMemory setting', () => {
+      delete process.env['QWEN_CODE_MEMORY_TEAM'];
+      expect(new Config(baseParams).getTeamMemoryEnabled()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          enableTeamMemory: true,
+        }).getTeamMemoryEnabled(),
+      ).toBe(true);
+    });
+
+    it('QWEN_CODE_MEMORY_TEAM overrides the setting', () => {
+      process.env['QWEN_CODE_MEMORY_TEAM'] = '1';
+      expect(new Config(baseParams).getTeamMemoryEnabled()).toBe(true);
+      process.env['QWEN_CODE_MEMORY_TEAM'] = '0';
+      expect(
+        new Config({
+          ...baseParams,
+          enableTeamMemory: true,
+        }).getTeamMemoryEnabled(),
+      ).toBe(false);
+    });
+
+    it('bareMode forces off even with the setting and env both on', () => {
+      process.env['QWEN_CODE_MEMORY_TEAM'] = '1';
+      expect(
+        new Config({
+          ...baseParams,
+          bareMode: true,
+          enableTeamMemory: true,
+        }).getTeamMemoryEnabled(),
+      ).toBe(false);
+    });
+  });
+
+  describe('getTeamMemorySyncEnabled', () => {
+    const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = prevEnv;
+      }
+    });
+
+    it('is off by default and follows the enableTeamMemorySync setting', () => {
+      delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      expect(new Config(baseParams).getTeamMemorySyncEnabled()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          enableTeamMemorySync: true,
+        }).getTeamMemorySyncEnabled(),
+      ).toBe(true);
+    });
+
+    it('QWEN_CODE_MEMORY_TEAM_SYNC overrides the setting', () => {
+      process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+      expect(new Config(baseParams).getTeamMemorySyncEnabled()).toBe(true);
+      process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '0';
+      expect(
+        new Config({
+          ...baseParams,
+          enableTeamMemorySync: true,
+        }).getTeamMemorySyncEnabled(),
+      ).toBe(false);
+    });
+
+    it('stays off in bare mode even with the setting and env both on', () => {
+      process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+      expect(
+        new Config({
+          ...baseParams,
+          bareMode: true,
+          enableTeamMemorySync: true,
+        }).getTeamMemorySyncEnabled(),
+      ).toBe(false);
+    });
+  });
+
   it('should store a system prompt override', () => {
     const config = new Config({
       ...baseParams,
@@ -410,6 +520,179 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getAppendSystemPrompt()).toBe('Be extra concise.');
     expect(config.getSystemPrompt()).toBeUndefined();
+  });
+
+  describe('getDefaultVisionBridgeModel', () => {
+    // Primary is text-only and lives on the 'openai' provider.
+    const stubProvider = (config: Config, models: unknown[]) => {
+      vi.spyOn(config, 'getModel').mockReturnValue('text-primary');
+      vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://primary.example.com',
+      } as ContentGeneratorConfig);
+      vi.spyOn(config, 'getAllConfiguredModels').mockReturnValue(
+        models as never,
+      );
+    };
+
+    it('honors an explicit visionModel even across providers', () => {
+      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+      stubProvider(config, [
+        {
+          id: 'vl-anthropic',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-anthropic',
+        baseUrl: 'https://api.anthropic.com',
+      });
+    });
+
+    it('falls back to same-provider auto-select when the explicit model is not configured', () => {
+      const config = new Config({ ...baseParams, visionModel: 'ghost-model' });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      // 'ghost-model' isn't configured, so the explicit pin is ignored and the
+      // same-provider candidate is auto-picked instead.
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('auto-selects a same-provider vision model when no explicit model is set', () => {
+      const config = new Config({ ...baseParams });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('honors an authType-qualified visionModel against the matching provider only', () => {
+      // Same model id on two providers; the 'anthropic:' qualifier must bind to
+      // the anthropic row, not the same-provider openai one.
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'anthropic:vl-shared',
+      });
+      stubProvider(config, [
+        {
+          id: 'vl-shared',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+        {
+          id: 'vl-shared',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'anthropic:vl-shared',
+        baseUrl: 'https://api.anthropic.com',
+      });
+    });
+
+    it('falls back to auto-select on a malformed visionModel selector instead of throwing', () => {
+      // 'openai:' is a known authType with no model id — resolveModelId throws,
+      // and the guard must swallow it rather than take down every image request.
+      const config = new Config({ ...baseParams, visionModel: 'openai:' });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(() => config.getDefaultVisionBridgeModel()).not.toThrow();
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('drops a pin that points at the current primary model and auto-selects a same-provider VL model instead', () => {
+      // Pinning the primary itself is a dead pin: the bridge exists to work
+      // around the text-only primary, so routing back at it would defeat the
+      // purpose. The provider-aware primary guard must drop the pin and hand off
+      // to same-provider auto-select rather than ever returning the primary.
+      const config = new Config({ ...baseParams, visionModel: 'text-primary' });
+      stubProvider(config, [
+        {
+          // Same id/provider/endpoint as the primary — without the guard the
+          // pin would resolve straight back to this row.
+          id: 'text-primary',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('setVisionModel("") clears the pin and reverts to same-provider auto-select', () => {
+      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+      stubProvider(config, [
+        {
+          id: 'vl-anthropic',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      // Pinned first.
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-anthropic',
+        baseUrl: 'https://api.anthropic.com',
+      });
+      // Cleared with '' — JSDoc promises a fall back to auto-select.
+      config.setVisionModel('');
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+      // undefined clears too.
+      config.setVisionModel('vl-anthropic');
+      config.setVisionModel(undefined);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
   });
 
   it('wires file history snapshot updates to chat recording', async () => {
@@ -2107,6 +2390,180 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+  });
+
+  it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {
+    const config = new Config({ ...baseParams, enableTeamMemory: true });
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValue(
+      '# Team Memory\n\n- [Shared](shared.md)',
+    );
+
+    await config.refreshHierarchicalMemory();
+
+    expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(config.getUserMemory()).not.toContain('Team Memory');
+    // The shareability check is gated on the active tier, so an inactive
+    // (untrusted) tier must never probe git.
+    expect(getTeamMemoryShareabilityWarning).not.toHaveBeenCalled();
+  });
+
+  it('refreshHierarchicalMemory must not sync when the team-root safety check rejects', async () => {
+    // The indexer THROWS when the team root is a symlink that could redirect the
+    // committed index outside the repo. Sync must respect that refusal: it must
+    // never git add/commit/push a dir that failed the safety check.
+    const prevSync = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+    try {
+      const config = new Config({
+        ...baseParams,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+      });
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      // Mirror the indexer's symlink-escape rejection: a SECURITY failure, which
+      // is the only class that blocks sync (see indexer.ts).
+      vi.mocked(rebuildTeamAutoMemoryIndex).mockRejectedValueOnce(
+        new TeamMemoryRootSecurityError(
+          'Refusing to write team memory index: /tmp/.qwen/team-memory is a ' +
+            'symlink, which could redirect the committed index outside the repository.',
+        ),
+      );
+
+      await config.refreshHierarchicalMemory();
+
+      // Gate proof: sync is enabled, yet the security rejection must skip it
+      // entirely. Stop treating TeamMemoryRootSecurityError as blocking and this
+      // assertion fails.
+      expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledTimes(1);
+      expect(syncTeamMemory).not.toHaveBeenCalled();
+    } finally {
+      if (prevSync === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = prevSync;
+      }
+    }
+  });
+
+  it('still syncs when the team-index rebuild fails for an OPERATIONAL reason', async () => {
+    // An EACCES/ENOSPC/EPERM rebuild failure is not a security escape, so it must
+    // NOT permanently gate legitimate sync — it self-corrects on the next
+    // successful rebuild. Only TeamMemoryRootSecurityError blocks sync.
+    const prevSync = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+    try {
+      const config = new Config({
+        ...baseParams,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+      });
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      // A plain Error stands in for an operational IO failure (e.g. EACCES).
+      const operationalError = Object.assign(
+        new Error('EACCES: permission denied, lstat'),
+        {
+          code: 'EACCES',
+        },
+      );
+      vi.mocked(rebuildTeamAutoMemoryIndex).mockRejectedValueOnce(
+        operationalError,
+      );
+
+      await config.refreshHierarchicalMemory();
+
+      // Not security-gated: sync still runs despite the operational failure.
+      expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledTimes(1);
+      expect(syncTeamMemory).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prevSync === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = prevSync;
+      }
+    }
+  });
+
+  it('syncs when the rebuild succeeds and sync is enabled (positive gate)', async () => {
+    // Complement to the negative branches: a successful rebuild on a trusted
+    // folder with sync enabled MUST call syncTeamMemory. Inverting or removing
+    // the sync condition is caught here.
+    const prevSync = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+    process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = '1';
+    try {
+      const config = new Config({
+        ...baseParams,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+      });
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValueOnce(
+        '# Team Memory\n\n- [Shared](shared.md)',
+      );
+
+      await config.refreshHierarchicalMemory();
+
+      expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledTimes(1);
+      expect(syncTeamMemory).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prevSync === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_TEAM_SYNC'] = prevSync;
+      }
+    }
+  });
+
+  it('refreshHierarchicalMemory surfaces a one-time warning when team memory is not git-shareable', async () => {
+    const config = new Config({ ...baseParams, enableTeamMemory: true });
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(getTeamMemoryShareabilityWarning).mockReturnValue(
+      'Team memory is enabled, but /tmp/.qwen/team-memory is git-ignored',
+    );
+
+    await config.refreshHierarchicalMemory();
+    // A second refresh must not re-emit the warning (latched once per process).
+    await config.refreshHierarchicalMemory();
+
+    expect(getTeamMemoryShareabilityWarning).toHaveBeenCalledTimes(1);
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('is git-ignored'),
+    );
   });
 
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
@@ -4676,6 +5133,28 @@ describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', 
   });
 });
 
+describe('computer use settings', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('exposes the configured idle timeout', () => {
+    const config = new Config({
+      ...baseParams,
+      computerUseIdleTimeoutMs: 12_345,
+    });
+    expect(config.getComputerUseIdleTimeoutMs()).toBe(12_345);
+  });
+
+  it('leaves the idle timeout undefined when not configured', () => {
+    const config = new Config(baseParams);
+    expect(config.getComputerUseIdleTimeoutMs()).toBeUndefined();
+  });
+});
+
 describe('BaseLlmClient Lifecycle', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
@@ -4781,6 +5260,7 @@ describe('Model Switching and Config Updates', () => {
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
       ['toolResultContentFormat']: 'string',
+      ['modalities']: { image: true },
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -4791,6 +5271,7 @@ describe('Model Switching and Config Updates', () => {
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
         toolResultContentFormat: { kind: 'settings' },
+        modalities: { kind: 'computed', detail: 'auto' },
       },
     });
 
@@ -4811,6 +5292,10 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
     expect(updatedConfig['toolResultContentFormat']).toBe('string');
+    // Modalities are model-derived; a hot switch must refresh them so the
+    // vision-bridge gate reflects the new model (it reads getEffectiveInputModalities()).
+    expect(updatedConfig['modalities']).toEqual({ image: true });
+    expect(config.getEffectiveInputModalities()).toEqual({ image: true });
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -4821,6 +5306,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
+    expect(sources['modalities']?.kind).toBe('computed');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {
@@ -5213,6 +5699,45 @@ describe('Model Switching and Config Updates', () => {
         bareMode: true,
       });
       expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+    });
+  });
+
+  describe('MCP Stop dispatch with context usage data', () => {
+    it('buildContextUsage handles MCP input patterns with runtime validation', async () => {
+      // Test the buildContextUsage function that's used in MCP Stop dispatch
+      // This validates the runtime type coercion and edge cases
+      const { buildContextUsage } = await import('../hooks/context-usage.js');
+
+      // Normal case: valid numbers
+      expect(buildContextUsage(128000, 64000)).toEqual({
+        context_usage: 0.5,
+        context_limit: 128000,
+        input_tokens: 64000,
+      });
+
+      // Missing context_limit: returns undefined
+      expect(buildContextUsage(undefined, 64000)).toBeUndefined();
+
+      // Missing input_tokens (defaults to 0): returns undefined
+      expect(buildContextUsage(128000, 0)).toBeUndefined();
+
+      // Both missing: returns undefined
+      expect(buildContextUsage(undefined, 0)).toBeUndefined();
+
+      // String values (MCP might send strings): Number.isFinite rejects strings
+      // @ts-expect-error - testing runtime validation
+      expect(buildContextUsage('128000', 64000)).toBeUndefined();
+
+      // Invalid string values: returns undefined
+      // @ts-expect-error - testing runtime validation
+      expect(buildContextUsage('invalid', 64000)).toBeUndefined();
+
+      // Negative values: returns undefined
+      expect(buildContextUsage(-128000, 64000)).toBeUndefined();
+      expect(buildContextUsage(128000, -64000)).toBeUndefined();
+
+      // Zero context_limit: returns undefined
+      expect(buildContextUsage(0, 64000)).toBeUndefined();
     });
   });
 });

@@ -12,6 +12,10 @@ import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import { CronCreateTool } from './cron-create.js';
+import { CronDeleteTool } from './cron-delete.js';
+import { CronListTool } from './cron-list.js';
+import { LoopWakeupTool } from './loop-wakeup.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -52,6 +56,12 @@ describe('tokenize', () => {
 
   it('filters empty tokens', () => {
     expect(tokenize('   foo    bar  ')).toEqual(['foo', 'bar']);
+  });
+
+  it('drops natural-language filler words and trailing punctuation', () => {
+    expect(tokenize('How do I stop this cron?')).toEqual(['stop', 'cron']);
+    expect(tokenize('please +cron, tasks!')).toEqual(['+cron', 'tasks']);
+    expect(tokenize('C++ C# search')).toEqual(['c++', 'c#', 'search']);
   });
 });
 
@@ -126,6 +136,32 @@ describe('scoreTool', () => {
       description: 'this tool does slack things',
     });
     expect(scoreTool(tool, ['slack'])).toBe(2); // SCORE_DESC_BUILTIN
+  });
+
+  it.each([
+    ['cancel', 'cron_delete'],
+    ['clear', 'cron_delete'],
+    ['delete', 'cron_remove'],
+    ['remove', 'cron_delete'],
+    ['stop', 'cron_delete'],
+  ])('bridges action alias "%s" to %s', (term, toolName) => {
+    const tool = new MockTool({
+      name: toolName,
+      description: 'scheduled task',
+      searchHint: 'cron task',
+    });
+
+    expect(scoreTool(tool, [term])).toBe(16);
+  });
+
+  it('does not add the alias bonus for a direct action-term match', () => {
+    const tool = new MockTool({
+      name: 'cron_stop',
+      description: 'scheduled task',
+      searchHint: 'cron task',
+    });
+
+    expect(scoreTool(tool, ['stop'])).toBe(10);
   });
 
   it('returns 0 when no term matches', () => {
@@ -246,6 +282,76 @@ describe('ToolSearchTool', () => {
     // Unrelated tools should not surface on a 'schedule' query.
     expect(content).not.toContain('"name":"lsp"');
     expect(content).not.toContain('"name":"ask_user_question"');
+  });
+
+  it('finds the cron delete tool for natural-language stop requests', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({
+        query: 'how do I stop this cron or loop wakeup?',
+        max_results: 1,
+      })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_delete"');
+    expect(content).not.toContain('"name":"cron_create"');
+  });
+
+  it('matches required action aliases when filtering candidates', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({
+        query: '+stop cron',
+        max_results: 1,
+      })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_delete"');
+    expect(content).not.toContain('No tools found');
+  });
+
+  it('finds the cron list tool for natural-language task visibility requests', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'show active loop tasks', max_results: 1 })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_list"');
+    expect(content).not.toContain('"name":"cron_create"');
+  });
+
+  it('still finds the loop wakeup tool for scheduling loop wakeups', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'schedule loop wakeup', max_results: 1 })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"loop_wakeup"');
+    expect(content).not.toContain('"name":"cron_delete"');
   });
 
   it('returns a friendly message when nothing matches', async () => {

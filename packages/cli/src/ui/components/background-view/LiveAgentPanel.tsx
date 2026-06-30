@@ -473,8 +473,8 @@ const AgentRow: React.FC<{
     ? escapeAnsiCtrlCodes(entry.subagentType ?? '')
     : '';
   const tokenSuffix =
-    entry.stats?.totalTokens && entry.stats.totalTokens > 0
-      ? ` · ${formatTokenCount(entry.stats.totalTokens)} tokens`
+    entry.stats?.outputTokens && entry.stats.outputTokens > 0
+      ? ` · ${formatTokenCount(entry.stats.outputTokens)} tokens`
       : '';
 
   // Layout (Claude Code's CoordinatorTaskPanel visual + our

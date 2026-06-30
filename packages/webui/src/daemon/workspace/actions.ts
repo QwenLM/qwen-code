@@ -28,12 +28,12 @@ export function createDaemonWorkspaceActions({
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
   return {
-    async listSessions() {
+    async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
       const cwd = getWorkspaceCwd();
       if (!cwd) return [];
       return withActionTimeout(
-        client.listWorkspaceSessions(cwd),
+        client.listWorkspaceSessions(cwd, options),
         'List sessions timed out',
       );
     },

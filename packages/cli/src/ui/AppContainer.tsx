@@ -1096,6 +1096,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isModelDialogOpen,
     isFastModelMode,
     isVoiceModelMode,
+    isVisionModelMode,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -1533,6 +1534,24 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const performMemoryRefresh = useCallback(async () => {
+    // Safe mode: skip all context file loading, matching refreshHierarchicalMemory()
+    if (config.isSafeMode()) {
+      config.setUserMemory('');
+      config.setGeminiMdFileCount(0);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry([], config.getWorkingDir()),
+      );
+      setGeminiMdFileCount(0);
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: 'Safe mode active — skipping context file refresh.',
+        },
+        Date.now(),
+      );
+      return;
+    }
+
     historyManager.addItem(
       {
         type: MessageType.INFO,
@@ -2684,12 +2703,23 @@ export const AppContainer = (props: AppContainerProps) => {
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
+  // `staticExtraHeight` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
+  // *inline* streaming/pending message may grow before it commits to <Static>;
+  // they do NOT reserve blank rows under the composer. In legacy mode completed
+  // history lives in <Static> (terminal scrollback) and the composer flows to
+  // the very bottom of the output. VP mode owns the whole viewport in the React
+  // tree, so to match that bottom spacing the composer must reach the bottom
+  // too — reserve nothing. (controlsHeight is measured one frame late, so a
+  // composer that grows can briefly overshoot by a row before the re-measure
+  // corrects, the same way legacy mode lets the terminal scroll on growth.)
+  const mainContentHeightReservation = useTerminalBuffer
+    ? 0
+    : staticExtraHeight + MAIN_CONTENT_HEIGHT_RESERVATION;
   const availableTerminalHeight = Math.max(
     0,
     terminalHeight -
       controlsHeight -
-      staticExtraHeight -
-      MAIN_CONTENT_HEIGHT_RESERVATION -
+      mainContentHeightReservation -
       tabBarHeight,
   );
 
@@ -3456,8 +3486,12 @@ export const AppContainer = (props: AppContainerProps) => {
         // character left if the prompt has focus. Cosmetic; tracked
         // for a follow-up that introduces a `consumed` return value
         // on KeypressHandler so global handlers can swallow keys.
-        const executingShell = pendingToolCallsRef.current.find(
-          (tc) =>
+        const promotableShells = pendingToolCallsRef.current.filter(
+          (
+            tc,
+          ): tc is TrackedExecutingToolCall & {
+            promoteAbortController: AbortController;
+          } =>
             tc.status === 'executing' &&
             // Defense-in-depth: also gate on the tool name. Today only
             // the shell tool's invocation wires `promoteAbortController`,
@@ -3467,8 +3501,9 @@ export const AppContainer = (props: AppContainerProps) => {
             // whose service has no promote-handoff handler.
             tc.request.name === ToolNames.SHELL &&
             tc.promoteAbortController !== undefined,
-        ) as TrackedExecutingToolCall | undefined;
-        if (executingShell?.promoteAbortController) {
+        );
+        if (promotableShells.length === 1) {
+          const executingShell = promotableShells[0];
           debugLogger.debug(
             `Ctrl+B promote: matched executing shell tool call ${executingShell.request.callId}`,
           );
@@ -3478,9 +3513,10 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
         debugLogger.debug(
-          `Ctrl+B promote: no executing shell tool call; falling through ` +
+          `Ctrl+B promote: expected exactly one executing shell tool call; falling through ` +
             `(streamingState=${streamingState}, ` +
-            `pendingToolCalls=${pendingToolCallsRef.current.length})`,
+            `pendingToolCalls=${pendingToolCallsRef.current.length}, ` +
+            `promotableShells=${promotableShells.length})`,
         );
       }
     },
@@ -3627,6 +3663,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3765,6 +3802,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,

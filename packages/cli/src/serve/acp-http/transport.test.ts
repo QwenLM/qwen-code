@@ -184,9 +184,19 @@ class FakeBridge {
   }
 
   subscribeThrows = false;
+  /** Records every subscribeEvents call so tests can assert the resume cursor. */
+  subscribeCalls: Array<{ sessionId: string; lastEventId?: number }> = [];
+  /** Parallel to `subscribeCalls`: each subscription's abort signal, so a test
+   * can detect when a closed stream's pump has actually stopped server-side. */
+  subscribeSignals: Array<AbortSignal | undefined> = [];
 
-  subscribeEvents(sessionId: string, opts?: { signal?: AbortSignal }) {
+  subscribeEvents(
+    sessionId: string,
+    opts?: { signal?: AbortSignal; lastEventId?: number },
+  ) {
     if (this.subscribeThrows) throw new Error('subscribe failed');
+    this.subscribeCalls.push({ sessionId, lastEventId: opts?.lastEventId });
+    this.subscribeSignals.push(opts?.signal);
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
     return q.iterable;
@@ -198,6 +208,18 @@ class FakeBridge {
       return Promise.resolve(this.promptBehavior(sessionId, q, signal));
     }
     return Promise.resolve({ stopReason: 'end_turn' });
+  }
+
+  /**
+   * Bus head id the daemon stamps as a deferred reply's WATERMARK (`anchorId`)
+   * in `replySession`. Configurable per test so the watermark-ordering path can
+   * be exercised end-to-end with a REAL anchor (without this method the daemon's
+   * try/catch fell back to `anchorId = undefined`, so every integration test
+   * only ever hit the unanchored path).
+   */
+  sessionLastEventId: number | undefined = undefined;
+  getSessionLastEventId(_sessionId: string): number | undefined {
+    return this.sessionLastEventId;
   }
 
   respondToSessionPermission() {
@@ -529,6 +551,53 @@ async function* readSse(
   }
 }
 
+/**
+ * Like `readSse` but yields the RAW frame text (so the `id:` resume-cursor
+ * line is visible — `readSse` only keeps the parsed `data:` payload).
+ */
+async function* readSseRaw(
+  res: Response,
+  signal: AbortSignal,
+): AsyncGenerator<string> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  signal.addEventListener('abort', () => void reader.cancel().catch(() => {}));
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buf += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      // Skip the `retry:` hint and comment-only heartbeats (no `data:` line).
+      if (frame.split('\n').some((l) => l.startsWith('data: '))) yield frame;
+    }
+  }
+}
+
+/** Read the next N RAW data frames (with `id:` lines) from an SSE response. */
+async function takeRawFrames(
+  res: Response,
+  n: number,
+  timeoutMs = 2000,
+): Promise<string[]> {
+  const out: string[] = [];
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    for await (const f of readSseRaw(res, ac.signal)) {
+      out.push(f);
+      if (out.length >= n) break;
+    }
+  } finally {
+    clearTimeout(timer);
+    ac.abort();
+  }
+  return out;
+}
+
 /** Read the next N data frames from an SSE response, then abort. */
 async function takeFrames(
   res: Response,
@@ -851,6 +920,397 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(
       (frames[1] as { result: { stopReason: string } }).result.stopReason,
     ).toBe('end_turn');
+  });
+
+  it('live session/update frames carry an SSE `id:` resume cursor', async () => {
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk' },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeRawFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    const frames = await got;
+    // `pushQueue` stamps bus ids from 1, so the first session_update is id 1.
+    // The frame MUST carry `id: 1` before its `data:` line — that is the
+    // cursor an SSE client echoes as `Last-Event-ID` on reconnect.
+    expect(frames[0]).toMatch(/(^|\n)id: 1\ndata: /);
+    expect(frames[0]).toContain('"method":"session/update"');
+  });
+
+  it('GET Last-Event-ID flows to subscribeEvents as the resume cursor', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+
+    // Reconnect carrying a cursor → subscribeEvents gets lastEventId=42.
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+    });
+    await resumed.body?.cancel().catch(() => {});
+
+    // A non-numeric header is rejected (logged) → live-only (undefined).
+    const bad = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': 'not-a-number',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await bad.body?.cancel().catch(() => {});
+
+    // A fresh stream with no header → live-only (undefined), as before.
+    const fresh = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 3);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await fresh.body?.cancel().catch(() => {});
+  });
+
+  it('real close-then-reconnect order keeps ownership (no 403) + prompt alive, resumes via Last-Event-ID', async () => {
+    let promptSignal: AbortSignal | undefined;
+    bridge.promptBehavior = async (_s, q, signal) => {
+      promptSignal = signal;
+      q.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk' },
+        },
+      });
+      // Keep the prompt running across the disconnect + reconnect.
+      await new Promise((r) => setTimeout(r, 1000));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1); // pump subscribed
+    const r1 = frameReader(s1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    expect(ack.status).toBe(202);
+    await r1.next(); // first content frame (bus id 1)
+
+    // Close the OLD stream FIRST — the real EventSource/proxy order (the
+    // existing reconnect tests overlap streams, hiding this).
+    r1.close();
+    await s1.body?.cancel().catch(() => {});
+    // Wait until the daemon has PROCESSED the close (old pump's signal aborted).
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+
+    // Detach-with-grace, NOT teardown: the in-flight prompt must survive.
+    expect(promptSignal?.aborted).toBe(false);
+
+    // Reconnect carrying the cursor — must be 200 (ownership kept), not 403.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '1',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 1,
+    });
+    expect(promptSignal?.aborted).toBe(false); // still alive after reconnect
+    await s2.body?.cancel().catch(() => {});
+  });
+
+  it('on resume, a reply buffered during the gap is flushed on replay_complete — AFTER replayed content, NOT on the pre-replay state_resync_required frame', async () => {
+    // Guards the core §1.8 ordering invariant end-to-end through the pump:
+    // the EventBus emits `state_resync_required` BEFORE the replay frames (then
+    // `replay_complete` at the end). If the deferred id-less reply were flushed
+    // on the resync frame it would land ahead of the replayed content — the
+    // truncated-body failure this PR fixes. It must flush on `replay_complete`.
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    bridge.promptBehavior = async (_s, _q) => {
+      // Hold the prompt open across the disconnect; its result is produced
+      // only after the gate opens (i.e. during the detach gap) → buffered.
+      await gate;
+      return { stopReason: 'end_turn' };
+    };
+
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    expect(ack.status).toBe(202);
+
+    // Close s1 → detach-with-grace (old pump's signal aborts).
+    await s1.body?.cancel().catch(() => {});
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+
+    // Now release the prompt: its result is sent while detached → buffered as an
+    // id-less reply. Settle briefly so it lands in the buffer before reconnect
+    // (same in-process settle idiom the harness uses elsewhere).
+    openGate();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Reconnect carrying a cursor → the buffered id-less reply is DEFERRED.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '0',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+
+    // Drive the resume sequence the real EventBus would: resync FIRST, then the
+    // replayed content, then replay_complete.
+    const q2 = bridge.queues.get('sess-1')!;
+    q2.push({
+      type: 'state_resync_required',
+      data: { reason: 'ring_evicted' },
+    });
+    q2.push({
+      type: 'session_update',
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'REPLAYED' },
+      },
+    });
+    q2.push({ type: 'replay_complete', data: { replayedCount: 1 } });
+
+    const r2 = frameReader(s2);
+    const order: string[] = [];
+    try {
+      // Read until we've seen the deferred reply (or a safety cap).
+      for (let i = 0; i < 8 && !order.includes('reply'); i++) {
+        const f = (await r2.next()) as {
+          method?: string;
+          result?: unknown;
+          params?: { kind?: string; update?: { text?: string } };
+        };
+        if (f.method === undefined && 'result' in f) order.push('reply');
+        else if (f.params?.kind === 'state_resync_required')
+          order.push('resync');
+        else if (f.params?.update?.text === 'REPLAYED') order.push('content');
+        else if (f.params?.kind === 'replay_complete')
+          order.push('replay_complete');
+      }
+    } finally {
+      r2.close();
+    }
+
+    // The reply must arrive AFTER the replayed content (and thus after the
+    // pre-replay resync frame) — not flushed early on state_resync_required.
+    expect(order).toContain('reply');
+    expect(order).toContain('content');
+    expect(order.indexOf('content')).toBeLessThan(order.indexOf('reply'));
+    expect(order.indexOf('resync')).toBeLessThan(order.indexOf('content'));
+  });
+
+  it('on resume, an ANCHORED deferred reply releases mid-replay at its watermark — after the anchor content, BEFORE replay_complete (end-to-end through getSessionLastEventId)', async () => {
+    // Exercises the anchored watermark path end-to-end: `replySession` stamps
+    // the reply with `anchorId = getSessionLastEventId(sessionId)` (a real
+    // number here, not the undefined fallback), so the reply is held until the
+    // pump has DELIVERED content through that id — then released MID-replay,
+    // before `replay_complete`. This distinguishes the watermark release from
+    // the unanchored "release at replay_complete" path (covered above): the
+    // reply must land between the anchor content and the replay boundary, and
+    // NOT before the content that precedes its watermark.
+    bridge.sessionLastEventId = 2; // reply's watermark anchors at bus id 2.
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    bridge.promptBehavior = async (_s, _q) => {
+      await gate; // result produced during the detach gap → buffered.
+      return { stopReason: 'end_turn' };
+    };
+
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    expect(ack.status).toBe(202);
+
+    // Close s1 → detach-with-grace; release the prompt while detached so its
+    // reply buffers as a deferred reply WITH anchorId=2.
+    await s1.body?.cancel().catch(() => {});
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+    openGate();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Reconnect carrying a cursor → replay in flight, the reply is DEFERRED.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '0',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+
+    // Clean replay (no eviction): two id-bearing content frames straddling the
+    // watermark, then replay_complete. The reply must release on id=2, NOT id=1.
+    const q2 = bridge.queues.get('sess-1')!;
+    q2.push({
+      type: 'session_update',
+      id: 1,
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'C1' },
+      },
+    });
+    q2.push({
+      type: 'session_update',
+      id: 2,
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'C2' },
+      },
+    });
+    q2.push({ type: 'replay_complete', data: { replayedCount: 2 } });
+
+    const r2 = frameReader(s2);
+    const order: string[] = [];
+    try {
+      // Read past the reply through to the replay boundary so the ordering of
+      // reply vs replay_complete is observable (the distinguishing assertion).
+      for (let i = 0; i < 12 && !order.includes('replay_complete'); i++) {
+        const f = (await r2.next()) as {
+          method?: string;
+          result?: unknown;
+          params?: { kind?: string; update?: { text?: string } };
+        };
+        if (f.method === undefined && 'result' in f) order.push('reply');
+        else if (f.params?.update?.text === 'C1') order.push('c1');
+        else if (f.params?.update?.text === 'C2') order.push('c2');
+        else if (f.params?.kind === 'replay_complete')
+          order.push('replay_complete');
+      }
+    } finally {
+      r2.close();
+    }
+
+    // Held through the pre-watermark content (c1), released ON the watermark
+    // (c2) MID-replay, and BEFORE the replay boundary — the anchor, not the
+    // replay_complete boundary, gated the release.
+    expect(order).toContain('reply');
+    expect(order).toContain('c1');
+    expect(order).toContain('c2');
+    expect(order).toContain('replay_complete');
+    expect(order.indexOf('c1')).toBeLessThan(order.indexOf('c2'));
+    expect(order.indexOf('c2')).toBeLessThan(order.indexOf('reply'));
+    expect(order.indexOf('reply')).toBeLessThan(
+      order.indexOf('replay_complete'),
+    );
+  });
+
+  it('GET Last-Event-ID past MAX_SAFE_INTEGER → live-only (undefined)', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const overflow = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '9007199254740992', // MAX_SAFE_INTEGER + 1
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await overflow.body?.cancel().catch(() => {});
+  });
+
+  it('a replayed permission_request reuses the pending entry (idempotent, same outbound id)', async () => {
+    bridge.promptBehavior = async (_s, q) => {
+      const perm = {
+        requestId: 'perm-1',
+        sessionId: 'sess-1',
+        toolCall: { name: 'shell' },
+        options: [{ optionId: 'allow', name: 'Allow' }],
+      };
+      q.push({ type: 'permission_request', data: perm });
+      // Simulate a ring replay re-delivering the SAME bridge request (a
+      // reconnect whose Last-Event-ID precedes the still-pending permission).
+      q.push({ type: 'permission_request', data: perm });
+      await new Promise((r) => setTimeout(r, 50));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const reader = frameReader(sess);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    const f1 = (await reader.next()) as { method: string; id: unknown };
+    const f2 = (await reader.next()) as { method: string; id: unknown };
+    expect(f1.method).toBe('session/request_permission');
+    expect(f2.method).toBe('session/request_permission');
+    // SAME outbound JSON-RPC id ⇒ one pending entry reused, not a 2nd orphan.
+    expect(f1.id).toBe(f2.id);
+    reader.close();
   });
 
   it('permission request round-trips agent→client→agent', async () => {
@@ -4088,6 +4548,7 @@ describe('ACP WebSocket transport security', () => {
   function startServer(
     opts: {
       token?: string;
+      allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
     } = {},
   ) {
@@ -4100,14 +4561,16 @@ describe('ACP WebSocket transport security', () => {
         workspace: fakeWorkspace,
         enabled: true,
         token: opts.token,
+        allowedOrigins: opts.allowedOrigins,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
       });
-      server = app.listen(0, '127.0.0.1', () => {
-        port = (server.address() as AddressInfo).port;
-        handle?.attachServer(server);
+      const listeningServer = app.listen(0, '127.0.0.1', () => {
+        port = (listeningServer.address() as AddressInfo).port;
+        handle?.attachServer(listeningServer);
         resolve();
       });
+      server = listeningServer;
     });
   }
 
@@ -4131,9 +4594,10 @@ describe('ACP WebSocket transport security', () => {
   function wsConnectRaw(
     host: string,
     origin?: string,
+    extraHeaders: Record<string, string> = {},
   ): Promise<{ code: number }> {
     return new Promise((resolve) => {
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { ...extraHeaders };
       if (origin) headers['Origin'] = origin;
       const ws = new WebSocket(`ws://${host}:${port}/acp`, {
         headers,
@@ -4172,9 +4636,42 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(403);
   });
 
-  it('allows WS upgrade with loopback Origin header', async () => {
+  it("rejects cross-origin WS upgrade even when allow-origin '*' is configured", async () => {
+    await startServer({
+      token: 'secret-token-123',
+      allowedOrigins: { allowAny: true, origins: new Set() },
+    });
+    const result = await wsConnectRaw('127.0.0.1', 'https://evil.com', {
+      Authorization: 'Bearer secret-token-123',
+    });
+    expect(result.code).toBe(403);
+  });
+
+  it('allows WS upgrade from an explicitly allowlisted extension origin', async () => {
+    await startServer({
+      token: 'secret-token-123',
+      allowedOrigins: {
+        allowAny: false,
+        origins: new Set(['chrome-extension://abcdefghijklmnop']),
+      },
+    });
+    const result = await wsConnectRaw(
+      '127.0.0.1',
+      'chrome-extension://abcdefghijklmnop',
+      { Authorization: 'Bearer secret-token-123' },
+    );
+    expect(result.code).toBe(101);
+  });
+
+  it('rejects WS upgrade with a loopback Origin header on a different port', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'http://localhost:3000');
+    expect(result.code).toBe(403);
+  });
+
+  it('allows WS upgrade with a loopback Origin header on the daemon port', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', `http://localhost:${port}`);
     expect(result.code).toBe(101);
   });
 

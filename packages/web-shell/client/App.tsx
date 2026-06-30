@@ -32,6 +32,7 @@ import type {
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
+import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -73,16 +74,13 @@ import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
+import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
-import deleteIconUrl from './assets/icons/delete.svg';
-import editIconUrl from './assets/icons/edit.svg';
-import insertIconUrl from './assets/icons/insert.svg';
-import queueIconUrl from './assets/icons/queue.svg';
 import {
   I18nProvider,
   getTranslator,
@@ -95,9 +93,10 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
-import { cssUrlVar } from './utils/cssUrlVar';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
+import { decideEscapeIntent } from './utils/escapeIntent';
+import { canDrainQueue } from './utils/queueDrain';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
 import {
@@ -210,7 +209,6 @@ function TodoContextsProvider({
 }
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
-const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 const MAX_TOASTS = 4;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
@@ -244,6 +242,7 @@ function isGoalClearCommand(text: string): boolean {
 
 interface QueuedPrompt {
   id: number;
+  sessionId?: string;
   text: string;
   images?: PromptImage[];
   onComplete?: () => void;
@@ -313,6 +312,11 @@ export interface BugReportInfo {
   systemInfo: Record<string, string>;
 }
 
+export interface WebShellSidebarOptions {
+  enabled?: boolean;
+  defaultCollapsed?: boolean;
+}
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string) => void;
@@ -330,6 +334,8 @@ export interface WebShellProps {
   style?: React.CSSProperties;
   /** Maximum chat content width in regular mode. Defaults to 1000px. */
   chatMaxWidth?: number;
+  /** Optional workspace sidebar. Disabled by default. */
+  sidebar?: boolean | WebShellSidebarOptions;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
@@ -406,6 +412,45 @@ type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
+
+function resolveSidebarOptions(
+  sidebar: WebShellProps['sidebar'],
+): Required<WebShellSidebarOptions> {
+  if (sidebar === true) {
+    return { enabled: true, defaultCollapsed: false };
+  }
+  if (!sidebar) {
+    return { enabled: false, defaultCollapsed: false };
+  }
+  return {
+    enabled: sidebar.enabled ?? true,
+    defaultCollapsed: sidebar.defaultCollapsed ?? false,
+  };
+}
+
+function readSidebarCollapsed(defaultCollapsed: boolean): boolean {
+  if (typeof window === 'undefined') return defaultCollapsed;
+  try {
+    const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+    if (stored === 'true') return true;
+    if (stored === 'false') return false;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return defaultCollapsed;
+}
+
+function writeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(
+      SIDEBAR_COLLAPSED_STORAGE_KEY,
+      String(collapsed),
+    );
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+}
 
 function getDefaultChatWidthMode(): ChatWidthMode {
   return `${DEFAULT_CHAT_MAX_WIDTH}`;
@@ -709,102 +754,6 @@ function translateCopyMessage(
   return message;
 }
 
-function QueuedPromptDisplay({
-  prompts,
-  t,
-  onDelete,
-  onInsert,
-  onEdit,
-}: {
-  prompts: readonly QueuedPrompt[];
-  t: ReturnType<typeof getTranslator>;
-  onDelete: (id: number) => void;
-  onInsert: (id: number) => void;
-  onEdit: (id: number) => void;
-}) {
-  if (prompts.length === 0) return null;
-
-  return (
-    <div className={styles.queuedPrompts}>
-      {prompts.map((prompt) => {
-        const normalizedPreview = prompt.text.replace(/\s+/g, ' ').trim();
-        const preview =
-          normalizedPreview.length > MAX_QUEUED_PROMPT_PREVIEW_CHARS
-            ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
-            : normalizedPreview;
-        const imageCount = prompt.images?.length ?? 0;
-        // A command (/… or !…) can't be inserted into the running turn — insert
-        // injects raw text the model would see literally, never running the
-        // command. Show the action disabled so it stays visible but inert.
-        const isCommand = isCommandPrompt(prompt.text);
-        return (
-          <div key={prompt.id} className={styles.queuedPrompt}>
-            <span className={styles.queuedPromptIcon} aria-hidden="true">
-              <span
-                className={styles.queuedPromptMaskIcon}
-                style={cssUrlVar('--queued-icon-url', queueIconUrl)}
-              />
-            </span>
-            <span className={styles.queuedPromptText}>
-              {preview}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
-                : ''}
-            </span>
-            <span className={styles.queuedPromptActions}>
-              {imageCount === 0 && (
-                <button
-                  type="button"
-                  className={styles.queuedPromptAction}
-                  onClick={() => onInsert(prompt.id)}
-                  disabled={isCommand}
-                  title={
-                    isCommand ? t('queue.insertCommandDisabled') : undefined
-                  }
-                >
-                  <span
-                    className={styles.queuedPromptActionIcon}
-                    style={cssUrlVar('--queued-icon-url', insertIconUrl)}
-                    aria-hidden="true"
-                  />
-                  {t('queue.insert')}
-                </button>
-              )}
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onDelete(prompt.id)}
-                aria-label={t('queue.delete')}
-                title={t('queue.delete')}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', deleteIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onEdit(prompt.id)}
-                aria-label={t('queue.edit')}
-                title={t('queue.edit')}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', editIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-            </span>
-          </div>
-        );
-      })}
-      <div className={styles.queuedHint}>{t('queue.footer')}</div>
-    </div>
-  );
-}
-
 export function App({
   onSessionIdChange,
   theme: providedTheme,
@@ -826,6 +775,7 @@ export function App({
   renderComposerToolbarEnd,
   renderFooter,
   chatMaxWidth,
+  sidebar,
   composerToolbarActions,
   compactThinking = false,
   collapseCompletedTurns = true,
@@ -848,6 +798,20 @@ export function App({
         : normalizeLanguage(providedLanguage),
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const sidebarOptions = useMemo(
+    () => resolveSidebarOptions(sidebar),
+    [sidebar],
+  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    readSidebarCollapsed(sidebarOptions.defaultCollapsed),
+  );
+  const [sidebarSwitchingSessionId, setSidebarSwitchingSessionId] = useState<
+    string | null
+  >(null);
+  const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
+    setSidebarCollapsed(collapsed);
+    writeSidebarCollapsed(collapsed);
+  }, []);
   const customization = useMemo(
     () => ({
       renderToolHeaderExtra,
@@ -952,13 +916,22 @@ export function App({
     [messageBlocks],
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
+  const canActOnPendingApproval = !(
+    connection.catchingUp && sidebarSwitchingSessionId !== null
+  );
   const pendingAskUserApproval = isAskUserPermission(pendingApproval)
-    ? pendingApproval
+    ? canActOnPendingApproval
+      ? pendingApproval
+      : null
     : null;
   const pendingToolApproval =
-    pendingApproval && !pendingAskUserApproval ? pendingApproval : null;
+    pendingApproval && !isAskUserPermission(pendingApproval)
+      ? canActOnPendingApproval
+        ? pendingApproval
+        : null
+      : null;
   const pendingApprovalRef = useRef(pendingApproval);
-  pendingApprovalRef.current = pendingApproval;
+  pendingApprovalRef.current = canActOnPendingApproval ? pendingApproval : null;
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -1242,7 +1215,11 @@ export function App({
   const [agentsDialogMode, setAgentsDialogMode] =
     useState<AgentsInitialMode | null>(null);
   const [escapeHintVisible, setEscapeHintVisible] = useState(false);
-  const escPressCountRef = useRef(0);
+  // Whether the first Esc has armed a stream cancellation; the composer's send
+  // button shows an "Esc again to stop" affordance while true.
+  const [cancelArmed, setCancelArmed] = useState(false);
+  // Which action the pending second Esc would perform, or null when idle.
+  const escArmedActionRef = useRef<'cancel' | 'clear' | null>(null);
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
@@ -1272,6 +1249,21 @@ export function App({
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const nextQueuedPromptIdRef = useRef(1);
   const drainingQueueRef = useRef(false);
+  // After a drained prompt is submitted, block the next drain until its turn has
+  // actually started. `streamingState` flips asynchronously (daemon round-trip),
+  // so without this gate a second queued prompt fires in the window before the
+  // first registers as streaming — both land back-to-back and the first is lost.
+  const awaitingTurnStartRef = useRef(false);
+  const awaitingTurnStartTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  // The pending setTimeout(0) submit of a drained prompt. Tracked so a session
+  // switch or unmount can cancel it — the drain cleanup deliberately leaves it
+  // running while the gate is armed (for the benign re-render storm), which
+  // would otherwise dispatch a stale prompt into the wrong/torn-down session.
+  const drainSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -1328,6 +1320,22 @@ export function App({
 
   useEffect(() => {
     activeSessionIdRef.current = connection.sessionId;
+    queuedPromptsRef.current = [];
+    setQueuedPrompts([]);
+    drainingQueueRef.current = false;
+    awaitingTurnStartRef.current = false;
+    if (awaitingTurnStartTimerRef.current) {
+      clearTimeout(awaitingTurnStartTimerRef.current);
+      awaitingTurnStartTimerRef.current = null;
+    }
+    // Cancel a still-pending drained submit so it can't fire into the new
+    // session (the drain cleanup leaves it running while the gate is armed).
+    if (drainSubmitTimerRef.current) {
+      clearTimeout(drainSubmitTimerRef.current);
+      drainSubmitTimerRef.current = null;
+    }
+    midTurnEnqueueAbortRef.current?.abort();
+    midTurnEnqueueAbortRef.current = null;
     btwAbortControllerRef.current?.abort();
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
@@ -1488,6 +1496,7 @@ export function App({
       if (!trimmed) return true;
       const nextPrompt: QueuedPrompt = {
         id: nextQueuedPromptIdRef.current++,
+        sessionId: activeSessionIdRef.current,
         text: trimmed,
         images: images ? [...images] : undefined,
         onComplete,
@@ -1540,6 +1549,11 @@ export function App({
     setQueuedPrompts(rest);
     return nextPrompt;
   }, []);
+
+  const peekNextQueuedPrompt = useCallback(
+    (): QueuedPrompt | null => queuedPromptsRef.current[0] ?? null,
+    [],
+  );
 
   const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
     const current = queuedPromptsRef.current;
@@ -1610,14 +1624,6 @@ export function App({
     () => popQueuedPromptForEdit(),
     [popQueuedPromptForEdit],
   );
-
-  const clearQueuedPrompts = useCallback((): boolean => {
-    if (queuedPromptsRef.current.length === 0) return false;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
-    return true;
-  }, [store, t]);
 
   // When the daemon drains queued messages into the running turn it emits
   // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
@@ -2067,20 +2073,53 @@ export function App({
     branchCurrentSession();
   }, [branchCurrentSession]);
 
-  const createNewSession = useCallback(() => {
-    (sessionActions as typeof sessionActions & SessionActionsWithCreate)
-      .createSession()
-      .then((session) => {
-        if (onSessionIdChange) {
-          onSessionIdChange(session.sessionId);
-          return;
-        }
-        return sessionActions.loadSession(session.sessionId);
-      })
-      .catch((error: unknown) => {
-        reportError(error, 'Failed to create a new session');
-      });
+  const createNewSession = useCallback(async () => {
+    try {
+      const session = await (
+        sessionActions as typeof sessionActions & SessionActionsWithCreate
+      ).createSession();
+      if (onSessionIdChange) {
+        onSessionIdChange(session.sessionId);
+        return true;
+      }
+      void sessionActions
+        .loadSession(session.sessionId)
+        .catch((error: unknown) =>
+          reportError(error, 'Failed to switch session'),
+        );
+      return true;
+    } catch (error) {
+      reportError(error, 'Failed to create a new session');
+      return false;
+    }
   }, [onSessionIdChange, reportError, sessionActions]);
+
+  const loadSidebarSession = useCallback(
+    async (sessionId: string) => {
+      setSidebarSwitchingSessionId(sessionId);
+      try {
+        await sessionActions.loadSession(sessionId, {
+          deferTranscriptReset: true,
+        });
+      } catch (error) {
+        setSidebarSwitchingSessionId((current) =>
+          current === sessionId ? null : current,
+        );
+        throw error;
+      }
+    },
+    [sessionActions],
+  );
+
+  useEffect(() => {
+    if (
+      sidebarSwitchingSessionId !== null &&
+      connection.sessionId === sidebarSwitchingSessionId &&
+      !connection.catchingUp
+    ) {
+      setSidebarSwitchingSessionId(null);
+    }
+  }, [connection.catchingUp, connection.sessionId, sidebarSwitchingSessionId]);
 
   const openTasksPanel = useCallback(() => {
     sessionActions
@@ -3014,19 +3053,55 @@ export function App({
   );
 
   useEffect(() => {
-    if (drainingQueueRef.current) return;
-    if (!connected) return;
-    if (streamingState !== 'idle') return;
-    if (interactionBlocked) return;
-    if (pendingApproval) return;
-    if (queuedPrompts.length === 0) return;
+    if (
+      !canDrainQueue({
+        draining: drainingQueueRef.current,
+        awaitingTurnStart: awaitingTurnStartRef.current,
+        connected,
+        streaming: streamingState !== 'idle',
+        interactionBlocked,
+        pendingApproval: !!pendingApproval,
+        queueLength: queuedPrompts.length,
+      })
+    ) {
+      return;
+    }
 
-    const nextPrompt = popNextQueuedPrompt();
+    const nextPrompt = peekNextQueuedPrompt();
     if (!nextPrompt) return;
+    if (
+      nextPrompt.sessionId !== undefined &&
+      nextPrompt.sessionId !== connection.sessionId
+    ) {
+      return;
+    }
+    popNextQueuedPrompt();
+
+    // Arm the gate SYNCHRONOUSLY, before the setState in popNextQueuedPrompt
+    // triggers a re-render: the daemon flips `streamingState` asynchronously, so
+    // without this the effect re-runs in the same tick and pops a second prompt
+    // before the first registers as streaming — both fire back-to-back and the
+    // first is lost. Cleared once this prompt's turn starts (streamingState
+    // effect), with a safety-net timer for a prompt that never streams (e.g. a
+    // queued slash command).
+    awaitingTurnStartRef.current = true;
+    if (awaitingTurnStartTimerRef.current) {
+      clearTimeout(awaitingTurnStartTimerRef.current);
+    }
+    const TURN_START_GATE_SAFETY_MS = 2500;
+    awaitingTurnStartTimerRef.current = setTimeout(() => {
+      awaitingTurnStartRef.current = false;
+      awaitingTurnStartTimerRef.current = null;
+      // Opening the gate touched only a ref. Nudge a re-render (same queue
+      // contents) so the drain effect re-evaluates and picks up anything still
+      // queued behind a prompt that never streamed (e.g. a local command).
+      setQueuedPrompts((prev) => [...prev]);
+    }, TURN_START_GATE_SAFETY_MS);
 
     drainingQueueRef.current = true;
     let sent = false;
-    const timer = window.setTimeout(() => {
+    const timer = setTimeout(() => {
+      drainSubmitTimerRef.current = null;
       sent = true;
       try {
         handleSubmit(nextPrompt.text, nextPrompt.images);
@@ -3035,27 +3110,62 @@ export function App({
         drainingQueueRef.current = false;
       }
     }, 0);
+    drainSubmitTimerRef.current = timer;
     return () => {
-      if (!sent) {
-        // Cleanup ran before timeout fired — put the prompt back at the
-        // front of the queue so it's not lost. This can happen when any
-        // dependency (e.g. handleSubmit, streamingState) changes between
-        // popNextQueuedPrompt() and the setTimeout firing.
-        queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
-        setQueuedPrompts(queuedPromptsRef.current);
+      // While the gate is armed the re-run is already blocked, so let the
+      // pending submit fire — don't cancel it or re-queue. Only when unarmed
+      // (a genuine dependency change before submit) restore the prompt.
+      if (!awaitingTurnStartRef.current) {
+        if (!sent) {
+          queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
+          setQueuedPrompts(queuedPromptsRef.current);
+        }
+        clearTimeout(timer);
+        drainSubmitTimerRef.current = null;
       }
-      window.clearTimeout(timer);
       drainingQueueRef.current = false;
     };
   }, [
     connected,
+    connection.sessionId,
     interactionBlocked,
     handleSubmit,
     pendingApproval,
+    peekNextQueuedPrompt,
     popNextQueuedPrompt,
     queuedPrompts,
     streamingState,
   ]);
+
+  // The drained prompt's turn has started — release the drain gate. From here
+  // the `streamingState !== 'idle'` guard holds the next prompt until this turn
+  // settles, so the queue advances one turn at a time.
+  useEffect(() => {
+    if (streamingState !== 'idle') {
+      awaitingTurnStartRef.current = false;
+      if (awaitingTurnStartTimerRef.current) {
+        clearTimeout(awaitingTurnStartTimerRef.current);
+        awaitingTurnStartTimerRef.current = null;
+      }
+    }
+  }, [streamingState]);
+
+  // On unmount, cancel both pending drain timers so neither the safety-net
+  // re-render (up to 2.5s) nor a still-pending submit fires on a torn-down
+  // component / dispatches into a dead session.
+  useEffect(
+    () => () => {
+      if (awaitingTurnStartTimerRef.current) {
+        clearTimeout(awaitingTurnStartTimerRef.current);
+        awaitingTurnStartTimerRef.current = null;
+      }
+      if (drainSubmitTimerRef.current) {
+        clearTimeout(drainSubmitTimerRef.current);
+        drainSubmitTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
@@ -3145,81 +3255,107 @@ export function App({
     t,
   ]);
 
+  const resetEscapeState = useCallback(() => {
+    escArmedActionRef.current = null;
+    setEscapeHintVisible(false);
+    setCancelArmed(false);
+    if (escapeTimerRef.current) {
+      clearTimeout(escapeTimerRef.current);
+      escapeTimerRef.current = null;
+    }
+  }, []);
+
+  // The Esc handler reads live state, but its global keydown listener must mount
+  // ONCE: streamingState flips among 'waiting'/'responding'/'thinking' mid-turn,
+  // and if it were an effect dep each flip would tear the listener down and run
+  // resetEscapeState(), wiping a half-armed two-press cancel. Read live values
+  // through a ref so the listener stays put across re-renders.
+  const escLiveRef = useRef({
+    streamingState,
+    pendingApproval,
+    interactionBlocked,
+    handleCancel,
+    handleCycleMode,
+  });
+  escLiveRef.current = {
+    streamingState,
+    pendingApproval,
+    interactionBlocked,
+    handleCancel,
+    handleCycleMode,
+  };
+
+  // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
+  // relevant action (cancel vs clear) changes with it, so a leftover arm is now
+  // stale. Keyed on the boolean, so intra-turn sub-state flips don't reset it.
+  const escStreamingBoundary = streamingState !== 'idle';
   useEffect(() => {
-    const resetEscapeState = () => {
-      escPressCountRef.current = 0;
-      setEscapeHintVisible(false);
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-        escapeTimerRef.current = null;
-      }
+    resetEscapeState();
+  }, [escStreamingBoundary, resetEscapeState]);
+
+  useEffect(() => {
+    // Arm a two-press action: the first Esc shows the affordance and starts a
+    // confirm window; a second Esc within it confirms, any other key resets it.
+    const ESC_CANCEL_CONFIRM_WINDOW_MS = 2000;
+    const ESC_CLEAR_CONFIRM_WINDOW_MS = 500;
+    const armEscape = (action: 'cancel' | 'clear', windowMs: number) => {
+      escArmedActionRef.current = action;
+      if (action === 'cancel') setCancelArmed(true);
+      else setEscapeHintVisible(true);
+      if (escapeTimerRef.current) clearTimeout(escapeTimerRef.current);
+      escapeTimerRef.current = setTimeout(resetEscapeState, windowMs);
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing) return;
+      const live = escLiveRef.current;
 
       if (e.key !== 'Escape') {
-        if (escPressCountRef.current > 0) {
+        if (escArmedActionRef.current !== null) {
           resetEscapeState();
         }
-        if (e.key === 'Tab' && e.shiftKey && !interactionBlocked) {
+        if (e.key === 'Tab' && e.shiftKey && !live.interactionBlocked) {
           e.preventDefault();
-          handleCycleMode();
+          live.handleCycleMode();
         }
         return;
       }
 
-      if (pendingApproval || interactionBlocked) return;
-
-      if (clearQueuedPrompts()) {
-        e.preventDefault();
-        resetEscapeState();
-        return;
-      }
-
-      if (editorRef.current?.hasInput()) {
-        e.preventDefault();
-        if (escPressCountRef.current === 0) {
-          escPressCountRef.current = 1;
-          setEscapeHintVisible(true);
-          if (escapeTimerRef.current) {
-            clearTimeout(escapeTimerRef.current);
-          }
-          escapeTimerRef.current = setTimeout(() => {
-            resetEscapeState();
-          }, 500);
-        } else {
+      // Streaming takes priority over clearing text (queued prompts stay intact
+      // and drain after the turn settles); see decideEscapeIntent for the rules.
+      const intent = decideEscapeIntent({
+        blocked: !!live.pendingApproval || live.interactionBlocked,
+        streaming: live.streamingState !== 'idle',
+        hasInput: !!editorRef.current?.hasInput(),
+        armed: escArmedActionRef.current,
+      });
+      if (intent.kind === 'ignore') return;
+      e.preventDefault();
+      switch (intent.kind) {
+        case 'cancel':
+          live.handleCancel();
+          resetEscapeState();
+          break;
+        case 'clear':
           editorRef.current?.clear();
           resetEscapeState();
-        }
-        return;
-      }
-
-      if (streamingState !== 'idle') {
-        e.preventDefault();
-        handleCancel();
-        resetEscapeState();
-        return;
+          break;
+        case 'arm':
+          armEscape(
+            intent.action,
+            intent.action === 'cancel'
+              ? ESC_CANCEL_CONFIRM_WINDOW_MS
+              : ESC_CLEAR_CONFIRM_WINDOW_MS,
+          );
+          break;
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
-      escPressCountRef.current = 0;
-      setEscapeHintVisible(false);
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-        escapeTimerRef.current = null;
-      }
+      resetEscapeState();
     };
-  }, [
-    streamingState,
-    handleCancel,
-    handleCycleMode,
-    pendingApproval,
-    interactionBlocked,
-    clearQueuedPrompts,
-  ]);
+  }, [resetEscapeState]);
 
   const isDisabled = !connected || connection.catchingUp;
 
@@ -3336,6 +3472,7 @@ export function App({
     styles.app,
     styles.appChat,
     isChatEmptyState ? styles.appChatEmpty : undefined,
+    sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
       : styles.themeDark,
@@ -3665,210 +3802,232 @@ export function App({
             </DialogShell>
           )}
 
-          <WebShellCustomizationProvider value={customization}>
-            <CompactModeContext.Provider value={compactMode}>
-              <TodoContextsProvider
-                timeline={todoTimeline}
-                details={todoDetails}
-              >
-                <div
-                  className={[
-                    styles.content,
-                    showFloatingTodos ||
-                    displayMessages.length > 0 ||
-                    pendingApproval
-                      ? styles.contentHasMessages
-                      : undefined,
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
-                >
-                  <MessageList
-                    ref={messageListRef}
-                    messages={displayMessages}
-                    pendingApproval={pendingToolApproval}
-                    onShowContextDetail={handleShowContextDetail}
-                    catchingUp={connection.catchingUp}
-                    isResponding={streamingState !== 'idle'}
-                    activeTurnStartedAt={activeTurnStartedAt}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    shellOutputMaxLines={shellOutputMaxLines}
-                    showRetryHint={showRetryHint}
-                    onRetryClick={handleRetry}
-                    onBranchSession={handleBranchCurrentSession}
-                    welcomeHeader={isChatEmptyState ? welcomeHeader : undefined}
-                    tailContent={undefined}
-                    tailKey={undefined}
-                    onFollowStateChange={handleFollowStateChange}
-                    virtualScrollThreshold={virtualScrollThreshold}
-                  />
-                  {btwMessage?.role === 'btw' && (
-                    <div className={styles.btwPanel}>
-                      <BtwMessage
-                        question={btwMessage.question}
-                        answer={btwMessage.answer}
-                        isPending={btwMessage.isPending}
+          <div className={styles.appShell}>
+            {sidebarOptions.enabled && (
+              <WebShellSidebar
+                collapsed={sidebarCollapsed}
+                onCollapsedChange={handleSidebarCollapsedChange}
+                onOpenSettings={() => setShowSettingsDialog(true)}
+                onNewSession={createNewSession}
+                onLoadSession={loadSidebarSession}
+                onError={reportError}
+              />
+            )}
+            <div className={styles.chatPane}>
+              <WebShellCustomizationProvider value={customization}>
+                <CompactModeContext.Provider value={compactMode}>
+                  <TodoContextsProvider
+                    timeline={todoTimeline}
+                    details={todoDetails}
+                  >
+                    <div
+                      className={[
+                        styles.content,
+                        showFloatingTodos ||
+                        displayMessages.length > 0 ||
+                        pendingApproval
+                          ? styles.contentHasMessages
+                          : undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
+                      <MessageList
+                        ref={messageListRef}
+                        messages={displayMessages}
+                        pendingApproval={pendingToolApproval}
+                        onShowContextDetail={handleShowContextDetail}
+                        catchingUp={connection.catchingUp}
+                        isResponding={streamingState !== 'idle'}
+                        activeTurnStartedAt={activeTurnStartedAt}
+                        workspaceCwd={connection.workspaceCwd || ''}
+                        shellOutputMaxLines={shellOutputMaxLines}
+                        showRetryHint={showRetryHint}
+                        onRetryClick={handleRetry}
+                        onBranchSession={handleBranchCurrentSession}
+                        welcomeHeader={
+                          isChatEmptyState ? welcomeHeader : undefined
+                        }
+                        tailContent={undefined}
+                        tailKey={undefined}
+                        onFollowStateChange={handleFollowStateChange}
+                        virtualScrollThreshold={virtualScrollThreshold}
+                      />
+                      {btwMessage?.role === 'btw' && (
+                        <div className={styles.btwPanel}>
+                          <BtwMessage
+                            question={btwMessage.question}
+                            answer={btwMessage.answer}
+                            isPending={btwMessage.isPending}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </TodoContextsProvider>
+                </CompactModeContext.Provider>
+
+                <div ref={footerRef} className={styles.footer}>
+                  {showScrollToBottom && (
+                    <div
+                      className={
+                        showFloatingTodos
+                          ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
+                          : styles.scrollToBottomLayer
+                      }
+                    >
+                      <button
+                        type="button"
+                        className={styles.scrollToBottomButton}
+                        aria-label={t('chat.scrollToBottom')}
+                        onClick={() => resumeChatBottomFollow('smooth')}
+                      >
+                        <svg
+                          className={styles.scrollToBottomIcon}
+                          viewBox="0 0 24 24"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+                  {showFloatingTodos && (
+                    <div className={styles.bottomPanels}>
+                      <TodoPanel todos={floatingTodos} />
+                    </div>
+                  )}
+                  {pendingToolApproval && (
+                    <div className={styles.approvalOverlay}>
+                      <ToolApproval
+                        request={pendingToolApproval}
+                        onConfirm={handleConfirm}
+                        variant="floating"
                       />
                     </div>
                   )}
-                </div>
-              </TodoContextsProvider>
-            </CompactModeContext.Provider>
-
-            <div ref={footerRef} className={styles.footer}>
-              {showScrollToBottom && (
-                <div
-                  className={
-                    showFloatingTodos
-                      ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
-                      : styles.scrollToBottomLayer
-                  }
-                >
-                  <button
-                    type="button"
-                    className={styles.scrollToBottomButton}
-                    aria-label={t('chat.scrollToBottom')}
-                    onClick={() => resumeChatBottomFollow('smooth')}
-                  >
-                    <svg
-                      className={styles.scrollToBottomIcon}
-                      viewBox="0 0 24 24"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
+                  {pendingAskUserApproval && (
+                    <div className={styles.approvalOverlay}>
+                      <AskUserQuestion
+                        request={pendingAskUserApproval}
+                        onConfirm={handleConfirm}
+                        variant="floating"
                       />
-                    </svg>
-                  </button>
+                    </div>
+                  )}
+                  <div className={styles.composer}>
+                    <StreamingStatus startedAt={activeTurnStartedAt} />
+                    {escapeHintVisible && streamingState === 'idle' && (
+                      <div className={styles.escClearStatus} role="status">
+                        {t('editor.escClearHint')}
+                      </div>
+                    )}
+                    <QueuedPromptDisplay
+                      prompts={queuedPrompts}
+                      t={t}
+                      onDelete={removeQueuedPrompt}
+                      onInsert={insertQueuedPrompt}
+                      onEdit={editQueuedPrompt}
+                    />
+                    <ChatEditor
+                      ref={setEditorHandle}
+                      onSubmit={handleEditorSubmit}
+                      onCycleMode={handleCycleMode}
+                      onToggleShortcuts={handleToggleShortcuts}
+                      onCancel={handleCancel}
+                      isRunning={streamingState !== 'idle'}
+                      cancelArmed={cancelArmed}
+                      disabled={isDisabled || pendingApproval !== null}
+                      commands={commands}
+                      skills={loadedSkills}
+                      slashCommandCategoryOrder={slashCommandCategoryOrder}
+                      queuedMessages={queuedTexts}
+                      onFocusFooter={handleFocusTaskPill}
+                      onPopQueuedMessages={popLastQueuedPromptText}
+                      currentMode={currentMode}
+                      currentModel={currentModel}
+                      chatWidthMode={chatWidthMode}
+                      showChatWidthToggle={!isChatEmptyState}
+                      chatWidthToggleMin={chatWidthToggleMin}
+                      visibleToolbarActions={composerToolbarActions}
+                      availableModels={availableModels}
+                      onSelectMode={handleSetMode}
+                      onSelectModel={handleModelSelect}
+                      onChatWidthModeChange={handleChatWidthModeChange}
+                      sessionName={sessionDisplayName}
+                      dialogOpen={interactionBlocked}
+                      followupState={followupState}
+                      onAcceptFollowup={onAcceptFollowup}
+                      onDismissFollowup={onDismissFollowup}
+                      composerInput={composerInput}
+                      composerInputVersion={composerInputVersion}
+                      placeholderText={
+                        !connected || connection.catchingUp
+                          ? t('common.loading')
+                          : streamingState !== 'idle'
+                            ? t('editor.processing')
+                            : t('editor.placeholder')
+                      }
+                    />
+                  </div>
+                  {CustomFooter ? (
+                    <CustomFooter
+                      connected={connected}
+                      mode={currentMode}
+                      model={currentModel}
+                      streamingState={streamingState}
+                      contextUsageRatio={
+                        (connection.contextWindow ?? 0) > 0
+                          ? (connection.tokenCount ?? 0) /
+                            (connection.contextWindow ?? 0)
+                          : 0
+                      }
+                      activeGoal={activeGoal}
+                      tasks={footerTasks}
+                      availableModes={MODES_CYCLE}
+                      availableModels={(connection.models ?? [])
+                        .filter(isVisibleComposerModel)
+                        .map((m) => ({
+                          id: m.id,
+                          label: getModelDisplayName(m.label || m.id),
+                          contextWindow: m.contextWindow,
+                        }))}
+                      skills={loadedSkills}
+                      onSelectMode={handleSetMode}
+                      onSelectModel={handleModelSelect}
+                    />
+                  ) : (
+                    <StatusBar
+                      onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
+                      onSelectModel={() =>
+                        setModelDialogMode((v) => (v ? null : 'main'))
+                      }
+                      onShowContext={() => showContextUsage('/context', false)}
+                      onOpenSettings={() => setShowSettingsDialog(true)}
+                      ref={statusBarRef}
+                      onOpenTasks={() => openTasksPanel()}
+                      onReturnToInput={handleReturnToEditor}
+                      tasks={backgroundTasks}
+                      activeGoal={activeGoal}
+                      hideSettings={hideSettings}
+                      onToggleShortcuts={handleToggleShortcuts}
+                      compact={true}
+                    />
+                  )}
+                  {isChatEmptyState && welcomeFooter && (
+                    <div className={styles.emptyWelcomeFooter}>
+                      {welcomeFooter}
+                    </div>
+                  )}
                 </div>
-              )}
-              {showFloatingTodos && (
-                <div className={styles.bottomPanels}>
-                  <TodoPanel todos={floatingTodos} />
-                </div>
-              )}
-              {pendingToolApproval && (
-                <div className={styles.approvalOverlay}>
-                  <ToolApproval
-                    request={pendingToolApproval}
-                    onConfirm={handleConfirm}
-                    variant="floating"
-                  />
-                </div>
-              )}
-              {pendingAskUserApproval && (
-                <div className={styles.approvalOverlay}>
-                  <AskUserQuestion
-                    request={pendingAskUserApproval}
-                    onConfirm={handleConfirm}
-                    variant="floating"
-                  />
-                </div>
-              )}
-              <div className={styles.composer}>
-                <StreamingStatus startedAt={activeTurnStartedAt} />
-                <QueuedPromptDisplay
-                  prompts={queuedPrompts}
-                  t={t}
-                  onDelete={removeQueuedPrompt}
-                  onInsert={insertQueuedPrompt}
-                  onEdit={editQueuedPrompt}
-                />
-                <ChatEditor
-                  ref={setEditorHandle}
-                  onSubmit={handleEditorSubmit}
-                  onCycleMode={handleCycleMode}
-                  onToggleShortcuts={handleToggleShortcuts}
-                  onCancel={handleCancel}
-                  isRunning={streamingState !== 'idle'}
-                  disabled={isDisabled || pendingApproval !== null}
-                  commands={commands}
-                  skills={loadedSkills}
-                  slashCommandCategoryOrder={slashCommandCategoryOrder}
-                  queuedMessages={queuedTexts}
-                  onFocusFooter={handleFocusTaskPill}
-                  onPopQueuedMessages={popLastQueuedPromptText}
-                  onClearQueuedMessages={clearQueuedPrompts}
-                  currentMode={currentMode}
-                  currentModel={currentModel}
-                  chatWidthMode={chatWidthMode}
-                  showChatWidthToggle={!isChatEmptyState}
-                  chatWidthToggleMin={chatWidthToggleMin}
-                  visibleToolbarActions={composerToolbarActions}
-                  availableModels={availableModels}
-                  onSelectMode={handleSetMode}
-                  onSelectModel={handleModelSelect}
-                  onChatWidthModeChange={handleChatWidthModeChange}
-                  sessionName={sessionDisplayName}
-                  dialogOpen={interactionBlocked}
-                  followupState={followupState}
-                  onAcceptFollowup={onAcceptFollowup}
-                  onDismissFollowup={onDismissFollowup}
-                  composerInput={composerInput}
-                  composerInputVersion={composerInputVersion}
-                  placeholderText={
-                    !connected || connection.catchingUp
-                      ? t('common.loading')
-                      : streamingState !== 'idle'
-                        ? t('editor.processing')
-                        : t('editor.placeholder')
-                  }
-                />
-              </div>
-              {CustomFooter ? (
-                <CustomFooter
-                  connected={connected}
-                  mode={currentMode}
-                  model={currentModel}
-                  streamingState={streamingState}
-                  contextUsageRatio={
-                    (connection.contextWindow ?? 0) > 0
-                      ? (connection.tokenCount ?? 0) /
-                        (connection.contextWindow ?? 0)
-                      : 0
-                  }
-                  activeGoal={activeGoal}
-                  tasks={footerTasks}
-                  availableModes={MODES_CYCLE}
-                  availableModels={(connection.models ?? [])
-                    .filter(isVisibleComposerModel)
-                    .map((m) => ({
-                      id: m.id,
-                      label: getModelDisplayName(m.label || m.id),
-                      contextWindow: m.contextWindow,
-                    }))}
-                  skills={loadedSkills}
-                  onSelectMode={handleSetMode}
-                  onSelectModel={handleModelSelect}
-                />
-              ) : (
-                <StatusBar
-                  escapeHint={escapeHintVisible}
-                  onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
-                  onSelectModel={() =>
-                    setModelDialogMode((v) => (v ? null : 'main'))
-                  }
-                  onShowContext={() => showContextUsage('/context', false)}
-                  onOpenSettings={() => setShowSettingsDialog(true)}
-                  ref={statusBarRef}
-                  onOpenTasks={() => openTasksPanel()}
-                  onReturnToInput={handleReturnToEditor}
-                  tasks={backgroundTasks}
-                  activeGoal={activeGoal}
-                  hideSettings={hideSettings}
-                  onToggleShortcuts={handleToggleShortcuts}
-                  compact={true}
-                />
-              )}
-              {isChatEmptyState && welcomeFooter && (
-                <div className={styles.emptyWelcomeFooter}>{welcomeFooter}</div>
-              )}
+              </WebShellCustomizationProvider>
             </div>
-          </WebShellCustomizationProvider>
+          </div>
         </div>
       </I18nProvider>
     </ThemeProvider>

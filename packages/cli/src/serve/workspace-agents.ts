@@ -71,7 +71,7 @@ import {
   type ServeWorkspaceAgentDetail,
   type ServeWorkspaceAgentSummary,
   type ServeWorkspaceAgentsStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 
 /**
  * Workspace subagent CRUD routes.
@@ -1300,19 +1300,21 @@ export function toDetail(config: SubagentConfig): ServeWorkspaceAgentDetail {
 
 /**
  * Build a CRUD-scoped `SubagentManager` for the daemon. The
- * underlying manager only touches three `Config` methods on its
+ * underlying manager only touches four `Config` methods on its
  * read/write paths (`getSdkMode`, `getProjectRoot`,
- * `getActiveExtensions`); a `Proxy` makes any future expansion of
+ * `getActiveExtensions`, `isSafeMode`); a `Proxy` makes any future expansion of
  * that surface throw immediately rather than silently produce
  * incorrect data.
  */
 export function createDaemonSubagentManager(
   boundWorkspace: string,
+  safeMode = false,
 ): SubagentManager {
   const stub = {
     getSdkMode: () => false,
     getProjectRoot: () => boundWorkspace,
     getActiveExtensions: () => [],
+    isSafeMode: () => safeMode,
   } as unknown as Record<string | symbol, unknown>;
   const guarded = new Proxy(stub, {
     get(target, prop) {

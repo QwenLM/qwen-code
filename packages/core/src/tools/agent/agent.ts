@@ -406,6 +406,9 @@ function applyPersistedCliFlagOverrides(
   if (flags.bare !== undefined) {
     ov.getBareMode = () => flags.bare;
   }
+  if (flags.safeMode !== undefined) {
+    ov.isSafeMode = () => flags.safeMode;
+  }
   if (hasOwn(flags, 'sandbox')) {
     const sandbox = flags.sandbox ?? undefined;
     ov.getSandbox = () => sandbox;
@@ -431,6 +434,7 @@ function capturePersistedCliFlags(
   return {
     approvalMode: resolvedApprovalMode,
     bare: config.getBareMode(),
+    safeMode: config.isSafeMode(),
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
     model: config.getModel(),
@@ -2422,6 +2426,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const summary = bgSubagent.getExecutionSummary();
           entry.stats = {
             totalTokens: summary.totalTokens,
+            outputTokens: summary.outputTokens,
             toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
@@ -2473,6 +2478,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const summary = bgSubagent.getExecutionSummary();
           return {
             totalTokens: summary.totalTokens,
+            outputTokens: summary.outputTokens,
             toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
@@ -2879,6 +2885,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const summary = subagent.getExecutionSummary();
         entry.stats = {
           totalTokens: summary.totalTokens,
+          outputTokens: summary.outputTokens,
           toolUses: fgLiveToolCallCount,
           durationMs: summary.totalDurationMs,
         };

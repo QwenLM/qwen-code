@@ -19,6 +19,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
+const CDP_TUNNEL_OPTIONAL_DEPENDENCIES = [
+  'chrome-devtools-mcp',
+  'puppeteer-core',
+];
+const PUBLISHED_PATCH_FILES = ['chrome-devtools-mcp+1.4.0.patch'];
 
 export function preparePackage({
   rootDir = defaultRootDir,
@@ -29,6 +34,7 @@ export function preparePackage({
 
   verifyBundleArtifacts(rootDir, distDir);
   copyDocumentationFiles(rootDir, distDir);
+  copyPublishedPatches(rootDir, distDir);
   copyLocales(rootDir, distDir);
   copyExtensionExamples(rootDir, distDir);
   const bundleNativeAudioCapture = copyNativeAudioCapturePackage(
@@ -94,6 +100,22 @@ function copyDocumentationFiles(rootDir, distDir) {
     } else {
       console.warn(`Warning: ${file} not found at ${sourcePath}`);
     }
+  }
+}
+
+function copyPublishedPatches(rootDir, distDir) {
+  console.log('Copying published dependency patches...');
+  const patchesDestDir = path.join(distDir, 'patches');
+  fs.rmSync(patchesDestDir, { recursive: true, force: true });
+  fs.mkdirSync(patchesDestDir, { recursive: true });
+
+  for (const patchFile of PUBLISHED_PATCH_FILES) {
+    const sourcePath = path.join(rootDir, 'patches', patchFile);
+    if (!fs.existsSync(sourcePath)) {
+      throw new Error(`Required published patch not found: ${sourcePath}`);
+    }
+    fs.copyFileSync(sourcePath, path.join(patchesDestDir, patchFile));
+    console.log(`Copied ${patchFile}`);
   }
 }
 
@@ -300,6 +322,7 @@ function writeDistPackageJson(
   console.log('Creating package.json for distribution...');
 
   const cliEntryContent = `#!/usr/bin/env node
+import module from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -312,6 +335,7 @@ function isServeCommand() {
 }
 
 if (isServeCommand()) {
+  module.enableCompileCache?.();
   process.argv[1] = cliPath;
   await import(pathToFileURL(cliPath).href);
 } else {
@@ -333,8 +357,74 @@ if (isServeCommand()) {
   fs.writeFileSync(cliEntryPath, cliEntryContent, { mode: 0o755 });
   console.log('Created dist cli-entry.js wrapper');
 
+  const postinstallContent = `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function resolvePackageJson(packageName) {
+  try {
+    return require.resolve(packageName + '/package.json');
+  } catch {
+    return undefined;
+  }
+}
+
+function findInstallRoot(packageJsonPath) {
+  let dir = path.dirname(packageJsonPath);
+  while (dir !== path.parse(dir).root) {
+    const parent = path.dirname(dir);
+    if (path.basename(parent) === 'node_modules') {
+      return path.dirname(parent);
+    }
+    dir = parent;
+  }
+  return undefined;
+}
+
+const chromeDevtoolsMcpPackageJson = resolvePackageJson('chrome-devtools-mcp');
+if (chromeDevtoolsMcpPackageJson) {
+  const installRoot = findInstallRoot(chromeDevtoolsMcpPackageJson);
+  const patchDir = path.join(__dirname, 'patches');
+  if (!installRoot || !existsSync(patchDir)) {
+    process.exit(0);
+  }
+  const relativePatchDir = path.relative(installRoot, patchDir) || '.';
+  const patchPackageBin = require.resolve('patch-package/index.js');
+  const result = spawnSync(
+    process.execPath,
+    [patchPackageBin, '--patch-dir', relativePatchDir, '--error-on-fail'],
+    { cwd: installRoot, stdio: 'inherit' },
+  );
+  if (result.signal) {
+    process.kill(process.pid, result.signal);
+  } else {
+    process.exit(result.status ?? 1);
+  }
+}
+`;
+
+  const postinstallPath = path.join(distDir, 'postinstall.js');
+  fs.writeFileSync(postinstallPath, postinstallContent, { mode: 0o755 });
+  console.log('Created dist postinstall.js');
+
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
+  );
+  const cdpTunnelOptionalDependencies = pickRequiredDependencies(
+    rootPackageJson.optionalDependencies,
+    CDP_TUNNEL_OPTIONAL_DEPENDENCIES,
+    'optionalDependencies',
+  );
+  const patchPackageDependency = pickRequiredDependencies(
+    { ...rootPackageJson.dependencies, ...rootPackageJson.devDependencies },
+    ['patch-package'],
+    'dependencies/devDependencies',
   );
 
   const distPackageJson = {
@@ -348,8 +438,12 @@ if (isServeCommand()) {
     bin: {
       qwen: 'cli-entry.js',
     },
+    scripts: {
+      postinstall: 'node postinstall.js',
+    },
     files: [
       'cli-entry.js',
+      'postinstall.js',
       'cli.js',
       // Worker thread entry loaded by FzfWorkerHandle at runtime via
       // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
@@ -365,12 +459,15 @@ if (isServeCommand()) {
       'examples',
       'bundled',
       'web-shell',
+      'patches',
     ],
     ...(bundleNativeAudioCapture
       ? { bundledDependencies: ['@qwen-code/audio-capture'] }
       : {}),
     config: rootPackageJson.config,
-    dependencies: {},
+    dependencies: {
+      ...patchPackageDependency,
+    },
     optionalDependencies: {
       '@qwen-code/audio-capture': rootPackageJson.version,
       '@lydell/node-pty': '1.2.0-beta.10',
@@ -386,6 +483,7 @@ if (isServeCommand()) {
       '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
       '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
       '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
+      ...cdpTunnelOptionalDependencies,
     },
     engines: rootPackageJson.engines,
   };
@@ -394,6 +492,20 @@ if (isServeCommand()) {
     path.join(distDir, 'package.json'),
     JSON.stringify(distPackageJson, null, 2) + '\n',
   );
+}
+
+function pickRequiredDependencies(source, dependencyNames, fieldName) {
+  const result = {};
+  for (const dependencyName of dependencyNames) {
+    const version = source?.[dependencyName];
+    if (!version) {
+      throw new Error(
+        `Required ${fieldName} entry missing from root package.json: ${dependencyName}`,
+      );
+    }
+    result[dependencyName] = version;
+  }
+  return result;
 }
 
 function printPackageStructure(distDir) {

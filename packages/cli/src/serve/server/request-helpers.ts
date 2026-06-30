@@ -6,11 +6,9 @@
 
 import * as path from 'node:path';
 import type { Request, Response } from 'express';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import {
-  MAX_WORKSPACE_PATH_LENGTH,
-  type AcpSessionBridge,
-} from '../acp-session-bridge.js';
 import type { WorkspaceRequestContext } from '../workspace-service/index.js';
 
 export function sendJsonBodyParserError(res: Response, err: unknown): boolean {

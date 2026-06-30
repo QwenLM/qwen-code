@@ -23,7 +23,7 @@ import {
   type ServeContextFileScope,
   type ServeWorkspaceMemoryFile,
   type ServeWorkspaceMemoryStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 
 /**
  * Issue #4175 PR 16: workspace memory CRUD routes.

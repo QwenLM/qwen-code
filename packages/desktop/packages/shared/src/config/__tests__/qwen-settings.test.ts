@@ -6,6 +6,8 @@ describe('Qwen memory settings', () => {
     expect(normalizeQwenMemorySettings(undefined)).toEqual({
       enableManagedAutoMemory: true,
       enableManagedAutoDream: false,
+      enableTeamMemory: false,
+      enableTeamMemorySync: false,
       enableAutoSkill: false,
       autoSkillConfirm: true,
     })
@@ -16,12 +18,16 @@ describe('Qwen memory settings', () => {
       normalizeQwenMemorySettings({
         enableManagedAutoMemory: false,
         enableManagedAutoDream: 'yes',
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
         enableAutoSkill: true,
         autoSkillConfirm: false,
       }),
     ).toEqual({
       enableManagedAutoMemory: false,
       enableManagedAutoDream: false,
+      enableTeamMemory: true,
+      enableTeamMemorySync: true,
       enableAutoSkill: true,
       autoSkillConfirm: false,
     })

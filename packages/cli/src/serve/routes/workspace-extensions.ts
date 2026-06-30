@@ -33,7 +33,7 @@ import {
   type ServeExtensionCapabilities,
   type ServeExtensionEntry,
   type ServeWorkspaceExtensionsStatus,
-} from '../status.js';
+} from '@qwen-code/acp-bridge/status';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 
 type SafeBody = typeof safeBodyType;
@@ -485,6 +485,9 @@ export function registerWorkspaceExtensionRoutes(
             id: ext.id,
             name: ext.name,
             ...(ext.displayName ? { displayName: ext.displayName } : {}),
+            ...(ext.config.description
+              ? { description: ext.config.description }
+              : {}),
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,

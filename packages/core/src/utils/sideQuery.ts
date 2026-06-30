@@ -107,6 +107,14 @@ export interface SideQueryTextOptions {
    */
   stream?: boolean;
   validate?: (text: string) => string | null;
+  /**
+   * Fail (throw) instead of silently falling back to the main generator when a
+   * distinct generator for `model` can't be created. See
+   * {@link GenerateTextOptions.failClosed} — the vision bridge sets this so a
+   * missing cross-provider credential never sends image payloads to the
+   * text-only primary.
+   */
+  failClosed?: boolean;
 }
 
 export interface SideQueryTextResult {
@@ -256,6 +264,7 @@ export async function runSideQuery<TResponse>(
       maxAttempts: options.maxAttempts,
     }),
     ...(options.stream !== undefined && { stream: options.stream }),
+    ...(options.failClosed !== undefined && { failClosed: options.failClosed }),
   });
 
   const customError = options.validate?.(result.text);

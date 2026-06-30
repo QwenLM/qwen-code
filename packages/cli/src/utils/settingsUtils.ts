@@ -324,6 +324,8 @@ export function validateSettingValue(
         return 'Value must be a finite number';
       if (def.minimum !== undefined && value < def.minimum)
         return `Value must be >= ${def.minimum}`;
+      if (def.maximum !== undefined && value > def.maximum)
+        return `Value must be <= ${def.maximum}`;
       break;
     case 'string':
       if (typeof value !== 'string') return 'Value must be a string';

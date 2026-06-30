@@ -165,6 +165,8 @@ export interface DaemonClientOptions {
   transport?: DaemonTransport;
 }
 
+const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
+
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
@@ -1280,20 +1282,28 @@ export class DaemonClient {
    */
   async listWorkspaceSessions(
     workspaceCwd: string,
+    options?: { pageSize?: number },
   ): Promise<DaemonSessionSummary[]> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/${encodeURIComponent(workspaceCwd)}/sessions`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/:id/sessions');
-        }
-        const body = (await res.json()) as {
-          sessions: DaemonSessionSummary[];
-        };
-        return body.sessions;
-      },
+    const requestedPageSize =
+      options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
+    const pageSize = Math.max(
+      1,
+      Math.min(
+        1000,
+        Math.round(
+          Number.isFinite(requestedPageSize)
+            ? requestedPageSize
+            : DEFAULT_SESSION_LIST_PAGE_SIZE,
+        ),
+      ),
     );
+    const body = await this.jsonRequest<{
+      sessions: DaemonSessionSummary[];
+    }>(
+      `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?size=${pageSize}`,
+      'GET /workspace/sessions',
+    );
+    return body.sessions;
   }
 
   async loadSession(
