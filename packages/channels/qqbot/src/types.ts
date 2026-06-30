@@ -44,6 +44,7 @@ export interface QQMessageEvent {
 export type QQGroupMessageEvent = QQMessageEvent & {
   group_openid: string;
   mentions?: Array<{
+    id?: string;
     member_openid?: string;
     username?: string;
     is_you?: boolean;

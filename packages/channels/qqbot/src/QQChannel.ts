@@ -52,7 +52,6 @@ import {
 import { qrCodeLogin } from './login.js';
 import {
   fetchAccessToken,
-  fetchBotInfo,
   fetchGatewayUrl,
   getApiBase,
   sendQQMessage,
@@ -1087,27 +1086,6 @@ export class QQChannel extends ChannelBase {
                 );
                 this.coldStart = false;
                 onReady();
-                // Fetch bot's own OPENID via @me endpoint (async, fire-and-forget)
-                fetchBotInfo(
-                  getApiBase(Boolean(this.qqConfig.sandbox)),
-                  this.accessToken!,
-                )
-                  .then((info) => {
-                    if (info?.id) {
-                      this.botOpenId = info.id;
-                      process.stderr.write(
-                        `[QQ:${this.name}] @me id=${info.id}\n`,
-                      );
-                      if (this.qqConfig.allowMention !== false) {
-                        this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
-                      }
-                    } else {
-                      process.stderr.write(
-                        `[QQ:${this.name}] @me returned no id\n`,
-                      );
-                    }
-                  })
-                  .catch(() => {});
               })
               .catch((err: unknown) => {
                 process.stderr.write(
@@ -1115,52 +1093,12 @@ export class QQChannel extends ChannelBase {
                 );
                 this.coldStart = false;
                 onReady();
-                // Fetch bot's own OPENID via @me endpoint (async, fire-and-forget)
-                fetchBotInfo(
-                  getApiBase(Boolean(this.qqConfig.sandbox)),
-                  this.accessToken!,
-                )
-                  .then((info) => {
-                    if (info?.id) {
-                      this.botOpenId = info.id;
-                      process.stderr.write(
-                        `[QQ:${this.name}] @me id=${info.id}\n`,
-                      );
-                      if (this.qqConfig.allowMention !== false) {
-                        this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
-                      }
-                    } else {
-                      process.stderr.write(
-                        `[QQ:${this.name}] @me returned no id\n`,
-                      );
-                    }
-                  })
-                  .catch(() => {});
               });
           } else {
             process.stderr.write(
               `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
             );
             onReady();
-            // Fetch bot's own OPENID via @me endpoint (async, fire-and-forget)
-            fetchBotInfo(
-              getApiBase(Boolean(this.qqConfig.sandbox)),
-              this.accessToken!,
-            )
-              .then((info) => {
-                if (info?.id) {
-                  this.botOpenId = info.id;
-                  process.stderr.write(`[QQ:${this.name}] @me id=${info.id}\n`);
-                  if (this.qqConfig.allowMention !== false) {
-                    this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
-                  }
-                } else {
-                  process.stderr.write(
-                    `[QQ:${this.name}] @me returned no id\n`,
-                  );
-                }
-              })
-              .catch(() => {});
           }
         } else if (t === 'C2C_MESSAGE_CREATE') {
           this.handleC2C(msg['d'] as unknown as QQMessageEvent);
@@ -1480,6 +1418,19 @@ export class QQChannel extends ChannelBase {
     // specifically @bot). Only treat as a slash command when the bot
     // itself is the direct target.
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
+
+    // Extract bot's own OPENID from the first @mention that targets us
+    if (isAtBot && !this.botOpenId) {
+      const selfMention = event.mentions?.find((m) => m.is_you);
+      if (selfMention?.id) {
+        this.botOpenId = selfMention.id;
+        process.stderr.write(`[QQ:${this.name}] botOpenId=${this.botOpenId}\n`);
+        if (this.qqConfig.allowMention !== false) {
+          this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+        }
+      }
+    }
+
     const isSlash = isAtBot && cleanText.startsWith('/');
     const isBot = event.author.bot === true;
     const botTag = isBot ? '[bot] ' : '';
@@ -1651,6 +1602,19 @@ export class QQChannel extends ChannelBase {
 
     // 只有 @机器人本人 + 斜杠 才是 slash command
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
+
+    // Extract bot's own OPENID from the first @mention that targets us
+    if (isAtBot && !this.botOpenId) {
+      const selfMention = event.mentions?.find((m) => m.is_you);
+      if (selfMention?.id) {
+        this.botOpenId = selfMention.id;
+        process.stderr.write(`[QQ:${this.name}] botOpenId=${this.botOpenId}\n`);
+        if (this.qqConfig.allowMention !== false) {
+          this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+        }
+      }
+    }
+
     const isSlash = isAtBot && cleanText.startsWith('/');
 
     // Log slash commands with safeName for audit trail
