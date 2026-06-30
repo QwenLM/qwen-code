@@ -93,6 +93,7 @@ export interface RunChannelDaemonWorkerOptions {
   selection: ServeChannelSelection;
   loadDaemonSdk?: () => Promise<DaemonSdkLike>;
   sendReady?: (ready: ChannelDaemonWorkerReady) => void;
+  startupSignal?: AbortSignal;
 }
 
 export function createDaemonSessionFactory({
@@ -218,16 +219,51 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   }
 }
 
+function startupAbortError(): Error {
+  return new Error('Daemon worker startup aborted.');
+}
+
+async function abortableStartup<T>(
+  value: T | Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  const promise = Promise.resolve(value);
+  if (!signal) return await promise;
+  if (signal.aborted) throw startupAbortError();
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(startupAbortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
+function throwIfStartupAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw startupAbortError();
+  }
+}
+
 export async function runChannelDaemonWorker(
   opts: RunChannelDaemonWorkerOptions,
 ): Promise<ChannelDaemonWorkerHandle> {
   validateDaemonWorkerUrl(opts.daemonUrl);
-  const sdk = await (opts.loadDaemonSdk ?? loadDaemonSdk)();
+  const startupSignal = opts.startupSignal;
+  const sdk = await abortableStartup(
+    (opts.loadDaemonSdk ?? loadDaemonSdk)(),
+    startupSignal,
+  );
   const client = new sdk.DaemonClient({
     baseUrl: opts.daemonUrl,
     ...(opts.daemonToken ? { token: opts.daemonToken } : {}),
   });
-  const capabilities = await client.capabilities();
+  const capabilities = await abortableStartup(
+    client.capabilities(),
+    startupSignal,
+  );
   const daemonWorkspace = canonicalizeWorkspace(
     capabilities.workspaceCwd ?? opts.workspace,
   );
@@ -238,19 +274,23 @@ export async function runChannelDaemonWorker(
     );
   }
 
-  await loadChannelsFromExtensions();
+  await abortableStartup(loadChannelsFromExtensions(), startupSignal);
   const settings = loadSettings(daemonWorkspace, {
     skipLoadEnvironment: true,
   });
+  throwIfStartupAborted(startupSignal);
   const proxy = resolveProxyUrl(
     undefined,
     settings.merged.proxy as string | undefined,
   );
   const channelsConfig = loadChannelsConfig(daemonWorkspace, settings);
   const names = selectedChannelNames(channelsConfig, opts.selection);
-  const parsed = await parseConfiguredChannels(channelsConfig, names, {
-    defaultCwd: daemonWorkspace,
-  });
+  const parsed = await abortableStartup(
+    parseConfiguredChannels(channelsConfig, names, {
+      defaultCwd: daemonWorkspace,
+    }),
+    startupSignal,
+  );
   validateChannelWorkspaces(parsed, daemonWorkspace);
   const modelServiceId = firstModel(parsed);
 
@@ -263,7 +303,6 @@ export async function runChannelDaemonWorker(
     }),
     ...(modelServiceId ? { modelServiceId } : {}),
   });
-  await bridge.start();
 
   const channels = new Map<string, ChannelBase>();
   const connected: string[] = [];
@@ -279,6 +318,7 @@ export async function runChannelDaemonWorker(
 
   let router: SessionRouter | undefined;
   try {
+    await abortableStartup(bridge.start(), startupSignal);
     const bridgeFacade = createDaemonChannelBridgeFacade(bridge, {
       exposeShellCommand: capabilities.features.includes(
         SESSION_SHELL_COMMAND_FEATURE,
@@ -296,25 +336,33 @@ export async function runChannelDaemonWorker(
     }
 
     for (const { name, config } of parsed) {
+      throwIfStartupAborted(startupSignal);
       channels.set(
         name,
-        await createChannel(name, config, bridgeFacade, {
-          ...(proxy ? { proxy } : {}),
-          router: createdRouter,
-        }),
+        await abortableStartup(
+          createChannel(name, config, bridgeFacade, {
+            ...(proxy ? { proxy } : {}),
+            router: createdRouter,
+          }),
+          startupSignal,
+        ),
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 
     for (const [name, channel] of channels) {
+      throwIfStartupAborted(startupSignal);
       const safeName = sanitizeLogText(name, 128);
       writeStdoutLine(`[Channel] Connecting "${safeName}"...`);
       try {
-        await channel.connect();
+        await abortableStartup(channel.connect(), startupSignal);
         connected.push(name);
         writeStdoutLine(`[Channel] "${safeName}" connected.`);
       } catch (err) {
+        if (startupSignal?.aborted) {
+          throw err;
+        }
         const safeMessage = sanitizeLogText(
           err instanceof Error ? err.message : String(err),
           512,
@@ -415,6 +463,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       description: 'Internal daemon-managed channel selection.',
     }),
   handler: async (argv) => {
+    const startupAbortController = new AbortController();
     let pendingShutdownReason: NodeJS.Signals | 'disconnect' | undefined;
     const onEarlyShutdown = (reason: NodeJS.Signals | 'disconnect') => {
       if (pendingShutdownReason) {
@@ -424,7 +473,8 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       pendingShutdownReason = reason;
     };
     const onEarlyDisconnect = () => {
-      onEarlyShutdown('disconnect');
+      startupAbortController.abort();
+      process.exit(1);
     };
     process.on('SIGINT', onEarlyShutdown);
     process.on('SIGTERM', onEarlyShutdown);
@@ -447,6 +497,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         daemonToken,
         workspace,
         selection,
+        startupSignal: startupAbortController.signal,
         sendReady: (ready) => {
           process.send?.({ type: 'ready', ...ready });
         },

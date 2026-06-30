@@ -641,6 +641,41 @@ describe('runChannelDaemonWorker', () => {
     expect(mockBridgeStop).toHaveBeenCalled();
   });
 
+  it('rolls back startup when aborted during channel connect', async () => {
+    const sdk = createSdk();
+    const controller = new AbortController();
+    const disconnect = vi.fn();
+    const connect = vi.fn(
+      () =>
+        new Promise<void>(() => {
+          // hangs until startupSignal aborts
+        }),
+    );
+    mockCreateChannel.mockResolvedValueOnce({
+      connect,
+      disconnect,
+      name: 'telegram',
+    });
+
+    const started = runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+      startupSignal: controller.signal,
+    });
+    await vi.waitFor(() => {
+      expect(connect).toHaveBeenCalled();
+    });
+
+    controller.abort();
+
+    await expect(started).rejects.toThrow('Daemon worker startup aborted.');
+    expect(disconnect).toHaveBeenCalled();
+    expect(mockBridgeStop).toHaveBeenCalled();
+    expect(mockRouterClearAll).toHaveBeenCalled();
+  });
+
   it('fails fast when a channel cwd does not match the daemon workspace', async () => {
     const sdk = createSdk();
     mockParseConfiguredChannels.mockResolvedValueOnce([
@@ -868,6 +903,49 @@ describe('daemonWorkerCommand', () => {
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
       finishBridgeStart?.();
+      restoreSend();
+    }
+  });
+
+  it('force exits when the parent disconnects during async setup', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const disconnect = vi.fn();
+    const connect = vi.fn(
+      () =>
+        new Promise<void>(() => {
+          // hangs until startupSignal aborts
+        }),
+    );
+    mockCreateChannel.mockResolvedValueOnce({
+      connect,
+      disconnect,
+      name: 'telegram',
+    });
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(connect).toHaveBeenCalled();
+      });
+
+      process.emit('disconnect');
+      await handler;
+
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(send).not.toHaveBeenCalled();
+      expect(disconnect).toHaveBeenCalled();
+      expect(mockBridgeStop).toHaveBeenCalled();
+      expect(mockRouterClearAll).toHaveBeenCalled();
+    } finally {
       restoreSend();
     }
   });
