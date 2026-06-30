@@ -284,6 +284,41 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('continues pidfile race cleanup when teardown steps throw', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockChannelDisconnect.mockImplementationOnce(() => {
+      throw new Error('disconnect boom');
+    });
+    mockBridgeStop.mockImplementationOnce(() => {
+      throw new Error('stop boom');
+    });
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockChannelDisconnect).toHaveBeenCalled();
+    expect(mockBridgeStop).toHaveBeenCalled();
+    expect(mockRouterClearAll).toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('started concurrently'),
+    );
+  });
+
   it('cleans up all connected channels when pidfile creation races', async () => {
     const channels = {
       telegram: { type: 'telegram' },

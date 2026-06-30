@@ -2038,6 +2038,73 @@ describe('runQwenServe channel worker supervisor', () => {
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
+  it('force-kills channel worker, bridge, and pidfile on a second shutdown signal', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-force-')),
+    );
+    let finishBridgeShutdown!: () => void;
+    const bridge = makeFakeBridge();
+    vi.mocked(bridge.shutdown).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishBridgeShutdown = resolve;
+        }),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      const signalListener = process
+        .rawListeners('SIGTERM')
+        .find((listener) => !existingSigtermListeners.has(listener)) as
+        | ((signal: NodeJS.Signals) => Promise<void>)
+        | undefined;
+      expect(signalListener).toBeDefined();
+
+      const firstSignal = signalListener!('SIGTERM');
+      await Promise.resolve();
+      const secondSignal = signalListener!('SIGTERM');
+      await secondSignal;
+
+      expect(worker.killAllSync).toHaveBeenCalled();
+      expect(bridge.killAllSync).toHaveBeenCalled();
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+
+      finishBridgeShutdown();
+      await firstSignal;
+    } finally {
+      finishBridgeShutdown?.();
+      await handle.close();
+      exitSpy.mockRestore();
+    }
+  });
+
   it('removes serve-owned pidfile through the legacy fallback cleanup path', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-fallback-')),

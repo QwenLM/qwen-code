@@ -50,6 +50,30 @@ function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
   }
 }
 
+function cleanupStartedChannels(
+  channels: Iterable<ChannelBase>,
+  bridge: AcpBridge,
+  router: SessionRouter,
+): void {
+  for (const channel of channels) {
+    try {
+      channel.disconnect();
+    } catch {
+      // best-effort
+    }
+  }
+  try {
+    bridge.stop();
+  } catch {
+    // best-effort
+  }
+  try {
+    router.clearAll();
+  } catch {
+    // best-effort
+  }
+}
+
 /** Check for duplicate instance and abort if one is already running. */
 function checkDuplicateInstance(): void {
   const existing = readServiceInfo();
@@ -127,11 +151,9 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     process.exit(1);
   }
 
-  writeServiceInfoOrExit([name], () => {
-    channel.disconnect();
-    bridge.stop();
-    router.clearAll();
-  });
+  writeServiceInfoOrExit([name], () =>
+    cleanupStartedChannels([channel], bridge, router),
+  );
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
   const attachDisconnectHandler = (b: AcpBridge): void => {
@@ -288,17 +310,7 @@ async function startAll(proxy?: string): Promise<void> {
 
   writeServiceInfoOrExit(
     parsed.map((p) => p.name),
-    () => {
-      for (const channel of channels.values()) {
-        try {
-          channel.disconnect();
-        } catch {
-          // best-effort
-        }
-      }
-      bridge.stop();
-      router.clearAll();
-    },
+    () => cleanupStartedChannels(channels.values(), bridge, router),
   );
   writeStdoutLine(
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,

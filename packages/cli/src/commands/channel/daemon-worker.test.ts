@@ -835,6 +835,43 @@ describe('daemonWorkerCommand', () => {
     }
   });
 
+  it('honors a shutdown signal received during async setup', async () => {
+    const exit = mockProcessExitNoThrow();
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    let finishBridgeStart!: () => void;
+    mockBridgeStart.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishBridgeStart = resolve;
+        }),
+    );
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(mockBridgeStart).toHaveBeenCalled();
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      expect(mockBridgeStop).not.toHaveBeenCalled();
+      finishBridgeStart();
+      await handler;
+
+      expect(mockBridgeStop).toHaveBeenCalled();
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      finishBridgeStart?.();
+      restoreSend();
+    }
+  });
+
   it('exits cleanly when the parent IPC disconnects', async () => {
     const exit = mockProcessExitNoThrow();
     const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);

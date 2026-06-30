@@ -4,6 +4,10 @@ import {
   writeFileSync,
   mkdirSync,
   unlinkSync,
+  openSync,
+  closeSync,
+  ftruncateSync,
+  writeSync,
 } from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core';
@@ -124,6 +128,12 @@ function writeInfo(info: ServiceInfo, flag: 'w' | 'wx' = 'w'): void {
   });
 }
 
+function fileExistsError(message: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = 'EEXIST';
+  return err;
+}
+
 /** Write PID file with current standalone channel process info. */
 export function writeServiceInfo(channels: string[]): void {
   const info: ServiceInfo = {
@@ -154,7 +164,41 @@ export function writeServeServiceInfo({
     ...(workerPid !== undefined ? { workerPid } : {}),
   };
 
-  writeInfo(info);
+  const filePath = pidFilePath();
+  let fd: number;
+  try {
+    fd = openSync(filePath, 'r+');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      writeInfo(info, 'wx');
+      return;
+    }
+    throw err;
+  }
+
+  try {
+    let existing: ServiceInfo | null = null;
+    try {
+      existing = parseServiceInfo(JSON.parse(readFileSync(fd, 'utf-8')));
+    } catch {
+      // Treat corrupt data as owned by another process. This updater must only
+      // replace the serve reservation it created earlier in startup.
+    }
+    if (
+      !existing ||
+      existing.owner !== 'serve' ||
+      existing.pid !== servePid ||
+      existing.servePid !== servePid
+    ) {
+      throw fileExistsError(
+        'Channel service pidfile is owned by another process.',
+      );
+    }
+    ftruncateSync(fd, 0);
+    writeSync(fd, JSON.stringify(info, null, 2), 0, 'utf-8');
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function reserveServeServiceInfo({

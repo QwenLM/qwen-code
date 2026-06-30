@@ -415,6 +415,26 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       description: 'Internal daemon-managed channel selection.',
     }),
   handler: async (argv) => {
+    let pendingShutdownReason: NodeJS.Signals | 'disconnect' | undefined;
+    const onEarlyShutdown = (reason: NodeJS.Signals | 'disconnect') => {
+      if (pendingShutdownReason) {
+        process.exit(1);
+        return;
+      }
+      pendingShutdownReason = reason;
+    };
+    const onEarlyDisconnect = () => {
+      onEarlyShutdown('disconnect');
+    };
+    process.on('SIGINT', onEarlyShutdown);
+    process.on('SIGTERM', onEarlyShutdown);
+    process.once('disconnect', onEarlyDisconnect);
+    const removeEarlyShutdownHandlers = () => {
+      process.removeListener('SIGINT', onEarlyShutdown);
+      process.removeListener('SIGTERM', onEarlyShutdown);
+      process.removeListener('disconnect', onEarlyDisconnect);
+    };
+
     try {
       assertInternalDaemonWorkerInvocation();
       const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
@@ -431,6 +451,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           process.send?.({ type: 'ready', ...ready });
         },
       });
+      removeEarlyShutdownHandlers();
 
       let shuttingDown = false;
       let exitCode = 0;
@@ -466,12 +487,16 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
       process.once('disconnect', onDisconnect);
+      if (pendingShutdownReason) {
+        void shutdown(pendingShutdownReason);
+      }
       await finished;
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('disconnect', onDisconnect);
       process.exit(exitCode);
     } catch (err) {
+      removeEarlyShutdownHandlers();
       const safeMessage = sanitizeLogText(
         err instanceof Error ? err.message : String(err),
         512,

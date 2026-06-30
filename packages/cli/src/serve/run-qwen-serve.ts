@@ -494,6 +494,13 @@ function writeServeChannelReservation(
   });
 }
 
+function channelServicePidfileConflictError(info: ServiceInfo): Error {
+  const owner = info.owner === 'serve' ? 'qwen serve' : 'qwen channel start';
+  return new Error(
+    `Channel service is already running under ${owner} (PID ${info.pid}). Stop it before starting qwen serve --channel.`,
+  );
+}
+
 function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
@@ -1333,13 +1340,7 @@ export async function runQwenServe(
     const channelPidfileNames = channelSelectionNames(opts.channelSelection);
     const existingChannelService = channelServicePidfile.readServiceInfo();
     if (existingChannelService) {
-      const owner =
-        existingChannelService.owner === 'serve'
-          ? 'qwen serve'
-          : 'qwen channel start';
-      throw new Error(
-        `Channel service is already running under ${owner} (PID ${existingChannelService.pid}). Stop it before starting qwen serve --channel.`,
-      );
+      throw channelServicePidfileConflictError(existingChannelService);
     }
     try {
       writeServeChannelReservation(channelServicePidfile, channelPidfileNames);
@@ -1350,11 +1351,7 @@ export async function runQwenServe(
         if (code === 'EEXIST') {
           const info = channelServicePidfile.readServiceInfo();
           if (info) {
-            const owner =
-              info.owner === 'serve' ? 'qwen serve' : 'qwen channel start';
-            throw new Error(
-              `Channel service is already running under ${owner} (PID ${info.pid}). Stop it before starting qwen serve --channel.`,
-            );
+            throw channelServicePidfileConflictError(info);
           }
           try {
             writeServeChannelReservation(
@@ -2639,11 +2636,10 @@ export async function runQwenServe(
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
             // NOTE: the SIGINT/SIGTERM handlers stay attached during the
-            // drain. Their `if (shuttingDown) return` guard makes a second
-            // signal a no-op. Detaching them up front would leave Node's
-            // default signal behavior in charge — a second SIGTERM mid-drain
-            // would terminate the process and orphan agent children. We
-            // detach AFTER drain completes (`finish` below).
+            // drain so a second signal can take the explicit force-exit path
+            // above. Detaching them up front would leave Node's default signal
+            // behavior in charge and could orphan agent children. We detach
+            // AFTER drain completes (`finish` below).
 
             // Two-phase shutdown:
             //   1. `bridge.shutdown()` — tears down agent children with

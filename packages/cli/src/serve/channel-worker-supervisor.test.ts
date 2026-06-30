@@ -485,6 +485,36 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('preserves a ready worker error when force-killing after failed state', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+    child.emit('error', new Error('ipc failed'));
+
+    supervisor.killAllSync();
+
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'exited',
+      signal: 'SIGKILL',
+      error: 'ipc failed',
+    });
+  });
+
   it('kills the worker synchronously on force shutdown', async () => {
     const child = new FakeChild();
     const supervisor = createChannelWorkerSupervisor({

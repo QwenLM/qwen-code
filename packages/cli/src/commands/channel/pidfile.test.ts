@@ -6,12 +6,24 @@ const fsStore = vi.hoisted(() => {
   const store: Record<string, string> = {};
   return store;
 });
+const fsFds = vi.hoisted(() => {
+  const fds = {
+    next: 3,
+    paths: {} as Record<number, string>,
+  };
+  return fds;
+});
 const mockGlobalQwenDir = vi.hoisted(() => '/tmp/qwen-pidfile-test/.qwen');
 
 vi.mock('node:fs', () => {
   const mock = {
     existsSync: (p: string) => p in fsStore,
-    readFileSync: (p: string) => {
+    readFileSync: (p: string | number) => {
+      if (typeof p === 'number') {
+        const fdPath = fsFds.paths[p];
+        if (!fdPath) throw new Error('EBADF');
+        return fsStore[fdPath] ?? '';
+      }
       if (!(p in fsStore)) throw new Error('ENOENT');
       return fsStore[p];
     },
@@ -27,6 +39,35 @@ vi.mock('node:fs', () => {
         throw err;
       }
       fsStore[p] = data;
+    },
+    openSync: (p: string) => {
+      if (!(p in fsStore)) {
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      }
+      const fd = fsFds.next++;
+      fsFds.paths[fd] = p;
+      return fd;
+    },
+    closeSync: (fd: number) => {
+      delete fsFds.paths[fd];
+    },
+    ftruncateSync: (fd: number) => {
+      const fdPath = fsFds.paths[fd];
+      if (!fdPath) throw new Error('EBADF');
+      fsStore[fdPath] = '';
+    },
+    writeSync: (
+      fd: number,
+      data: string,
+      _position?: number,
+      _encoding?: BufferEncoding,
+    ) => {
+      const fdPath = fsFds.paths[fd];
+      if (!fdPath) throw new Error('EBADF');
+      fsStore[fdPath] = data;
+      return data.length;
     },
     mkdirSync: () => {},
     unlinkSync: (p: string) => {
@@ -62,6 +103,8 @@ function getPidFilePath() {
 
 beforeEach(() => {
   for (const k of Object.keys(fsStore)) delete fsStore[k];
+  fsFds.next = 3;
+  for (const k of Object.keys(fsFds.paths)) delete fsFds.paths[Number(k)];
 });
 
 afterEach(() => {
@@ -120,6 +163,73 @@ describe('writeServiceInfo + readServiceInfo', () => {
       servePid: 4321,
       workerPid: 8765,
       channels: ['telegram', 'feishu'],
+    });
+  });
+
+  it('updates a matching serve-owned reservation with worker metadata', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    reserveServeServiceInfo({
+      channels: ['telegram'],
+      servePid: 4321,
+    });
+    writeServeServiceInfo({
+      channels: ['telegram'],
+      servePid: 4321,
+      workerPid: 8765,
+    });
+
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'serve',
+      pid: 4321,
+      servePid: 4321,
+      workerPid: 8765,
+      channels: ['telegram'],
+    });
+  });
+
+  it('does not let serve metadata updates overwrite standalone pidfiles', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    writeServiceInfo(['telegram']);
+
+    expect(() =>
+      writeServeServiceInfo({
+        channels: ['telegram'],
+        servePid: 4321,
+        workerPid: 8765,
+      }),
+    ).toThrow('Channel service pidfile is owned by another process.');
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'channel',
+      pid: process.pid,
+      channels: ['telegram'],
+    });
+  });
+
+  it('does not let one serve process overwrite another serve reservation', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    reserveServeServiceInfo({
+      channels: ['telegram'],
+      servePid: 4321,
+    });
+
+    expect(() =>
+      writeServeServiceInfo({
+        channels: ['telegram'],
+        servePid: 9999,
+        workerPid: 8765,
+      }),
+    ).toThrow('Channel service pidfile is owned by another process.');
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'serve',
+      pid: 4321,
+      servePid: 4321,
+      channels: ['telegram'],
     });
   });
 

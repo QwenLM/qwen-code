@@ -357,14 +357,18 @@ export function createChannelWorkerSupervisor(
       ) {
         return;
       }
+      const preserveFailure =
+        snapshot.state === 'failed' && !hasObservedExit(snapshot);
       stopping = true;
       child.kill('SIGKILL');
       child = undefined;
-      snapshot = {
-        ...snapshot,
-        state: 'stopped',
-        signal: 'SIGKILL',
-      };
+      if (!preserveFailure) {
+        snapshot = {
+          ...snapshot,
+          state: 'stopped',
+          signal: 'SIGKILL',
+        };
+      }
     },
     snapshot() {
       return { ...snapshot, channels: [...snapshot.channels] };
