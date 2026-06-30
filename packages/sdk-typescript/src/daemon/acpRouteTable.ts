@@ -637,6 +637,26 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     },
   },
 
+  // GET /workspace/:id/sessions → session/list
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/(.+)\/sessions\/?$/,
+    mapping: {
+      method: 'session/list',
+      extractParams: (segs, _body, _method, query) => {
+        const size = query?.get('size');
+        return {
+          workspaceCwd: segs[0],
+          ...strParam(query, 'cursor'),
+          ...strParam(query, 'archiveState'),
+          ...(size == null || size === ''
+            ? {}
+            : { _meta: { size: Number(size) } }),
+        };
+      },
+    },
+  },
+
   // ---- Workspace catch-all (must be AFTER all specific workspace routes) --
   // Handles any workspace path not matched above (e.g., /workspace/custom/path).
   {
@@ -744,6 +764,24 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/sessions\/delete\/?$/,
     mapping: {
       method: '_qwen/sessions/delete',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // POST /sessions/archive → _qwen/sessions/archive
+  {
+    httpMethod: 'POST',
+    pattern: /^\/sessions\/archive\/?$/,
+    mapping: {
+      method: '_qwen/sessions/archive',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // POST /sessions/unarchive → _qwen/sessions/unarchive
+  {
+    httpMethod: 'POST',
+    pattern: /^\/sessions\/unarchive\/?$/,
+    mapping: {
+      method: '_qwen/sessions/unarchive',
       extractParams: (_s, body) => (isRecord(body) ? body : {}),
     },
   },

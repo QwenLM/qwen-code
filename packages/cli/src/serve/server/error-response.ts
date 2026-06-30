@@ -27,6 +27,8 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArchivedError,
+  SessionArchivingError,
   SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -239,6 +241,23 @@ export function sendBridgeError(
   }
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    return;
+  }
+  if (err instanceof SessionArchivedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionArchivingError) {
+    res.set('Retry-After', '5');
+    res.status(409).json({
+      error: err.message,
+      code: 'session_archiving',
+      sessionId: err.sessionId,
+    });
     return;
   }
   if (err instanceof InvalidClientIdError) {

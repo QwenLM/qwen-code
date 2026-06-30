@@ -84,6 +84,8 @@ export {
   CdWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
+  SessionArchivedError,
+  SessionArchivingError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,

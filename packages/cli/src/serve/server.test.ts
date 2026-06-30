@@ -209,6 +209,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_lsp',
   'session_status',
   'session_close',
+  'session_archive',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
   // guardrail surface (`--mcp-client-budget`, `clientCount` /
@@ -516,6 +517,7 @@ interface FakeBridgeOpts {
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
+    closeOpts?: FakeCloseSessionOpts,
   ) => Promise<void>;
   updateMetadataImpl?: (
     sessionId: string,
@@ -534,6 +536,11 @@ interface FakeBridgeOpts {
     context?: BridgeClientRequestContext,
   ) => Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
   daemonStatusSnapshotImpl?: () => BridgeDaemonStatusSnapshot;
+}
+
+interface FakeCloseSessionOpts {
+  reason?: string;
+  requireAgentClose?: boolean;
 }
 
 interface FakeBridge extends AcpSessionBridge {
@@ -671,6 +678,7 @@ interface FakeBridge extends AcpSessionBridge {
   closeCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
+    closeOpts?: FakeCloseSessionOpts;
   }>;
   updateMetadataCalls: Array<{
     sessionId: string;
@@ -1454,9 +1462,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       removeRuntimeMcpServerCalls.push({ name, originatorClientId });
       return removeRuntimeMcpServerImpl(name, originatorClientId);
     },
-    async closeSession(sessionId, context) {
-      closeCalls.push({ sessionId, ...(context ? { context } : {}) });
-      return closeImpl(sessionId, context);
+    async closeSession(sessionId, context, closeOpts) {
+      closeCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+        ...(closeOpts ? { closeOpts } : {}),
+      });
+      return closeImpl(sessionId, context, closeOpts);
     },
     updateSessionMetadata(sessionId, metadata, context) {
       updateMetadataCalls.push({
@@ -6052,20 +6064,22 @@ describe('createServeApp', () => {
       expect(res.body.sessions).toHaveLength(2);
       expect(res.body.sessions).toEqual(
         expect.arrayContaining([
-          {
+          expect.objectContaining({
             sessionId: 's-1',
             workspaceCwd: WS_BOUND,
             createdAt: '2026-05-17T12:00:00.000Z',
             clientCount: 1,
             hasActivePrompt: false,
-          },
-          {
+            isArchived: false,
+          }),
+          expect.objectContaining({
             sessionId: 's-2',
             workspaceCwd: WS_BOUND,
             createdAt: '2026-05-17T12:01:00.000Z',
             clientCount: 0,
             hasActivePrompt: true,
-          },
+            isArchived: false,
+          }),
         ]),
       );
       expect(bridge.listCalls).toEqual([WS_BOUND]);
@@ -6374,6 +6388,7 @@ describe('createServeApp', () => {
         expect(listSessionsSpy).toHaveBeenCalledWith({
           cursor: 1000123.456,
           size: 20,
+          archiveState: 'active',
         });
       } finally {
         listSessionsSpy.mockRestore();
@@ -8910,8 +8925,15 @@ describe('createServeApp', () => {
       await fsp.rm(runtimeDir, { recursive: true, force: true });
     });
 
-    async function writeSession(sessionId: string): Promise<void> {
-      const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
+    async function writeSession(
+      sessionId: string,
+      state: 'active' | 'archived' = 'active',
+    ): Promise<void> {
+      const chatsDir = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+      );
       await fsp.mkdir(chatsDir, { recursive: true });
       const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
       const record = {
@@ -8924,6 +8946,18 @@ describe('createServeApp', () => {
         cwd: wsDir,
       };
       await fsp.writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+    }
+
+    function sessionFilePath(
+      sessionId: string,
+      state: 'active' | 'archived' = 'active',
+    ): string {
+      return path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+        `${sessionId}.jsonl`,
+      );
     }
 
     it('400 on missing sessionIds', async () => {
@@ -8997,6 +9031,29 @@ describe('createServeApp', () => {
       const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
       const filePath = path.join(chatsDir, `${sid}.jsonl`);
       await expect(fsp.access(filePath)).rejects.toThrow();
+    });
+
+    it('deletes archived session transcript when bridge throws SessionNotFoundError', async () => {
+      const sid = 'feedbeef-dead-beef-dead-beefdeaddead';
+      await writeSession(sid, 'archived');
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([sid]);
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).rejects.toThrow();
     });
 
     it('does not delete when bridge.closeSession throws InvalidClientIdError', async () => {
@@ -9185,6 +9242,261 @@ describe('createServeApp', () => {
       expect(res.status).toBe(500);
       expect(res.body.code).toBe('sessions_delete_failed');
       spy.mockRestore();
+    });
+  });
+
+  describe('POST /sessions/archive and /sessions/unarchive', () => {
+    let previousRuntimeDir: string | undefined;
+    let runtimeDir: string;
+    let wsDir: string;
+
+    beforeEach(async () => {
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-session-archive-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      wsDir = realpathSync(runtimeDir);
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    function sessionFilePath(
+      sessionId: string,
+      state: 'active' | 'archived' = 'active',
+    ): string {
+      return path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+        `${sessionId}.jsonl`,
+      );
+    }
+
+    async function writeSession(
+      sessionId: string,
+      state: 'active' | 'archived' = 'active',
+    ): Promise<void> {
+      const filePath = sessionFilePath(sessionId, state);
+      await fsp.mkdir(path.dirname(filePath), { recursive: true });
+      const record = {
+        uuid: `${sessionId}-user-1`,
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-05-28T12:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd: wsDir,
+      };
+      await fsp.writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+    }
+
+    function createArchiveApp(bridge = fakeBridge()) {
+      return createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+    }
+
+    it('archives an inactive session by moving JSONL into chats/archive', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createArchiveApp(bridge);
+      const res = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        archived: [sid],
+        alreadyArchived: [],
+        notFound: [],
+        errors: [],
+      });
+      expect(bridge.closeCalls[0]?.closeOpts).toMatchObject({
+        requireAgentClose: true,
+      });
+      await expect(fsp.access(sessionFilePath(sid))).rejects.toThrow();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).resolves.toBeUndefined();
+    });
+
+    it('does not move JSONL when live strict close fails', async () => {
+      const sid = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          throw new Error('flush failed');
+        },
+      });
+      const app = createArchiveApp(bridge);
+      const res = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body.archived).toEqual([]);
+      expect(res.body.errors).toEqual([
+        { sessionId: sid, error: 'flush failed' },
+      ]);
+      await expect(fsp.access(sessionFilePath(sid))).resolves.toBeUndefined();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).rejects.toThrow();
+    });
+
+    it('unarchives by moving JSONL back into active chats', async () => {
+      const sid = '33333333-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid, 'archived');
+      const app = createArchiveApp();
+      const res = await request(app)
+        .post('/sessions/unarchive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        unarchived: [sid],
+        alreadyActive: [],
+        notFound: [],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).resolves.toBeUndefined();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).rejects.toThrow();
+    });
+
+    it('rejects load and resume for archived sessions with session_archived', async () => {
+      const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid, 'archived');
+      const bridge = fakeBridge();
+      const app = createArchiveApp(bridge);
+
+      const loadRes = await request(app)
+        .post(`/session/${sid}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: wsDir });
+      expect(loadRes.status).toBe(409);
+      expect(loadRes.body).toMatchObject({
+        code: 'session_archived',
+        sessionId: sid,
+      });
+
+      const resumeRes = await request(app)
+        .post(`/session/${sid}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: wsDir });
+      expect(resumeRes.status).toBe(409);
+      expect(resumeRes.body).toMatchObject({
+        code: 'session_archived',
+        sessionId: sid,
+      });
+      expect(bridge.loadCalls).toHaveLength(0);
+      expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('returns session_archiving for prompt while archive is in flight', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          closeStarted();
+          await closeReleasedPromise;
+        },
+      });
+      const app = createArchiveApp(bridge);
+      const archivePromise = request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] })
+        .then((res) => res);
+      await closeStartedPromise;
+
+      const promptRes = await request(app)
+        .post(`/session/${sid}/prompt`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+      expect(promptRes.status).toBe(409);
+      expect(promptRes.body).toMatchObject({
+        code: 'session_archiving',
+        sessionId: sid,
+      });
+      expect(bridge.promptCalls).toHaveLength(0);
+
+      releaseClose();
+      const archiveRes = await archivePromise;
+      expect(archiveRes.status).toBe(200);
+      expect(archiveRes.body.archived).toEqual([sid]);
+    });
+
+    it('returns session_archiving for overlapping archive batches before partial work starts', async () => {
+      const sidA = '66666666-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const sidB = '77777777-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sidA);
+      await writeSession(sidB);
+
+      let closeAStarted!: () => void;
+      let releaseCloseA!: () => void;
+      const closeAStartedPromise = new Promise<void>((resolve) => {
+        closeAStarted = resolve;
+      });
+      const closeAReleasedPromise = new Promise<void>((resolve) => {
+        releaseCloseA = resolve;
+      });
+
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          if (sessionId === sidA) {
+            closeAStarted();
+            await closeAReleasedPromise;
+          }
+        },
+      });
+      const app = createArchiveApp(bridge);
+
+      const firstArchive = request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sidA, sidB] })
+        .then((res) => res);
+      await closeAStartedPromise;
+
+      const secondRes = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sidB, sidA] });
+      expect(secondRes.status).toBe(409);
+      expect(secondRes.body).toMatchObject({
+        code: 'session_archiving',
+        sessionId: sidB,
+      });
+      expect(bridge.closeCalls.map((call) => call.sessionId)).toEqual([sidA]);
+
+      releaseCloseA();
+      const firstRes = await firstArchive;
+      expect(firstRes.status).toBe(200);
+      expect(firstRes.body.archived).toEqual([sidA, sidB]);
     });
   });
 

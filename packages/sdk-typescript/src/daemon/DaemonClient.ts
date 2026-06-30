@@ -21,6 +21,7 @@ import type {
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
+  DaemonArchiveSessionsResult,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
@@ -32,6 +33,7 @@ import type {
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionArchiveState,
   DaemonSessionLspStatus,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
@@ -108,6 +110,7 @@ import type {
   DaemonWorkspaceTrustChangeRequest,
   DaemonWorkspaceTrustChangeResult,
   DaemonWorkspaceTrustStatus,
+  DaemonUnarchiveSessionsResult,
 } from './types.js';
 
 /**
@@ -1282,7 +1285,10 @@ export class DaemonClient {
    */
   async listWorkspaceSessions(
     workspaceCwd: string,
-    options?: { pageSize?: number },
+    options?: {
+      pageSize?: number;
+      archiveState?: DaemonSessionArchiveState;
+    },
   ): Promise<DaemonSessionSummary[]> {
     const requestedPageSize =
       options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
@@ -1297,10 +1303,14 @@ export class DaemonClient {
         ),
       ),
     );
+    const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.archiveState !== undefined) {
+      query.set('archiveState', options.archiveState);
+    }
     const body = await this.jsonRequest<{
       sessions: DaemonSessionSummary[];
     }>(
-      `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?size=${pageSize}`,
+      `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
     );
     return body.sessions;
@@ -2637,6 +2647,46 @@ export class DaemonClient {
           };
         }
         throw await this.failOnError(res, 'POST /sessions/delete');
+      },
+    );
+  }
+
+  async archiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<DaemonArchiveSessionsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/archive`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as DaemonArchiveSessionsResult;
+        }
+        throw await this.failOnError(res, 'POST /sessions/archive');
+      },
+    );
+  }
+
+  async unarchiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<DaemonUnarchiveSessionsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/unarchive`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as DaemonUnarchiveSessionsResult;
+        }
+        throw await this.failOnError(res, 'POST /sessions/unarchive');
       },
     );
   }

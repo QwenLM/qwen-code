@@ -12,6 +12,7 @@ import {
   SessionService,
   addDaemonRequestAttribute,
   type ApprovalMode,
+  type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -42,10 +43,15 @@ import {
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
 } from '../server/session-list.js';
+import {
+  assertSessionLoadable,
+  type SessionArchiveCoordinator,
+} from '../server/session-archive.js';
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
+  archiveCoordinator: SessionArchiveCoordinator;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
@@ -61,6 +67,7 @@ export function registerSessionRoutes(
   const {
     boundWorkspace,
     bridge,
+    archiveCoordinator,
     mutate,
     sendBridgeError,
     daemonLog,
@@ -68,6 +75,41 @@ export function registerSessionRoutes(
     sessionShellCommandEnabled,
   } = deps;
   const LANGUAGE_CODES = deps.languageCodes;
+
+  const parseSessionIdsBody = (
+    req: Request,
+    res: Response,
+  ): string[] | undefined => {
+    const body = safeBody(req);
+    const sessionIds: unknown = body['sessionIds'];
+    if (
+      !Array.isArray(sessionIds) ||
+      sessionIds.length === 0 ||
+      sessionIds.length > 100 ||
+      !sessionIds.every((id) => typeof id === 'string')
+    ) {
+      res.status(400).json({
+        error: '`sessionIds` must be a non-empty string array (max 100)',
+        code: 'invalid_request',
+      });
+      return undefined;
+    }
+    return [...new Set(sessionIds as string[])];
+  };
+
+  const assertNoArchiveTransition = (sessionIds: string[]): void => {
+    for (const sessionId of sessionIds) {
+      archiveCoordinator.assertNotTransitioning(sessionId);
+    }
+  };
+
+  const serializeSessionErrors = (
+    errors: Array<{ sessionId: string; error: unknown }>,
+  ): Array<{ sessionId: string; error: string }> =>
+    errors.map((e) => ({
+      sessionId: e.sessionId,
+      error: e.error instanceof Error ? e.error.message : String(e.error),
+    }));
 
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
@@ -182,6 +224,8 @@ export function registerSessionRoutes(
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        archiveCoordinator.assertNotTransitioning(sessionId);
+        await assertSessionLoadable(new SessionService(cwd), sessionId);
         const session =
           action === 'load'
             ? await bridge.loadSession({
@@ -251,6 +295,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const result = await bridge.branchSession(
         sessionId,
         { name },
@@ -294,6 +339,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const result = await bridge.launchSessionForkAgent(
         sessionId,
         directive,
@@ -327,6 +373,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const result = await bridge.changeSessionCwd(
         sessionId,
         { path: targetPath },
@@ -470,6 +517,7 @@ export function registerSessionRoutes(
         return;
       }
       try {
+        archiveCoordinator.assertNotTransitioning(sessionId);
         res
           .status(200)
           .json(await bridge.cancelSessionTask(sessionId, taskId, kind));
@@ -494,6 +542,7 @@ export function registerSessionRoutes(
         return;
       }
       try {
+        archiveCoordinator.assertNotTransitioning(sessionId);
         res.status(200).json(await bridge.clearSessionGoal(sessionId));
       } catch (err) {
         sendBridgeError(res, err, {
@@ -523,6 +572,7 @@ export function registerSessionRoutes(
       if (clientId === null) return;
       const promptId = crypto.randomUUID();
       try {
+        archiveCoordinator.assertNotTransitioning(sessionId);
         res.status(200).json(
           await bridge.continueSession(sessionId, {
             ...(clientId !== undefined ? { clientId } : {}),
@@ -586,6 +636,7 @@ export function registerSessionRoutes(
 
     let lastEventId: number;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       lastEventId = bridge.getSessionLastEventId(sessionId);
     } catch (err) {
       sendBridgeError(res, err, {
@@ -689,6 +740,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const result = bridge.recordHeartbeat(
         sessionId,
         clientId !== undefined ? { clientId } : undefined,
@@ -708,6 +760,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       await bridge.detachClient(sessionId, clientId);
       res.status(204).end();
     } catch (err) {
@@ -724,6 +777,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       await bridge.cancelSession(
         sessionId,
         {
@@ -749,6 +803,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       await bridge.closeSession(
         sessionId,
         clientId !== undefined ? { clientId } : undefined,
@@ -765,22 +820,15 @@ export function registerSessionRoutes(
   app.post('/sessions/delete', mutate(), async (req, res) => {
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
-    const body = safeBody(req);
-    const sessionIds: unknown = body['sessionIds'];
-    if (
-      !Array.isArray(sessionIds) ||
-      sessionIds.length === 0 ||
-      sessionIds.length > 100 ||
-      !sessionIds.every((id) => typeof id === 'string')
-    ) {
-      res.status(400).json({
-        error: '`sessionIds` must be a non-empty string array (max 100)',
-        code: 'invalid_request',
-      });
+    const uniqueIds = parseSessionIdsBody(req, res);
+    if (uniqueIds === undefined) return;
+    try {
+      assertNoArchiveTransition(uniqueIds);
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /sessions/delete' });
       return;
     }
     try {
-      const uniqueIds = [...new Set(sessionIds as string[])];
       const closeResults = await Promise.allSettled(
         uniqueIds.map(async (id) => {
           // Intentional: no clientId — batch delete bypasses per-tab ownership.
@@ -843,6 +891,89 @@ export function registerSessionRoutes(
     }
   });
 
+  app.post('/sessions/archive', mutate(), async (req, res) => {
+    const uniqueIds = parseSessionIdsBody(req, res);
+    if (uniqueIds === undefined) return;
+
+    const service = new SessionService(boundWorkspace);
+    const archived: string[] = [];
+    const alreadyArchived: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: unknown }> = [];
+
+    try {
+      await archiveCoordinator.runExclusiveMany(uniqueIds, async () => {
+        for (const sessionId of uniqueIds) {
+          try {
+            try {
+              await bridge.closeSession(sessionId, undefined, {
+                requireAgentClose: true,
+              });
+            } catch (err) {
+              if (!(err instanceof SessionNotFoundError)) {
+                throw err;
+              }
+            }
+            const result = await service.archiveSessions([sessionId]);
+            archived.push(...result.archived);
+            alreadyArchived.push(...result.alreadyArchived);
+            notFound.push(...result.notFound);
+            errors.push(...result.errors);
+          } catch (err) {
+            errors.push({ sessionId, error: err });
+          }
+        }
+      });
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /sessions/archive' });
+      return;
+    }
+
+    res.status(200).json({
+      archived,
+      alreadyArchived,
+      notFound,
+      errors: serializeSessionErrors(errors),
+    });
+  });
+
+  app.post('/sessions/unarchive', mutate(), async (req, res) => {
+    const uniqueIds = parseSessionIdsBody(req, res);
+    if (uniqueIds === undefined) return;
+
+    const service = new SessionService(boundWorkspace);
+    const unarchived: string[] = [];
+    const alreadyActive: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: unknown }> = [];
+
+    try {
+      await archiveCoordinator.runExclusiveMany(uniqueIds, async () => {
+        for (const sessionId of uniqueIds) {
+          try {
+            const result = await service.unarchiveSessions([sessionId]);
+            unarchived.push(...result.unarchived);
+            alreadyActive.push(...result.alreadyActive);
+            notFound.push(...result.notFound);
+            errors.push(...result.errors);
+          } catch (err) {
+            errors.push({ sessionId, error: err });
+          }
+        }
+      });
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /sessions/unarchive' });
+      return;
+    }
+
+    res.status(200).json({
+      unarchived,
+      alreadyActive,
+      notFound,
+      errors: serializeSessionErrors(errors),
+    });
+  });
+
   app.patch('/session/:id/metadata', async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
@@ -862,6 +993,7 @@ export function registerSessionRoutes(
         ? rawDisplayName.slice(0, 256)
         : undefined;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const effective = bridge.updateSessionMetadata(
         sessionId,
         { displayName },
@@ -905,9 +1037,25 @@ export function registerSessionRoutes(
           ? req.query['cursor']
           : undefined;
       const size = parseSessionPageSizeQuery(req.query['size']);
+      const rawArchiveState = req.query['archiveState'];
+      let archiveState: SessionArchiveState | undefined;
+      if (rawArchiveState !== undefined) {
+        if (
+          typeof rawArchiveState !== 'string' ||
+          (rawArchiveState !== 'active' && rawArchiveState !== 'archived')
+        ) {
+          res.status(400).json({
+            error: '`archiveState` must be "active" or "archived"',
+            code: 'invalid_archive_state',
+          });
+          return;
+        }
+        archiveState = rawArchiveState;
+      }
       const result = await listWorkspaceSessionsForResponse(bridge, key, {
         cursor,
         size,
+        archiveState,
       });
       res.status(200).json({
         sessions: result.sessions,
@@ -946,6 +1094,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const response = await bridge.setSessionModel(
         sessionId,
         {
@@ -974,6 +1123,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const response = await bridge.generateSessionRecap(
         sessionId,
         clientId !== undefined ? { clientId } : undefined,
@@ -1020,6 +1170,7 @@ export function registerSessionRoutes(
       return;
     }
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const result = await bridge.generateSessionBtw(
         sessionId,
         question.trim(),
@@ -1086,6 +1237,7 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const result = bridge.enqueueMidTurnMessage(
         sessionId,
         trimmed,
@@ -1134,6 +1286,7 @@ export function registerSessionRoutes(
     };
     res.once('close', onResClose);
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const result = await bridge.executeShellCommand(
         sessionId,
         command.trim(),
@@ -1200,6 +1353,7 @@ export function registerSessionRoutes(
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        archiveCoordinator.assertNotTransitioning(sessionId);
         const response = await bridge.rewindSession(
           sessionId,
           { promptId, rewindFiles: body['rewindFiles'] !== false },
@@ -1246,6 +1400,7 @@ export function registerSessionRoutes(
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        archiveCoordinator.assertNotTransitioning(sessionId);
         const response = await bridge.setSessionApprovalMode(
           sessionId,
           mode as ApprovalMode,
@@ -1294,6 +1449,7 @@ export function registerSessionRoutes(
     if (clientId === null) return;
 
     try {
+      archiveCoordinator.assertNotTransitioning(sessionId);
       const response = await bridge.setSessionLanguage(
         sessionId,
         {

@@ -15,6 +15,7 @@ import {
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
   writeWorkspaceContextFile,
+  type SessionArchiveState,
   type SubagentLevel,
 } from '@qwen-code/qwen-code-core';
 import { FsError } from '../fs/errors.js';
@@ -28,7 +29,9 @@ import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import {
@@ -64,6 +67,10 @@ import {
   InvalidCursorError,
   listWorkspaceSessionsForResponse,
 } from '../server.js';
+import {
+  assertSessionLoadable,
+  SessionArchiveCoordinator,
+} from '../server/session-archive.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
@@ -149,6 +156,8 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
   `${QWEN_METHOD_NS}sessions/delete`,
+  `${QWEN_METHOD_NS}sessions/archive`,
+  `${QWEN_METHOD_NS}sessions/unarchive`,
   // Wave 2: agents
   `${QWEN_METHOD_NS}workspace/agents/list`,
   `${QWEN_METHOD_NS}workspace/agents/get`,
@@ -372,6 +381,24 @@ function toRpcError(err: unknown): {
   }
   const name = err instanceof Error ? err.name : '';
   switch (name) {
+    case 'SessionArchivedError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_archived',
+          sessionId: (err as { sessionId?: unknown }).sessionId,
+        },
+      };
+    case 'SessionArchivingError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_archiving',
+          sessionId: (err as { sessionId?: unknown }).sessionId,
+        },
+      };
     case 'SessionNotFoundError':
     case 'InvalidSessionScopeError':
     case 'WorkspaceMismatchError':
@@ -431,6 +458,7 @@ export class AcpDispatcher {
     private readonly fsFactory?: WorkspaceFileSystemFactory,
     private readonly deviceFlowRegistry?: DeviceFlowRegistry,
     private readonly sessionShellCommandEnabled: boolean = false,
+    private readonly archiveCoordinator: SessionArchiveCoordinator = new SessionArchiveCoordinator(),
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -456,6 +484,36 @@ export class AcpDispatcher {
       route: `ACP ${method}`,
       workspaceCwd: this.boundWorkspace,
     };
+  }
+
+  private parseSessionIds(params: Record<string, unknown>): string[] {
+    const sessionIds = params['sessionIds'];
+    if (
+      !Array.isArray(sessionIds) ||
+      sessionIds.length === 0 ||
+      sessionIds.length > 100 ||
+      !sessionIds.every((s) => typeof s === 'string')
+    ) {
+      throw new AcpParamError(
+        '`sessionIds` must be non-empty string array (max 100)',
+      );
+    }
+    return [...new Set(sessionIds as string[])];
+  }
+
+  private assertNoArchiveTransition(sessionIds: string[]): void {
+    for (const sessionId of sessionIds) {
+      this.archiveCoordinator.assertNotTransitioning(sessionId);
+    }
+  }
+
+  private serializeSessionErrors(
+    errors: Array<{ sessionId: string; error: unknown }>,
+  ): Array<{ sessionId: string; error: string }> {
+    return errors.map((e) => ({
+      sessionId: e.sessionId,
+      error: errMsg(e.error),
+    }));
   }
 
   /**
@@ -811,6 +869,8 @@ export class AcpDispatcher {
             return;
           }
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
+          await assertSessionLoadable(new SessionService(cwd), sessionId);
           const restored =
             method === 'session/load'
               ? await this.bridge.loadSession({
@@ -875,6 +935,24 @@ export class AcpDispatcher {
         }
 
         case 'session/list': {
+          const rawWorkspace =
+            typeof params['workspaceCwd'] === 'string'
+              ? params['workspaceCwd']
+              : undefined;
+          const workspaceCwd =
+            rawWorkspace === undefined
+              ? this.boundWorkspace
+              : parseOptionalWorkspaceCwd(
+                  { cwd: rawWorkspace },
+                  this.boundWorkspace,
+                );
+          const requestedWorkspace = canonicalizeWorkspace(workspaceCwd);
+          if (requestedWorkspace !== this.boundWorkspace) {
+            throw new WorkspaceMismatchError(
+              this.boundWorkspace,
+              requestedWorkspace,
+            );
+          }
           const cursor =
             typeof params['cursor'] === 'string' ? params['cursor'] : undefined;
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
@@ -882,17 +960,41 @@ export class AcpDispatcher {
             typeof meta?.['size'] === 'number'
               ? (meta['size'] as number)
               : undefined;
+          const rawArchiveState =
+            typeof params['archiveState'] === 'string'
+              ? params['archiveState']
+              : typeof meta?.['archiveState'] === 'string'
+                ? meta['archiveState']
+                : undefined;
+          let archiveState: SessionArchiveState | undefined;
+          if (rawArchiveState !== undefined) {
+            if (
+              rawArchiveState !== 'active' &&
+              rawArchiveState !== 'archived'
+            ) {
+              throw new AcpParamError(
+                '`archiveState` must be "active" or "archived"',
+              );
+            }
+            archiveState = rawArchiveState;
+          }
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
-            this.boundWorkspace,
-            { cursor, size: metaSize },
+            requestedWorkspace,
+            { cursor, size: metaSize, archiveState },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
               sessionId: s.sessionId,
+              workspaceCwd: s.workspaceCwd,
               cwd: s.workspaceCwd,
-              title: s.displayName,
+              createdAt: s.createdAt,
               updatedAt: s.updatedAt,
+              displayName: s.displayName,
+              title: s.displayName,
+              clientCount: s.clientCount,
+              hasActivePrompt: s.hasActivePrompt,
+              isArchived: s.isArchived === true,
             })),
             ...(result.nextCursor != null
               ? { nextCursor: result.nextCursor }
@@ -904,6 +1006,7 @@ export class AcpDispatcher {
         case 'session/close': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           // Close the ownership gate SYNCHRONOUSLY (before the await) so two
           // concurrent `session/close`s don't both pass `requireOwned` —
           // the second would otherwise send a misleading error and trigger a
@@ -948,6 +1051,7 @@ export class AcpDispatcher {
             return;
           }
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const ctx = this.sessionCtx(conn, sessionId, loopback);
           const result = await this.bridge.branchSession(
             sessionId,
@@ -978,6 +1082,7 @@ export class AcpDispatcher {
         case 'session/cancel': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           // Abort our local in-flight prompt controller too — cancelSession
           // tells the agent to wind down, but the HTTP-side `sendPrompt`
           // await must also be released so the session FIFO unblocks.
@@ -1000,6 +1105,7 @@ export class AcpDispatcher {
         case 'session/prompt': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           validatePrompt(params);
           await this.handlePrompt(conn, sessionId, id, params, loopback);
           return;
@@ -1011,6 +1117,7 @@ export class AcpDispatcher {
         case 'session/set_config_option': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const configId = String(params['configId'] ?? '');
           const rawValue = params['value'];
           const ctx = this.sessionCtx(conn, sessionId, loopback);
@@ -1093,6 +1200,7 @@ export class AcpDispatcher {
             return;
           }
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const modeId = String(params['modeId'] ?? '');
           if (!modeId || !APPROVAL_MODES.includes(modeId as ApprovalMode)) {
             if (id !== undefined) {
@@ -1134,6 +1242,7 @@ export class AcpDispatcher {
             return;
           }
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const modelId = String(params['modelId'] ?? '');
           if (!modelId) {
             if (id !== undefined) {
@@ -1160,6 +1269,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/heartbeat`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const result = this.bridge.recordHeartbeat(
             sessionId,
             this.sessionCtx(conn, sessionId, loopback),
@@ -1193,6 +1303,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/update_metadata`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const metadata = isObject(params['metadata'])
             ? (params['metadata'] as Record<string, unknown>)
             : {};
@@ -1583,6 +1694,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/recap`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const result = await this.bridge.generateSessionRecap(
             sessionId,
             this.sessionCtx(conn, sessionId, loopback),
@@ -1594,6 +1706,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/btw`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const rawQ = params['question'];
           if (
             typeof rawQ !== 'string' ||
@@ -1629,6 +1742,7 @@ export class AcpDispatcher {
             return;
           }
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const binding = conn.sessions.get(sessionId);
           const clientId = binding?.clientId;
           if (!clientId) {
@@ -1671,6 +1785,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/detach`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          this.archiveCoordinator.assertNotTransitioning(sessionId);
           const ctx = this.sessionCtx(conn, sessionId, loopback);
           await this.bridge.detachClient(sessionId, ctx.clientId);
           this.replyConn(conn, id, { ok: true });
@@ -2350,24 +2465,8 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}sessions/delete`: {
-          const sessionIds = params['sessionIds'];
-          if (
-            !Array.isArray(sessionIds) ||
-            sessionIds.length === 0 ||
-            sessionIds.length > 100 ||
-            !sessionIds.every((s) => typeof s === 'string')
-          ) {
-            if (id !== undefined)
-              conn.sendConn(
-                error(
-                  id,
-                  RPC.INVALID_PARAMS,
-                  '`sessionIds` must be non-empty string array (max 100)',
-                ),
-              );
-            return;
-          }
-          const ids = [...new Set(sessionIds as string[])];
+          const ids = this.parseSessionIds(params);
+          this.assertNoArchiveTransition(ids);
           const closeErrors: Array<{ sessionId: string; error: string }> = [];
           const closedIds: string[] = [];
           await Promise.allSettled(
@@ -2412,6 +2511,78 @@ export class AcpDispatcher {
                 error: errMsg(e.error),
               })),
             ],
+          } as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}sessions/archive`: {
+          const ids = this.parseSessionIds(params);
+          const svc = new SessionService(this.boundWorkspace);
+          const archived: string[] = [];
+          const alreadyArchived: string[] = [];
+          const notFound: string[] = [];
+          const errors: Array<{ sessionId: string; error: unknown }> = [];
+          await this.archiveCoordinator.runExclusiveMany(ids, async () => {
+            for (const sid of ids) {
+              try {
+                try {
+                  await this.bridge.closeSession(sid, undefined, {
+                    requireAgentClose: true,
+                  });
+                } catch (err) {
+                  if (
+                    !(
+                      err instanceof Error &&
+                      err.name === 'SessionNotFoundError'
+                    )
+                  ) {
+                    throw err;
+                  }
+                }
+                const result = await svc.archiveSessions([sid]);
+                archived.push(...result.archived);
+                alreadyArchived.push(...result.alreadyArchived);
+                notFound.push(...result.notFound);
+                errors.push(...result.errors);
+              } catch (err) {
+                errors.push({ sessionId: sid, error: err });
+              }
+            }
+          });
+          this.replyConn(conn, id, {
+            archived,
+            alreadyArchived,
+            notFound,
+            errors: this.serializeSessionErrors(errors),
+          } as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}sessions/unarchive`: {
+          const ids = this.parseSessionIds(params);
+          const svc = new SessionService(this.boundWorkspace);
+          const unarchived: string[] = [];
+          const alreadyActive: string[] = [];
+          const notFound: string[] = [];
+          const errors: Array<{ sessionId: string; error: unknown }> = [];
+          await this.archiveCoordinator.runExclusiveMany(ids, async () => {
+            for (const sid of ids) {
+              try {
+                const result = await svc.unarchiveSessions([sid]);
+                unarchived.push(...result.unarchived);
+                alreadyActive.push(...result.alreadyActive);
+                notFound.push(...result.notFound);
+                errors.push(...result.errors);
+              } catch (err) {
+                errors.push({ sessionId: sid, error: err });
+              }
+            }
+          });
+          this.replyConn(conn, id, {
+            unarchived,
+            alreadyActive,
+            notFound,
+            errors: this.serializeSessionErrors(errors),
           } as unknown);
           return;
         }

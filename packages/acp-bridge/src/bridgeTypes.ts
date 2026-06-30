@@ -144,6 +144,7 @@ export interface BridgeSessionSummary {
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  isArchived?: boolean;
 }
 
 export interface SessionMetadataUpdate {
@@ -153,6 +154,8 @@ export interface SessionMetadataUpdate {
 export interface CloseSessionOpts {
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
+  /** Require the ACP child to acknowledge session close before resolving. */
+  requireAgentClose?: boolean;
 }
 
 export interface BridgeClientRequestContext {

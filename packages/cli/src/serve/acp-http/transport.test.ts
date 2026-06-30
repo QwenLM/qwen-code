@@ -12,7 +12,10 @@ import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import WebSocket from 'ws';
-import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import type {
+  BridgeSessionSummary,
+  HttpAcpBridge,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   InvalidClientIdError,
@@ -268,8 +271,10 @@ class FakeBridge {
     return { sessionId: 'sess-1', lastSeenAt: Date.now() };
   }
 
+  workspaceSessions: BridgeSessionSummary[] = [];
+
   listWorkspaceSessions() {
-    return [];
+    return this.workspaceSessions;
   }
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
@@ -1425,6 +1430,102 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }>;
     expect(frame.id).toBe(12);
     expect(frame.result.ok).toBe(true);
+  });
+
+  it('session/list returns REST-compatible session summary fields', async () => {
+    bridge.workspaceSessions = [
+      {
+        sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+        workspaceCwd: '/ws',
+        createdAt: '2026-06-30T00:00:00.000Z',
+        updatedAt: '2026-06-30T00:01:00.000Z',
+        displayName: 'Listed Session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isArchived: false,
+      },
+    ];
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 13,
+      method: 'session/list',
+      params: { workspaceCwd: '/ws' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { sessions: Array<Record<string, unknown>> };
+    }>;
+    expect(frame.id).toBe(13);
+    expect(frame.result.sessions[0]).toMatchObject({
+      sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+      workspaceCwd: '/ws',
+      cwd: '/ws',
+      createdAt: '2026-06-30T00:00:00.000Z',
+      updatedAt: '2026-06-30T00:01:00.000Z',
+      displayName: 'Listed Session',
+      title: 'Listed Session',
+      clientCount: 1,
+      hasActivePrompt: false,
+      isArchived: false,
+    });
+  });
+
+  it('_qwen/sessions/archive rejects invalid batch params', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 14,
+      method: '_qwen/sessions/archive',
+      params: { sessionIds: 'not-an-array' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.id).toBe(14);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('sessionIds');
+  });
+
+  it('_qwen/sessions/unarchive returns per-id result buckets', async () => {
+    const sessionId = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 15,
+      method: '_qwen/sessions/unarchive',
+      params: { sessionIds: [sessionId] },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: {
+        unarchived: string[];
+        alreadyActive: string[];
+        notFound: string[];
+        errors: unknown[];
+      };
+    }>;
+    expect(frame.id).toBe(15);
+    expect(frame.result).toEqual({
+      unarchived: [],
+      alreadyActive: [],
+      notFound: [sessionId],
+      errors: [],
+    });
   });
 
   it('unknown method → JSON-RPC method-not-found on conn stream', async () => {

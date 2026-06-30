@@ -23,6 +23,7 @@ import {
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import {
   RPC,
   error as rpcError,
@@ -191,6 +192,7 @@ export interface MountAcpHttpOptions {
   allowedOrigins?: ParsedAllowOriginPatterns;
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
+  archiveCoordinator?: SessionArchiveCoordinator;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
   checkRate?: (key: string, tier: RateLimitTier) => boolean;
   /**
@@ -287,6 +289,7 @@ export function mountAcpHttp(
     opts.fsFactory,
     opts.deviceFlowRegistry,
     opts.sessionShellCommandEnabled === true,
+    opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
   );
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.

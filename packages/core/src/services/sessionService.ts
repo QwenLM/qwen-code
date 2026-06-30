@@ -75,7 +75,13 @@ export interface SessionListItem {
    * chose.
    */
   titleSource?: TitleSource;
+  /** True when the item was read from the archive directory. */
+  isArchived?: boolean;
 }
+
+export type SessionArchiveState = 'active' | 'archived';
+
+export type SessionLocation = SessionArchiveState | 'conflict' | undefined;
 
 /**
  * Pagination options for listing sessions.
@@ -92,6 +98,11 @@ export interface ListSessionsOptions {
    * @default 20
    */
   size?: number;
+  /**
+   * Which session directory to list.
+   * @default 'active'
+   */
+  archiveState?: SessionArchiveState;
 }
 
 /**
@@ -114,6 +125,20 @@ export interface ListSessionsResult {
  */
 export interface RemoveSessionsResult {
   removed: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+export interface ArchiveSessionsResult {
+  archived: string[];
+  alreadyArchived: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+export interface UnarchiveSessionsResult {
+  unarchived: string[];
+  alreadyActive: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: Error }>;
 }
@@ -246,6 +271,33 @@ export class SessionService {
     return path.join(this.storage.getProjectDir(), 'chats');
   }
 
+  private getArchiveChatsDir(): string {
+    return path.join(this.getChatsDir(), 'archive');
+  }
+
+  private getChatsDirForState(state: SessionArchiveState): string {
+    return state === 'archived'
+      ? this.getArchiveChatsDir()
+      : this.getChatsDir();
+  }
+
+  private getSessionFilePath(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(this.getChatsDirForState(state), `${sessionId}.jsonl`);
+  }
+
+  private getWorktreeSessionPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(
+      this.getChatsDirForState(state),
+      `${sessionId}.worktree.json`,
+    );
+  }
+
   private async sessionBelongsToCurrentProject(
     sessionId: string,
     recordCwd: string,
@@ -269,7 +321,89 @@ export class SessionService {
    * exist yet — consumers must handle ENOENT as "no active worktree".
    */
   getWorktreeSessionPath(sessionId: string): string {
-    return path.join(this.getChatsDir(), `${sessionId}.worktree.json`);
+    return this.getWorktreeSessionPathForState(sessionId, 'active');
+  }
+
+  private async readProjectSessionHead(
+    sessionId: string,
+    filePath: string,
+  ): Promise<ChatRecord | undefined> {
+    try {
+      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      if (records.length === 0) {
+        return undefined;
+      }
+      const firstRecord = records[0];
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, firstRecord.cwd))
+      ) {
+        return undefined;
+      }
+      return firstRecord;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  async getSessionLocation(sessionId: string): Promise<SessionLocation> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+
+    const active = await this.readProjectSessionHead(
+      sessionId,
+      this.getSessionFilePath(sessionId, 'active'),
+    );
+    const archived = await this.readProjectSessionHead(
+      sessionId,
+      this.getSessionFilePath(sessionId, 'archived'),
+    );
+
+    if (active && archived) return 'conflict';
+    if (active) return 'active';
+    if (archived) return 'archived';
+    return undefined;
+  }
+
+  private removeFileIfExists(filePath: string): void {
+    try {
+      fs.unlinkSync(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+  }
+
+  private removeWorktreeSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = this.getWorktreeSessionPathForState(sessionId, state);
+      if (fs.existsSync(sidecar)) {
+        this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
+  private moveOptionalFile(
+    sourcePath: string,
+    targetPath: string,
+    options: { failIfTargetExists: boolean },
+  ): boolean {
+    if (!fs.existsSync(sourcePath)) {
+      return false;
+    }
+    if (fs.existsSync(targetPath)) {
+      if (options.failIfTargetExists) {
+        throw new Error(`Archive sidecar conflict: ${targetPath}`);
+      }
+      return false;
+    }
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.renameSync(sourcePath, targetPath);
+    return true;
   }
 
   /**
@@ -544,8 +678,9 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20 } = options;
-    const chatsDir = this.getChatsDir();
+    const { cursor, size = 20, archiveState = 'active' } = options;
+    const chatsDir = this.getChatsDirForState(archiveState);
+    const isArchived = archiveState === 'archived';
 
     // Get all valid session files (matching UUID pattern) with their stats
     let files: Array<{ name: string; mtime: number }> = [];
@@ -642,6 +777,7 @@ export class SessionService {
         // and `countSessionMessages` for the rationale.
         customTitle: titleInfo.title,
         titleSource: titleInfo.source,
+        isArchived,
       });
     }
 
@@ -867,23 +1003,21 @@ export class SessionService {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     try {
-      // Verify the file exists and belongs to this project
-      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
-      if (records.length === 0) {
+      const activePath = this.getSessionFilePath(sessionId, 'active');
+      const active = await this.readProjectSessionHead(sessionId, activePath);
+      const archivedPath = this.getSessionFilePath(sessionId, 'archived');
+      const archived = await this.readProjectSessionHead(
+        sessionId,
+        archivedPath,
+      );
+      if (!active && !archived) {
         return false;
       }
-
-      if (
-        !(await this.sessionBelongsToCurrentProject(sessionId, records[0].cwd))
-      ) {
-        return false;
-      }
-
-      fs.unlinkSync(filePath);
+      if (active) this.removeFileIfExists(activePath);
+      if (archived) this.removeFileIfExists(archivedPath);
+      this.removeWorktreeSidecars(sessionId);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -891,6 +1025,126 @@ export class SessionService {
       }
       throw error;
     }
+  }
+
+  async archiveSessions(sessionIds: string[]): Promise<ArchiveSessionsResult> {
+    const archived: string[] = [];
+    const alreadyArchived: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    for (const sessionId of [...new Set(sessionIds)]) {
+      try {
+        const location = await this.getSessionLocation(sessionId);
+        if (location === undefined) {
+          notFound.push(sessionId);
+          continue;
+        }
+        if (location === 'archived') {
+          alreadyArchived.push(sessionId);
+          continue;
+        }
+        if (location === 'conflict') {
+          throw new Error(`Session archive conflict: ${sessionId}`);
+        }
+
+        const sourcePath = this.getSessionFilePath(sessionId, 'active');
+        const targetPath = this.getSessionFilePath(sessionId, 'archived');
+        if (fs.existsSync(targetPath)) {
+          throw new Error(`Session archive conflict: ${sessionId}`);
+        }
+
+        fs.mkdirSync(this.getArchiveChatsDir(), { recursive: true });
+        fs.renameSync(sourcePath, targetPath);
+        try {
+          this.moveOptionalFile(
+            this.getWorktreeSessionPathForState(sessionId, 'active'),
+            this.getWorktreeSessionPathForState(sessionId, 'archived'),
+            { failIfTargetExists: false },
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `archiveSessions: failed to move worktree sidecar for ${sessionId}: ${error}`,
+          );
+        }
+        archived.push(sessionId);
+      } catch (error) {
+        errors.push({
+          sessionId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+
+    return { archived, alreadyArchived, notFound, errors };
+  }
+
+  async unarchiveSessions(
+    sessionIds: string[],
+  ): Promise<UnarchiveSessionsResult> {
+    const unarchived: string[] = [];
+    const alreadyActive: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    for (const sessionId of [...new Set(sessionIds)]) {
+      try {
+        const location = await this.getSessionLocation(sessionId);
+        if (location === undefined) {
+          notFound.push(sessionId);
+          continue;
+        }
+        if (location === 'active') {
+          alreadyActive.push(sessionId);
+          continue;
+        }
+        if (location === 'conflict') {
+          throw new Error(`Session archive conflict: ${sessionId}`);
+        }
+
+        const sourcePath = this.getSessionFilePath(sessionId, 'archived');
+        const targetPath = this.getSessionFilePath(sessionId, 'active');
+        if (fs.existsSync(targetPath)) {
+          throw new Error(`Session archive conflict: ${sessionId}`);
+        }
+
+        const archivedSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'archived',
+        );
+        const activeSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'active',
+        );
+        const sidecarMoved = this.moveOptionalFile(
+          archivedSidecar,
+          activeSidecar,
+          { failIfTargetExists: true },
+        );
+        try {
+          fs.renameSync(sourcePath, targetPath);
+        } catch (error) {
+          if (sidecarMoved) {
+            try {
+              fs.renameSync(activeSidecar, archivedSidecar);
+            } catch (rollbackError) {
+              debugLogger.warn(
+                `unarchiveSessions: failed to roll back worktree sidecar for ${sessionId}: ${rollbackError}`,
+              );
+            }
+          }
+          throw error;
+        }
+        unarchived.push(sessionId);
+      } catch (error) {
+        errors.push({
+          sessionId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+
+    return { unarchived, alreadyActive, notFound, errors };
   }
 
   /**
@@ -1356,6 +1610,11 @@ export class SessionService {
     } catch {
       return false;
     }
+  }
+
+  async sessionExistsInAnyState(sessionId: string): Promise<boolean> {
+    const location = await this.getSessionLocation(sessionId);
+    return location !== undefined;
   }
 }
 

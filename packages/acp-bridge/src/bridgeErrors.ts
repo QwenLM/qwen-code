@@ -64,6 +64,28 @@ export class SessionNotFoundError extends Error {
   }
 }
 
+export class SessionArchivedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`Session "${sessionId}" is archived. Unarchive it before loading.`);
+    this.name = 'SessionArchivedError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class SessionArchivingError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session "${sessionId}" is being archived or unarchived; retry later.`,
+    );
+    this.name = 'SessionArchivingError';
+    this.sessionId = sessionId;
+  }
+}
+
 export class RestoreInProgressError extends Error {
   readonly sessionId: string;
   readonly activeAction: 'load' | 'resume';

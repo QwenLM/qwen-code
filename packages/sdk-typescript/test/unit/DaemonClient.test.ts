@@ -1680,6 +1680,47 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('archiveSessionsData / unarchiveSessionsData', () => {
+    it('POSTs to /sessions/archive with sessionIds in body and returns result', async () => {
+      const result = {
+        archived: ['s-1'],
+        alreadyArchived: ['s-2'],
+        notFound: [],
+        errors: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.archiveSessionsData(['s-1', 's-2']);
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/sessions/archive');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1', 's-2'],
+      });
+    });
+
+    it('POSTs to /sessions/unarchive with sessionIds in body and returns result', async () => {
+      const result = {
+        unarchived: ['s-1'],
+        alreadyActive: ['s-2'],
+        notFound: [],
+        errors: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.unarchiveSessionsData(
+        ['s-1', 's-2'],
+        'client-1',
+      );
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/sessions/unarchive');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1', 's-2'],
+      });
+    });
+  });
+
   describe('updateSessionMetadata', () => {
     it('sends PATCH to /session/:id/metadata and returns effective metadata', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1841,6 +1882,28 @@ describe('DaemonClient', () => {
       expect(calls.map((call) => call.url)).toEqual([
         'http://daemon/workspace/%2Fwork%2Fa/sessions?size=50',
       ]);
+    });
+
+    it('passes archiveState when listing archived sessions', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [
+            {
+              sessionId: 's-archived',
+              workspaceCwd: '/work/a',
+              isArchived: true,
+            },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const sessions = await client.listWorkspaceSessions('/work/a', {
+        archiveState: 'archived',
+      });
+      expect(sessions[0]?.isArchived).toBe(true);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&archiveState=archived',
+      );
     });
 
     it('throws on non-2xx (e.g. 400 from a relative path)', async () => {

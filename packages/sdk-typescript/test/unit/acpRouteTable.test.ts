@@ -191,6 +191,24 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/health');
   });
 
+  it('GET /workspace/:id/sessions maps to session/list', () => {
+    const result = matchRoute('/workspace/%2Fwork%2Fa/sessions', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/list');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('size=50&archiveState=archived&cursor=123'),
+    );
+    expect(params).toEqual({
+      workspaceCwd: '/work/a',
+      cursor: '123',
+      archiveState: 'archived',
+      _meta: { size: 50 },
+    });
+  });
+
   // ---- POST /session/:id/model → session/set_model --------------------
 
   it('POST /session/:id/model maps to session/set_model', () => {
@@ -637,6 +655,21 @@ describe('acpRouteTable – matchRoute', () => {
       'POST',
     );
     expect(params).toEqual({ sessionIds: ['a', 'b'] });
+  });
+
+  it('POST /sessions/archive maps to _qwen/sessions/archive', () => {
+    const result = matchRoute('/sessions/archive', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/sessions/archive');
+    expect(
+      result!.mapping.extractParams([], { sessionIds: ['s-1'] }, 'POST'),
+    ).toEqual({ sessionIds: ['s-1'] });
+  });
+
+  it('POST /sessions/unarchive maps to _qwen/sessions/unarchive', () => {
+    const result = matchRoute('/sessions/unarchive', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/sessions/unarchive');
   });
 
   // ---- Removed routes (no dispatcher handler) ----------------------------

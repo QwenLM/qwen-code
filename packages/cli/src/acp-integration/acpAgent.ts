@@ -2635,10 +2635,26 @@ class QwenAgent implements Agent {
       );
     }
 
+    let flushError: unknown;
+    try {
+      await session.getConfig().getChatRecordingService()?.flush();
+    } catch (err) {
+      flushError = err;
+      debugLogger.debug(
+        `Session ${sessionId} chat recording flush during close failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
     unregisterGoalHook(session.getConfig(), sessionId);
     this.mcpPool?.releaseSession(sessionId);
     uiTelemetryService.removeSession(sessionId);
     this.sessions.delete(sessionId);
+
+    if (flushError !== undefined) {
+      throw flushError;
+    }
   }
 
   disposeSessions(): void {

@@ -40,6 +40,9 @@ describe('SessionService', () => {
   let readdirSyncSpy: MockInstance<typeof fs.readdirSync>;
   let statSyncSpy: MockInstance<typeof fs.statSync>;
   let unlinkSyncSpy: MockInstance<typeof fs.unlinkSync>;
+  let existsSyncSpy: MockInstance<typeof fs.existsSync>;
+  let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
+  let renameSyncSpy: MockInstance<typeof fs.renameSync>;
 
   beforeEach(() => {
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
@@ -62,6 +65,11 @@ describe('SessionService', () => {
     );
     unlinkSyncSpy = vi
       .spyOn(fs, 'unlinkSync')
+      .mockImplementation(() => undefined);
+    existsSyncSpy = vi.spyOn(fs, 'existsSync');
+    mkdirSyncSpy = vi.spyOn(fs, 'mkdirSync');
+    renameSyncSpy = vi
+      .spyOn(fs, 'renameSync')
       .mockImplementation(() => undefined);
 
     // Mock jsonl-utils. `parseLineTolerant` defaults to a no-op so any code
@@ -174,6 +182,51 @@ describe('SessionService', () => {
       // sessionIdB should be first (more recent mtime)
       expect(result.items[0].sessionId).toBe(sessionIdB);
       expect(result.items[1].sessionId).toBe(sessionIdA);
+    });
+
+    it('should ignore archive directory when listing active sessions', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+        'archive',
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items.map((item) => item.sessionId)).toEqual([sessionIdA]);
+      expect(result.items[0].isArchived).toBe(false);
+      expect(jsonl.readLines).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(jsonl.readLines).mock.calls[0][0]).not.toContain(
+        '/archive/',
+      );
+    });
+
+    it('should list archived sessions from archive directory only', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        if (dir.toString().endsWith('/chats/archive')) {
+          return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
+        }
+        return [`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
+      });
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordB1]);
+
+      const result = await sessionService.listSessions({
+        archiveState: 'archived',
+      });
+
+      expect(result.items.map((item) => item.sessionId)).toEqual([sessionIdB]);
+      expect(result.items[0].isArchived).toBe(true);
+      expect(vi.mocked(jsonl.readLines).mock.calls[0][0]).toContain(
+        '/chats/archive/',
+      );
     });
 
     it('should extract prompt text from first record', async () => {
@@ -923,6 +976,140 @@ describe('SessionService', () => {
 
       expect(result).toBe(false);
     });
+
+    it('should remove archived session files and both worktree sidecars', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`${sessionIdA}.worktree.json`),
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('should remove both JSONL files when active and archived copies conflict', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+  });
+
+  describe('archiveSessions', () => {
+    it('should move active sessions into the archive directory', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.alreadyArchived).toEqual([]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(mkdirSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/chats/archive'),
+        { recursive: true },
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should report already archived sessions without moving them', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.alreadyArchived).toEqual([sessionIdA]);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('should report active and archived duplicate ids as errors', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([]);
+      expect(result.errors[0]?.sessionId).toBe(sessionIdA);
+      expect(result.errors[0]?.error.message).toMatch(/conflict/i);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unarchiveSessions', () => {
+    it('should move archived sessions back to the active directory', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.alreadyActive).toEqual([]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should reject unarchive when active and archived files both exist', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([]);
+      expect(result.errors[0]?.sessionId).toBe(sessionIdA);
+      expect(result.errors[0]?.error.message).toMatch(/conflict/i);
+      expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('removeSessions', () => {
@@ -931,6 +1118,11 @@ describe('SessionService', () => {
       // never has a backing record (notFound).
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
           if (filePath.includes(sessionIdA)) return [recordA1];
           if (filePath.includes(sessionIdB)) return [recordB1];
           return [];
@@ -950,7 +1142,16 @@ describe('SessionService', () => {
     });
 
     it('should de-duplicate input ids', async () => {
-      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
 
       const result = await sessionService.removeSessions([
         sessionIdA,
@@ -966,6 +1167,11 @@ describe('SessionService', () => {
     it('should keep going when one removal fails', async () => {
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
           if (filePath.includes(sessionIdA)) return [recordA1];
           if (filePath.includes(sessionIdB)) return [recordB1];
           return [];
@@ -1246,6 +1452,24 @@ describe('SessionService', () => {
       const exists = await sessionService.sessionExists(sessionIdA);
 
       expect(exists).toBe(true);
+    });
+
+    it('should keep default existence checks active-only', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+
+      await expect(sessionService.sessionExists(sessionIdA)).resolves.toBe(
+        false,
+      );
+      await expect(
+        sessionService.sessionExistsInAnyState(sessionIdA),
+      ).resolves.toBe(true);
     });
   });
 
