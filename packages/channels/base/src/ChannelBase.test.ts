@@ -4840,6 +4840,48 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('does not push a scheduled response after the session is cancelled', async () => {
+      let resolveScheduledPrompt: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveScheduledPrompt = resolve;
+          }),
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      const scheduled = ch.runScheduledPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+      });
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+      });
+
+      await ch.handleInbound(envelope({ text: '/cancel', senderId: 'alice' }));
+      resolveScheduledPrompt('late scheduled response');
+      await scheduled;
+
+      expect(ch.proactive).toEqual([]);
+    });
+
     it('disables a stored job when its sender is no longer allowed', async () => {
       const disable = vi.fn().mockResolvedValue(true);
       const ch = createChannel(

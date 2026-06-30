@@ -31,7 +31,7 @@ export class ChannelCronScheduler {
   private readonly jobTimeoutMs: number;
   private timer: ReturnType<typeof setInterval> | undefined;
   private runningTick: Promise<void> | undefined;
-  private readonly inFlightJobs = new Set<string>();
+  private readonly inFlightJobs = new Map<string, symbol>();
 
   constructor(options: ChannelCronSchedulerOptions) {
     this.store = options.store;
@@ -67,9 +67,12 @@ export class ChannelCronScheduler {
 
   async tick(): Promise<void> {
     if (this.runningTick) return this.runningTick;
-    this.runningTick = this.runTick().finally(() => {
-      this.runningTick = undefined;
+    const tick = this.runTick().finally(() => {
+      if (this.runningTick === tick) {
+        this.runningTick = undefined;
+      }
     });
+    this.runningTick = tick;
     return this.runningTick;
   }
 
@@ -83,7 +86,9 @@ export class ChannelCronScheduler {
         !this.inFlightJobs.has(job.id) &&
         this.isDue(job, now),
     );
-    await Promise.allSettled(dueJobs.map((job) => this.fireOnce(job, now)));
+    for (const job of dueJobs) {
+      void this.fireOnce(job, now);
+    }
   }
 
   private isDue(job: ChannelCronJob, now: Date): boolean {
@@ -99,11 +104,18 @@ export class ChannelCronScheduler {
   }
 
   private async fireOnce(job: ChannelCronJob, now: Date): Promise<void> {
-    this.inFlightJobs.add(job.id);
+    const token = Symbol(job.id);
+    this.inFlightJobs.set(job.id, token);
     try {
       await this.fire(job, now);
+    } catch (err) {
+      process.stderr.write(
+        `[scheduler] unhandled error for job ${job.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
     } finally {
-      this.inFlightJobs.delete(job.id);
+      if (this.inFlightJobs.get(job.id) === token) {
+        this.inFlightJobs.delete(job.id);
+      }
     }
   }
 
@@ -119,21 +131,29 @@ export class ChannelCronScheduler {
       await channel.runScheduledPrompt(latestJob, {
         timeoutMs: this.jobTimeoutMs,
       });
-      const patch: ChannelCronJobPatch = {
-        lastFiredAt: now.toISOString(),
-        lastStatus: 'ok',
-        lastError: undefined,
-        consecutiveFailures: 0,
-      };
-      if (!latestJob.recurring) {
-        patch.enabled = false;
-      }
-      await this.store.update(latestJob.id, patch);
     } catch (err) {
       await this.recordFailure(
         latestJob,
         now,
         err instanceof Error ? err.message : String(err),
+      );
+      return;
+    }
+
+    const patch: ChannelCronJobPatch = {
+      lastFiredAt: now.toISOString(),
+      lastStatus: 'ok',
+      lastError: undefined,
+      consecutiveFailures: 0,
+    };
+    if (!latestJob.recurring) {
+      patch.enabled = false;
+    }
+    try {
+      await this.store.update(latestJob.id, patch);
+    } catch (err) {
+      process.stderr.write(
+        `[scheduler] job ${latestJob.id} succeeded but status persist failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
   }
