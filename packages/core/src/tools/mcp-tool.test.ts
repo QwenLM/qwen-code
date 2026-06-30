@@ -1610,4 +1610,142 @@ describe('DiscoveredMCPTool', () => {
       expect(discoverToolsForServer).toHaveBeenCalled();
     });
   });
+
+  describe('MCP Tool Idle Timeout', () => {
+    it('should abort when MCP server does not respond within idle timeout', async () => {
+      vi.useFakeTimers();
+
+      const idleTimeoutMs = 1000; // 1 second for testing
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          (_params, _schema, options) =>
+            new Promise((_resolve, reject) => {
+              // Simulate SDK behavior: reject when signal is aborted
+              options?.signal?.addEventListener('abort', () => {
+                const error = new Error(
+                  (options?.signal as AbortSignal & { reason?: Error })?.reason
+                    ?.message ?? 'The operation was aborted',
+                );
+                error.name = 'AbortError';
+                reject(error);
+              });
+            }),
+        ),
+      };
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        mockMcpClient,
+        undefined,
+        idleTimeoutMs,
+      );
+
+      const invocation = tool.build({ param: 'test' });
+      const abortController = new AbortController();
+      const executePromise = invocation.execute(abortController.signal);
+
+      // Advance time to trigger the idle timeout
+      vi.advanceTimersByTime(idleTimeoutMs + 100);
+
+      await expect(executePromise).rejects.toThrow(
+        /did not respond within.*idle timeout/,
+      );
+      // The external abort signal should not have been triggered
+      expect(abortController.signal.aborted).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it('should reset idle timeout on progress updates', async () => {
+      vi.useFakeTimers();
+
+      const idleTimeoutMs = 1000;
+      let onProgressCallback: ((progress: any) => void) | undefined;
+
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockImplementation((_params, _schema, options) => {
+          onProgressCallback = options?.onprogress;
+          return new Promise((resolve) => {
+            // Resolve after 2.5 seconds (would timeout without progress)
+            setTimeout(() => {
+              resolve({ content: [{ type: 'text', text: 'Success' }] });
+            }, 2500);
+          });
+        }),
+      };
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        mockMcpClient,
+        undefined,
+        idleTimeoutMs,
+      );
+
+      const invocation = tool.build({ param: 'test' });
+      const executePromise = invocation.execute(new AbortController().signal);
+
+      // Send progress at 500ms, 1500ms, 2500ms to reset the timeout
+      vi.advanceTimersByTime(500);
+      onProgressCallback?.({ progress: 0.25 });
+
+      vi.advanceTimersByTime(1000);
+      onProgressCallback?.({ progress: 0.5 });
+
+      vi.advanceTimersByTime(1000);
+      onProgressCallback?.({ progress: 0.75 });
+
+      const result = await executePromise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBeDefined();
+
+      vi.useRealTimers();
+    });
+
+    it('should not apply idle timeout when set to 0 or undefined', async () => {
+      vi.useFakeTimers();
+
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'Success' }],
+        }),
+      };
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        mockMcpClient,
+        undefined,
+        undefined, // No idle timeout
+      );
+
+      const invocation = tool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBeDefined();
+
+      vi.useRealTimers();
+    });
+  });
 });

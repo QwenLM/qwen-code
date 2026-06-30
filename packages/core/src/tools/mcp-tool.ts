@@ -136,6 +136,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
+    private readonly mcpToolIdleTimeoutMs?: number,
     private readonly annotations?: McpToolAnnotations,
     private readonly retryCount: number = 0,
   ) {
@@ -264,6 +265,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.cliConfig,
           newTool['mcpClient'],
           this.mcpTimeout,
+          this.mcpToolIdleTimeoutMs,
           this.annotations,
           this.retryCount + 1,
         );
@@ -317,7 +319,36 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // Create an AbortController for idle timeout
+    const idleTimeoutController = new AbortController();
+    let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    // Combine the external signal with our idle timeout controller
+    const combinedSignal = AbortSignal.any([
+      signal,
+      idleTimeoutController.signal,
+    ]);
+
+    const resetIdleTimeout = () => {
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
+      if (this.mcpToolIdleTimeoutMs && this.mcpToolIdleTimeoutMs > 0) {
+        idleTimeoutId = setTimeout(() => {
+          const error = new Error(
+            `MCP tool '${this.serverToolName}' on server '${this.serverName}' ` +
+              `did not respond within ${this.mcpToolIdleTimeoutMs}ms idle timeout`,
+          );
+          error.name = 'AbortError';
+          idleTimeoutController.abort(error);
+        }, this.mcpToolIdleTimeoutMs);
+      }
+    };
+
     try {
+      // Start the idle timeout
+      resetIdleTimeout();
+
       const callToolResult = await this.mcpClient!.callTool(
         {
           name: this.serverToolName,
@@ -326,6 +357,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         undefined,
         {
           onprogress: (progress) => {
+            // Reset idle timeout on progress
+            resetIdleTimeout();
+
             if (updateOutput) {
               const progressData: McpToolProgressData = {
                 type: 'mcp_tool_progress',
@@ -337,9 +371,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             }
           },
           timeout: this.mcpTimeout,
-          signal,
+          signal: combinedSignal,
         },
       );
+
+      // Clear the idle timeout on success
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
 
       // Wrap the raw CallToolResult into the Part[] format that the
       // existing transform/display functions expect.
@@ -373,6 +412,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         returnDisplay: getDisplayFromParts(truncatedParts),
       };
     } catch (error) {
+      // Clear the idle timeout on error
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+      }
       return this.handleReconnectOnError(error, signal, updateOutput);
     }
   }
@@ -510,6 +553,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
+    private readonly mcpToolIdleTimeoutMs?: number,
     readonly annotations?: McpToolAnnotations,
   ) {
     super(
@@ -542,6 +586,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
     );
   }
@@ -577,6 +622,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
     );
   }
@@ -594,6 +640,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
       this.annotations,
     );
   }
