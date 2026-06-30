@@ -18,6 +18,7 @@ import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
 } from './workspace-remember.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 
@@ -274,6 +275,14 @@ describe('workspace memory remember routes', () => {
       .send({ content: 'x'.repeat(64 * 1024 + 1) })
       .expect(400)
       .expect((res) => expect(res.body.code).toBe('invalid_content'));
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: ` ${'x'.repeat(MAX_REMEMBER_CONTENT_BYTES)} ` })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    expect(bridge.rememberCalls[0]?.content).toBe(
+      'x'.repeat(MAX_REMEMBER_CONTENT_BYTES),
+    );
     await request(app)
       .post('/workspace/memory/remember')
       .send({ content: 'x', contextMode: 'thread' })

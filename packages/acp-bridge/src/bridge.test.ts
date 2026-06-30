@@ -1317,7 +1317,10 @@ describe('createAcpSessionBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = makeBridge({ channelFactory: factory });
+    const bridge = makeBridge({
+      channelFactory: factory,
+      channelIdleTimeoutMs: 60_000,
+    });
 
     const live = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     await expect(
@@ -1340,6 +1343,13 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles).toHaveLength(1);
     expect(handles[0]!.agent.extMethodCalls).toHaveLength(1);
+
+    await bridge.closeSession(live.sessionId);
+    expect(handles[0]!.killed).toBe(false);
+
+    const next = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(next.sessionId).toBeTruthy();
+    expect(handles).toHaveLength(1);
 
     await bridge.shutdown();
   });

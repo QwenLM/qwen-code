@@ -2518,8 +2518,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (isAcpSessionResourceNotFound(err, req.sessionId)) {
           throw new SessionNotFoundError(req.sessionId);
         }
-        ci.emptyReapPending = true;
-        if (hasNoChannelWork(ci, { ignoreRestoreId: req.sessionId })) {
+        ci.emptyReapPending = hasNoChannelWork(ci, {
+          ignoreRestoreId: req.sessionId,
+        });
+        if (ci.emptyReapPending) {
           ci.isDying = true;
         }
         throw err;

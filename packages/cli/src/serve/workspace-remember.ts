@@ -253,14 +253,17 @@ export function mountWorkspaceMemoryRememberRoutes(
     async (req, res) => {
       const body = deps.safeBody(req);
       const content = body['content'];
-      if (typeof content !== 'string' || !content.trim()) {
+      const trimmedContent = typeof content === 'string' ? content.trim() : '';
+      if (!trimmedContent) {
         res.status(400).json({
           error: '`content` must be a non-empty string',
           code: 'invalid_content',
         });
         return;
       }
-      if (Buffer.byteLength(content, 'utf8') > MAX_REMEMBER_CONTENT_BYTES) {
+      if (
+        Buffer.byteLength(trimmedContent, 'utf8') > MAX_REMEMBER_CONTENT_BYTES
+      ) {
         res.status(400).json({
           error: `\`content\` exceeds the ${MAX_REMEMBER_CONTENT_BYTES}-byte limit`,
           code: 'invalid_content',
@@ -302,7 +305,7 @@ export function mountWorkspaceMemoryRememberRoutes(
       let task: WorkspaceMemoryRememberTaskSnapshot;
       try {
         task = deps.lane.enqueue({
-          content: content.trim(),
+          content: trimmedContent,
           contextMode: contextModeRaw,
           ...(originatorClientId ? { originatorClientId } : {}),
         });
