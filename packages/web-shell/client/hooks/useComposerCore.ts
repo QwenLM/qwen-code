@@ -86,8 +86,8 @@ const TOOLTIP_STYLES = `
   max-width: 700px !important;
   max-height: 400px !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
-  background: var(--bg-primary, #0d0d0d) !important;
-  border: 1px solid var(--border-color, #2a2a2a) !important;
+  background: var(--background, #0d0d0d) !important;
+  border: 1px solid var(--border, #2a2a2a) !important;
   border-radius: 6px !important;
   overflow: visible;
 }
@@ -99,7 +99,7 @@ const TOOLTIP_STYLES = `
   font-family: var(--font-mono, monospace);
   font-size: 13px;
   scrollbar-width: thin;
-  scrollbar-color: var(--border-color) transparent;
+  scrollbar-color: var(--border) transparent;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul::-webkit-scrollbar {
@@ -112,7 +112,7 @@ const TOOLTIP_STYLES = `
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul::-webkit-scrollbar-thumb {
-  background: var(--border-color);
+  background: var(--border);
   border-radius: 3px;
 }
 
@@ -121,22 +121,22 @@ const TOOLTIP_STYLES = `
   align-items: baseline;
   min-width: 0;
   padding: 4px 8px !important;
-  color: var(--text-primary, #e4e4e4) !important;
+  color: var(--foreground, #e4e4e4) !important;
   overflow: hidden;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:hover {
-  background: var(--bg-tertiary, #1e1e1e) !important;
-  color: var(--text-primary, #e4e4e4) !important;
+  background: var(--secondary, #1e1e1e) !important;
+  color: var(--foreground, #e4e4e4) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li[aria-selected] {
-  background: var(--bg-tertiary, #1e1e1e) !important;
-  color: var(--text-primary, #e4e4e4) !important;
+  background: var(--secondary, #1e1e1e) !important;
+  color: var(--foreground, #e4e4e4) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:is(:hover, [aria-selected]) .cm-completionLabel {
-  color: var(--accent-color, #4a9eff);
+  color: var(--agent-blue-500, #4a9eff);
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section {
@@ -144,7 +144,7 @@ const TOOLTIP_STYLES = `
   height: 0;
   margin: 6px 10px 3px;
   padding: 0 !important;
-  border-bottom: 1px solid var(--border-color) !important;
+  border-bottom: 1px solid var(--border) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section:first-of-type {
@@ -164,7 +164,7 @@ const TOOLTIP_STYLES = `
   flex: 1 1 auto;
   min-width: 0;
   font-style: normal;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 13px;
   margin-left: var(--web-shell-completion-column-gap);
   opacity: 0.8;
@@ -204,10 +204,10 @@ const TOOLTIP_STYLES = `
   max-height: min(280px, calc(100vh - 32px));
   padding: 8px 10px;
   overflow: auto;
-  border: 1px solid var(--border-color, #2a2a2a);
+  border: 1px solid var(--border, #2a2a2a);
   border-radius: 6px;
-  background: var(--bg-secondary, #161616);
-  color: var(--text-primary, #e4e4e4);
+  background: var(--muted, #161616);
+  color: var(--foreground, #e4e4e4);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
@@ -215,7 +215,7 @@ const TOOLTIP_STYLES = `
   white-space: pre-line;
   overflow-wrap: anywhere;
   scrollbar-width: thin;
-  scrollbar-color: var(--border-color) transparent;
+  scrollbar-color: var(--border) transparent;
 }
 
 [data-web-shell-tooltip-portal] .cm-completionInfo-hover {
@@ -233,7 +233,7 @@ const TOOLTIP_STYLES = `
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip.cm-completionInfo::-webkit-scrollbar-thumb {
-  background: var(--border-color);
+  background: var(--border);
   border-radius: 3px;
 }
 
@@ -520,14 +520,14 @@ class ComposerTagWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const chip = document.createElement('span');
     chip.style.cssText =
-      'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-tertiary);color:var(--text-primary);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
+      'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
     const tagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
 
     if (tagLabel) {
       const label = document.createElement('span');
       label.style.cssText =
-        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--accent-color);';
+        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--agent-blue-500);';
       label.textContent = tagLabel;
       chip.appendChild(label);
     }
@@ -535,13 +535,13 @@ class ComposerTagWidget extends WidgetType {
     if (tagValue) {
       const value = document.createElement('span');
       value.style.cssText =
-        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--text-secondary);';
+        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--muted-foreground);';
       value.textContent = tagValue;
       chip.appendChild(value);
     } else if (!tagLabel) {
       const fallback = document.createElement('span');
       fallback.style.cssText =
-        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--accent-color);';
+        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--agent-blue-500);';
       fallback.textContent = this.tag.id;
       chip.appendChild(fallback);
     }
@@ -554,7 +554,7 @@ class ComposerTagWidget extends WidgetType {
         `Remove ${getComposerTagDisplay(this.tag)}`,
       );
       remove.style.cssText =
-        'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--text-dimmed);font:inherit;line-height:22px;cursor:pointer;';
+        'flex:0 0 auto;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--muted-foreground);font:inherit;line-height:22px;cursor:pointer;';
       remove.textContent = '×';
       remove.addEventListener('mousedown', (event) => event.preventDefault());
       remove.addEventListener('click', (event) => {
@@ -582,7 +582,7 @@ class ComposerTagWidget extends WidgetType {
         remove.style.color = 'var(--error-color)';
       });
       remove.addEventListener('mouseleave', () => {
-        remove.style.color = 'var(--text-dimmed)';
+        remove.style.color = 'var(--muted-foreground)';
       });
       chip.appendChild(remove);
     }
@@ -660,7 +660,7 @@ export const editableCompartment = new Compartment();
 export const placeholderCompartment = new Compartment();
 export const followupGhostCompartment = new Compartment();
 
-function getFollowupCompletion(
+export function getFollowupCompletion(
   text: string,
   suggestion: string | null | undefined,
 ): string | null {
@@ -754,7 +754,6 @@ export interface UseComposerCoreOptions {
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
-  onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -888,7 +887,6 @@ export function useComposerCore(
     slashCommandCategoryOrder,
     queuedMessages = [],
     onPopQueuedMessages,
-    onClearQueuedMessages,
     currentMode = 'default',
     onFocusFooter,
     dialogOpen = false,
@@ -925,8 +923,6 @@ export function useComposerCore(
   queuedMessagesRef.current = queuedMessages;
   const onPopQueuedMessagesRef = useRef(onPopQueuedMessages);
   onPopQueuedMessagesRef.current = onPopQueuedMessages;
-  const onClearQueuedMessagesRef = useRef(onClearQueuedMessages);
-  onClearQueuedMessagesRef.current = onClearQueuedMessages;
   const followupStateRef = useRef(followupState);
   followupStateRef.current = followupState;
   const onAcceptFollowupRef = useRef(onAcceptFollowup);
@@ -1085,11 +1081,23 @@ export function useComposerCore(
   // Update hasContent when tags or images change
   useEffect(() => {
     const view = viewRef.current;
-    const text = view?.state.doc.toString().trim() ?? '';
-    setHasContent(
-      text.length > 0 || composerTags.length > 0 || pastedImages.length > 0,
+    const text = view?.state.doc.toString() ?? '';
+    const followupCompletion = getFollowupCompletion(
+      text,
+      followupState?.isVisible ? followupState.suggestion : null,
     );
-  }, [composerTags, pastedImages]);
+    setHasContent(
+      text.trim().length > 0 ||
+        !!followupCompletion ||
+        composerTags.length > 0 ||
+        pastedImages.length > 0,
+    );
+  }, [
+    composerTags,
+    pastedImages,
+    followupState?.isVisible,
+    followupState?.suggestion,
+  ]);
 
   const promptHistory = useInputHistory();
   const shellHistory = useInputHistory('qwen-web-shell-command-history');
@@ -1278,7 +1286,13 @@ export function useComposerCore(
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
     ) => {
-      const rawText = (textOverride ?? view.state.doc.toString()).trim();
+      const editorText = view.state.doc.toString();
+      const followup = followupStateRef.current;
+      const followupCompletion =
+        textOverride === undefined && followup?.isVisible
+          ? getFollowupCompletion(editorText, followup.suggestion)
+          : null;
+      const rawText = (textOverride ?? followupCompletion ?? editorText).trim();
       const tags = tagsOverride ?? composerTagsRef.current;
       if (!rawText && tags.length === 0) return true;
       const text = expandLargePastePlaceholders(
@@ -1294,6 +1308,9 @@ export function useComposerCore(
       );
       if (accepted === false) return true;
       setSlashMenu(null);
+      if (followupCompletion) {
+        onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+      }
       onDismissFollowupRef.current?.();
       pendingPastesRef.current.clear();
       nextPasteIdRef.current = 1;
@@ -1318,6 +1335,7 @@ export function useComposerCore(
     const completionSources = [
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
+        () => workspaceActionsRef.current?.loadExtensionsStatus,
       ),
     ];
 
@@ -1440,8 +1458,10 @@ export function useComposerCore(
             setShellMode(false);
             return true;
           }
-          if (queuedMessagesRef.current.length === 0) return false;
-          return onClearQueuedMessagesRef.current?.() ?? false;
+          // Don't clear the queue on Escape — let it fall through to the
+          // window handler, where Escape cancels the in-flight turn (queued
+          // prompts are preserved and drain once it settles).
+          return false;
         },
       },
       {
@@ -1753,9 +1773,15 @@ export function useComposerCore(
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
-            const text = update.state.doc.toString().trim();
+            const text = update.state.doc.toString();
+            const followup = followupStateRef.current;
+            const followupCompletion = getFollowupCompletion(
+              text,
+              followup?.isVisible ? followup.suggestion : null,
+            );
             setHasContent(
-              text.length > 0 ||
+              text.trim().length > 0 ||
+                !!followupCompletion ||
                 composerTagsRef.current.length > 0 ||
                 pastedImagesRef.current.length > 0,
             );

@@ -13,6 +13,7 @@ vi.mock('../../App', async () => {
 
 const {
   buildUnifiedDiff,
+  extractDiff,
   formatToolGroupSummary,
   getActiveTool,
   getRawFileDiff,
@@ -182,6 +183,32 @@ describe('tool output logic', () => {
         }),
       ),
     ).toBe('');
+  });
+
+  it('prefers raw fileDiff over content old/new text', () => {
+    const fileDiff =
+      'Index: file.ts\n@@ -10,1 +10,2 @@\n old context\n+precise line';
+
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          content: [
+            {
+              type: 'diff',
+              oldText: 'full old text',
+              newText: 'full new text',
+            },
+          ],
+          rawOutput: {
+            fileDiff,
+            fileName: 'file.ts',
+            originalContent: 'full old text',
+            newContent: 'full new text',
+          },
+        }),
+      ),
+    ).toBe(fileDiff);
   });
 
   it('builds a unified diff for changed content blocks', () => {

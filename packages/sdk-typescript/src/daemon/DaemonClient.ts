@@ -50,6 +50,7 @@ import type {
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
@@ -66,6 +67,8 @@ import type {
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  DaemonGithubSetupRequest,
+  DaemonGithubSetupResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonReloadResponse,
@@ -92,10 +95,19 @@ import type {
   ExtensionRefreshResponse,
   ExtensionUpdateCheckResponse,
   DaemonWorkspaceHooksStatus,
-  DaemonWorkspaceSettingsStatus,
-  DaemonSettingUpdateResult,
   DaemonPermissionRuleType,
+  DaemonPermissionScope,
+  DaemonWorkspaceSettingsStatus,
   DaemonWorkspacePermissionsStatus,
+  DaemonSettingUpdateResult,
+  DaemonVoiceAudioInput,
+  DaemonWorkspaceVoiceStatus,
+  DaemonWorkspaceVoiceTranscribeOptions,
+  DaemonWorkspaceVoiceTranscriptionResult,
+  DaemonWorkspaceVoiceUpdate,
+  DaemonWorkspaceTrustChangeRequest,
+  DaemonWorkspaceTrustChangeResult,
+  DaemonWorkspaceTrustStatus,
 } from './types.js';
 
 /**
@@ -153,13 +165,25 @@ export interface DaemonClientOptions {
   transport?: DaemonTransport;
 }
 
+const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
+
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
+const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 // Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 // Server deadline + headroom so the client never races the daemon's own budget.
 const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
+
+function normalizePermissionRuleInput(rule: string): string {
+  const trimmed = rule.trim();
+  if (!trimmed) {
+    throw new Error('rule must be a non-empty string');
+  }
+  return trimmed;
+}
 
 export function normalizePendingPromptLimit(
   value: number | null | undefined,
@@ -444,6 +468,7 @@ export class DaemonClient {
     init: RequestInit = {},
     consume?: (res: Response) => Promise<T>,
     perCallTimeoutMs?: number,
+    mode: 'transport' | 'rest' = 'transport',
   ): Promise<T> {
     // When `consume` is provided, the timer must remain
     // armed through the entire callback (body read + parse). The
@@ -476,7 +501,10 @@ export class DaemonClient {
       effectiveTimeoutMs = perCallTimeoutMs;
     }
     if (!effectiveTimeoutMs || !Number.isFinite(effectiveTimeoutMs)) {
-      const res = await this.transport.fetch(url, init);
+      const res =
+        mode === 'rest'
+          ? await this._fetch(url, init)
+          : await this.transport.fetch(url, init);
       if (consume) return consume(res);
       return res as unknown as T;
     }
@@ -501,7 +529,10 @@ export class DaemonClient {
       ? composeAbortSignals([callerSignal, ctrl.signal])
       : ctrl.signal;
     try {
-      const res = await this.transport.fetch(url, { ...init, signal });
+      const res =
+        mode === 'rest'
+          ? await this._fetch(url, { ...init, signal })
+          : await this.transport.fetch(url, { ...init, signal });
       if (consume) return await consume(res);
       return res as unknown as T;
     } finally {
@@ -577,7 +608,12 @@ export class DaemonClient {
   private async jsonRequest<T>(
     path: string,
     label: string,
-    opts: { method?: string; body?: unknown; clientId?: string } = {},
+    opts: {
+      method?: string;
+      body?: unknown;
+      clientId?: string;
+      timeoutMs?: number;
+    } = {},
   ): Promise<T> {
     const hasBody = opts.body !== undefined;
     return await this.fetchWithTimeout(
@@ -594,6 +630,7 @@ export class DaemonClient {
         if (!res.ok) throw await this.failOnError(res, label);
         return (await res.json()) as T;
       },
+      opts.timeoutMs,
     );
   }
 
@@ -643,6 +680,24 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/mcp/:server/tools');
         }
         return (await res.json()) as DaemonWorkspaceMcpToolsStatus;
+      },
+    );
+  }
+
+  async workspaceMcpResources(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpResourcesStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/resources`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace/mcp/:server/resources',
+          );
+        }
+        return (await res.json()) as DaemonWorkspaceMcpResourcesStatus;
       },
     );
   }
@@ -1227,20 +1282,28 @@ export class DaemonClient {
    */
   async listWorkspaceSessions(
     workspaceCwd: string,
+    options?: { pageSize?: number },
   ): Promise<DaemonSessionSummary[]> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/${encodeURIComponent(workspaceCwd)}/sessions`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/:id/sessions');
-        }
-        const body = (await res.json()) as {
-          sessions: DaemonSessionSummary[];
-        };
-        return body.sessions;
-      },
+    const requestedPageSize =
+      options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
+    const pageSize = Math.max(
+      1,
+      Math.min(
+        1000,
+        Math.round(
+          Number.isFinite(requestedPageSize)
+            ? requestedPageSize
+            : DEFAULT_SESSION_LIST_PAGE_SIZE,
+        ),
+      ),
     );
+    const body = await this.jsonRequest<{
+      sessions: DaemonSessionSummary[];
+    }>(
+      `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?size=${pageSize}`,
+      'GET /workspace/sessions',
+    );
+    return body.sessions;
   }
 
   async loadSession(
@@ -1787,23 +1850,104 @@ export class DaemonClient {
     );
   }
 
+  async workspaceVoice(clientId?: string): Promise<DaemonWorkspaceVoiceStatus> {
+    return await this.jsonRequest<DaemonWorkspaceVoiceStatus>(
+      '/workspace/voice',
+      'GET /workspace/voice',
+      { clientId },
+    );
+  }
+
+  async setWorkspaceVoice(
+    update: DaemonWorkspaceVoiceUpdate,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceVoiceStatus> {
+    return await this.jsonRequest<DaemonWorkspaceVoiceStatus>(
+      '/workspace/voice',
+      'POST /workspace/voice',
+      { method: 'POST', body: update, clientId },
+    );
+  }
+
+  async transcribeWorkspaceVoice(
+    audio: DaemonVoiceAudioInput,
+    opts: DaemonWorkspaceVoiceTranscribeOptions,
+  ): Promise<DaemonWorkspaceVoiceTranscriptionResult> {
+    const query = opts.voiceModel
+      ? `?${new URLSearchParams({ voiceModel: opts.voiceModel }).toString()}`
+      : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/voice/transcribe${query}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': opts.mimeType }, opts.clientId),
+        body: audio as BodyInit,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/voice/transcribe');
+        }
+        return (await res.json()) as DaemonWorkspaceVoiceTranscriptionResult;
+      },
+      VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
+      'rest',
+    );
+  }
+
+  async workspaceTrust(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceTrustStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/trust`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/trust');
+        }
+        return (await res.json()) as DaemonWorkspaceTrustStatus;
+      },
+    );
+  }
+
+  async requestWorkspaceTrustChange(
+    request: DaemonWorkspaceTrustChangeRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceTrustChangeResult> {
+    return await this.jsonRequest<DaemonWorkspaceTrustChangeResult>(
+      '/workspace/trust/request',
+      'POST /workspace/trust/request',
+      { method: 'POST', body: request, clientId },
+    );
+  }
+
   async workspacePermissions(opts?: {
     clientId?: string;
   }): Promise<DaemonWorkspacePermissionsStatus> {
-    return this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+    return await this.jsonRequest<DaemonWorkspacePermissionsStatus>(
       '/workspace/permissions',
       'GET /workspace/permissions',
       { clientId: opts?.clientId },
     );
   }
 
+  /**
+   * Replace one permission rule list.
+   *
+   * `capabilities.features` including `workspace_permissions` means the
+   * daemon exposes the permissions surface. A write still needs a live ACP
+   * session so the active child can receive the update; without one the
+   * daemon rejects the request with `permission_session_required`.
+   */
   async setWorkspacePermissionRules(
-    scope: 'workspace',
+    scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,
     rules: readonly string[],
     opts?: { clientId?: string },
   ): Promise<DaemonWorkspacePermissionsStatus> {
-    return this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+    return await this.jsonRequest<DaemonWorkspacePermissionsStatus>(
       '/workspace/permissions',
       'POST /workspace/permissions',
       {
@@ -1823,19 +1967,19 @@ export class DaemonClient {
    * the GET and POST will be silently overwritten (lost-update / TOCTOU).
    */
   async addWorkspacePermissionRule(
-    scope: 'workspace',
+    scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,
     rule: string,
     opts?: { clientId?: string },
   ): Promise<DaemonWorkspacePermissionsStatus> {
-    const normalizedRule = rule.trim();
-    const status = await this.workspacePermissions(opts);
-    const currentRules = status[scope].rules[ruleType];
-    if (currentRules.includes(normalizedRule)) return status;
-    return this.setWorkspacePermissionRules(
+    const normalized = normalizePermissionRuleInput(rule);
+    const current = await this.workspacePermissions(opts);
+    const rules = current[scope].rules[ruleType];
+    if (rules.includes(normalized)) return current;
+    return await this.setWorkspacePermissionRules(
       scope,
       ruleType,
-      [...currentRules, normalizedRule],
+      [...rules, normalized],
       opts,
     );
   }
@@ -1849,17 +1993,21 @@ export class DaemonClient {
    * the GET and POST will be silently overwritten (lost-update / TOCTOU).
    */
   async removeWorkspacePermissionRule(
-    scope: 'workspace',
+    scope: DaemonPermissionScope,
     ruleType: DaemonPermissionRuleType,
     rule: string,
     opts?: { clientId?: string },
   ): Promise<DaemonWorkspacePermissionsStatus> {
-    const normalizedRule = rule.trim();
-    const status = await this.workspacePermissions(opts);
-    const currentRules = status[scope].rules[ruleType];
-    const nextRules = currentRules.filter((item) => item !== normalizedRule);
-    if (nextRules.length === currentRules.length) return status;
-    return this.setWorkspacePermissionRules(scope, ruleType, nextRules, opts);
+    const normalized = normalizePermissionRuleInput(rule);
+    const current = await this.workspacePermissions(opts);
+    const rules = current[scope].rules[ruleType];
+    if (!rules.includes(normalized)) return current;
+    return await this.setWorkspacePermissionRules(
+      scope,
+      ruleType,
+      rules.filter((item) => item !== normalized),
+      opts,
+    );
   }
 
   /**
@@ -2061,6 +2209,22 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /workspace/init');
         }
         return (await res.json()) as DaemonInitWorkspaceResult;
+      },
+    );
+  }
+
+  async setupGithub(
+    params: DaemonGithubSetupRequest,
+    clientId?: string,
+  ): Promise<DaemonGithubSetupResult> {
+    return await this.jsonRequest<DaemonGithubSetupResult>(
+      '/workspace/setup-github',
+      'POST /workspace/setup-github',
+      {
+        method: 'POST',
+        body: params,
+        clientId,
+        timeoutMs: GITHUB_SETUP_DEFAULT_TIMEOUT_MS,
       },
     );
   }

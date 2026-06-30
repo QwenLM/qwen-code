@@ -11,7 +11,7 @@ import type { Argv, CommandModule } from 'yargs';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '../serve/event-bus.js';
+import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
@@ -49,10 +49,25 @@ function blockForever(): Promise<never> {
  * Exported for tests.
  */
 export async function maybeOpenWebShellBrowser(
-  handle: { url: string; webShellMounted: boolean; resolvedToken?: string },
+  handle: {
+    url: string;
+    webShellMounted: boolean;
+    resolvedToken?: string;
+    runtimeReady?: Promise<void>;
+  },
   open: boolean,
 ): Promise<void> {
   if (!open || !handle.webShellMounted || !shouldLaunchBrowser()) return;
+  try {
+    await handle.runtimeReady;
+  } catch (runtimeErr) {
+    writeStderrLine(
+      `qwen serve: Web Shell runtime not ready; skipping --open: ${
+        runtimeErr instanceof Error ? runtimeErr.message : String(runtimeErr)
+      }`,
+    );
+    return;
+  }
   try {
     const target = new URL(handle.url);
     // Node's URL returns the IPv6 wildcard as `[::]` (bracketed), never `::`.
@@ -474,9 +489,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       }
     }
 
-    // Lazy-load the serve module so non-serve invocations don't pay for
-    // express + body-parser + qs in their startup path.
-    const { runQwenServe } = await import('../serve/index.js');
+    // Lazy-load the slim serve runner so the yargs fallback path does not pull
+    // the public serve barrel, which also exports REST/ACP runtime modules.
+    const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const handle = await runQwenServe({
         port: argv.port,

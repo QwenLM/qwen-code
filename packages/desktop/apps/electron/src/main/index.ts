@@ -3,8 +3,8 @@
 import { loadShellEnv } from './shell-env'
 loadShellEnv()
 
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
-import { createHash, randomUUID } from 'crypto'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, session, shell } from 'electron'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import { hostname, homedir } from 'os'
 import { mkdirSync } from 'fs'
 import * as Sentry from '@sentry/electron/main'
@@ -89,6 +89,7 @@ import type { PlatformServices } from '../runtime/platform'
 import { createElectronPlatform } from './platform'
 import type { HandlerDeps } from './handlers/handler-deps'
 import { bootstrapServer, releaseServerLock, parseServerPort } from '@craft-agent/server-core/bootstrap'
+import { startVoiceServer, resolveDesktopVoiceConfig, type VoiceServer } from '@craft-agent/server-core/voice'
 import { createMessagingBootstrap, type MessagingBootstrapHandle } from '@craft-agent/messaging-gateway'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { initModelRefreshService, getModelRefreshService, setFetcherPlatform } from '@craft-agent/server-core/model-fetchers'
@@ -96,7 +97,7 @@ import { setSearchPlatform, setImageProcessor } from '@craft-agent/server-core/s
 import { createApplicationMenu } from './menu'
 import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
-import { ensureDefaultConversationWorkspace, getWorkspaces, getWorkspaceByNameOrId, isProtectedWorkspace } from '@craft-agent/shared/config'
+import { ensureDefaultConversationWorkspace, getVoiceEnabled, getWorkspaces, getWorkspaceByNameOrId, isProtectedWorkspace } from '@craft-agent/shared/config'
 import { initializeDocs } from '@craft-agent/shared/docs'
 import { initializeReleaseNotes } from '@craft-agent/shared/release-notes'
 import { ensureDefaultPermissions } from '@craft-agent/shared/agent/permissions-config'
@@ -105,6 +106,7 @@ import { setBundledAssetsRoot } from '@craft-agent/shared/utils'
 import { initializeBackendHostRuntime } from '@craft-agent/shared/agent/backend'
 import { setPowerShellValidatorRoot } from '@craft-agent/shared/agent'
 import { handleDeepLink } from './deep-link'
+import { getRendererDevOrigin as deriveRendererDevOrigin, isTrustedRendererFrameUrl } from './voice/frame-trust'
 import { BrowserPaneManager } from './browser-pane-manager'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { registerThumbnailScheme, registerThumbnailHandler } from './thumbnail-protocol'
@@ -195,6 +197,15 @@ let browserPaneManager: BrowserPaneManager | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
 let moduleSink: EventSink | null = null
 let moduleClientResolver: ((webContentsId: number) => string | undefined) | null = null
+let voiceServer: VoiceServer | null = null
+let voiceStreamUrl: string | null = null
+
+// The renderer dev origin and frame-trust gate are extracted to ./voice/frame-trust
+// (pure, Electron-free) so the gate guarding the voice token is unit-testable.
+// Wrap them here to keep the existing call sites reading process.env directly.
+function getRendererDevOrigin(): string | undefined {
+  return deriveRendererDevOrigin(process.env.VITE_DEV_SERVER_URL)
+}
 
 // Messaging gateway: the bootstrap handle is created once sessionManager is
 // available (inside createHandlerDeps) and populated with the WS publisher
@@ -401,6 +412,76 @@ app.whenReady().then(async () => {
 
   // Register thumbnail:// protocol handler (scheme was registered earlier, before app.whenReady)
   registerThumbnailHandler()
+
+  // Grant microphone access for the trusted main-window UI (voice dictation).
+  // The main window uses the default session (browser panes have their own
+  // partition + handler), so without this getUserMedia is blocked. Scope the
+  // grant to mic/media only — do NOT broaden the default session to every
+  // permission (geolocation, HID, serial, …).
+  const VOICE_PERMISSIONS = new Set(['media', 'audioCapture'])
+  const getMediaTypes = (details: unknown): string[] => {
+    if (!details || typeof details !== 'object') return []
+    const mediaDetails = details as {
+      mediaTypes?: unknown
+      mediaType?: unknown
+    }
+    if (Array.isArray(mediaDetails.mediaTypes)) {
+      return mediaDetails.mediaTypes.filter(
+        (mediaType): mediaType is string => typeof mediaType === 'string',
+      )
+    }
+    return typeof mediaDetails.mediaType === 'string'
+      ? [mediaDetails.mediaType]
+      : []
+  }
+  const isAudioOnlyMediaRequest = (
+    permission: string,
+    details?: unknown,
+  ) => {
+    if (permission === 'audioCapture') return true
+    if (permission !== 'media') return false
+    const mediaTypes = getMediaTypes(details)
+    return (
+      mediaTypes.length > 0 &&
+      mediaTypes.every((mediaType) => mediaType === 'audio')
+    )
+  }
+  const canUseVoicePermission = (
+    wc: { id: number } | null | undefined,
+    permission: string,
+    details?: unknown,
+  ) => Boolean(
+    wc &&
+    getVoiceEnabled() &&
+    VOICE_PERMISSIONS.has(permission) &&
+    isAudioOnlyMediaRequest(permission, details) &&
+    windowManager?.getWorkspaceForWindow(wc.id) != null,
+  )
+  session.defaultSession.setPermissionRequestHandler(
+    (wc, permission, callback, details) => {
+      if (!VOICE_PERMISSIONS.has(permission)) {
+        mainLog.debug(`defaultSession: denied non-voice permission '${permission}'`)
+        callback(false)
+        return
+      }
+      const allowed = canUseVoicePermission(wc, permission, details)
+      if (!allowed) {
+        mainLog.debug(`defaultSession: denied permission '${permission}'`)
+      }
+      callback(allowed)
+    },
+  )
+  session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) => {
+    if (!VOICE_PERMISSIONS.has(permission)) {
+      mainLog.debug(`defaultSession: denied non-voice permission check '${permission}'`)
+      return false
+    }
+    const allowed = canUseVoicePermission(wc, permission, details)
+    if (!allowed) {
+      mainLog.debug(`defaultSession: denied permission check '${permission}'`)
+    }
+    return allowed
+  })
 
   // Re-apply proxy settings now that Electron sessions are available
   // (first call before app.whenReady only configured Node-level proxy)
@@ -721,6 +802,24 @@ app.whenReady().then(async () => {
       moduleSink = instance.wsServer.push.bind(instance.wsServer)
       moduleClientResolver = resolveClientId
 
+      // Voice dictation: a separate loopback WS server (raw PCM, no RPC envelope)
+      // with a voice-scoped token that transcribes via the qwen credentials.
+      try {
+        const voiceToken = randomBytes(32).toString('hex')
+        voiceServer = await startVoiceServer({
+          token: voiceToken,
+          resolveConfig: resolveDesktopVoiceConfig,
+          allowedOrigins: [getRendererDevOrigin()].filter(
+            (origin): origin is string => Boolean(origin),
+          ),
+          isEnabled: getVoiceEnabled,
+          logger: platform.logger,
+        })
+        voiceStreamUrl = `${voiceServer.url}?token=${encodeURIComponent(voiceToken)}`
+      } catch (error) {
+        mainLog.error('Failed to start voice stream server:', error)
+      }
+
       // -----------------------------------------------------------------------
       // Messaging Gateway — attach the WS publisher, init local workspaces,
       // install the fan-out event sink. The handle was created inside
@@ -916,6 +1015,22 @@ app.whenReady().then(async () => {
       })
       ipcMain.on('__get-ws-token', (e) => {
         e.returnValue = instance.token
+      })
+      ipcMain.on('__get-voice-stream-url', (e) => {
+        // The voice WS URL embeds the loopback auth token, so only hand it to
+        // the app's own top-level renderer frame. Reject sub-frames (injected /
+        // cross-origin iframes) and any frame not loaded from our renderer
+        // origin so the token can't be exfiltrated.
+        const frame = e.senderFrame
+        if (
+          !frame ||
+          frame !== e.sender.mainFrame ||
+          !isTrustedRendererFrameUrl(frame.url, process.env.VITE_DEV_SERVER_URL)
+        ) {
+          e.returnValue = null
+          return
+        }
+        e.returnValue = getVoiceEnabled() ? voiceStreamUrl : null
       })
       ipcMain.on('__get-workspace-remote-config', (e) => {
         const wsId = windowManager?.getWorkspaceForWindow(e.sender.id)
@@ -1185,6 +1300,10 @@ app.on('before-quit', async (event) => {
 
     // Stop all model refresh timers
     getModelRefreshService().stopAll()
+
+    // Stop the voice stream server (terminates clients so it closes promptly).
+    await voiceServer?.close()
+    voiceServer = null
 
     // Stop messaging gateways so the WhatsApp worker subprocess exits cleanly.
     if (messagingHandle) {

@@ -49,6 +49,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
       listSkills: vi.fn().mockResolvedValue([]),
     }),
     getChatCompression: vi.fn().mockReturnValue(undefined),
+    getAutoCompactThreshold: vi.fn(),
   } as unknown as Config;
 }
 
@@ -74,6 +75,7 @@ describe('collectContextData (contextCommand)', () => {
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
     } as unknown as Config;
   });
 
@@ -165,6 +167,7 @@ describe('collectContextData (contextCommand)', () => {
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -246,5 +249,16 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.thresholds.auto).toBe(167_000);
     const text = formatContextUsageText(data);
     expect(text).not.toMatch(/Compaction thresholds/);
+  });
+
+  it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
+    // config.getAutoCompactThreshold() returns 0.5 → computeThresholds(32000, 0.5)
+    // = { warn: 16,000, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    const config = makeMockConfig(32_000);
+    vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
+    const data = await collectContextData(config, false);
+
+    expect(data.breakdown.thresholds).toBeDefined();
+    expect(data.breakdown.thresholds!.auto).toBe(16_000);
   });
 });

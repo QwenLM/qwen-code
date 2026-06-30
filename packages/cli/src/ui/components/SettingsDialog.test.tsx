@@ -171,6 +171,7 @@ vi.mock('../../utils/languageUtils.js', async () => {
   return {
     ...actual,
     updateOutputLanguageFile: vi.fn(),
+    writeOutputLanguageAndRegisterPath: vi.fn(),
   };
 });
 
@@ -520,6 +521,56 @@ describe('SettingsDialog', () => {
       expect(mockSetCompactMode).toHaveBeenCalledWith(true);
       // Verify refreshStatic was called to update rendered history
       expect(mockRefreshStatic).toHaveBeenCalled();
+
+      unmount();
+    });
+
+    it('should not save number settings below their configured minimum', async () => {
+      vi.mocked(saveModifiedSettings).mockClear();
+
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+      const component = (
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>
+      );
+
+      const { stdin, unmount, lastFrame } = render(component);
+
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Settings');
+      });
+
+      const cleanupPeriodIndex = getDialogSettingKeys().indexOf(
+        'general.cleanupPeriodDays',
+      );
+      expect(cleanupPeriodIndex).toBeGreaterThanOrEqual(0);
+
+      const press = async (key: string) => {
+        act(() => {
+          stdin.write(key);
+        });
+        await wait();
+      };
+
+      for (let i = 0; i < cleanupPeriodIndex; i++) {
+        await press(TerminalKeys.DOWN_ARROW as string);
+      }
+
+      await press(TerminalKeys.ENTER as string);
+      await press('-');
+      await press('1');
+      await press(TerminalKeys.ENTER as string);
+
+      await wait();
+
+      const cleanupPeriodCall = vi
+        .mocked(saveModifiedSettings)
+        .mock.calls.find((call) =>
+          (call[0] as Set<string>).has('general.cleanupPeriodDays'),
+        );
+      expect(cleanupPeriodCall).toBeUndefined();
 
       unmount();
     });

@@ -5,6 +5,8 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import { useI18n } from '../i18n';
+import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
 import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
@@ -19,11 +21,6 @@ import { InsightReady } from './InsightReady';
 interface MessageItemProps {
   message: Message;
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   workspaceCwd?: string;
@@ -39,7 +36,6 @@ interface MessageItemProps {
 export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
-  onConfirm,
   onShowContextDetail,
   workspaceCwd,
   isLatest = false,
@@ -80,7 +76,6 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             pendingApproval={pendingApproval}
-            onConfirm={onConfirm}
             workspaceCwd={workspaceCwd}
             shellOutputMaxLines={shellOutputMaxLines}
           />
@@ -137,13 +132,38 @@ export const MessageItem = memo(function MessageItem({
 
   if (body === null) return null;
 
+  // Isolate each message's render: a throw in Markdown/KaTeX/Mermaid/a tool
+  // panel degrades to an inline notice rather than white-screening the whole
+  // (embeddable) transcript. `resetKeys={[message]}` lets a streamed/edited/
+  // retried update recover on its own; a stable broken message stays on the
+  // fallback without looping.
+  const safeBody = (
+    <ErrorBoundary
+      label={`message:${message.role}`}
+      resetKeys={[message]}
+      fallback={
+        <MessageRenderError align={message.role === 'user' ? 'end' : 'start'} />
+      }
+    >
+      {body}
+    </ErrorBoundary>
+  );
+
   if (message.role === 'assistant') {
     if (showAssistantActions) {
-      return body;
+      return safeBody;
     }
     return (
-      <MessageTimestamp timestamp={message.timestamp}>{body}</MessageTimestamp>
+      <MessageTimestamp timestamp={message.timestamp}>
+        {safeBody}
+      </MessageTimestamp>
     );
+  }
+
+  // The cancellation marker is a right-aligned, full-width turn-terminal row; a
+  // hover timestamp would overlap its text, so render it without the wrapper.
+  if (message.role === 'system' && message.source === 'prompt_cancelled') {
+    return safeBody;
   }
 
   return (
@@ -153,17 +173,43 @@ export const MessageItem = memo(function MessageItem({
       copyText={message.role === 'user' ? message.content : undefined}
       copyTitle="Copy"
     >
-      {body}
+      {safeBody}
     </MessageTimestamp>
   );
 }, areMessageItemPropsEqual);
+
+// Aligns with the message it replaces: user messages are right-aligned bubbles,
+// so the notice sits on the right too and still reads as that user turn's prompt
+// (a left-aligned notice would look like it belongs to the previous turn's
+// output). Assistant and other rows are left-aligned, matching their layout.
+function MessageRenderError({ align }: { align: 'start' | 'end' }) {
+  const { t } = useI18n();
+  return (
+    <div
+      role="alert"
+      style={{
+        display: 'flex',
+        justifyContent: align === 'end' ? 'flex-end' : 'flex-start',
+      }}
+    >
+      <span
+        style={{
+          color: 'var(--error-color, #e06c75)',
+          fontSize: '0.85em',
+          opacity: 0.85,
+        }}
+      >
+        {t('message.renderError')}
+      </span>
+    </div>
+  );
+}
 
 function areMessageItemPropsEqual(
   prev: MessageItemProps,
   next: MessageItemProps,
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
-  if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;

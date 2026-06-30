@@ -566,9 +566,14 @@ Hook output supports three categories of fields:
 ```json
 {
   "stop_hook_active": "boolean indicating if stop hook is active",
-  "last_assistant_message": "the last message from the assistant"
+  "last_assistant_message": "the last message from the assistant",
+  "context_usage": "ratio of context window used (may exceed 1 when tokens exceed window; optional)",
+  "context_limit": "context window size in tokens (optional)",
+  "input_tokens": "prompt token count (may include output tokens depending on provider; optional)"
 }
 ```
+
+The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scripts to observe context usage and implement custom compact strategies — for example, a script that prints a reminder to run `/compact` when usage exceeds a custom threshold.
 
 **Output Options**:
 

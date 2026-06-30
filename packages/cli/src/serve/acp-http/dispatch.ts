@@ -35,6 +35,24 @@ import {
   MAX_READ_BYTES,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
+import {
+  isPermissionRuleType,
+  normalizePermissionRules,
+  PermissionRulesValidationError,
+  readPermissionRuleSet,
+} from '../../config/permission-settings.js';
+import { loadSettings } from '../../config/settings.js';
+import { WorkspaceVoiceError } from '../../services/voice-service.js';
+import { SetupGithubError, setupGithub } from '../../services/setup-github.js';
+import {
+  createSetupGithubFileOps,
+  resolveSetupGithubProxy,
+  sanitizeSetupGithubMessage,
+  sanitizeSetupGithubResult,
+  setupGithubEventData,
+} from '../routes/workspace-setup-github.js';
+import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
+import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
@@ -49,6 +67,10 @@ import {
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
+} from '../workspace-service/types.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
 } from '../workspace-service/types.js';
 import type { AcpConnection } from './connection-registry.js';
 import {
@@ -87,6 +109,13 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/env`,
   `${QWEN_METHOD_NS}workspace/preflight`,
   `${QWEN_METHOD_NS}workspace/init`,
+  `${QWEN_METHOD_NS}workspace/trust`,
+  `${QWEN_METHOD_NS}workspace/trust/request`,
+  `${QWEN_METHOD_NS}workspace/permissions`,
+  `${QWEN_METHOD_NS}workspace/permissions/set`,
+  `${QWEN_METHOD_NS}workspace/voice`,
+  `${QWEN_METHOD_NS}workspace/voice/set`,
+  `${QWEN_METHOD_NS}workspace/setup-github`,
   `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
   `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
   // Wave 1: session extensions
@@ -116,6 +145,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   // Wave 1: remaining workspace
   `${QWEN_METHOD_NS}workspace/tools`,
   `${QWEN_METHOD_NS}workspace/mcp/tools`,
+  `${QWEN_METHOD_NS}workspace/mcp/resources`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
   `${QWEN_METHOD_NS}sessions/delete`,
@@ -283,6 +313,26 @@ function toRpcError(err: unknown): {
       code: RPC.INTERNAL_ERROR,
       message: err.message,
       data: { errorKind: 'memory_write_timeout' },
+    };
+  }
+  if (err instanceof WorkspaceVoiceError) {
+    return {
+      code:
+        err.status >= 400 && err.status < 500
+          ? RPC.INVALID_PARAMS
+          : RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: err.code },
+    };
+  }
+  if (err instanceof WorkspaceSettingsPartialPersistError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: {
+        errorKind: 'partial_persist_error',
+        committedKeys: err.committedWrites.map((write) => write.key),
+      },
     };
   }
   if (err instanceof TooManyActiveDeviceFlowsError) {
@@ -1226,6 +1276,244 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}workspace/trust`: {
+          const result = await this.workspace.getWorkspaceTrustStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/trust/request`: {
+          const desiredState = params['desiredState'];
+          if (desiredState !== 'trusted' && desiredState !== 'untrusted') {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`desiredState` must be "trusted" or "untrusted"',
+                ),
+              );
+            }
+            return;
+          }
+          const reason = params['reason'];
+          if (
+            reason !== undefined &&
+            (typeof reason !== 'string' ||
+              reason.length > MAX_TRUST_REASON_LENGTH)
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`reason\` must be a string up to ${MAX_TRUST_REASON_LENGTH} chars`,
+                ),
+              );
+            }
+            return;
+          }
+          const ctx = this.wsCtx(conn, method);
+          const status = await this.workspace.getWorkspaceTrustStatus(ctx);
+          if (!status.folderTrustEnabled) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_REQUEST,
+                  'Folder trust is disabled for this workspace',
+                ),
+              );
+            }
+            return;
+          }
+          const result = await this.workspace.requestWorkspaceTrustChange(ctx, {
+            desiredState,
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/permissions`: {
+          const result = await this.workspace.getWorkspacePermissionsStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/permissions/set`: {
+          const scope = params['scope'];
+          if (scope !== 'user' && scope !== 'workspace') {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`scope` must be "user" or "workspace"',
+                ),
+              );
+            }
+            return;
+          }
+
+          const ruleType = params['ruleType'];
+          if (!isPermissionRuleType(ruleType)) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`ruleType` must be "allow", "ask", or "deny"',
+                ),
+              );
+            }
+            return;
+          }
+
+          let rules: string[];
+          try {
+            const settings = loadSettings(this.boundWorkspace);
+            const scopeSettings =
+              scope === 'workspace'
+                ? settings.workspace.settings
+                : settings.user.settings;
+            const existingRules =
+              readPermissionRuleSet(scopeSettings)[ruleType];
+            rules = normalizePermissionRules(params['rules'], {
+              existingRules,
+            });
+          } catch (err) {
+            if (err instanceof PermissionRulesValidationError) {
+              if (id !== undefined) {
+                conn.sendConn(error(id, RPC.INVALID_PARAMS, err.message));
+              }
+              return;
+            }
+            throw err;
+          }
+
+          let result: unknown;
+          try {
+            result = await this.workspace.setWorkspacePermissionRules(
+              this.wsCtx(conn, method),
+              { scope, ruleType, rules },
+            );
+          } catch (err) {
+            if (
+              err instanceof WorkspacePermissionRulesSessionRequiredError &&
+              id !== undefined
+            ) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, err.message, {
+                  errorKind: 'permission_session_required',
+                }),
+              );
+              return;
+            }
+            throw err;
+          }
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/voice`: {
+          const result = await this.workspace.getWorkspaceVoiceStatus(
+            this.wsCtx(conn, method),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/voice/set`: {
+          const update = parseWorkspaceVoiceUpdateParams(params);
+          if ('error' in update) {
+            if (id !== undefined) {
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, update.error));
+            }
+            return;
+          }
+
+          const result = await this.workspace.setWorkspaceVoiceSettings(
+            this.wsCtx(conn, method),
+            update,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/setup-github`: {
+          if (params['consent'] !== true) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`consent` must be true', {
+                  errorKind: 'github_setup_consent_required',
+                }),
+              );
+            }
+            return;
+          }
+          if (!this.fsFactory) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured', {
+                  errorKind: 'internal_error',
+                }),
+              );
+            }
+            return;
+          }
+          try {
+            const result = await setupGithub({
+              cwd: this.boundWorkspace,
+              workspaceRoot: this.boundWorkspace,
+              proxy: resolveSetupGithubProxy(this.boundWorkspace),
+              abortSignal: conn.abortSignal,
+              fileOps: createSetupGithubFileOps(
+                this.fsFactory,
+                `ACP ${method}`,
+                conn.clientId,
+              ),
+            });
+            this.bridge.publishWorkspaceEvent({
+              type: 'github_setup_completed',
+              data: setupGithubEventData(result),
+              ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+            } as BridgeEvent);
+            this.replyConn(conn, id, result as unknown);
+          } catch (err) {
+            if (err instanceof SetupGithubError && id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  err.status >= 500 ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
+                  sanitizeSetupGithubMessage(err.message, this.boundWorkspace),
+                  {
+                    errorKind: err.code,
+                    ...(err.partial
+                      ? {
+                          partial: true,
+                          result: err.partialResult
+                            ? sanitizeSetupGithubResult(
+                                err.partialResult,
+                                this.boundWorkspace,
+                              )
+                            : null,
+                        }
+                      : {}),
+                  },
+                ),
+              );
+              return;
+            }
+            throw err;
+          }
+          return;
+        }
+
         case `${QWEN_METHOD_NS}workspace/set_tool_enabled`: {
           const toolName = String(params['toolName'] ?? '');
           if (!toolName || toolName.length > MAX_NAME_LENGTH) {
@@ -1991,6 +2279,21 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}workspace/mcp/resources`: {
+          const serverName = String(params['serverName'] ?? '');
+          if (!serverName) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`serverName` required'),
+              );
+            return;
+          }
+          const result =
+            await this.bridge.getWorkspaceMcpResourcesStatus(serverName);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
         case `${QWEN_METHOD_NS}workspace/mcp/servers/add`: {
           const name = String(params['name'] ?? '');
           if (!name || name.length > MAX_NAME_LENGTH) {
@@ -2435,22 +2738,98 @@ export class AcpDispatcher {
     conn: AcpConnection,
     sessionId: string,
     signal: AbortSignal,
+    lastEventId?: number,
   ): Promise<void> {
     try {
-      const iterable = this.bridge.subscribeEvents(sessionId, { signal });
+      // `lastEventId` (from the `Last-Event-ID` reconnect header) drives the
+      // EventBus ring replay: events with `id > lastEventId` still buffered
+      // are replayed before live events flow, recovering content frames lost
+      // in a mid-turn proxy gap (§1.8). `undefined` ⇒ live-only, as before.
+      const iterable = this.bridge.subscribeEvents(sessionId, {
+        signal,
+        ...(lastEventId !== undefined ? { lastEventId } : {}),
+      });
+      // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
+      // `session/prompt` result produced during the detach gap) so they land
+      // AFTER the content chunks that preceded them. Each deferred reply carries
+      // a WATERMARK (`anchorId` = the bus head id when it was produced); release
+      // it only once the pump has DELIVERED through that id. We track the highest
+      // delivered id and, after each content frame, release replies the pump has
+      // now caught up to (`releaseDeferredSessionReplies`).
+      //
+      // `replay_complete` is the boundary for the REPLAY range only: it releases
+      // replies anchored within the replayed frames and stops gating new replies
+      // on the replay window. Replies anchored ABOVE the replay range (the turn
+      // was still running at reconnect, so the tail arrives as LIVE events after
+      // `replay_complete`) keep deferring until the per-event release below
+      // delivers their content — a result produced during a slow replay must not
+      // jump ahead of that tail (§1.8 W1, MsyIt).
+      //
+      // NOT released on `state_resync_required`: the EventBus emits that frame
+      // FIRST, before the replay frames (both the `epoch_reset` and
+      // `ring_evicted` paths fall through to the replay loop + `replay_complete`).
+      // It is id-less, so the per-event release skips it anyway.
+      let lastDeliveredId = lastEventId ?? 0;
+      // A `state_resync_required` means the ring evicted frames (overflow /
+      // epoch reset), so an anchor event a deferred reply is waiting on may
+      // never be delivered. Track it so `endReplayDeferral` can release ALL
+      // deferred replies (anchor guarantee void) instead of stranding them
+      // behind an unreachable watermark — the cascading-freeze fix.
+      let sawEviction = false;
       for await (const event of iterable) {
         if (signal.aborted) break;
         // Count event delivery as connection activity so a long, quiet prompt
         // (no inbound HTTP) isn't reaped by the idle-TTL sweep.
         conn.touch();
         this.translateEvent(conn, sessionId, event);
+        if (event.type === 'state_resync_required') sawEviction = true;
+        if (typeof event.id === 'number') {
+          lastDeliveredId = event.id;
+          conn.releaseDeferredSessionReplies(sessionId, event.id);
+        }
+        if (event.type === 'replay_complete') {
+          conn.endReplayDeferral(sessionId, lastDeliveredId, sawEviction);
+          // Operator breadcrumb for "did resume recover the gap?": one line per
+          // resumed stream stating the cursor it resumed from, how far delivery
+          // reached, the bus-reported replayed count, and whether the ring had
+          // evicted frames (a gap the replay could not fully backfill).
+          const replayedCount = (event.data as { replayedCount?: number })
+            ?.replayedCount;
+          writeStderrLine(
+            `qwen serve: /acp replay complete (${logSafe(sessionId)}) ` +
+              `from=${lastEventId ?? 'none'} delivered_through=${lastDeliveredId} ` +
+              `count=${replayedCount ?? 'n/a'} evicted=${sawEviction}`,
+          );
+        }
       }
+      // Safety: a live-only subscription (no cursor → no replay boundary) or a
+      // clean end without a boundary frame still releases anything STILL deferred
+      // (its anchored content will never arrive now) — but NOT if this pump was
+      // aborted. An abort means the stream was detached/reclaimed; flushing here
+      // could drain the deferred reply onto a RECLAIMING stream ahead of its own
+      // replay (reintroducing the very out-of-order delivery the deferral
+      // prevents). The reclaiming pump owns the buffer then and will release
+      // after its replay boundary. On an iterator error mid-replay the catch
+      // below performs the SAME flush (a re-throw with the stream still open
+      // closes it outright rather than detaching with grace, so the buffered
+      // replies must be released there too — otherwise they are lost).
+      if (!signal.aborted) conn.flushBufferedSessionFrames(sessionId);
     } catch (err) {
       // Symmetric for the SYNC `subscribeEvents` throw and a MID-STREAM
       // iterator error: surface a `stream_error` to the client, then re-throw
       // so the caller's `.catch()` closes the stream. Returning would leave a
       // zombie SSE stream (heartbeats, no events, no reconnect signal).
       if (!signal.aborted) {
+        // The iterator has terminated (errored), so no more content frames will
+        // arrive through this pump and the ordering constraint the deferral
+        // protected against no longer applies. Flush any still-deferred session
+        // replies onto the (still-open) stream BEFORE signalling stream_error:
+        // the re-throw drives `onPumpSettled`, and while the stream is still
+        // open that takes the `closeSessionStream` branch (full teardown, NOT a
+        // detach-with-grace), which would otherwise DROP the buffered replies
+        // instead of preserving them for a reconnect. Same safety flush as the
+        // happy-path completion above.
+        conn.flushBufferedSessionFrames(sessionId);
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
@@ -2474,7 +2853,13 @@ export class AcpDispatcher {
     switch (event.type) {
       case 'session_update': {
         // `event.data` is the ACP `SessionNotification` (params shape).
-        conn.sendSession(sessionId, notification('session/update', event.data));
+        // `event.id` is the bus cursor → SSE `id:` line for `Last-Event-ID`
+        // resume (the content frames §1.8 recovers all flow through here).
+        conn.sendSession(
+          sessionId,
+          notification('session/update', event.data),
+          event.id,
+        );
         return;
       }
       case 'permission_request': {
@@ -2493,6 +2878,22 @@ export class AcpDispatcher {
         // there is none, cancel (deny-safe) rather than register+stall.
         const binding = conn.sessions.get(sessionId);
         if (!binding?.stream || binding.stream.isClosed) {
+          // KNOWN GAP (tracked as the §1.7 cross-connection permission
+          // follow-up): when this fires DURING a reconnect grace window
+          // (`binding.graceTimer` set), the prompt is intentionally kept alive,
+          // but the permission is still cancel-denied here — so a client
+          // reconnecting within grace can't vote on it (ring replay re-delivers
+          // the request, but the mediator already resolved it cancelled). Log a
+          // breadcrumb so an operator can correlate an auto-denied permission
+          // with a transient disconnect. The structural fix (defer the
+          // permission across grace) belongs with the permission-coordination
+          // follow-up, not this content-stream PR.
+          if (binding?.graceTimer) {
+            writeStderrLine(
+              `qwen serve: /acp permission cancel during reconnect grace ` +
+                `(${logSafe(sessionId)}); vote not deferred (see §1.7 follow-up)`,
+            );
+          }
           const cancelled = this.cancelAbandonedPermission(
             { sessionId, bridgeRequestId: data.requestId },
             // Pass the bridge-stamped clientId when the binding still exists
@@ -2513,12 +2914,52 @@ export class AcpDispatcher {
           }
           return;
         }
-        const id = conn.nextId();
-        conn.pending.set(id, {
-          sessionId,
-          bridgeRequestId: data.requestId,
-          kind: 'permission',
-        });
+        // Idempotent under ring replay: a `permission_request` is an
+        // id-bearing ring event, so a reconnect whose `Last-Event-ID` precedes
+        // a still-unanswered request replays it here. Reuse the existing
+        // pending entry for this bridge requestId (re-send the SAME outbound id
+        // for catch-up) instead of minting a second id + entry — which would
+        // orphan one until teardown and double-prompt a client that doesn't
+        // dedupe on `_meta.requestId`.
+        //
+        // KNOWN LIMITATION (already-resolved replay): if the client ALREADY
+        // voted, the vote handler consumed the pending entry, so the scan below
+        // finds no match and mints a fresh entry + re-sends the prompt. The
+        // re-sent prompt carries the SAME `_meta.requestId`, so a conformant
+        // client (the dedupe contract this whole replay path already relies on)
+        // recognises and drops it; the only residual is a transient orphan
+        // pending entry, reaped by `abandonPendingForSession` at teardown — the
+        // agent does NOT stall, since its permission was resolved by the prior
+        // vote. Full response-replay idempotency for non-deduping clients (an
+        // LRU of resolved requestIds re-sending the recorded outcome) belongs
+        // with the permission-coordination follow-up (§1.7), not this
+        // content-stream PR, as it would add resolved-permission state to the
+        // vote path.
+        let id: string | undefined;
+        for (const [existingId, p] of conn.pending) {
+          if (
+            p.kind === 'permission' &&
+            p.sessionId === sessionId &&
+            p.bridgeRequestId === data.requestId
+          ) {
+            id = existingId;
+            break;
+          }
+        }
+        if (id === undefined) {
+          id = conn.nextId();
+          conn.pending.set(id, {
+            sessionId,
+            bridgeRequestId: data.requestId,
+            kind: 'permission',
+          });
+        }
+        // INVARIANT: this sends straight to `binding.stream` (not via
+        // `conn.sendSession`) and is safe ONLY because `translateEvent` runs
+        // synchronously from the pump — `binding.stream` was checked non-null
+        // above and cannot be detached mid-call. Do NOT introduce an `await`
+        // between that check and this send: a detach during the gap would set
+        // `binding.stream = undefined` and this would throw `TypeError`.
         void binding.stream.send(
           request(id, 'session/request_permission', {
             sessionId: data.sessionId,
@@ -2526,6 +2967,9 @@ export class AcpDispatcher {
             options: data.options,
             _meta: { [QWEN_META_KEY]: { requestId: data.requestId } },
           }),
+          // Carry the bus cursor: a permission request is a real sequenced
+          // event, so the client must resume past it.
+          event.id,
         );
         return;
       }
@@ -2538,18 +2982,25 @@ export class AcpDispatcher {
             ...(event.data as object),
             kind: 'stream_error',
           }),
+          // Pass the bus cursor through if present; a synthetic terminal frame
+          // has no bus id (event.id undefined) so no SSE `id:` line is written.
+          event.id,
         );
         return;
       }
       default: {
         // client_evicted / slow_client_warning / state_resync_required /
         // model_switched / approval_mode_changed / … → opaque qwen notify.
+        // `event.id` is undefined for the synthetic control frames (no SSE
+        // `id:` line, so they don't burn a slot in the resume sequence) and
+        // set for ring-backed daemon events.
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
             kind: event.type,
             data: event.data,
           }),
+          event.id,
         );
       }
     }
@@ -2692,7 +3143,32 @@ export class AcpDispatcher {
     // violating the JSON-RPC one-response-per-request contract. Fall back to
     // the connection-scoped stream so an id'd request always gets its reply.
     if (conn.sessions.has(sessionId)) {
-      conn.sendSession(sessionId, frame);
+      // Out-of-band reply: `sendSessionReply` defers it behind an in-flight ring
+      // replay so a prompt finishing mid-replay can't overtake not-yet-sent
+      // content frames (§1.8 W1). Anchor the reply to the bus head id NOW —
+      // every content event that should precede it has id ≤ this — so the pump
+      // releases it only after delivering through that id, even when the tail
+      // content is still flowing as live events behind `replay_complete`.
+      //
+      // The ACP binding can outlive the bridge session for a beat (concurrent
+      // teardown); `getSessionLastEventId` throws then. Fall back to an
+      // unanchored defer (released at the next boundary) — never let a missing
+      // watermark turn a reply into a thrown error.
+      let anchorId: number | undefined;
+      try {
+        anchorId = this.bridge.getSessionLastEventId(sessionId);
+      } catch (err) {
+        // Expected on the teardown race; log a breadcrumb so an operator can
+        // tell that benign case apart from an unexpected bridge regression that
+        // starts exercising this fallback (which would otherwise be invisible).
+        anchorId = undefined;
+        writeStderrLine(
+          `qwen serve: /acp replySession(${logSafe(sessionId)}) ` +
+            `anchor unavailable, deferring unanchored: ` +
+            logSafe(err instanceof Error ? err.message : String(err)),
+        );
+      }
+      conn.sendSessionReply(sessionId, frame, anchorId);
     } else {
       // Fallback fired — log it so an operator can correlate "reply arrived on
       // the connection stream, not the session stream" with a mid-flight

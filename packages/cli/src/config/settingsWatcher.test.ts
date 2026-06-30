@@ -552,6 +552,51 @@ describe('SettingsWatcher', () => {
 
       expect(listener).toHaveBeenCalledTimes(1);
     });
+
+    it('should notify when only mcpServers changes (sub-task 3 hot-reload)', async () => {
+      // Regression guard for the watcher↔schema integration: mcpServers is now
+      // requiresRestart:false, so an MCP-server-only edit must reach the
+      // listener that drives reinitializeMcpServers. Before the schema flip
+      // this change was suppressed and the runtime reconcile never fired.
+      watcher.startWatching();
+      const listener = vi.fn();
+      watcher.addChangeListener(listener);
+
+      const userFile = settings.forScope(SettingScope.User);
+      userFile.settings = s({ mcpServers: { foo: { command: 'a' } } });
+
+      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
+        userFile.settings = s({
+          mcpServers: { foo: { command: 'a' }, bar: { command: 'b' } },
+        });
+      });
+
+      fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
+      await vi.advanceTimersByTimeAsync(SettingsWatcher.DEBOUNCE_MS + 10);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('should notify when only mcp.excluded changes (sub-task 3 gating hot-reload)', async () => {
+      // mcp.excluded / mcp.allowed feed mcpGatingEqual; the leaf is now
+      // requiresRestart:false even though the mcp parent stays true (the
+      // watcher resolves the longest-matching schema key, so the leaf wins).
+      watcher.startWatching();
+      const listener = vi.fn();
+      watcher.addChangeListener(listener);
+
+      const userFile = settings.forScope(SettingScope.User);
+      userFile.settings = s({ mcp: { excluded: ['a'] } });
+
+      vi.mocked(settings.reloadScopeFromDisk).mockImplementation(() => {
+        userFile.settings = s({ mcp: { excluded: ['a', 'b'] } });
+      });
+
+      fireAllEvent(0, 'change', '/home/user/.qwen/settings.json');
+      await vi.advanceTimersByTimeAsync(SettingsWatcher.DEBOUNCE_MS + 10);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('change type classification', () => {

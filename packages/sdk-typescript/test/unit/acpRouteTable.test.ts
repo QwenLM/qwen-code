@@ -279,6 +279,12 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s18/lsp', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/lsp');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ sessionId: 's18' });
   });
 
   // ---- Granular workspace routes ----------------------------------------
@@ -317,6 +323,78 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/workspace/init', 'POST');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/workspace/init');
+  });
+
+  it('GET /workspace/trust maps to _qwen/workspace/trust', () => {
+    const result = matchRoute('/workspace/trust', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/trust');
+  });
+
+  it('POST /workspace/trust/request maps to _qwen/workspace/trust/request', () => {
+    const result = matchRoute('/workspace/trust/request', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/trust/request');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { desiredState: 'trusted', reason: 'operator prompt' },
+      'POST',
+    );
+    expect(params).toEqual({
+      desiredState: 'trusted',
+      reason: 'operator prompt',
+    });
+  });
+
+  it('GET /workspace/permissions maps to _qwen/workspace/permissions', () => {
+    const result = matchRoute('/workspace/permissions', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/permissions');
+  });
+
+  it('POST /workspace/permissions maps to _qwen/workspace/permissions/set', () => {
+    const body = {
+      scope: 'workspace',
+      ruleType: 'deny',
+      rules: ['Read(.env)'],
+    };
+    const result = matchRoute('/workspace/permissions', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/permissions/set');
+    expect(result!.mapping.extractParams(result!.segments, body, 'POST')).toBe(
+      body,
+    );
+  });
+
+  it('GET /workspace/voice maps to _qwen/workspace/voice', () => {
+    const result = matchRoute('/workspace/voice', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/voice');
+  });
+
+  it('POST /workspace/voice maps to _qwen/workspace/voice/set', () => {
+    const body = {
+      enabled: true,
+      mode: 'tap',
+      language: 'english',
+      voiceModel: 'qwen3-asr-flash',
+    };
+    const result = matchRoute('/workspace/voice', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/voice/set');
+    expect(result!.mapping.extractParams(result!.segments, body, 'POST')).toBe(
+      body,
+    );
+  });
+
+  it('POST /workspace/setup-github maps to _qwen/workspace/setup-github', () => {
+    const body = { consent: true };
+    const result = matchRoute('/workspace/setup-github', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/setup-github');
+    expect(result!.mapping.extractParams(result!.segments, body, 'POST')).toBe(
+      body,
+    );
   });
 
   it('GET /workspace/tools maps to _qwen/workspace/tools', () => {
@@ -383,6 +461,18 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/workspace/mcp/fs/tools', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/workspace/mcp/tools');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ serverName: 'fs' });
+  });
+
+  it('GET /workspace/mcp/:server/resources maps to _qwen/workspace/mcp/resources', () => {
+    const result = matchRoute('/workspace/mcp/fs/resources', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/resources');
     const params = result!.mapping.extractParams(
       result!.segments,
       undefined,
@@ -578,5 +668,99 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/has%20space/prompt', 'POST');
     expect(result).not.toBeNull();
     expect(result!.segments[0]).toBe('has space');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Query-backed routes coerce searchParams into typed JSON-RPC params
+// ---------------------------------------------------------------------------
+
+describe('acpRouteTable – query param coercion', () => {
+  function extract(path: string, method: string) {
+    const url = new URL(`http://d${path}`);
+    const m = matchRoute(url.pathname, method)!;
+    expect(m).not.toBeNull();
+    return {
+      method: m.mapping.method,
+      params: m.mapping.extractParams(
+        m.segments,
+        undefined,
+        method,
+        url.searchParams,
+      ),
+    };
+  }
+
+  it('GET /file forwards path (string) + maxBytes/line/limit as NUMBERS', () => {
+    const { method, params } = extract(
+      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10',
+      'GET',
+    );
+    expect(method).toBe('_qwen/file/read');
+    expect(params).toEqual({
+      path: 'src/a.ts',
+      maxBytes: 123,
+      line: 4,
+      limit: 10,
+    });
+    // The daemon requires real numbers — a regression to strings would break it.
+    expect(typeof params['maxBytes']).toBe('number');
+  });
+
+  it('GET /file omits absent optional params', () => {
+    const { params } = extract('/file?path=a.ts', 'GET');
+    expect(params).toEqual({ path: 'a.ts' });
+  });
+
+  it('GET /file treats an EMPTY numeric param as absent, not 0 (M3BYd)', () => {
+    // `?maxBytes=` is present-but-empty; `Number('')` is 0 — must be omitted so
+    // the daemon doesn't honor an unintended 0.
+    const { params } = extract('/file?path=a.ts&maxBytes=', 'GET');
+    expect(params).toEqual({ path: 'a.ts' });
+    expect('maxBytes' in params).toBe(false);
+  });
+
+  it('GET /file/bytes forwards path + offset/maxBytes as numbers', () => {
+    const { method, params } = extract(
+      '/file/bytes?path=a.bin&offset=8&maxBytes=64',
+      'GET',
+    );
+    expect(method).toBe('_qwen/file/read_bytes');
+    expect(params).toEqual({ path: 'a.bin', offset: 8, maxBytes: 64 });
+  });
+
+  it('GET /stat, /list forward path', () => {
+    expect(extract('/stat?path=a.ts', 'GET').params).toEqual({ path: 'a.ts' });
+    expect(extract('/list?path=dir', 'GET').params).toEqual({ path: 'dir' });
+  });
+
+  it('GET /glob forwards pattern', () => {
+    expect(extract('/glob?pattern=**%2F*.ts', 'GET').params).toEqual({
+      pattern: '**/*.ts',
+    });
+  });
+
+  it('GET context-usage coerces detail to the boolean true', () => {
+    const { method, params } = extract(
+      '/session/s1/context-usage?detail=true',
+      'GET',
+    );
+    expect(method).toBe('_qwen/session/context_usage');
+    expect(params).toEqual({ sessionId: 's1', detail: true });
+    expect(params['detail']).toBe(true); // not the string 'true'
+  });
+
+  it('GET context-usage without detail omits it (sessionId only)', () => {
+    expect(extract('/session/s1/context-usage', 'GET').params).toEqual({
+      sessionId: 's1',
+    });
+  });
+
+  it('GET context-usage with present-but-empty detail (`?detail=`) omits it, not `false`', () => {
+    // Mirror the numeric `?maxBytes=` rule: an empty value is "not set", so we
+    // must not forward `{ detail: false }` for a param the caller never set.
+    const { params } = extract('/session/s1/context-usage?detail=', 'GET');
+    expect(params).toEqual({ sessionId: 's1' });
+    expect('detail' in params).toBe(false);
   });
 });

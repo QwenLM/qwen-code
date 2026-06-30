@@ -4,11 +4,11 @@
   gap: 8px;
   align-items: baseline;
   padding: 5px 0;
-  background: var(--user-msg-bg);
+  background: var(--accent);
 }
 
 .prefix {
-  color: var(--user-color);
+  color: var(--success-color);
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -16,7 +16,7 @@
 .body {
   flex: 1 1 auto;
   min-width: 0;
-  color: var(--msg-body-color);
+  color: var(--foreground);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -33,13 +33,14 @@
   max-height: 200px;
   border-radius: 8px;
   object-fit: contain;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
 }
 
 /* ---- Chat mode: right-aligned bubble layout ---- */
 
 .chatMessageRow {
   display: flex;
+  width: 100%;
   justify-content: flex-end;
   margin: 30px 0;
 }
@@ -48,9 +49,9 @@
   display: inline-block;
   max-width: 80%;
   padding: 8px 12px;
-  border-radius: 16px;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   line-height: 1.5;
@@ -75,7 +76,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   cursor: pointer;
   font: inherit;
   font-size: 14px;
@@ -84,7 +85,7 @@
 
 .toggleButton:hover,
 .toggleButton:focus-visible {
-  color: var(--text-primary);
+  color: var(--foreground);
   outline: none;
 }
 
@@ -111,5 +112,5 @@
   max-height: 150px;
   border-radius: 8px;
   object-fit: contain;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
 }

@@ -17,6 +17,11 @@
       "import": "./dist/daemon/index.js",
       "require": "./dist/daemon/index.cjs"
     },
+    "./daemon/transports": {
+      "types": "./dist/daemon/transports.d.ts",
+      "import": "./dist/daemon/transports.js",
+      "require": "./dist/daemon/transports.cjs"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

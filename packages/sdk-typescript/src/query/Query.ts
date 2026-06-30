@@ -78,6 +78,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   readonly initialized: Promise<void>;
   private closed = false;
   private messageRouterStarted = false;
+  private transportReadFinalized = false;
 
   private firstResultReceivedPromise?: Promise<void>;
   private firstResultReceivedResolve?: () => void;
@@ -330,13 +331,13 @@ export class Query implements AsyncIterable<SDKMessage> {
           }
         }
 
-        if (this.abortController.signal.aborted) {
-          this.inputStream.error(new AbortError('Query aborted'));
-        } else {
-          this.inputStream.done();
-        }
+        this.finishTransportRead();
       } catch (error) {
-        this.inputStream.error(
+        // A transport-level crash (not clean EOF) must still reject every
+        // pending control + MCP request, otherwise continueLastTurn() and MCP
+        // callers hang until their timeout (MCP responses have none). Route
+        // through finishTransportRead so the real error propagates.
+        this.finishTransportRead(
           error instanceof Error ? error : new Error(String(error)),
         );
       }
@@ -394,6 +395,55 @@ export class Query implements AsyncIterable<SDKMessage> {
 
     logger.warn('Unknown message type:', message);
     this.inputStream.enqueue(message as SDKMessage);
+  }
+
+  private finishTransportRead(error?: Error): void {
+    // Idempotent: close() and the transport-read loop can both reach here.
+    if (this.transportReadFinalized) {
+      return;
+    }
+    this.transportReadFinalized = true;
+
+    const rejectionError =
+      error ??
+      this.transport.exitError ??
+      new Error('Transport closed before control response');
+
+    // Surface a single correlatable line when the transport dies with work
+    // still in flight (e.g. the CLI subprocess crashes mid-continuation):
+    // otherwise oncall sees only scattered rejected promises with no anchor.
+    const pendingCount =
+      this.pendingControlRequests.size + this.pendingMcpResponses.size;
+    if (pendingCount > 0) {
+      logger.error('Transport finalized with pending requests rejected', {
+        pendingControl: this.pendingControlRequests.size,
+        pendingMcp: this.pendingMcpResponses.size,
+        error: rejectionError.message,
+      });
+    }
+
+    for (const pending of this.pendingControlRequests.values()) {
+      pending.abortController.abort();
+      clearTimeout(pending.timeout);
+      pending.reject(rejectionError);
+    }
+    this.pendingControlRequests.clear();
+
+    for (const pending of this.pendingMcpResponses.values()) {
+      pending.reject(rejectionError);
+    }
+    this.pendingMcpResponses.clear();
+
+    // Skip stream finalization if close() already settled the stream.
+    if (this.inputStream.hasError === undefined) {
+      if (this.abortController.signal.aborted) {
+        this.inputStream.error(new AbortError('Query aborted'));
+      } else if (error) {
+        this.inputStream.error(error);
+      } else {
+        this.inputStream.done();
+      }
+    }
   }
 
   private async handleControlRequest(
@@ -898,6 +948,14 @@ export class Query implements AsyncIterable<SDKMessage> {
 
   async interrupt(): Promise<void> {
     await this.sendControlRequest(ControlRequestType.INTERRUPT);
+  }
+
+  /**
+   * Continue the most recent unfinished turn without appending a synthetic user
+   * message. Output arrives as regular messages on this Query's async iterator.
+   */
+  async continueLastTurn(): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.CONTINUE_LAST_TURN);
   }
 
   async setPermissionMode(mode: string): Promise<void> {

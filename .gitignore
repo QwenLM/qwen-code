@@ -40,8 +40,16 @@ package-lock.json
 # reserved for auto-generated skills — do not hand-author a project skill with
 # this prefix, or its directory will be ignored here.
 .qwen/skills/auto-skill-*/
+# Staging area for auto-skills awaiting confirmation (memory.autoSkillConfirm).
+# Already covered by `.qwen/*` above since it's never re-included, but listed
+# explicitly alongside auto-skill-*/ so the intent is obvious.
+.qwen/pending-skills/
 !.qwen/agents/
 !.qwen/agents/**
+# Team memory (memory.enableTeamMemory) is shared with collaborators THROUGH
+# git, so it must be tracked despite the `.qwen/*` ignore above.
+!.qwen/team-memory/
+!.qwen/team-memory/**
 
 # OS metadata
 .DS_Store
@@ -101,6 +109,9 @@ packages/core/src/utils/filesearch/fzfWorker.js
 # storybook
 *storybook.log
 storybook-static
+
+# test
+coverage/
 
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs

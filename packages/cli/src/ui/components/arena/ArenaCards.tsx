@@ -297,7 +297,7 @@ export const ArenaSessionCard: React.FC<ArenaSessionCardProps> = ({
                   :{' '}
                 </Text>
                 <Text color={theme.text.primary}>
-                  {agent.totalTokens.toLocaleString()} tokens · runtime{' '}
+                  {agent.outputTokens.toLocaleString()} tokens · runtime{' '}
                   {formatDuration(agent.durationMs)}
                 </Text>
               </Box>

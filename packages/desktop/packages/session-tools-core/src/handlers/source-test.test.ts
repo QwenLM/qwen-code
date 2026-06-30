@@ -275,4 +275,41 @@ describe('source_test auto-enable', () => {
     expect(text).not.toContain('tools available now');
     expect(text).not.toContain('available on your next message');
   });
+
+  it('uses the requested source slug for guide checks when config slug is legacy-formatted', async () => {
+    writeSource(tempDir, 'my-source', { slug: 'my--source' });
+
+    const ctx = createCtx(tempDir, {
+      validateStdioMcpConnection: stubMcpOk(),
+    });
+
+    const result = await handleSourceTest(ctx, {
+      sourceSlug: 'my-source',
+      autoEnable: false,
+    });
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('guide.md exists');
+    expect(text).toContain('Validation passed');
+    expect(result.isError).toBe(false);
+  });
+
+  it('uses the requested source slug for missing guide warnings when config slug is legacy-formatted', async () => {
+    writeSource(tempDir, 'my-source', { slug: 'my--source' });
+    rmSync(join(tempDir, 'sources', 'my-source', 'guide.md'), { force: true });
+
+    const ctx = createCtx(tempDir, {
+      validateStdioMcpConnection: stubMcpOk(),
+    });
+
+    const result = await handleSourceTest(ctx, {
+      sourceSlug: 'my-source',
+      autoEnable: false,
+    });
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('No guide.md file');
+    expect(text).not.toContain('Invalid source slug: "my--source"');
+    expect(result.isError).toBe(false);
+  });
 });

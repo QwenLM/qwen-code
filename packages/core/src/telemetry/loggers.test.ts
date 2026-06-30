@@ -38,6 +38,7 @@ import {
   EVENT_EXTENSION_DISABLE,
   EVENT_EXTENSION_INSTALL,
   EVENT_EXTENSION_UNINSTALL,
+  EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
   logApiRequest,
@@ -1390,7 +1391,7 @@ describe('loggers', () => {
         body: 'Tool output truncated for test-tool.',
         attributes: {
           'session.id': 'test-session-id',
-          'event.name': 'tool_output_truncated',
+          'event.name': EVENT_TOOL_OUTPUT_TRUNCATED,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           eventName: 'tool_output_truncated',
           prompt_id: 'prompt-id-1',

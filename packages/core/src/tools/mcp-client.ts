@@ -332,7 +332,14 @@ export class McpClient {
         // it ahead of `updateStatus` guarantees the field is populated
         // by the time the listener fires.
         this.lastTransportError = error;
-        debugLogger.error(`MCP ERROR (${this.serverName}):`, error.toString());
+        // Use getErrorMessage (not `error.toString()`) so the underlying
+        // syscall behind opaque wrappers like undici's `TypeError: fetch
+        // failed` (e.g. `ECONNREFUSED`, a proxy `502`) is surfaced instead of
+        // a bare "fetch failed". Critical for diagnosing local-server /
+        // proxy connectivity issues.
+        debugLogger.error(
+          `MCP ERROR (${this.serverName}): ${getErrorMessage(error)}`,
+        );
         this.updateStatus(MCPServerStatus.DISCONNECTED);
       };
 
@@ -1718,8 +1725,7 @@ export async function createTransport(
   ) {
     const provider = new ServiceAccountImpersonationProvider(mcpServerConfig);
     const transportOptions:
-      | StreamableHTTPClientTransportOptions
-      | SSEClientTransportOptions = {
+      StreamableHTTPClientTransportOptions | SSEClientTransportOptions = {
       authProvider: provider,
     };
 
@@ -1747,8 +1753,7 @@ export async function createTransport(
   ) {
     const provider = new GoogleCredentialProvider(mcpServerConfig);
     const transportOptions:
-      | StreamableHTTPClientTransportOptions
-      | SSEClientTransportOptions = {
+      StreamableHTTPClientTransportOptions | SSEClientTransportOptions = {
       authProvider: provider,
     };
     if (mcpServerConfig.httpUrl) {
