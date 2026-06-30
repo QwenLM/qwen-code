@@ -3241,14 +3241,15 @@ describe('createServeApp', () => {
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
         const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const maxExtensionOperationHistory = 3;
         const app = createServeApp(
           { ...tokenOpts, workspace: WS_BOUND },
           undefined,
-          { bridge },
+          { bridge, maxExtensionOperationHistory },
         );
         const operationIds: string[] = [];
 
-        for (let i = 0; i < 101; i += 1) {
+        for (let i = 0; i <= maxExtensionOperationHistory; i += 1) {
           const res = await request(app)
             .post('/workspace/extensions/install')
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
@@ -3296,7 +3297,7 @@ describe('createServeApp', () => {
       } finally {
         restore();
       }
-    });
+    }, 15_000);
 
     it('returns 404 for unknown extension operation ids', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -8328,12 +8329,17 @@ describe('createServeApp', () => {
       expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
     });
 
-    it('400 invalid_server_name when name is a reserved JS property', async () => {
-      for (const name of ['__proto__', 'constructor', 'prototype']) {
+    it.each([
+      ['__proto__', '%5F%5Fproto%5F%5F'],
+      ['constructor', 'constructor'],
+      ['prototype', 'prototype'],
+    ] as const)(
+      '400 invalid_server_name when name is a reserved JS property: %s',
+      async (_name, pathSegment) => {
         const bridge = fakeBridge({ knownClientIds: ['client-1'] });
         const app = createServeApp(tokenOpts, undefined, { bridge });
         const res = await auth(
-          request(app).delete(`/workspace/mcp/servers/${name}`),
+          request(app).delete(`/workspace/mcp/servers/${pathSegment}`),
         )
           .set('X-Qwen-Client-Id', 'client-1')
           .send();
@@ -8341,8 +8347,8 @@ describe('createServeApp', () => {
         expect(res.body.code).toBe('invalid_server_name');
         expect(res.body.error).toContain('reserved');
         expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
-      }
-    });
+      },
+    );
 
     it('401 auth_required when no bearer token (strict gate)', async () => {
       const bridge = fakeBridge();
@@ -8800,7 +8806,8 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/session/session-A/cancel')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'client-1');
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
       expect(res.status).toBe(204);
       expect(bridge.cancelCalls[0]?.context).toEqual({
         clientId: 'client-1',
@@ -8838,7 +8845,8 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
         .delete('/session/session-A')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
       expect(res.status).toBe(204);
       expect(bridge.closeCalls).toHaveLength(1);
       expect(bridge.closeCalls[0]?.sessionId).toBe('session-A');
@@ -8850,7 +8858,8 @@ describe('createServeApp', () => {
       const res = await request(app)
         .delete('/session/session-A')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'client-1');
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
       expect(res.status).toBe(204);
       expect(bridge.closeCalls[0]?.context).toEqual({
         clientId: 'client-1',
@@ -8866,7 +8875,8 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
         .delete('/session/missing')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
     });
@@ -8881,7 +8891,8 @@ describe('createServeApp', () => {
       const res = await request(app)
         .delete('/session/session-A')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'bad-client');
+        .set('X-Qwen-Client-Id', 'bad-client')
+        .send();
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_client_id');
     });

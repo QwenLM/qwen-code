@@ -59,6 +59,7 @@ import {
 export interface WorkspaceMemoryRouteDeps {
   bridge: AcpSessionBridge;
   boundWorkspace: string;
+  collectStatus?: typeof collectWorkspaceMemoryStatus;
   /**
    * `mutate({ strict: true })`-style middleware factory from PR 15.
    * Passed in so `server.ts` stays the single composition root for
@@ -85,7 +86,8 @@ export function mountWorkspaceMemoryRoutes(
 ): void {
   app.get('/workspace/memory', async (_req, res) => {
     try {
-      const status = await collectWorkspaceMemoryStatus(deps.boundWorkspace);
+      const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
+      const status = await collectStatus(deps.boundWorkspace);
       res.status(200).json(status);
     } catch (err) {
       // Per-file stat failures are caught inside
