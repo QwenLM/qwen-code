@@ -18,6 +18,15 @@ const ESC = '\x1b';
 export const SGR_EVENT_PREFIX = `${ESC}[<`;
 export const X11_EVENT_PREFIX = `${ESC}[M`;
 
+/**
+ * Upper bound on an SGR mouse sequence's length while still incomplete. SGR
+ * sequences (`\x1b[<btn;col;rowM`) are short; once a buffer exceeds this
+ * without a terminator it is treated as garbage and abandoned so it doesn't
+ * swallow real input. Shared by isIncompleteMouseSequence and the SGR
+ * reassembly buffer in KeypressContext.
+ */
+export const MAX_SGR_MOUSE_SEQUENCE_LENGTH = 50;
+
 // eslint-disable-next-line no-control-regex
 export const SGR_MOUSE_REGEX = /^\x1b\[<(\d+);(\d+);(\d+)([mM])/;
 // eslint-disable-next-line no-control-regex
@@ -179,8 +188,10 @@ export function isIncompleteMouseSequence(buffer: string): boolean {
     return buffer.length < X11_EVENT_PREFIX.length + 3;
   }
   if (buffer.startsWith(SGR_EVENT_PREFIX)) {
-    // SGR ends with 'm' or 'M'. Cap at 50 bytes to fail garbage early.
-    return !/[mM]/.test(buffer) && buffer.length < 50;
+    // SGR ends with 'm' or 'M'. Cap the length to fail garbage early.
+    return (
+      !/[mM]/.test(buffer) && buffer.length < MAX_SGR_MOUSE_SEQUENCE_LENGTH
+    );
   }
   // Prefix of the prefix (e.g. "ESC" or "ESC [")
   return true;

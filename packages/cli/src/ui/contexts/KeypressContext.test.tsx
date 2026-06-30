@@ -719,6 +719,40 @@ describe('KeypressContext - Kitty Protocol', () => {
         expect(pasteCall?.[0].sequence).toContain('0;5;5');
       });
 
+      it('abandons a runaway SGR mouse buffer so later keystrokes still arrive', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // A malformed `\x1b[<` with no terminator (e.g. stray subprocess output)
+        // must not swallow input indefinitely: once the reassembly buffer passes
+        // the SGR length cap it is abandoned, so a following keystroke is
+        // delivered normally instead of being buffered and discarded.
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          // Start SGR reassembly, then feed long garbage without a terminator
+          // to overflow the cap, followed by a plain 'a'.
+          stdin.emit('data', Buffer.from('\x1b[<'));
+          stdin.emit('data', Buffer.from('1'.repeat(60)));
+          stdin.emit('data', Buffer.from('a'));
+        });
+
+        await waitFor(() => {
+          expect(
+            keyHandler.mock.calls.some((c) => c[0]?.sequence === 'a'),
+          ).toBe(true);
+        });
+        // The garbage never reconstructs into a real mouse event.
+        expect(mouseHandler).not.toHaveBeenCalled();
+      });
+
       it('should handle empty paste sequence', async () => {
         const keyHandler = vi.fn();
 

@@ -24,6 +24,7 @@ import { PassThrough } from 'node:stream';
 import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
 import {
   parseSGRMouseEvent,
+  MAX_SGR_MOUSE_SEQUENCE_LENGTH,
   type MouseEvent as SgrMouseEvent,
 } from '../utils/mouse.js';
 import {
@@ -733,9 +734,9 @@ export function KeypressProvider({
       // options or move the cursor. Let those bytes fall through to the paste
       // buffer instead, and discard any half-built mouse fragment.
       if (isPaste) {
-        if (swallowingSgrMouse) {
-          resetSgrMouse();
-        }
+        // resetSgrMouse() is idempotent (a no-op when nothing is in flight),
+        // so call it unconditionally — matching the other reset call sites.
+        resetSgrMouse();
       } else if (swallowingSgrMouse) {
         if (key.ctrl && key.name === 'c') {
           resetSgrMouse();
@@ -764,6 +765,13 @@ export function KeypressProvider({
               }
             }
             sgrMouseBuffer = '';
+          } else if (sgrMouseBuffer.length >= MAX_SGR_MOUSE_SEQUENCE_LENGTH) {
+            // A malformed `\x1b[<` (e.g. from subprocess output) without a
+            // terminator would otherwise swallow every subsequent keystroke
+            // until the 200ms timeout fires. Mirror the 50-byte cap in
+            // isIncompleteMouseSequence: bail out early so the next keystroke
+            // is handled normally instead of being buffered and discarded.
+            resetSgrMouse();
           }
           return;
         }
