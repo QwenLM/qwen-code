@@ -293,10 +293,9 @@ export async function runVisionBridge(params: {
   const intent = collectText(nonImageParts).slice(0, BRIDGE_INTENT_MAX_CHARS);
 
   const selection = config.getDefaultVisionBridgeModel?.();
-  const model =
-    selection?.baseUrl && selection.id
-      ? `${selection.id}\0${selection.baseUrl}`
-      : selection?.id;
+  const modelId = selection?.id;
+  const baseUrl = selection?.baseUrl;
+  const model = baseUrl && modelId ? `${modelId}\0${baseUrl}` : modelId;
   if (!model) {
     return failure(
       'no image-capable model is available for the vision bridge',
@@ -323,7 +322,7 @@ export async function runVisionBridge(params: {
   ];
   // We are about to send the image(s); disclose egress conservatively from here
   // on (success and every failure/cancel after this point).
-  const modelEndpoint = hostOf(selection.baseUrl);
+  const modelEndpoint = hostOf(baseUrl);
   const egress = {
     egressOccurred: true,
     ...(modelEndpoint && { modelEndpoint }),
