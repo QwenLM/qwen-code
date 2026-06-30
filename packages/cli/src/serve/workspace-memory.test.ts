@@ -18,7 +18,12 @@ import {
   vi,
   type MockInstance,
 } from 'vitest';
-import { Storage } from '@qwen-code/qwen-code-core';
+import {
+  AGENT_CONTEXT_FILENAME,
+  DEFAULT_CONTEXT_FILENAME,
+  Storage,
+  setGeminiMdFilename,
+} from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
 import {
   InvalidClientIdError,
@@ -115,16 +120,20 @@ function buildApp(opts: {
   bridge: AcpSessionBridge;
   boundWorkspace: string;
   strictNoToken?: boolean;
+  collectStatus?: Parameters<
+    typeof mountWorkspaceMemoryRoutes
+  >[1]['collectStatus'];
 }) {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   const mutate = createMutationGate({
-    tokenConfigured: !opts.strictNoToken,
+    tokenConfigured: opts.strictNoToken !== true,
     requireAuth: false,
   });
   mountWorkspaceMemoryRoutes(app, {
     bridge: opts.bridge,
     boundWorkspace: opts.boundWorkspace,
+    ...(opts.collectStatus ? { collectStatus: opts.collectStatus } : {}),
     mutate,
     parseClientId: (req, res) => {
       const raw = req.get('x-qwen-client-id');
@@ -156,11 +165,15 @@ function buildApp(opts: {
   return app;
 }
 
+function resetContextFilenames(): void {
+  setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+}
+
 describe('workspace memory routes', () => {
   let tmp: string;
   let workspace: string;
   let globalDir: string;
-  let getGlobalQwenDirSpy: MockInstance<() => string>;
+  let getGlobalQwenDirSpy: MockInstance<typeof Storage.getGlobalQwenDir>;
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-memory-'));
@@ -170,9 +183,11 @@ describe('workspace memory routes', () => {
     getGlobalQwenDirSpy = vi
       .spyOn(Storage, 'getGlobalQwenDir')
       .mockReturnValue(globalDir);
+    resetContextFilenames();
   });
 
   afterEach(async () => {
+    resetContextFilenames();
     getGlobalQwenDirSpy.mockRestore();
     await fs.rm(tmp, { recursive: true, force: true });
   });
@@ -443,21 +458,16 @@ describe('workspace memory routes', () => {
 
     it('returns 500 memory_discovery_failed when GET helper throws unexpectedly', async () => {
       const bridge = buildBridgeStub();
-      const app = buildApp({ bridge, boundWorkspace: workspace });
-      // Force the helper to throw by spying on `Storage.getGlobalQwenDir`
-      // — every call site of the discovery walk uses it.
-      const failGlobal = vi
-        .spyOn(Storage, 'getGlobalQwenDir')
-        .mockImplementation(() => {
+      const app = buildApp({
+        bridge,
+        boundWorkspace: workspace,
+        collectStatus: async () => {
           throw new Error('boom');
-        });
-      try {
-        const res = await request(app).get('/workspace/memory');
-        expect(res.status).toBe(500);
-        expect(res.body.code).toBe('memory_discovery_failed');
-      } finally {
-        failGlobal.mockRestore();
-      }
+        },
+      });
+      const res = await request(app).get('/workspace/memory');
+      expect(res.status).toBe(500);
+      expect(res.body.code).toBe('memory_discovery_failed');
     });
 
     it('stamps originatorClientId on the memory_changed event for known clients', async () => {

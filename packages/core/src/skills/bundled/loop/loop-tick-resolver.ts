@@ -219,13 +219,13 @@ export class LoopTickResolver {
     // global dir (homeQwenDir is its resolved value), report the literal env-var
     // name — never the absolute path. The home candidate is always
     // `<homeQwenDir>/loop.md`, so swap the whole resolved dir for `$QWEN_HOME` and
-    // re-attach the separator + basename directly. Deriving the tail from the
+    // re-attach the user-facing POSIX slash + basename directly. Deriving the tail from the
     // resolved path's length instead mishandles edge dirs: a trailing slash
     // (`$QWEN_HOME=/x/.qwen/`) over-counts the separator, and a filesystem-root
     // homeQwenDir (`$QWEN_HOME=/` → homeLoopPath `/loop.md`, dirname `/`) drops the
     // leading separator — both garbling the tail into `$QWEN_HOMEloop.md`.
     if (process.env['QWEN_HOME']) {
-      return `$QWEN_HOME${path.sep}loop.md`;
+      return '$QWEN_HOME/loop.md';
     }
     return 'the configured global loop.md';
   }

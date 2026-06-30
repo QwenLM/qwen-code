@@ -179,6 +179,7 @@ export interface ServeAppDeps {
    * and a stderr audit sink.
    */
   deviceFlowRegistry?: DeviceFlowRegistry;
+  maxExtensionOperationHistory?: number;
   /**
    * Extra device-flow providers for tests / future extensions.
    * Production builds register only `QwenOAuthDeviceFlowProvider`;
@@ -606,6 +607,9 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    ...(deps.maxExtensionOperationHistory === undefined
+      ? {}
+      : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
   });
 
   // Workspace file routes (read-only + mutation).

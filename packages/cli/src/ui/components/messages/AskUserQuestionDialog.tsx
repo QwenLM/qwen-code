@@ -68,10 +68,9 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     currentQuestion &&
     selectedIndex === currentQuestion.options.length;
 
-  const currentCustomInputValue = customInputValues[currentQuestionIndex] ?? '';
-  const getCurrentCustomInputValue = () =>
-    customInputValuesRef.current[currentQuestionIndex] ??
-    currentCustomInputValue;
+  const getCustomInputValue = (idx: number) =>
+    customInputValuesRef.current[idx] ?? customInputValues[idx] ?? '';
+  const currentCustomInputValue = getCustomInputValue(currentQuestionIndex);
   const isCustomInputAnswer =
     !isSubmitTab &&
     currentQuestion &&
@@ -86,7 +85,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     const q = confirmationDetails.questions[idx];
     if (q?.multiSelect) {
       const selections = [...(multiSelectedOptions[idx] ?? [])];
-      const customValue = (customInputValues[idx] ?? '').trim();
+      const customValue = getCustomInputValue(idx).trim();
       if (customInputChecked[idx] && customValue) {
         selections.push(customValue);
       }
@@ -123,32 +122,37 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     }
   };
 
-  const handleMultiSelectSubmit = () => {
+  const getCurrentMultiSelectAnswer = (
+    includeCustomInput = customInputChecked[currentQuestionIndex],
+    inputValue = currentCustomInputValue,
+  ): string | undefined => {
     if (!currentQuestion) return;
     const selections = [...(multiSelectedOptions[currentQuestionIndex] ?? [])];
-    const customValue = getCurrentCustomInputValue().trim();
-    if (customInputChecked[currentQuestionIndex] && customValue) {
+    const customValue = inputValue.trim();
+    if (includeCustomInput && customValue) {
       selections.push(customValue);
     }
-    if (selections.length === 0) return;
-
-    selectAndAdvance(selections.join(', '));
+    return selections.length > 0 ? selections.join(', ') : undefined;
   };
 
-  const handleCustomInputSubmit = () => {
-    const trimmedValue = getCurrentCustomInputValue().trim();
+  const handleMultiSelectSubmit = () => {
+    const answer = getCurrentMultiSelectAnswer();
+    if (!answer) return;
+
+    selectAndAdvance(answer);
+  };
+
+  const handleCustomInputSubmit = (inputValue = currentCustomInputValue) => {
+    const trimmedValue = inputValue.trim();
 
     if (isMultiSelect) {
+      // Toggle custom input checked state, then submit/advance if non-empty
       setCustomInputChecked((prev) => ({
         ...prev,
         [currentQuestionIndex]: trimmedValue.length > 0,
       }));
       if (trimmedValue) {
-        const selections = [
-          ...(multiSelectedOptions[currentQuestionIndex] ?? []),
-          trimmedValue,
-        ];
-        selectAndAdvance(selections.join(', '));
+        selectAndAdvance(getCurrentMultiSelectAnswer(true, inputValue)!);
       }
       return;
     }
@@ -482,9 +486,14 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 value={currentCustomInputValue}
                 initialCursorOffset={currentCustomInputValue.length}
                 onChange={(value: string) => {
-                  customInputValuesRef.current[currentQuestionIndex] = value;
                   const oldValue =
-                    customInputValues[currentQuestionIndex] ?? '';
+                    customInputValuesRef.current[currentQuestionIndex] ??
+                    customInputValues[currentQuestionIndex] ??
+                    '';
+                  customInputValuesRef.current = {
+                    ...customInputValuesRef.current,
+                    [currentQuestionIndex]: value,
+                  };
                   if (isMultiSelect && value !== oldValue) {
                     setCustomInputChecked((prevChecked) => ({
                       ...prevChecked,
