@@ -138,9 +138,9 @@ function formatVisionBridgeNotice(result: VisionBridgeResult): string {
   const egressNote = result.egressOccurred
     ? ` Your image and prompt/context were sent to ${target}.`
     : '';
-  // No leading glyph here: the renderer supplies the gutter prefix (🔎 for the
+  // No leading glyph here: the renderer supplies the gutter prefix (◎ for the
   // dim notice, ✕ for the error variant). Baking one in too produced a doubled
-  // marker (e.g. `● 🔎 …`).
+  // marker (e.g. `● ◎ …`).
   if (result.status === 'failed') {
     const reason = result.egressOccurred
       ? 'the vision model request failed'
@@ -1501,7 +1501,7 @@ export const useGeminiStream = (
         addItem(
           {
             type: 'info',
-            text: `⚠️  ${message}`,
+            text: `⚠  ${message}`,
           },
           userMessageTimestamp,
         );
@@ -1566,8 +1566,8 @@ export const useGeminiStream = (
         {
           type: 'error',
           text:
-            `🚫 Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
-            `💡 Solutions:\n` +
+            `✗ Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
+            `★ Solutions:\n` +
             `   • Start a new session: Use /clear command\n` +
             `   • Increase limit: Add "sessionTokenLimit": (e.g., 128000) to your settings.json\n` +
             `   • Compress history: Use /compress command to compress history`,
@@ -2456,10 +2456,10 @@ export const useGeminiStream = (
    * Retries the last failed prompt when the user presses Ctrl+Y.
    *
    * Activation conditions for Ctrl+Y shortcut:
-   * 1. ✅ The last request must have failed (lastPromptErroredRef.current === true)
-   * 2. ✅ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
-   * 3. ✅ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
-   * 4. ✅ There must be a stored lastPrompt in lastPromptRef.current
+   * 1. ✓ The last request must have failed (lastPromptErroredRef.current === true)
+   * 2. ✓ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
+   * 3. ✓ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
+   * 4. ✓ There must be a stored lastPrompt in lastPromptRef.current
    *
    * When conditions are not met:
    * - If streaming is active (Responding/WaitingForConfirmation): silently return without action

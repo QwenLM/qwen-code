@@ -214,7 +214,7 @@ export const summaryCommand: SlashCommand = {
       ui.addItem(
         {
           type: 'error' as const,
-          text: `❌ ${formatErrorMessage(error)}`,
+          text: `✗ ${formatErrorMessage(error)}`,
         },
         Date.now(),
       );

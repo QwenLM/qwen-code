@@ -10,18 +10,18 @@ The status line shows session-aware information — model name, token usage, git
 ```
 Single-line status (default approval mode — 1 row):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
+│  user@host ~/project (main) ctx:34%   docker | Debug | 67%     │  ← status line
 └─────────────────────────────────────────────────────────────────┘
 
 Multi-line status (up to 2 lines — 2 rows):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  user@host ~/project (main) ctx:34%   docker | Debug | 67%     │  ← status line 1
 │  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
 └─────────────────────────────────────────────────────────────────┘
 
 Multi-line status + non-default mode (3 rows max):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  user@host ~/project (main) ctx:34%   docker | Debug | 67%     │  ← status line 1
 │  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
 │  auto-accept edits (shift + tab to cycle)                       │  ← mode indicator
 └─────────────────────────────────────────────────────────────────┘
