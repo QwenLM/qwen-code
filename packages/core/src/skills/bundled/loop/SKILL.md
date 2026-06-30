@@ -22,12 +22,12 @@ If the input (after stripping the `/loop` prefix) is exactly one of these keywor
 
 Parse the input after removing the `/loop` prefix:
 
-1. **Empty input**: show usage `/loop [interval] [prompt]` and stop. Do not call CronCreate or LoopWakeup in this slice.
+1. **Empty input** (no prompt, no interval): the **autonomous path** — run a self-paced autonomous loop. See the Autonomous mode section.
 2. **Leading interval token**: if the first whitespace-delimited token matches `^\d+[smhd]$` (e.g. `5m`, `2h`), this is the fixed-interval recurring path. The rest is the prompt.
 3. **Trailing "every" clause**: otherwise, if the input ends with `every <N><unit>` or `every <N> <unit-word>` (e.g. `every 20m`, `every 5 minutes`, `every 2 hours`), this is the fixed-interval recurring path. Extract that interval and strip it from the prompt. Only match when what follows "every" is a time expression — `check every PR` has no interval.
 4. **Prompt-only input**: otherwise, the entire input is the prompt and this is the prompt-only self-paced path.
 
-If the resulting prompt is empty, show usage `/loop [interval] [prompt]` and stop.
+If an interval was given but the prompt is empty (e.g. `/loop 5m`), this is a fixed-interval **autonomous** loop — see the Autonomous mode section.
 
 Examples:
 
@@ -36,7 +36,8 @@ Examples:
 - `run tests every 5 minutes` → fixed interval `5m`, prompt `run tests` (trailing "every" clause)
 - `check every PR` → prompt-only self-paced path, prompt `check every PR` ("every" is not followed by a time expression)
 - `check the deploy` → prompt-only self-paced path, prompt `check the deploy`
-- `5m` → empty prompt → show usage
+- (empty) → self-paced autonomous loop (sentinel `<<autonomous-loop-dynamic>>`)
+- `5m` → fixed-interval autonomous loop (interval `5m`, sentinel `<<autonomous-loop>>`)
 
 ## Prompt-only self-paced path
 
@@ -99,6 +100,15 @@ Use this when the user wants the loop to work a task list kept in a file (they s
 - Self-paced (no interval) → LoopWakeup `prompt`: `<<loop.md-dynamic>>`
 - Fixed interval → CronCreate `prompt`: `<<loop.md>>` (with `recurring: true`, and `durable: true` if persistence is implied)
 
-At each fire you receive either the full task list (first delivery, after the file changes, or after a compaction) or a short reminder to keep working the list established earlier. Work the tasks; in self-paced mode re-arm LoopWakeup with `<<loop.md-dynamic>>` only when continued follow-up is useful (same "don't re-arm if complete/blocked" rules as the prompt-only path). If `.qwen/loop.md` is absent at fire time, treat the tick as a no-op. Confirm to the user in plain language ("looping over your `.qwen/loop.md` task list…"), not the raw sentinel.
+At each fire you receive either the full task list (first delivery, after the file changes, or after a compaction) or a short reminder to keep working the list established earlier. Work the tasks; in self-paced mode re-arm LoopWakeup with `<<loop.md-dynamic>>` only when continued follow-up is useful (same "don't re-arm if complete/blocked" rules as the prompt-only path). If `.qwen/loop.md` is absent at fire time, the loop falls back to autonomous mode (it keeps working autonomously instead of no-op'ing); a recreated file is picked up on the next fire. Confirm to the user in plain language ("looping over your `.qwen/loop.md` task list…"), not the raw sentinel.
+
+## Autonomous mode
+
+Use this for a bare `/loop` (no prompt, no file) — the user wants you to keep their work moving while they're away. Arm the loop with an autonomous sentinel and run the first check now:
+
+- Self-paced (empty input) → LoopWakeup `prompt`: `<<autonomous-loop-dynamic>>`
+- Fixed interval (`/loop <interval>`, no prompt) → CronCreate `prompt`: `<<autonomous-loop>>` (with `recurring: true`, and `durable: true` if persistence is implied)
+
+The first immediate check, and each scheduled fire, advance work the conversation already established — finish things the user started, maintain an in-progress PR (address review threads, fix failing CI, resolve conflicts), honor "I'll also…" commitments. You are a steward, not an initiator: act on what the transcript already established; never invent new work or make irreversible changes (push, delete, send) without clear authorization. If everything is genuinely quiet, say so in one sentence and stop. The first fire (and the first after a compaction) delivers fuller guidance; later fires send a short reminder pointing back to it. In self-paced mode re-arm LoopWakeup with `<<autonomous-loop-dynamic>>` (same "don't re-arm if complete/blocked" rules). Confirm to the user in plain language ("running an autonomous loop on your work…"), not the raw sentinel.
 
 ## Input

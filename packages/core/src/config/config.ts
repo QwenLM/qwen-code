@@ -198,6 +198,7 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import { isSafeModeEnv } from '../utils/safe-mode.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
@@ -630,6 +631,55 @@ export function isGatedMcpScope(scope: McpServerScope | undefined): boolean {
   return scope === 'project' || scope === 'workspace';
 }
 
+/**
+ * Test whether a server name matches a single pattern. Patterns use simple
+ * glob semantics: `*` matches any sequence of characters (including empty),
+ * `?` matches exactly one character. A pattern without glob characters is
+ * compared as an exact string (no behavior change for existing configs).
+ * Uses an iterative two-pointer algorithm — O(n×m) worst case, no regex,
+ * no backtracking vulnerability.
+ */
+export function matchesServerPattern(name: string, pattern: string): boolean {
+  if (!pattern.includes('*') && !pattern.includes('?')) {
+    return name === pattern;
+  }
+  let ni = 0;
+  let pi = 0;
+  let starNi = -1;
+  let starPi = -1;
+  while (ni < name.length) {
+    if (
+      pi < pattern.length &&
+      (pattern[pi] === '?' || pattern[pi] === name[ni])
+    ) {
+      ni++;
+      pi++;
+    } else if (pi < pattern.length && pattern[pi] === '*') {
+      starPi = pi++;
+      starNi = ni;
+    } else if (starPi !== -1) {
+      pi = starPi + 1;
+      ni = ++starNi;
+    } else {
+      return false;
+    }
+  }
+  while (pi < pattern.length && pattern[pi] === '*') pi++;
+  return pi === pattern.length;
+}
+
+/**
+ * Test whether a server name matches any pattern in the given list.
+ * Returns false for an empty or undefined list.
+ */
+export function matchesAnyServerPattern(
+  name: string,
+  patterns: string[] | undefined,
+): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  return patterns.some((p) => matchesServerPattern(name, p));
+}
+
 export class MCPServerConfig {
   constructor(
     // For stdio transport
@@ -1009,6 +1059,12 @@ export interface ConfigParameters {
    * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
    */
   fastModel?: string;
+  /**
+   * Safe mode: disables all user customizations (context files, hooks,
+   * extensions, skills, MCP servers, rules) for troubleshooting.
+   * Activated via `--safe-mode` CLI flag or `QWEN_CODE_SAFE_MODE=true` env var.
+   */
+  safeMode?: boolean;
   /**
    * Explicit vision model for the vision bridge. When a text-only primary model
    * receives an image, the bridge transcribes it through this model instead of
@@ -1443,6 +1499,7 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
+  private readonly safeMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
@@ -1665,6 +1722,12 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
+    this.safeMode = params.safeMode ?? isSafeModeEnv();
+    if (this.safeMode) {
+      this.debugLogger.info(
+        'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
+      );
+    }
     this.warnings = params.warnings ?? [];
     this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
@@ -1793,10 +1856,14 @@ export class Config {
     this.promptRegistry = new PromptRegistry();
     this.resourceRegistry = new ResourceRegistry();
     this.extensionManager.setConfig(this);
-    const explicitExtensionNames = this.getExplicitExtensionNames();
-    if (!this.getBareMode()) {
+    const explicitExtensionNames = this.isSafeMode()
+      ? []
+      : (this.overrideExtensions ?? []).filter(
+          (n) => n.trim() !== '' && n.toLowerCase() !== 'none',
+        );
+    if (!this.isSafeMode() && !this.getBareMode()) {
       await this.extensionManager.refreshCache();
-    } else if (explicitExtensionNames.length > 0) {
+    } else if (!this.isSafeMode() && explicitExtensionNames.length > 0) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
       });
@@ -2008,7 +2075,7 @@ export class Config {
 
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.isSafeMode()) {
       await this.skillManager.refreshCache();
     } else {
       await this.skillManager.startWatching();
@@ -2030,7 +2097,7 @@ export class Config {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
 
-    if (!this.getBareMode()) {
+    if (!this.getBareMode() && !this.isSafeMode()) {
       await this.extensionManager.refreshCache();
     }
 
@@ -2052,6 +2119,7 @@ export class Config {
     // construction path.
     const skipInlineMcpDiscovery =
       this.getBareMode() ||
+      this.isSafeMode() ||
       !legacyBlockingMcp ||
       options?.skipMcpDiscovery === true;
 
@@ -2093,6 +2161,7 @@ export class Config {
     if (
       skipInlineMcpDiscovery &&
       !this.getBareMode() &&
+      !this.isSafeMode() &&
       !options?.skipMcpDiscovery
     ) {
       this.startMcpDiscoveryInBackground();
@@ -2312,6 +2381,16 @@ export class Config {
   async refreshHierarchicalMemory(
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
   ): Promise<void> {
+    // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
+    if (this.isSafeMode()) {
+      this.setUserMemory('');
+      this.setGeminiMdFileCount(0);
+      this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+        [],
+        this.getWorkingDir(),
+      );
+      return;
+    }
     const { memoryContent, fileCount, conditionalRules, projectRoot } =
       await loadServerHierarchicalMemory(
         this.getWorkingDir(),
@@ -3719,12 +3798,13 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    if (this.isSafeMode()) return {};
     let mcpServers = this.getMergedMcpServers();
 
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
         Object.entries(mcpServers).filter(([key]) =>
-          this.allowedMcpServers?.includes(key),
+          matchesAnyServerPattern(key, this.allowedMcpServers),
         ),
       );
     }
@@ -3745,7 +3825,8 @@ export class Config {
   }
 
   isMcpServerDisabled(serverName: string): boolean {
-    if (this.excludedMcpServers?.includes(serverName)) return true;
+    if (matchesAnyServerPattern(serverName, this.excludedMcpServers))
+      return true;
     // Extension-bundled servers can be disabled individually via extension
     // preferences. Only the extension that actually contributed the server is
     // consulted, so a same-named server from another source (e.g. a shadowing
@@ -3897,11 +3978,12 @@ export class Config {
     if (!(serverName in this.getMergedMcpServers())) return undefined;
     if (
       this.allowedMcpServers &&
-      !this.allowedMcpServers.includes(serverName)
+      !matchesAnyServerPattern(serverName, this.allowedMcpServers)
     ) {
       return 'not_allowed';
     }
-    if (this.excludedMcpServers?.includes(serverName)) return 'excluded';
+    if (matchesAnyServerPattern(serverName, this.excludedMcpServers))
+      return 'excluded';
     if (this.isMcpServerPendingApproval(serverName)) return 'pending_approval';
     return undefined;
   }
@@ -4892,7 +4974,7 @@ export class Config {
    * Check if all hooks are disabled.
    */
   getDisableAllHooks(): boolean {
-    return this.disableAllHooks || this.getBareMode();
+    return this.disableAllHooks || this.getBareMode() || this.isSafeMode();
   }
 
   getStopHookBlockingCap(): number {
@@ -4900,7 +4982,9 @@ export class Config {
   }
 
   getManagedAutoMemoryEnabled(): boolean {
-    return this.enableManagedAutoMemory && !this.getBareMode();
+    return (
+      this.enableManagedAutoMemory && !this.getBareMode() && !this.isSafeMode()
+    );
   }
 
   /**
@@ -4947,11 +5031,13 @@ export class Config {
   }
 
   getManagedAutoDreamEnabled(): boolean {
-    return this.enableManagedAutoDream && !this.getBareMode();
+    return (
+      this.enableManagedAutoDream && !this.getBareMode() && !this.isSafeMode()
+    );
   }
 
   getAutoSkillEnabled(): boolean {
-    return this.enableAutoSkill && !this.getBareMode();
+    return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
   }
 
   getAutoSkillConfirmEnabled(): boolean {
@@ -4959,7 +5045,7 @@ export class Config {
   }
 
   getPreventSystemSleepEnabled(): boolean {
-    return this.preventSystemSleep;
+    return this.preventSystemSleep && !this.isSafeMode();
   }
 
   /**
@@ -4994,7 +5080,7 @@ export class Config {
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
     // Only return project hooks if workspace is trusted
@@ -5012,7 +5098,7 @@ export class Config {
    * Used by HookRegistry to load user-specific hooks with proper source attribution.
    */
   getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
     // Prefer new userHooks field, fall back to hooks for backward compatibility
@@ -5032,12 +5118,6 @@ export class Config {
     } else {
       return extensions;
     }
-  }
-
-  private getExplicitExtensionNames(): string[] {
-    return (this.overrideExtensions ?? []).filter(
-      (name) => name.trim() !== '' && name.toLowerCase() !== 'none',
-    );
   }
 
   getActiveExtensions(): Extension[] {
@@ -5063,7 +5143,7 @@ export class Config {
 
     if (this.allowedMcpServers) {
       Object.entries(mcpServers).forEach(([key, server]) => {
-        const isAllowed = this.allowedMcpServers?.includes(key);
+        const isAllowed = matchesAnyServerPattern(key, this.allowedMcpServers);
         if (!isAllowed) {
           blockedMcpServers.push({
             name: key,
@@ -5104,7 +5184,9 @@ export class Config {
    * If empty, all URLs are allowed (subject to SSRF protection).
    */
   getAllowedHttpHookUrls(): string[] {
-    return this.getBareMode() ? [] : this.allowedHttpHookUrls;
+    return this.getBareMode() || this.isSafeMode()
+      ? []
+      : this.allowedHttpHookUrls;
   }
 
   isTrustedFolder(): boolean {
@@ -5261,6 +5343,14 @@ export class Config {
 
   getBareMode(): boolean {
     return this.bareMode;
+  }
+
+  /**
+   * Safe mode disables all user customizations (context files, hooks,
+   * extensions, skills, MCP servers, rules) for troubleshooting.
+   */
+  isSafeMode(): boolean {
+    return this.safeMode;
   }
 
   getTruncateToolOutputThreshold(): number {

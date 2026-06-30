@@ -4,21 +4,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FetchError, formatFetchErrorForUser } from './fetch.js';
 
+function makeTlsError(): Error {
+  const tlsCause = new Error('unable to verify the first certificate');
+  (tlsCause as Error & { code?: string }).code =
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE';
+  const fetchError = new TypeError('fetch failed') as TypeError & {
+    cause?: unknown;
+  };
+  fetchError.cause = tlsCause;
+  return fetchError;
+}
+
 describe('formatFetchErrorForUser', () => {
+  const saved = {
+    QWEN_TLS_INSECURE: process.env['QWEN_TLS_INSECURE'],
+    NODE_TLS_REJECT_UNAUTHORIZED: process.env['NODE_TLS_REJECT_UNAUTHORIZED'],
+  };
+
+  beforeEach(() => {
+    delete process.env['QWEN_TLS_INSECURE'];
+    delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
   it('includes troubleshooting hints for TLS errors', () => {
-    const tlsCause = new Error('unable to verify the first certificate');
-    (tlsCause as Error & { code?: string }).code =
-      'UNABLE_TO_VERIFY_LEAF_SIGNATURE';
-
-    const fetchError = new TypeError('fetch failed') as TypeError & {
-      cause?: unknown;
-    };
-    fetchError.cause = tlsCause;
-
-    const message = formatFetchErrorForUser(fetchError, {
+    const message = formatFetchErrorForUser(makeTlsError(), {
       url: 'https://chat.qwen.ai',
     });
 
@@ -28,6 +47,16 @@ describe('formatFetchErrorForUser', () => {
     expect(message).toContain('Confirm you can reach https://chat.qwen.ai');
     expect(message).toContain('--proxy');
     expect(message).toContain('NODE_EXTRA_CA_CERTS');
+    expect(message).toContain('--insecure');
+  });
+
+  it('omits the --insecure hint when verification is already disabled', () => {
+    process.env['QWEN_TLS_INSECURE'] = '1';
+    const message = formatFetchErrorForUser(makeTlsError());
+
+    expect(message).toContain('already disabled');
+    expect(message).not.toContain('NODE_EXTRA_CA_CERTS');
+    expect(message).not.toContain('pass `--insecure`');
   });
 
   it('includes troubleshooting hints for network codes', () => {

@@ -20,6 +20,7 @@ import {
   findProviderById,
   getAllGeminiMdFilenames,
   getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   getScopedEnvContents,
@@ -60,6 +61,7 @@ import {
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
+  matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -3905,7 +3907,9 @@ class QwenAgent implements Agent {
           : currentModelId || undefined;
       const providers = new Map<string, ServeWorkspaceProviderStatus>();
 
-      for (const model of config.getAllConfiguredModels()) {
+      for (const model of config
+        .getAllConfiguredModels()
+        .filter(isMainSelectableModel)) {
         const authType = String(model.authType);
         let provider = providers.get(authType);
         if (!provider) {
@@ -4769,6 +4773,9 @@ class QwenAgent implements Agent {
             id: ext.id,
             name: ext.name,
             displayName: ext.displayName,
+            ...(ext.config.description
+              ? { description: ext.config.description }
+              : {}),
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
@@ -5591,23 +5598,34 @@ class QwenAgent implements Agent {
 
         if (action === 'enable') {
           const settings = loadSettings(this.config.getTargetDir());
+          let settingsChanged = false;
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded || [];
-            if (currentExcluded.includes(serverName)) {
-              settings.setValue(
-                scope,
-                'mcp.excluded',
-                currentExcluded.filter((name: string) => name !== serverName),
-              );
+            const filtered = currentExcluded.filter(
+              (pattern: string) => pattern !== serverName,
+            );
+            if (filtered.length !== currentExcluded.length) {
+              settings.setValue(scope, 'mcp.excluded', filtered);
+              settingsChanged = true;
             }
           }
           const currentExcluded = this.config.getExcludedMcpServers() || [];
-          this.config.setExcludedMcpServers(
-            currentExcluded.filter((name: string) => name !== serverName),
+          const runtimeFiltered = currentExcluded.filter(
+            (pattern: string) => pattern !== serverName,
           );
+          let runtimeChanged = false;
+          if (runtimeFiltered.length !== currentExcluded.length) {
+            this.config.setExcludedMcpServers(runtimeFiltered);
+            runtimeChanged = true;
+          }
           await toolRegistry.discoverToolsForServer(serverName);
-          return { serverName, action, ok: true, changed: true };
+          return {
+            serverName,
+            action,
+            ok: true,
+            changed: settingsChanged || runtimeChanged,
+          };
         }
 
         if (action === 'disable') {
@@ -5630,18 +5648,27 @@ class QwenAgent implements Agent {
           }
           const scopeSettings = settings.forScope(targetScope).settings;
           const currentExcluded = scopeSettings.mcp?.excluded || [];
-          if (!currentExcluded.includes(serverName)) {
+          let settingsChanged = false;
+          if (!matchesAnyServerPattern(serverName, currentExcluded)) {
             settings.setValue(targetScope, 'mcp.excluded', [
               ...currentExcluded,
               serverName,
             ]);
+            settingsChanged = true;
           }
           const runtimeExcluded = this.config.getExcludedMcpServers() || [];
-          if (!runtimeExcluded.includes(serverName)) {
+          let runtimeChanged = false;
+          if (!matchesAnyServerPattern(serverName, runtimeExcluded)) {
             this.config.setExcludedMcpServers([...runtimeExcluded, serverName]);
+            runtimeChanged = true;
           }
           await toolRegistry.disableMcpServer(serverName);
-          return { serverName, action, ok: true, changed: true };
+          return {
+            serverName,
+            action,
+            ok: true,
+            changed: settingsChanged || runtimeChanged,
+          };
         }
 
         if (action === 'clear-auth') {
@@ -7625,6 +7652,19 @@ class QwenAgent implements Agent {
       config.getSessionId(),
       this.clientCapabilities.fs,
       config.getFileSystemService(),
+      {
+        // SYNC: Mirrors ReadFileTool's default allowed local roots, including
+        // auto-memory roots, so ACP-local read fallback follows the same policy.
+        localReadRoots: [
+          config.storage.getProjectTempDir(),
+          path.join(config.storage.getProjectDir(), 'subagents'),
+          Storage.getGlobalTempDir(),
+          getAutoMemoryRoot(config.getTargetDir()),
+          getUserAutoMemoryRoot(),
+          ...config.storage.getUserSkillsDirs(),
+          Storage.getUserExtensionsDir(),
+        ],
+      },
     );
     config.setFileSystemService(acpFileSystemService);
   }
@@ -7688,7 +7728,9 @@ class QwenAgent implements Agent {
       ''
     ).trim();
     const currentAuthType = config.getAuthType();
-    const allConfiguredModels = config.getAllConfiguredModels();
+    const allConfiguredModels = config
+      .getAllConfiguredModels()
+      .filter(isMainSelectableModel);
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = activeRuntimeSnapshot
@@ -7737,7 +7779,9 @@ class QwenAgent implements Agent {
 
   private buildConfigOptions(config: Config): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
-    const allConfiguredModels = config.getAllConfiguredModels();
+    const allConfiguredModels = config
+      .getAllConfiguredModels()
+      .filter(isMainSelectableModel);
     const rawCurrentModelId = (config.getModel() || '').trim();
     const currentAuthType = config.getAuthType?.();
 
@@ -7797,6 +7841,13 @@ class QwenAgent implements Agent {
     if (!baseModelId) return baseModelId;
     return authType ? formatAcpModelId(baseModelId, authType) : baseModelId;
   }
+}
+
+function isMainSelectableModel(model: {
+  fastOnly?: boolean;
+  voiceOnly?: boolean;
+}): boolean {
+  return model.fastOnly !== true && model.voiceOnly !== true;
 }
 
 function diffSettingsKeys(

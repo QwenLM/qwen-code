@@ -31,6 +31,7 @@ import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../hooks/stopHookCap.js';
+import { toModelVisibleSubagentResult } from './subagent-result.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -325,7 +326,8 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
         'fork' &&
       typeof (
         launchPromptRecord?.systemPayload as
-          NotificationRecordPayload | undefined
+          | NotificationRecordPayload
+          | undefined
       )?.displayText === 'string'
         ? {
             history: structuredClone(
@@ -699,7 +701,7 @@ export class BackgroundAgentResumeService {
       // definition would silently auto-deny calls the fresh launch bubbles.
       const shouldBubble = Boolean(
         target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
-        this.config.isInteractive(),
+          this.config.isInteractive(),
       );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;
@@ -933,8 +935,15 @@ export class BackgroundAgentResumeService {
           }
 
           const terminateMode = subagent.getTerminateMode();
-          const finalText = appendStopHookBlockingCapWarning(
+          const modelVisibleText = toModelVisibleSubagentResult(
             subagent.getFinalText(),
+            terminateMode,
+          );
+          const finalText = appendStopHookBlockingCapWarning(
+            terminateMode === AgentTerminateMode.GOAL
+              ? modelVisibleText ||
+                  '(subagent produced no model-visible output)'
+              : modelVisibleText,
             stopHookWarning,
           );
           const stats = getCompletionStats(subagent, liveToolCallCount);

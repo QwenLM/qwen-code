@@ -37,6 +37,7 @@ import {
   ApprovalMode,
   CompressionStatus,
   detectLoopSentinel,
+  detectAutonomousSentinel,
   LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
@@ -160,6 +161,12 @@ import {
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  matchExtensionByRef,
+  parseExtensionRef,
+} from '../../utils/extension-mention.js';
 
 // Import modular session components
 import type {
@@ -553,6 +560,22 @@ function isUserPromptRecord(record: ChatRecord): boolean {
       (part) => typeof part.text === 'string' && part.text.trim().length > 0,
     ) ?? false
   );
+}
+
+const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
+
+function collectExtensionMentionRefs(
+  text: string,
+  mentions: Map<string, string>,
+): void {
+  for (const match of text.matchAll(AT_TOKEN_RE)) {
+    const pathName = match[1];
+    if (!pathName) continue;
+    const ref = parseExtensionRef(pathName);
+    if (ref) {
+      mentions.set(ref.name.toLowerCase(), ref.name);
+    }
+  }
 }
 
 export interface AvailableCommandsSnapshot {
@@ -2608,14 +2631,17 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start((job: { prompt: string; cronExpr?: string }) => {
-      if (this.cronDisabledByTokenLimit) return;
-      this.cronQueue.push({
-        prompt: job.prompt,
-        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
-      });
-      void this.#drainCronQueue();
-    });
+    scheduler.start(
+      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        if (this.cronDisabledByTokenLimit) return;
+        if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+        this.cronQueue.push({
+          prompt: job.prompt,
+          source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+        });
+        void this.#drainCronQueue();
+      },
+    );
   }
 
   /**
@@ -2737,6 +2763,11 @@ export class Session implements SessionContext {
               // changed fire, a short reminder when unchanged. Non-sentinel
               // prompts pass through untouched.
               const loopMode = detectLoopSentinel(prompt);
+              // A bare `/loop` arms an autonomous sentinel instead of a loop.md
+              // one; only one family can match a given prompt.
+              const autonomousMode = loopMode
+                ? null
+                : detectAutonomousSentinel(prompt);
               let loopTick: LoopTickResult | null = null;
               if (loopMode) {
                 const resolver = this.#getLoopTickResolver();
@@ -2805,36 +2836,49 @@ export class Session implements SessionContext {
                     );
                   }
                 }
+              } else if (autonomousMode) {
+                // A bare `/loop` arms an autonomous-loop sentinel (no prompt, no
+                // file). Resolve it to the autonomous preamble — full on the first
+                // fire, a short tick after. Synchronous: no fs read, so no
+                // folder-trust / transient handling.
+                loopTick =
+                  this.#getLoopTickResolver().resolveAutonomous(autonomousMode);
               }
               const modelText = loopTick ? loopTick.modelText : prompt;
               if (loopTick) {
                 debugLogger.debug(
-                  `loop tick: mode=${loopMode} delivery=${
+                  `loop tick: mode=${loopMode ?? autonomousMode} delivery=${
                     loopTick.full
                       ? 'full'
-                      : loopTick.sourceLabel
-                        ? 'reminder'
-                        : 'absent'
-                  } source=${loopTick.sourceLabel ?? 'none'} transient=${
-                    loopTick.transientError ?? false
-                  }`,
+                      : loopTick.transientError
+                        ? 'transient-error'
+                        : loopTick.autonomous
+                          ? 'autonomous-tick'
+                          : loopTick.sourceLabel
+                            ? 'reminder'
+                            : 'absent'
+                  } source=${loopTick.sourceLabel ?? 'none'} autonomous=${
+                    loopTick.autonomous ?? false
+                  } transient=${loopTick.transientError ?? false}`,
                 );
               }
               // For a loop tick echo a stable, relative label — never the bare
               // sentinel or the full task dump (and the resolver never hands back
               // the absolute path, which would leak the OS username / dir layout
               // into the ACP client UI); otherwise echo the prompt verbatim.
-              const echoText = loopTick
-                ? loopTick.sourceLabel
-                  ? `Loop tick — tasks from ${loopTick.sourceLabel}`
-                  : // A transient-error tick (buildTransientErrorTick) resolved a
-                    // file but couldn't read it this tick; it deliberately omits
-                    // sourceLabel, so don't conflate it with a genuinely-absent
-                    // loop.md. No errno/path here — those stay in the model text.
-                    loopTick.transientError
-                    ? 'Loop tick — loop.md temporarily unavailable'
-                    : 'Loop tick — loop.md not present'
-                : prompt;
+              const echoText = !loopTick
+                ? prompt
+                : // An autonomous tick (a bare-`/loop` sentinel, or a loop.md
+                  // sentinel whose file is gone and converged on the preamble).
+                  loopTick.autonomous
+                  ? 'Autonomous loop tick'
+                  : loopTick.sourceLabel
+                    ? `Loop tick — tasks from ${loopTick.sourceLabel}`
+                    : // The only remaining tick is a transient read failure
+                      // (buildTransientErrorTick): a loop.md exists but couldn't be
+                      // read this tick. A genuinely-absent loop.md converges on the
+                      // autonomous branch above, so there is no "not present" echo.
+                      'Loop tick — loop.md temporarily unavailable';
 
               // Echo the cron prompt as a user message so the client sees it
               await this.sendUpdate({
@@ -5002,10 +5046,12 @@ export class Session implements SessionContext {
     const FILE_URI_SCHEME = 'file://';
 
     const embeddedContext: EmbeddedResourceResource[] = [];
+    const extensionMentions = new Map<string, string>();
 
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
+          collectExtensionMentionRefs(part.text, extensionMentions);
           return { text: part.text };
         case 'image':
         case 'audio':
@@ -5040,9 +5086,21 @@ export class Session implements SessionContext {
     });
 
     const atPathCommandParts = parts.filter((part) => 'fileData' in part);
+    const extensionParts = await this.#resolveExtensionMentionParts(
+      extensionMentions,
+      abortSignal,
+    );
+
+    if (
+      atPathCommandParts.length === 0 &&
+      embeddedContext.length === 0 &&
+      extensionParts.length === 0
+    ) {
+      return parts;
+    }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
-      return parts;
+      return [...parts, ...extensionParts];
     }
 
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
@@ -5085,6 +5143,7 @@ export class Session implements SessionContext {
 
       // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
+      processedQueryParts.push(...extensionParts);
 
       // Then add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
@@ -5096,6 +5155,7 @@ export class Session implements SessionContext {
       }
     } else {
       processedQueryParts.push({ text: initialQueryText.trim() });
+      processedQueryParts.push(...extensionParts);
     }
 
     // Process embedded context from resource blocks
@@ -5120,6 +5180,39 @@ export class Session implements SessionContext {
     }
 
     return processedQueryParts;
+  }
+
+  async #resolveExtensionMentionParts(
+    extensionMentions: Map<string, string>,
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    if (extensionMentions.size === 0) return [];
+    const activeExtensions = this.config.getActiveExtensions?.() ?? [];
+    if (activeExtensions.length === 0) return [];
+
+    const extensionParts: Part[] = [];
+    const resolvedExtensionNames = new Set<string>();
+    let remainingBudget = EXTENSION_CONTEXT_BUDGET;
+    for (const name of extensionMentions.values()) {
+      const extension = matchExtensionByRef(name, activeExtensions);
+      if (!extension) {
+        this.debug(
+          `Extension "${name}" not found among active extensions. ` +
+            `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+        );
+        continue;
+      }
+      if (resolvedExtensionNames.has(extension.name)) continue;
+      resolvedExtensionNames.add(extension.name);
+      const context = await buildExtensionMentionContext(extension, {
+        remainingBudget,
+        signal: abortSignal,
+        onDebugMessage: (message) => this.debug(message),
+      });
+      remainingBudget = context.remainingBudget;
+      extensionParts.push({ text: context.text });
+    }
+    return extensionParts;
   }
 
   debug(msg: string): void {

@@ -118,6 +118,7 @@ jobs:
     # post-merge re-run on `main` would be redundant.
     if: "${{ !cancelled() && github.event_name != 'push' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
     permissions:
       contents: 'read'
       checks: 'write'
@@ -209,6 +210,7 @@ jobs:
 
       - name: 'Run actionlint'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        timeout-minutes: 5
         run: 'node scripts/lint.js --actionlint'
 
       - name: 'Run shellcheck'
@@ -247,11 +249,22 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
+      - name: 'Check serve fast-path bundle closure'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run check:serve-fast-path-bundle'
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
         run: 'npm run test:ci'
 
       - name: 'Run no-AK integration smoke tests'
@@ -334,6 +347,13 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
         run: 'npm run test:ci'
 
   # Windows counterpart of test_macos (see that job's note). Runner is
@@ -380,6 +400,13 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
         run: 'npm run test:ci'
 
   post_coverage_comment:
@@ -427,7 +454,6 @@ jobs:
           node_version: '${{ matrix.node-version }}'
           os: '${{ matrix.os }}'
           github_token: '${{ secrets.GITHUB_TOKEN }}'
-
 
   # Integration tests run only in the merge queue, not on every PR push.
   # They are the suite that previously ran *only* in the nightly Release

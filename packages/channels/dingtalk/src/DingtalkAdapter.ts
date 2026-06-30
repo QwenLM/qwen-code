@@ -16,7 +16,7 @@ import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
-  AcpBridge,
+  ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 
 /**
@@ -99,7 +99,7 @@ export class DingtalkChannel extends ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);

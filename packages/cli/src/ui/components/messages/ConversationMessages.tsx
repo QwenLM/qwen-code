@@ -17,7 +17,7 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
-import { getCachedStringWidth } from '../../utils/textUtils.js';
+import { wrapToVisualLines } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
 
 export const THINKING_ICON = '∴ ';
@@ -263,38 +263,6 @@ export const AssistantMessageContent: React.FC<
 );
 
 const MAX_STREAMING_THINKING_VISUAL_LINES = 4;
-
-function wrapToVisualLines(text: string, width: number): string[] {
-  if (width <= 0) {
-    return [''];
-  }
-  const visualLines: string[] = [];
-  for (const logicalLine of text.split('\n')) {
-    if (logicalLine === '') {
-      visualLines.push('');
-      continue;
-    }
-    let currentLine = '';
-    let currentWidth = 0;
-    for (const char of logicalLine) {
-      const charWidth = getCachedStringWidth(char);
-      if (currentWidth + charWidth > width && currentWidth > 0) {
-        visualLines.push(currentLine);
-        currentLine = '';
-        currentWidth = 0;
-      }
-      currentLine += char;
-      currentWidth += charWidth;
-    }
-    if (currentLine) {
-      visualLines.push(currentLine);
-    }
-  }
-  if (visualLines.length === 0) {
-    visualLines.push('');
-  }
-  return visualLines;
-}
 
 function tailVisualLines(
   text: string,
