@@ -235,6 +235,7 @@ export function createChannelWorkerSupervisor(
 
       await new Promise<void>((resolve, reject) => {
         let settled = false;
+        let exitObserved = false;
         let startupTimer: NodeJS.Timeout | undefined;
         function cleanupReadyWait() {
           if (startupTimer) {
@@ -269,6 +270,7 @@ export function createChannelWorkerSupervisor(
           code: number | null,
           signal: NodeJS.Signals | null,
         ) {
+          exitObserved = true;
           const state = ready ? 'exited' : 'failed';
           const message = `Channel worker exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'}).`;
           setExited(
@@ -287,22 +289,14 @@ export function createChannelWorkerSupervisor(
           child = undefined;
         }
         function settleError(err: Error) {
-          if (settled && child === undefined) return;
-          const observedExit = child?.pid === undefined;
-          if (observedExit) {
-            setExited(ready ? 'exited' : 'failed', null, null, err.message);
-          } else {
-            snapshot = {
-              ...snapshot,
-              state: 'failed',
-              error: err.message,
-            };
-          }
+          if (exitObserved || (settled && child === undefined)) return;
+          snapshot = {
+            ...snapshot,
+            state: 'failed',
+            error: err.message,
+          };
           if (!settled) {
             failBeforeReady(err);
-          }
-          if (observedExit) {
-            child = undefined;
           }
         }
         startupTimer = setTimeout(() => {

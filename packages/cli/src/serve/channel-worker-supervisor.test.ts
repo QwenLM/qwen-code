@@ -241,7 +241,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
-  it('does not signal a spawn failure that never produced a process pid', async () => {
+  it('still signals a worker error without an observed exit when pid is absent', async () => {
     const child = new FakeChild();
     child.pid = undefined;
     const supervisor = createChannelWorkerSupervisor({
@@ -258,7 +258,7 @@ describe('createChannelWorkerSupervisor', () => {
 
     await supervisor.stop();
 
-    expect(child.kill).not.toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
       state: 'stopped',
