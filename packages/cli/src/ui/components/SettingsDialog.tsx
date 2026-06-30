@@ -394,8 +394,9 @@ export function SettingsDialog({
           setSystemInfo(info);
         }
       })
-      .catch(() => {
+      .catch((err) => {
         // Leave systemInfo null; the tab renders a short fallback line.
+        debugLogger.debug('Failed to load system info:', err);
       });
     return () => {
       cancelled = true;
@@ -644,7 +645,13 @@ export function SettingsDialog({
         } else if (name === 'down' || name === 'return') {
           setFocusZone('list');
         } else if (name === 'tab') {
-          setMode((prev) => (prev === 'settings' ? 'scope' : 'settings'));
+          setMode((prev) => {
+            const next = prev === 'settings' ? 'scope' : 'settings';
+            // Move focus out of the search box so the search-zone handler
+            // stops intercepting keys while the ScopeSelector is focused.
+            if (next === 'scope') setFocusZone('list');
+            return next;
+          });
         } else if (name === 'escape') {
           if (searchQuery) {
             setSearchQuery('');
@@ -655,11 +662,12 @@ export function SettingsDialog({
           setSearchQuery((q) => q.slice(0, -1));
         } else if (
           !ctrl &&
-          name !== 'space' &&
           typeof key.sequence === 'string' &&
           key.sequence.length === 1 &&
           key.sequence >= ' '
         ) {
+          // Space is allowed here (unlike the list zone, where it toggles a
+          // setting) so multi-word queries like "vim mode" can be typed.
           setSearchQuery((q) => q + key.sequence);
         }
         return;
@@ -837,6 +845,11 @@ export function SettingsDialog({
           const currentItem = items[activeSettingIndex];
           if (currentItem?.type === 'number') {
             startEditing(currentItem.value, key.sequence);
+          } else {
+            // Non-number setting: route the digit into the search box instead
+            // of swallowing it, so queries like "8080" can be typed.
+            setFocusZone('search');
+            setSearchQuery((q) => q + key.sequence);
           }
         } else if (ctrl && (name === 'c' || name === 'l')) {
           // Ctrl+C or Ctrl+L: Clear current setting and reset to default
@@ -967,10 +980,11 @@ export function SettingsDialog({
           name !== 'space' &&
           typeof key.sequence === 'string' &&
           key.sequence.length === 1 &&
-          key.sequence >= ' ' &&
-          !/^[0-9]$/.test(key.sequence)
+          key.sequence >= ' '
         ) {
           // Typing a printable key jumps to the search box and filters.
+          // (Digits are handled by the number-edit branch above, which routes
+          // them here when the current setting is not a number.)
           setFocusZone('search');
           setSearchQuery((q) => q + key.sequence);
         }

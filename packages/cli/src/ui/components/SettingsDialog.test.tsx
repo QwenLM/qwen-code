@@ -1506,6 +1506,53 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
+    it('allows spaces so multi-word queries can be typed', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      for (const ch of 'vim mode') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+
+      // The space is preserved in the query rather than being swallowed.
+      expect(lastFrame()).toContain('⌕ vim mode');
+
+      unmount();
+    });
+
+    it('routes digits into the search box for non-number settings', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      // The first row is a non-number setting; typing digits should filter
+      // rather than be dropped.
+      for (const ch of '8080') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+
+      expect(lastFrame()).toContain('⌕ 8080');
+
+      unmount();
+    });
+
     it('clears the search query on Escape before closing', async () => {
       const settings = createMockSettings();
       const onSelect = vi.fn();
