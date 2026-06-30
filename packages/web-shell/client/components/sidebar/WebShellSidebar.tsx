@@ -940,15 +940,17 @@ export function WebShellSidebar({
           </span>
           {!collapsed && <span>{t('sidebar.settings')}</span>}
         </button>
-        <button
-          className={styles.collapseButton}
-          type="button"
-          title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
-          aria-label={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
-          onClick={() => onCollapsedChange(!collapsed)}
-        >
-          <IconCollapse collapsed={collapsed} />
-        </button>
+        {!mobileOpen && (
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
+            aria-label={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
+            onClick={() => onCollapsedChange(!collapsed)}
+          >
+            <IconCollapse collapsed={collapsed} />
+          </button>
+        )}
       </div>
       <div
         className={styles.resizeHandle}

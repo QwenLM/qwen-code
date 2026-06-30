@@ -2132,11 +2132,13 @@ export function App({
   }, [branchCurrentSession]);
 
   const createNewSession = useCallback(async () => {
+    // Close the drawer before awaiting so a failed createSession() doesn't leave
+    // it stuck open with the page scroll still locked, matching loadSidebarSession.
+    closeMobileDrawer();
     try {
       const session = await (
         sessionActions as typeof sessionActions & SessionActionsWithCreate
       ).createSession();
-      closeMobileDrawer();
       if (onSessionIdChange) {
         onSessionIdChange(session.sessionId);
         return true;
