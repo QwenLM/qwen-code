@@ -875,7 +875,7 @@ export class AcpDispatcher {
             return;
           }
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
-          const restored = await this.archiveCoordinator.runExclusiveMany(
+          const restored = await this.archiveCoordinator.runSharedMany(
             [sessionId],
             async () => {
               await assertSessionLoadable(new SessionService(cwd), sessionId);
@@ -948,19 +948,22 @@ export class AcpDispatcher {
             typeof params['workspaceCwd'] === 'string'
               ? params['workspaceCwd']
               : undefined;
-          const workspaceCwd =
+          let workspaceCwd =
             rawWorkspace === undefined
               ? this.boundWorkspace
               : parseOptionalWorkspaceCwd(
                   { cwd: rawWorkspace },
                   this.boundWorkspace,
                 );
-          const requestedWorkspace = canonicalizeWorkspace(workspaceCwd);
-          if (requestedWorkspace !== this.boundWorkspace) {
-            throw new WorkspaceMismatchError(
-              this.boundWorkspace,
-              requestedWorkspace,
-            );
+          if (rawWorkspace !== undefined) {
+            const requestedWorkspace = canonicalizeWorkspace(workspaceCwd);
+            if (requestedWorkspace !== this.boundWorkspace) {
+              throw new WorkspaceMismatchError(
+                this.boundWorkspace,
+                requestedWorkspace,
+              );
+            }
+            workspaceCwd = requestedWorkspace;
           }
           const cursor =
             typeof params['cursor'] === 'string' ? params['cursor'] : undefined;
@@ -989,7 +992,7 @@ export class AcpDispatcher {
           }
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
-            requestedWorkspace,
+            workspaceCwd,
             { cursor, size: metaSize, archiveState },
           );
           this.replyConn(conn, id, {

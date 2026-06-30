@@ -1006,6 +1006,9 @@ describe('SessionService', () => {
 
     it('should remove both JSONL files when active and archived copies conflict', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`/chats/archive/${sessionIdA}.jsonl`),
+      );
 
       const result = await sessionService.removeSession(sessionIdA);
 
@@ -1196,6 +1199,10 @@ describe('SessionService', () => {
   });
 
   describe('unarchiveSessions', () => {
+    beforeEach(() => {
+      mkdirSyncSpy.mockImplementation(() => undefined);
+    });
+
     const mockArchivedSessionOnly = () => {
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {
@@ -1643,10 +1650,12 @@ describe('SessionService', () => {
       await expect(service.getSessionLocation(sessionIdA)).rejects.toThrow(
         error,
       );
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('readProjectSessionHead: failed to read');
-      expect(warnings[0]).toContain(`${sessionIdA}.jsonl`);
-      expect(warnings[0]).toContain('malformed JSON');
+      expect(warnings).toHaveLength(2);
+      for (const warning of warnings) {
+        expect(warning).toContain('readProjectSessionHead: failed to read');
+        expect(warning).toContain(`${sessionIdA}.jsonl`);
+        expect(warning).toContain('malformed JSON');
+      }
     });
   });
 

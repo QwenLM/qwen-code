@@ -9746,6 +9746,56 @@ describe('createServeApp', () => {
       expect(bridge.closeCalls).toHaveLength(0);
     });
 
+    it('allows concurrent loads for the same session while restore is in flight', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
+      await writeSession(sid);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      let loadCount = 0;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => {
+          loadCount++;
+          if (loadCount === 1) {
+            loadStarted();
+          }
+          await loadReleasedPromise;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: true,
+            clientId: req.clientId ?? `client-load-${loadCount}`,
+            state: {},
+            hasActivePrompt: false,
+          };
+        },
+      });
+      const app = createArchiveApp(bridge);
+
+      const firstLoad = request(app)
+        .post(`/session/${sid}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: wsDir })
+        .then((res) => res);
+      await loadStartedPromise;
+      const secondLoad = request(app)
+        .post(`/session/${sid}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: wsDir })
+        .then((res) => res);
+
+      releaseLoad();
+      const [firstRes, secondRes] = await Promise.all([firstLoad, secondLoad]);
+      expect(firstRes.status).toBe(200);
+      expect(secondRes.status).toBe(200);
+      expect(bridge.loadCalls).toHaveLength(2);
+    });
+
     it('returns session_archiving for archive while single close is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
       await writeSession(sid);

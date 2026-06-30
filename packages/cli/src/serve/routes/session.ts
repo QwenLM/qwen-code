@@ -221,7 +221,7 @@ export function registerSessionRoutes(
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
-        const session = await archiveCoordinator.runExclusiveMany(
+        const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
             await assertSessionLoadable(new SessionService(cwd), sessionId);

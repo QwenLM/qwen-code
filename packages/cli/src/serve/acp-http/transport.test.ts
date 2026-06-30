@@ -1825,6 +1825,54 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/load allows concurrent restores for the same session', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440126';
+      await writeStoredSession(sessionId);
+      let releaseLoad!: () => void;
+      bridge.gate = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const got = takeFrames(stream, 2);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 214,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 215,
+        method: 'session/load',
+        params: { sessionId },
+      });
+
+      releaseLoad();
+      const frames = (await got) as Array<{
+        id: number;
+        result?: { replayed?: boolean };
+        error?: { data?: { errorKind?: string } };
+      }>;
+      expect(frames.map((frame) => frame.id).sort()).toEqual([214, 215]);
+      expect(frames).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 214,
+            result: expect.objectContaining({ replayed: true }),
+          }),
+          expect.objectContaining({
+            id: 215,
+            result: expect.objectContaining({ replayed: true }),
+          }),
+        ]),
+      );
+      expect(frames.some((frame) => frame.error)).toBe(false);
+    });
+  });
+
   it('session/close holds archive gate while close is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440125';

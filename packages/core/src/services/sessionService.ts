@@ -365,14 +365,16 @@ export class SessionService {
       return undefined;
     }
 
-    const active = await this.readProjectSessionHead(
-      sessionId,
-      this.getSessionFilePath(sessionId, 'active'),
-    );
-    const archived = await this.readProjectSessionHead(
-      sessionId,
-      this.getSessionFilePath(sessionId, 'archived'),
-    );
+    const [active, archived] = await Promise.all([
+      this.readProjectSessionHead(
+        sessionId,
+        this.getSessionFilePath(sessionId, 'active'),
+      ),
+      this.readProjectSessionHead(
+        sessionId,
+        this.getSessionFilePath(sessionId, 'archived'),
+      ),
+    ]);
 
     if (active && archived) return 'conflict';
     if (active) return 'active';
@@ -1020,16 +1022,24 @@ export class SessionService {
     try {
       const activePath = this.getSessionFilePath(sessionId, 'active');
       const active = await this.readProjectSessionHead(sessionId, activePath);
+      if (active) {
+        this.removeFileIfExists(activePath);
+        const archivedPath = this.getSessionFilePath(sessionId, 'archived');
+        if (fs.existsSync(archivedPath)) {
+          this.removeFileIfExists(archivedPath);
+        }
+        this.removeWorktreeSidecars(sessionId);
+        return true;
+      }
       const archivedPath = this.getSessionFilePath(sessionId, 'archived');
       const archived = await this.readProjectSessionHead(
         sessionId,
         archivedPath,
       );
-      if (!active && !archived) {
+      if (!archived) {
         return false;
       }
-      if (active) this.removeFileIfExists(activePath);
-      if (archived) this.removeFileIfExists(archivedPath);
+      this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
       return true;
     } catch (error) {

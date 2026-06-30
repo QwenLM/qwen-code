@@ -30,10 +30,11 @@ export interface DaemonUnarchiveSessionsResult {
 }
 
 export class SessionArchiveCoordinator {
-  private readonly inFlight = new Set<string>();
+  private readonly exclusive = new Set<string>();
+  private readonly shared = new Map<string, number>();
 
   assertNotTransitioning(sessionId: string): void {
-    if (this.inFlight.has(sessionId)) {
+    if (this.exclusive.has(sessionId)) {
       throw new SessionArchivingError(sessionId);
     }
   }
@@ -42,17 +43,46 @@ export class SessionArchiveCoordinator {
     sessionIds: string[],
     fn: () => Promise<T>,
   ): Promise<T> {
-    for (const sessionId of sessionIds) {
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    for (const sessionId of uniqueSessionIds) {
       this.assertNotTransitioning(sessionId);
+      if ((this.shared.get(sessionId) ?? 0) > 0) {
+        throw new SessionArchivingError(sessionId);
+      }
     }
-    for (const sessionId of sessionIds) {
-      this.inFlight.add(sessionId);
+    for (const sessionId of uniqueSessionIds) {
+      this.exclusive.add(sessionId);
     }
     try {
       return await fn();
     } finally {
-      for (const sessionId of sessionIds) {
-        this.inFlight.delete(sessionId);
+      for (const sessionId of uniqueSessionIds) {
+        this.exclusive.delete(sessionId);
+      }
+    }
+  }
+
+  async runSharedMany<T>(
+    sessionIds: string[],
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    for (const sessionId of uniqueSessionIds) {
+      this.assertNotTransitioning(sessionId);
+    }
+    for (const sessionId of uniqueSessionIds) {
+      this.shared.set(sessionId, (this.shared.get(sessionId) ?? 0) + 1);
+    }
+    try {
+      return await fn();
+    } finally {
+      for (const sessionId of uniqueSessionIds) {
+        const count = (this.shared.get(sessionId) ?? 1) - 1;
+        if (count <= 0) {
+          this.shared.delete(sessionId);
+        } else {
+          this.shared.set(sessionId, count);
+        }
       }
     }
   }
