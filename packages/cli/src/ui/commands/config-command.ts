@@ -18,7 +18,39 @@ import {
   getFlattenedSchema,
   getNestedProperty,
   getSettingDefinition,
+  validateSettingValue,
 } from '../../utils/settingsUtils.js';
+
+const SETTABLE_TYPES = new Set(['boolean', 'string', 'number', 'enum']);
+
+const SENSITIVE_KEY_PATTERNS = [
+  /apikey/i,
+  /api[_-]?key/i,
+  /secret/i,
+  /token/i,
+  /password/i,
+  /credential/i,
+  /private[_-]?key/i,
+];
+
+const SENSITIVE_URL_PATTERNS = [/baseurl/i, /base_url/i, /proxy/i];
+
+function isSensitiveKey(key: string): boolean {
+  return (
+    SENSITIVE_KEY_PATTERNS.some((p) => p.test(key)) ||
+    SENSITIVE_URL_PATTERNS.some((p) => p.test(key))
+  );
+}
+
+function maskValue(value: unknown): string {
+  if (value === undefined) return '(not set)';
+  if (typeof value === 'string') {
+    if (!value) return '(empty)';
+    if (value.length <= 4) return '****';
+    return `${value.slice(0, 4)}****`;
+  }
+  return '****';
+}
 
 function findClosestKey(input: string): string | undefined {
   const allKeys = getAllSettingKeys();
@@ -74,11 +106,14 @@ function coerceValue(
       if (isToggle) {
         return { value: !currentValue };
       }
-      if (rawValue === 'true') return { value: true };
-      if (rawValue === 'false') return { value: false };
+      const normalised = rawValue?.toLowerCase().trim();
+      if (normalised === 'true' || normalised === '1') return { value: true };
+      if (normalised === 'false' || normalised === '0') return { value: false };
       return {
         value: undefined,
-        error: `Invalid boolean value: "${rawValue}". Use "true" or "false".`,
+        error: t('Invalid boolean value: "{{value}}". Use "true" or "false".', {
+          value: String(rawValue),
+        }),
       };
     }
 
@@ -86,15 +121,31 @@ function coerceValue(
       if (isToggle) {
         return {
           value: undefined,
-          error: `Cannot toggle a number setting. Provide a value: key=<number>.`,
+          error: t(
+            'Cannot toggle a number setting. Provide a value: key=<number>.',
+          ),
+        };
+      }
+      if (!rawValue || rawValue.trim() === '') {
+        return {
+          value: undefined,
+          error: t('Invalid number value: "{{value}}".', {
+            value: String(rawValue),
+          }),
         };
       }
       const parsed = Number(rawValue);
-      if (Number.isNaN(parsed)) {
+      if (Number.isNaN(parsed) || !Number.isFinite(parsed)) {
         return {
           value: undefined,
-          error: `Invalid number value: "${rawValue}".`,
+          error: t('Invalid number value: "{{value}}".', {
+            value: String(rawValue),
+          }),
         };
+      }
+      const validationError = validateSettingValue(def, parsed);
+      if (validationError) {
+        return { value: undefined, error: validationError };
       }
       return { value: parsed };
     }
@@ -103,24 +154,39 @@ function coerceValue(
       if (isToggle) {
         return {
           value: undefined,
-          error: `Cannot toggle a string setting. Provide a value: key=<value>.`,
+          error: t(
+            'Cannot toggle a string setting. Provide a value: key=<value>.',
+          ),
         };
       }
-      return { value: rawValue ?? '' };
+      const strValue = rawValue ?? '';
+      const validationError = validateSettingValue(def, strValue);
+      if (validationError) {
+        return { value: undefined, error: validationError };
+      }
+      return { value: strValue };
     }
 
     case 'enum': {
       if (isToggle) {
         return {
           value: undefined,
-          error: `Cannot toggle an enum setting. Provide one of: ${def.options?.map((o) => o.value).join(', ')}.`,
+          error: t(
+            'Cannot toggle an enum setting. Provide one of: {{options}}.',
+            {
+              options: def.options?.map((o) => o.value).join(', ') ?? '',
+            },
+          ),
         };
       }
       const validValues = def.options?.map((o) => o.value) ?? [];
       if (!validValues.includes(rawValue as never)) {
         return {
           value: undefined,
-          error: `Invalid enum value: "${rawValue}". Valid values: ${validValues.join(', ')}.`,
+          error: t(
+            'Invalid enum value: "{{value}}". Valid values: {{options}}.',
+            { value: String(rawValue), options: validValues.join(', ') },
+          ),
         };
       }
       return { value: rawValue };
@@ -130,13 +196,18 @@ function coerceValue(
     case 'object':
       return {
         value: undefined,
-        error: `Setting "${def.type}" type cannot be set via /config. Edit settings.json directly.`,
+        error: t(
+          'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
+          { type: def.type },
+        ),
       };
 
     default:
       return {
         value: undefined,
-        error: `Unsupported setting type: "${def.type}".`,
+        error: t('Unsupported setting type: "{{type}}".', {
+          type: String(def.type),
+        }),
       };
   }
 }
@@ -147,14 +218,19 @@ function formatValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function padRight(str: string, len: number): string {
+  if (str.length > len) return str.slice(0, len - 3) + '... ';
+  if (str.length === len) return str + ' ';
+  return str + ' '.repeat(len - str.length);
+}
+
 function listAllSettings(context: CommandContext): MessageActionReturn {
   const flattened = getFlattenedSchema();
   const merged = context.services.settings.merged;
 
-  const settableTypes = new Set(['boolean', 'string', 'number', 'enum']);
   const lines: string[] = [];
 
-  lines.push('Available settings:');
+  lines.push(t('Available settings:'));
   lines.push('');
   lines.push(
     padRight('Key', 40) +
@@ -167,11 +243,16 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
   const keys = Object.keys(flattened).sort();
   for (const key of keys) {
     const def = flattened[key]!;
-    if (!settableTypes.has(def.type)) continue;
+    if (!SETTABLE_TYPES.has(def.type)) continue;
 
     const current = getNestedProperty(merged as Record<string, unknown>, key);
-    const displayCurrent =
-      current !== undefined ? formatValue(current) : formatValue(def.default);
+    let displayCurrent: string;
+    if (isSensitiveKey(key)) {
+      displayCurrent = maskValue(current ?? def.default);
+    } else {
+      displayCurrent =
+        current !== undefined ? formatValue(current) : formatValue(def.default);
+    }
 
     lines.push(
       padRight(key, 40) +
@@ -188,10 +269,6 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
   };
 }
 
-function padRight(str: string, len: number): string {
-  return str.length >= len ? str + ' ' : str + ' '.repeat(len - str.length);
-}
-
 export const configCommand: SlashCommand = {
   name: 'config',
   get description() {
@@ -199,7 +276,7 @@ export const configCommand: SlashCommand = {
   },
   argumentHint: '<key>[=<value>] or --help',
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'non_interactive', 'acp'],
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
 
   action: async (
     context: CommandContext,
@@ -207,18 +284,14 @@ export const configCommand: SlashCommand = {
   ): Promise<MessageActionReturn> => {
     const trimmed = args.trim();
 
-    if (!trimmed) {
-      return listAllSettings(context);
-    }
-
-    if (trimmed === '--help' || trimmed === '-h') {
+    if (!trimmed || trimmed === '--help' || trimmed === '-h') {
       return listAllSettings(context);
     }
 
     const eqIndex = trimmed.indexOf('=');
     const isToggle = eqIndex === -1;
     const key = isToggle ? trimmed : trimmed.slice(0, eqIndex).trim();
-    const rawValue = isToggle ? undefined : trimmed.slice(eqIndex + 1).trim();
+    const rawValue = isToggle ? undefined : trimmed.slice(eqIndex + 1);
 
     const def = getSettingDefinition(key);
     if (!def) {
@@ -226,7 +299,12 @@ export const configCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: `Unknown setting key: "${key}".${suggestion ? ` Did you mean "${suggestion}"?` : ''}`,
+        content: suggestion
+          ? t(
+              'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?',
+              { key, suggestion },
+            )
+          : t('Unknown setting key: "{{key}}".', { key }),
       };
     }
 
@@ -234,6 +312,17 @@ export const configCommand: SlashCommand = {
       context.services.settings.merged as Record<string, unknown>,
       key,
     );
+
+    if (isToggle && def.type !== 'boolean') {
+      const display = isSensitiveKey(key)
+        ? maskValue(currentValue)
+        : formatValue(currentValue);
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: `${key} = ${display}`,
+      };
+    }
 
     const result = coerceValue(def, rawValue, isToggle, currentValue);
     if (result.error) {
@@ -244,11 +333,32 @@ export const configCommand: SlashCommand = {
       };
     }
 
-    context.services.settings.setValue(SettingScope.User, key, result.value);
+    try {
+      context.services.settings.setValue(SettingScope.User, key, result.value);
+    } catch (error) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Failed to set "{{key}}": {{error}}', {
+          key,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      };
+    }
 
-    let message = `Set ${key} = ${JSON.stringify(result.value)}`;
+    let message = t('Set {{key}} = {{value}}', {
+      key,
+      value: JSON.stringify(result.value),
+    });
     if (def.requiresRestart) {
-      message += '\n(This setting requires a restart to take effect.)';
+      message += '\n' + t('(This setting requires a restart to take effect.)');
+    }
+    if (isSensitiveKey(key)) {
+      message +=
+        '\n' +
+        t(
+          '(Security-sensitive setting — verify you are not exposing credentials.)',
+        );
     }
 
     return {
@@ -263,15 +373,18 @@ export const configCommand: SlashCommand = {
     if (current.includes('=')) return null;
 
     const allKeys = getAllSettingKeys();
-    const settableTypes = new Set(['boolean', 'string', 'number', 'enum']);
     return allKeys
       .filter((k) => {
+        if (!k.startsWith(current)) return false;
         const def = getSettingDefinition(k);
-        return def && settableTypes.has(def.type) && k.startsWith(current);
+        return def && SETTABLE_TYPES.has(def.type);
       })
-      .map((k) => ({
-        value: k,
-        description: getSettingDefinition(k)?.description ?? '',
-      }));
+      .map((k) => {
+        const def = getSettingDefinition(k);
+        return {
+          value: k,
+          description: def?.description ?? '',
+        };
+      });
   },
 };

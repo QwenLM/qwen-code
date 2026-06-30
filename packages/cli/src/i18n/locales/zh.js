@@ -631,6 +631,30 @@ export default {
   // ============================================================================
   'Get or set any setting by dot-path key':
     '通过点号路径键查看或设置任意配置项',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    '无效的布尔值："{{value}}"。请使用 "true" 或 "false"。',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    '无法切换数字类型的设置。请提供值：key=<number>。',
+  'Invalid number value: "{{value}}".': '无效的数字值："{{value}}"。',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    '无法切换字符串类型的设置。请提供值：key=<value>。',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    '无法切换枚举类型的设置。请提供以下选项之一：{{options}}。',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    '无效的枚举值："{{value}}"。有效值：{{options}}。',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    '"{{type}}" 类型的设置无法通过 /config 修改。请直接编辑 settings.json。',
+  'Unsupported setting type: "{{type}}".': '不支持的设置类型："{{type}}"。',
+  'Available settings:': '可用设置：',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    '未知的设置键："{{key}}"。您是不是想设置 "{{suggestion}}"？',
+  'Unknown setting key: "{{key}}".': '未知的设置键："{{key}}"。',
+  'Failed to set "{{key}}": {{error}}': '设置 "{{key}}" 失败：{{error}}',
+  'Set {{key}} = {{value}}': '已设置 {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '（此设置需要重启才能生效。）',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '（安全敏感设置 — 请确认您没有泄露凭据。）',
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   Settings: '设置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':

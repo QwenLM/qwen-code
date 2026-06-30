@@ -79,6 +79,50 @@ describe('configCommand', () => {
         false,
       );
     });
+
+    it('accepts case-insensitive boolean values', async () => {
+      const { ctx, setValueMock } = createMockContext({});
+      const result = await configCommand.action!(ctx, 'general.vimMode=True');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('general.vimMode'),
+      });
+      expect(setValueMock).toHaveBeenCalledWith(
+        'User',
+        'general.vimMode',
+        true,
+      );
+    });
+
+    it('accepts 1 and 0 as boolean values', async () => {
+      const { ctx, setValueMock } = createMockContext({});
+
+      const result1 = await configCommand.action!(ctx, 'general.vimMode=1');
+      expect(result1).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('general.vimMode'),
+      });
+      expect(setValueMock).toHaveBeenCalledWith(
+        'User',
+        'general.vimMode',
+        true,
+      );
+
+      const result0 = await configCommand.action!(ctx, 'general.vimMode=0');
+      expect(result0).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('general.vimMode'),
+      });
+      expect(setValueMock).toHaveBeenCalledWith(
+        'User',
+        'general.vimMode',
+        false,
+      );
+    });
   });
 
   describe('toggle boolean', () => {
@@ -177,14 +221,14 @@ describe('configCommand', () => {
       });
     });
 
-    it('returns error when toggling enum', async () => {
+    it('shows current value when toggling enum', async () => {
       const { ctx } = createMockContext({});
       const result = await configCommand.action!(ctx, 'tools.approvalMode');
 
       expect(result).toEqual({
         type: 'message',
-        messageType: 'error',
-        content: expect.stringContaining('Cannot toggle'),
+        messageType: 'info',
+        content: expect.stringContaining('tools.approvalMode ='),
       });
     });
   });
@@ -209,8 +253,10 @@ describe('configCommand', () => {
       );
     });
 
-    it('returns error when toggling string', async () => {
-      const { ctx } = createMockContext({});
+    it('shows current value when toggling string', async () => {
+      const { ctx } = createMockContext({
+        general: { preferredEditor: 'vscode' },
+      });
       const result = await configCommand.action!(
         ctx,
         'general.preferredEditor',
@@ -218,8 +264,8 @@ describe('configCommand', () => {
 
       expect(result).toEqual({
         type: 'message',
-        messageType: 'error',
-        content: expect.stringContaining('Cannot toggle'),
+        messageType: 'info',
+        content: expect.stringContaining('general.preferredEditor = vscode'),
       });
     });
   });
@@ -258,8 +304,38 @@ describe('configCommand', () => {
       });
     });
 
-    it('returns error when toggling number', async () => {
+    it('returns error for empty number value', async () => {
       const { ctx } = createMockContext({});
+      const result = await configCommand.action!(
+        ctx,
+        'general.sessionRecapAwayThresholdMinutes=',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Invalid number'),
+      });
+    });
+
+    it('returns error for Infinity', async () => {
+      const { ctx } = createMockContext({});
+      const result = await configCommand.action!(
+        ctx,
+        'general.sessionRecapAwayThresholdMinutes=Infinity',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Invalid number'),
+      });
+    });
+
+    it('shows current value when toggling number', async () => {
+      const { ctx } = createMockContext({
+        general: { sessionRecapAwayThresholdMinutes: 30 },
+      });
       const result = await configCommand.action!(
         ctx,
         'general.sessionRecapAwayThresholdMinutes',
@@ -267,8 +343,10 @@ describe('configCommand', () => {
 
       expect(result).toEqual({
         type: 'message',
-        messageType: 'error',
-        content: expect.stringContaining('Cannot toggle'),
+        messageType: 'info',
+        content: expect.stringContaining(
+          'general.sessionRecapAwayThresholdMinutes = 30',
+        ),
       });
     });
   });
@@ -343,6 +421,19 @@ describe('configCommand', () => {
         content: expect.stringContaining('Available settings'),
       });
     });
+
+    it('masks sensitive values in listing', async () => {
+      const { ctx } = createMockContext({
+        proxy: 'http://my-secret-proxy:8080',
+      });
+      const result = await configCommand.action!(ctx, '--help');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.not.stringContaining('my-secret-proxy'),
+      });
+    });
   });
 
   describe('restart warning', () => {
@@ -357,6 +448,55 @@ describe('configCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('requires a restart'),
+      });
+    });
+  });
+
+  describe('security-sensitive settings', () => {
+    it('shows sensitive warning when setting proxy', async () => {
+      const { ctx } = createMockContext({});
+      const result = await configCommand.action!(
+        ctx,
+        'proxy=http://localhost:8080',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('Security-sensitive'),
+      });
+    });
+
+    it('masks sensitive value when getting proxy without =', async () => {
+      const { ctx } = createMockContext({
+        proxy: 'http://secret-proxy:8080',
+      });
+      const result = await configCommand.action!(ctx, 'proxy');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.not.stringContaining('secret-proxy'),
+      });
+    });
+  });
+
+  describe('setValue error handling', () => {
+    it('returns error message when setValue throws', async () => {
+      const { ctx } = createMockContext({});
+      const settings = ctx.services.settings as unknown as {
+        setValue: ReturnType<typeof vi.fn>;
+      };
+      settings.setValue.mockImplementation(() => {
+        throw new Error('Permission denied');
+      });
+
+      const result = await configCommand.action!(ctx, 'general.vimMode=true');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Failed to set'),
       });
     });
   });
@@ -385,6 +525,19 @@ describe('configCommand', () => {
       );
 
       expect(completions).toBeNull();
+    });
+
+    it('excludes non-settable types from completions', async () => {
+      const { ctx } = createMockContext({});
+      const completions = await configCommand.completion!(ctx, 'mcp');
+
+      if (completions) {
+        const hasObjectOrArray = completions.some((c) => {
+          const value = typeof c === 'string' ? c : c.value;
+          return value === 'mcpServers';
+        });
+        expect(hasObjectOrArray).toBe(false);
+      }
     });
   });
 });
