@@ -1650,7 +1650,7 @@ export class Session implements SessionContext {
                 const blockReason =
                   hookOutput?.getEffectiveReason() || 'No reason provided';
                 await this.messageEmitter.emitAgentMessage(
-                  `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+                  `✗ **UserPromptSubmit blocked**: ${blockReason}`,
                 );
                 return { stopReason: 'end_turn' };
               }
@@ -4729,7 +4729,7 @@ export class Session implements SessionContext {
               const blockReason =
                 preHookResult.blockReason || 'Blocked by PreToolUse hook';
               await this.messageEmitter.emitAgentMessage(
-                `🚫 **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+                `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
               );
               return earlyErrorResponse(new Error(blockReason), toolName);
             }
