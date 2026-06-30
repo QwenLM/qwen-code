@@ -49,13 +49,15 @@ Default posture: **skepticism**. Burden of proof is on the author. Distinguish *
 
 Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`, or cross-package changes spanning multiple `packages/*/`.
 
-**Tier 1 — Large-scope changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). If the PR touches 10+ files or 500+ lines (additions + deletions combined) in core paths → reject immediately. No evaluation, no Stage 1.
+**Tier 1 — Large-scope changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). Hard-block on _size_, not breadth: if a core-path change totals **500+ lines** (additions + deletions combined) → reject immediately. No evaluation, no Stage 1.
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This change touches core infrastructure at scale. Core refactors must be maintainer-initiated — please open an issue to discuss the design first."
 ```
 
 Then **stop**. This is a wall, not a guideline.
+
+**Breadth ≠ size.** A uniform, low-risk sweep — renaming a symbol, updating an import path, a lint/format autofix, the same null-guard at many call sites — can touch **10+ files** while changing only a line or two each. Don't auto-reject on file count alone: **escalate to the maintainer**, and otherwise let it proceed to Stage 1 under Tier 2's 100%-confidence bar, judged on the actual diff rather than the file count. (A deep rewrite concentrated in a few files still trips the 500-line threshold above, so depth isn't ignored.)
 
 **Tier 2 — Small-scope changes to core → evaluate with 100% confidence.** If the PR touches fewer files but still hits core paths, you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
 
