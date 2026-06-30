@@ -14,6 +14,13 @@ import type { DaemonTransport } from './DaemonTransport.js';
 export interface NegotiateTransportOptions {
   /** Timeout for the capabilities probe and WS handshake. Default 5000ms. */
   probeTimeoutMs?: number;
+  /**
+   * `fetch` implementation used for the capabilities probe and threaded
+   * into the constructed REST / ACP-HTTP transport. Defaults to the
+   * global `fetch`. Supply this to inject auth headers, a proxy agent, or
+   * a test double in environments where the global isn't what you want.
+   */
+  fetchFn?: typeof globalThis.fetch;
 }
 
 /**
@@ -41,7 +48,7 @@ export async function negotiateTransport(
   token?: string,
   opts?: NegotiateTransportOptions,
 ): Promise<DaemonTransport> {
-  const fetchFn = globalThis.fetch.bind(globalThis);
+  const fetchFn = opts?.fetchFn ?? globalThis.fetch.bind(globalThis);
   const probeTimeoutMs = opts?.probeTimeoutMs ?? 5_000;
 
   // Lazy imports to avoid circular module initialization. These

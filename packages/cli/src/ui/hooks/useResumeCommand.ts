@@ -123,10 +123,13 @@ export function useResumeCommand(
         const rawItems = buildResumedHistoryItems(sessionData, config);
         const collapseOnResume =
           settings.merged.ui?.history?.collapseOnResume ?? false;
+        const collapsePreviewCount =
+          settings.merged.ui?.history?.collapsePreviewCount ?? 0;
 
         const uiHistoryItems = applyCollapsePolicyAndSummary(
           rawItems,
           collapseOnResume,
+          collapsePreviewCount,
         );
 
         // 1. Swap core first. Matches useBranchCommand's core-before-UI
@@ -218,6 +221,7 @@ export function useResumeCommand(
       setSessionName,
       remount,
       settings.merged.ui?.history?.collapseOnResume,
+      settings.merged.ui?.history?.collapsePreviewCount,
     ],
   );
 
