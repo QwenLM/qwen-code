@@ -121,8 +121,7 @@ jobs:
                 issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                 label_is_trigger=false
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" ]] && label_is_trigger=true
-                if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_bug}" == 'true' && "${issue_is_ready}" == 'true' ]] \
-                  && [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" ]]; then
+                if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_bug}" == 'true' && "${issue_is_ready}" == 'true' && "${label_is_trigger}" == 'true' ]]; then
                   DO_ISSUE=true
                 else
                   echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} trigger_label=${label_is_trigger} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
