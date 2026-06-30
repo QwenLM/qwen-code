@@ -18,8 +18,18 @@ import type {
 // (same lightweight mechanism as `@qwen-code/acp-bridge/mcpTimeouts`). A `const`
 // keeps its literal type, so it still narrows in `switch (event.type)` and works
 // as a `typeof`-d type argument.
-import { MID_TURN_MESSAGE_INJECTED_EVENT } from '@qwen-code/acp-bridge/daemonEventTypes';
-export { MID_TURN_MESSAGE_INJECTED_EVENT };
+import {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
+} from '@qwen-code/acp-bridge/daemonEventTypes';
+export {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
+};
 
 export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
@@ -32,6 +42,9 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_closed',
   'session_metadata_updated',
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -848,6 +861,41 @@ export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
   typeof MID_TURN_MESSAGE_INJECTED_EVENT,
   DaemonMidTurnMessageInjectedData
 >;
+export interface DaemonPendingPromptAddedData {
+  sessionId: string;
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  [key: string]: unknown;
+}
+export interface DaemonPendingPromptStartedData {
+  sessionId: string;
+  promptId: string;
+  text: string;
+  [key: string]: unknown;
+}
+export interface DaemonPendingPromptCompletedData {
+  sessionId: string;
+  promptId: string;
+  state: 'completed' | 'removed';
+  [key: string]: unknown;
+}
+export type DaemonPendingPromptAddedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_ADDED_EVENT,
+  DaemonPendingPromptAddedData
+>;
+export type DaemonPendingPromptStartedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_STARTED_EVENT,
+  DaemonPendingPromptStartedData
+>;
+export type DaemonPendingPromptCompletedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_COMPLETED_EVENT,
+  DaemonPendingPromptCompletedData
+>;
+export type DaemonPendingPromptEvent =
+  | DaemonPendingPromptAddedEvent
+  | DaemonPendingPromptStartedEvent
+  | DaemonPendingPromptCompletedEvent;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
   DaemonClientEvictedData
@@ -989,6 +1037,7 @@ export type DaemonSessionEvent =
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
   | DaemonMidTurnMessageInjectedEvent
+  | DaemonPendingPromptEvent
   | DaemonSessionBranchedEvent;
 
 export type DaemonControlEvent =
@@ -1440,6 +1489,18 @@ export function asKnownDaemonEvent(
     case MID_TURN_MESSAGE_INJECTED_EVENT:
       return isMidTurnMessageInjectedData(event.data)
         ? (event as DaemonMidTurnMessageInjectedEvent)
+        : undefined;
+    case PENDING_PROMPT_ADDED_EVENT:
+      return isPendingPromptAddedData(event.data)
+        ? (event as DaemonPendingPromptAddedEvent)
+        : undefined;
+    case PENDING_PROMPT_STARTED_EVENT:
+      return isPendingPromptStartedData(event.data)
+        ? (event as DaemonPendingPromptStartedEvent)
+        : undefined;
+    case PENDING_PROMPT_COMPLETED_EVENT:
+      return isPendingPromptCompletedData(event.data)
+        ? (event as DaemonPendingPromptCompletedEvent)
         : undefined;
     case 'client_evicted':
       return isClientEvictedData(event.data)
@@ -1945,6 +2006,9 @@ export function reduceDaemonSessionEvent(
     case 'settings_reloaded':
     case 'extensions_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
+    case PENDING_PROMPT_ADDED_EVENT:
+    case PENDING_PROMPT_STARTED_EVENT:
+    case PENDING_PROMPT_COMPLETED_EVENT:
       return base;
     case 'session_rewound':
       return {
@@ -2384,6 +2448,40 @@ function isMidTurnMessageInjectedData(
     isNonEmptyString(value['sessionId']) &&
     Array.isArray(value['messages']) &&
     value['messages'].every((message) => typeof message === 'string')
+  );
+}
+
+function isPendingPromptAddedData(
+  value: unknown,
+): value is DaemonPendingPromptAddedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    typeof value['text'] === 'string' &&
+    typeof value['queuedAt'] === 'number'
+  );
+}
+
+function isPendingPromptStartedData(
+  value: unknown,
+): value is DaemonPendingPromptStartedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    typeof value['text'] === 'string'
+  );
+}
+
+function isPendingPromptCompletedData(
+  value: unknown,
+): value is DaemonPendingPromptCompletedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    (value['state'] === 'completed' || value['state'] === 'removed')
   );
 }
 

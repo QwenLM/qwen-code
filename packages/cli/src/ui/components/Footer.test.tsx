@@ -139,7 +139,7 @@ describe('<Footer />', () => {
       120,
       createMockUIState({ workflowKeywordActive: true }),
     );
-    expect(lastFrame()).toContain('workflow active');
+    expect(lastFrame()).toContain('▷ workflow active');
   });
 
   it('hides the "workflow active" indicator by default', () => {

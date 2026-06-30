@@ -6012,7 +6012,7 @@ describe('useGeminiStream', () => {
         expect(mockAddItem).toHaveBeenCalledWith(
           {
             type: 'info',
-            text: '⚠️  Response truncated due to token limits.',
+            text: '⚠  Response truncated due to token limits.',
           },
           expect.any(Number),
         );
@@ -6134,57 +6134,57 @@ describe('useGeminiStream', () => {
       const testCases = [
         {
           reason: 'SAFETY',
-          message: '⚠️  Response stopped due to safety reasons.',
+          message: '⚠  Response stopped due to safety reasons.',
         },
         {
           reason: 'RECITATION',
-          message: '⚠️  Response stopped due to recitation policy.',
+          message: '⚠  Response stopped due to recitation policy.',
         },
         {
           reason: 'LANGUAGE',
-          message: '⚠️  Response stopped due to unsupported language.',
+          message: '⚠  Response stopped due to unsupported language.',
         },
         {
           reason: 'BLOCKLIST',
-          message: '⚠️  Response stopped due to forbidden terms.',
+          message: '⚠  Response stopped due to forbidden terms.',
         },
         {
           reason: 'PROHIBITED_CONTENT',
-          message: '⚠️  Response stopped due to prohibited content.',
+          message: '⚠  Response stopped due to prohibited content.',
         },
         {
           reason: 'SPII',
           message:
-            '⚠️  Response stopped due to sensitive personally identifiable information.',
+            '⚠  Response stopped due to sensitive personally identifiable information.',
         },
-        { reason: 'OTHER', message: '⚠️  Response stopped for other reasons.' },
+        { reason: 'OTHER', message: '⚠  Response stopped for other reasons.' },
         {
           reason: 'MALFORMED_FUNCTION_CALL',
-          message: '⚠️  Response stopped due to malformed function call.',
+          message: '⚠  Response stopped due to malformed function call.',
         },
         {
           reason: 'IMAGE_SAFETY',
-          message: '⚠️  Response stopped due to image safety violations.',
+          message: '⚠  Response stopped due to image safety violations.',
         },
         {
           reason: 'IMAGE_PROHIBITED_CONTENT',
-          message: '⚠️  Response stopped due to image prohibited content.',
+          message: '⚠  Response stopped due to image prohibited content.',
         },
         {
           reason: 'NO_IMAGE',
-          message: '⚠️  Response stopped due to no image.',
+          message: '⚠  Response stopped due to no image.',
         },
         {
           reason: 'IMAGE_RECITATION',
-          message: '⚠️  Response stopped due to image recitation policy.',
+          message: '⚠  Response stopped due to image recitation policy.',
         },
         {
           reason: 'IMAGE_OTHER',
-          message: '⚠️  Response stopped due to other image-related reasons.',
+          message: '⚠  Response stopped due to other image-related reasons.',
         },
         {
           reason: 'UNEXPECTED_TOOL_CALL',
-          message: '⚠️  Response stopped due to unexpected tool call.',
+          message: '⚠  Response stopped due to unexpected tool call.',
         },
       ];
 
@@ -8371,7 +8371,7 @@ describe('useGeminiStream', () => {
         (async function* () {
           yield {
             type: ServerGeminiEventType.HookSystemMessage,
-            value: '🔄 Ralph iteration 3 | No completion promise set',
+            value: '◐ Ralph iteration 3 | No completion promise set',
           };
         })(),
       );
@@ -8386,7 +8386,7 @@ describe('useGeminiStream', () => {
         expect(mockAddItem).toHaveBeenCalledWith(
           expect.objectContaining({
             type: 'stop_hook_system_message',
-            message: '🔄 Ralph iteration 3 | No completion promise set',
+            message: '◐ Ralph iteration 3 | No completion promise set',
           }),
           expect.any(Number),
         );
