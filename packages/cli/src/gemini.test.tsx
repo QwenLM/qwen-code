@@ -496,6 +496,7 @@ describe('gemini.tsx main function', () => {
           removed: [],
           restarted: [],
           unchanged: [],
+          failed: [],
         },
         skipped: [],
       }));

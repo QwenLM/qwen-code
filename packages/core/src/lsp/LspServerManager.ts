@@ -16,6 +16,7 @@ import { LspConnectionFactory } from './LspConnectionFactory.js';
 import {
   DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS,
   DEFAULT_LSP_MAX_RESTARTS,
+  DEFAULT_LSP_SHUTDOWN_TIMEOUT_MS,
   DEFAULT_LSP_SOCKET_MAX_RETRY_DELAY_MS,
   DEFAULT_LSP_SOCKET_RETRY_DELAY_MS,
   DEFAULT_LSP_STARTUP_TIMEOUT_MS,
@@ -167,6 +168,7 @@ export class LspServerManager {
       removed: [],
       restarted: [],
       unchanged: [],
+      failed: [],
     };
 
     for (const [name, handle] of Array.from(this.serverHandles)) {
@@ -193,11 +195,16 @@ export class LspServerManager {
           status: 'NOT_STARTED',
         };
         this.serverHandles.set(name, nextHandle);
-        if (nextHash) {
-          this.serverConfigHashes.set(name, nextHash);
-        }
-        result.restarted.push(name);
         await this.startServer(name, nextHandle);
+        if (nextHandle.status === 'FAILED') {
+          this.serverConfigHashes.delete(name);
+          result.failed.push(name);
+        } else {
+          if (nextHash) {
+            this.serverConfigHashes.set(name, nextHash);
+          }
+          result.restarted.push(name);
+        }
       } else {
         result.unchanged.push(name);
       }
@@ -212,12 +219,17 @@ export class LspServerManager {
         status: 'NOT_STARTED',
       };
       this.serverHandles.set(name, handle);
-      const hash = desiredHashes.get(name);
-      if (hash) {
-        this.serverConfigHashes.set(name, hash);
-      }
-      result.added.push(name);
       await this.startServer(name, handle);
+      if (handle.status === 'FAILED') {
+        this.serverConfigHashes.delete(name);
+        result.failed.push(name);
+      } else {
+        const hash = desiredHashes.get(name);
+        if (hash) {
+          this.serverConfigHashes.set(name, hash);
+        }
+        result.added.push(name);
+      }
     }
 
     debugLogger.info(
@@ -227,7 +239,9 @@ export class LspServerManager {
         result.removed,
       )}, restarted=${formatServerNames(
         result.restarted,
-      )}, unchanged=${formatServerNames(result.unchanged)}`,
+      )}, unchanged=${formatServerNames(
+        result.unchanged,
+      )}, failed=${formatServerNames(result.failed)}`,
     );
     return result;
   }
@@ -452,6 +466,9 @@ export class LspServerManager {
     debugLogger.info(`Stopping LSP server ${name}`);
     handle.stopRequested = true;
 
+    if (handle.startingPromise) {
+      await handle.startingPromise;
+    }
     await this.releaseServerResources(name, handle, true);
     handle.connection = undefined;
     handle.process = undefined;
@@ -462,6 +479,12 @@ export class LspServerManager {
     debugLogger.info(`LSP server ${name} stopped`);
   }
 
+  /**
+   * Releases runtime resources for a handle without changing its logical config.
+   *
+   * Connection shutdown and process termination are intentionally isolated so a
+   * broken JSON-RPC stream cannot prevent killing an owned server process.
+   */
   private async releaseServerResources(
     name: string,
     handle: LspServerHandle,
@@ -482,32 +505,38 @@ export class LspServerManager {
     }
 
     if (handle.process && handle.process.exitCode === null) {
-      handle.process.kill();
+      try {
+        handle.process.kill();
+      } catch (error) {
+        debugLogger.warn(`Error killing LSP server ${name} process:`, error);
+      }
     }
   }
 
+  /**
+   * Performs graceful LSP shutdown with a bounded wait, then always closes the
+   * underlying JSON-RPC connection to avoid retaining streams or sockets.
+   */
   private async shutdownConnection(handle: LspServerHandle): Promise<void> {
     if (!handle.connection) {
       return;
     }
     try {
       const shutdownPromise = handle.connection.shutdown();
-      if (typeof handle.config.shutdownTimeout === 'number') {
-        let timerId: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([
-            shutdownPromise,
-            new Promise<void>((resolve) => {
-              timerId = setTimeout(resolve, handle.config.shutdownTimeout);
-            }),
-          ]);
-        } finally {
-          if (timerId !== undefined) {
-            clearTimeout(timerId);
-          }
+      const timeout =
+        handle.config.shutdownTimeout ?? DEFAULT_LSP_SHUTDOWN_TIMEOUT_MS;
+      let timerId: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          shutdownPromise,
+          new Promise<void>((resolve) => {
+            timerId = setTimeout(resolve, timeout);
+          }),
+        ]);
+      } finally {
+        if (timerId !== undefined) {
+          clearTimeout(timerId);
         }
-      } else {
-        await shutdownPromise;
       }
     } finally {
       // Always end the JSON-RPC connection, even if shutdown rejects or times

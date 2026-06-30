@@ -1643,6 +1643,7 @@ describe('Server Config (config.ts)', () => {
         removed: [],
         restarted: [],
         unchanged: [],
+        failed: [],
       },
       skipped: [],
     };

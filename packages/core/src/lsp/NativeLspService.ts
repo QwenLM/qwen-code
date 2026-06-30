@@ -144,12 +144,16 @@ export class NativeLspService {
       extensionConfigs,
       userConfigs,
     );
-    debugLogger.info(
-      `Discovered ${serverConfigs.length} LSP server config(s): ${formatServerNames(
-        serverConfigs.map((config) => config.name),
-      )}`,
+    const { admitted, skipped } = this.filterServerConfigs(
+      serverConfigs,
+      workspaceTrusted,
     );
-    this.serverManager.setServerConfigs(serverConfigs);
+    debugLogger.info(
+      `Discovered ${admitted.length} LSP server config(s): ${formatServerNames(
+        admitted.map((config) => config.name),
+      )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
+    );
+    this.serverManager.setServerConfigs(admitted);
   }
 
   async reinitialize(): Promise<LspServiceReinitializeResult> {
@@ -167,13 +171,14 @@ export class NativeLspService {
           removed,
           restarted: [],
           unchanged: [],
+          failed: [],
         },
         skipped: [],
       };
       debugLogger.info(
         `LSP reinitialize result: added=<none>, removed=${formatServerNames(
           removed,
-        )}, restarted=<none>, unchanged=<none>, skipped=<none>`,
+        )}, restarted=<none>, unchanged=<none>, failed=<none>, skipped=<none>`,
       );
       return result;
     }
@@ -199,6 +204,7 @@ export class NativeLspService {
     this.clearDocumentTrackingForServers([
       ...reconcile.removed,
       ...reconcile.restarted,
+      ...reconcile.failed,
     ]);
     debugLogger.info(
       `LSP reinitialize result: added=${formatServerNames(
@@ -209,6 +215,8 @@ export class NativeLspService {
         reconcile.restarted,
       )}, unchanged=${formatServerNames(
         reconcile.unchanged,
+      )}, failed=${formatServerNames(
+        reconcile.failed,
       )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
     );
     return { reconcile, skipped };

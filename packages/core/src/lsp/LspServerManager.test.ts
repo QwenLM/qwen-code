@@ -112,6 +112,7 @@ describe('LspServerManager', () => {
         removed: [],
         restarted: [],
         unchanged: [],
+        failed: [],
       });
       expect(privateView.startServer).toHaveBeenCalledOnce();
       expect(manager.getHandles().get('clangd')?.status).toBe('READY');
@@ -119,7 +120,7 @@ describe('LspServerManager', () => {
         'Reconciling LSP server configs: desired=clangd',
       );
       expect(debugLoggerMock.info).toHaveBeenCalledWith(
-        'LSP reconcile result: added=clangd, removed=<none>, restarted=<none>, unchanged=<none>',
+        'LSP reconcile result: added=clangd, removed=<none>, restarted=<none>, unchanged=<none>, failed=<none>',
       );
     });
 
@@ -133,7 +134,7 @@ describe('LspServerManager', () => {
       expect(privateView.stopServer).toHaveBeenCalledOnce();
       expect(manager.getHandles().has('clangd')).toBe(false);
       expect(debugLoggerMock.info).toHaveBeenCalledWith(
-        'LSP reconcile result: added=<none>, removed=clangd, restarted=<none>, unchanged=<none>',
+        'LSP reconcile result: added=<none>, removed=clangd, restarted=<none>, unchanged=<none>, failed=<none>',
       );
     });
 
@@ -159,8 +160,63 @@ describe('LspServerManager', () => {
       expect(privateView.startServer).toHaveBeenCalledOnce();
       expect(manager.getHandles().get('pyright')).toBe(originalOtherHandle);
       expect(debugLoggerMock.info).toHaveBeenCalledWith(
-        'LSP reconcile result: added=<none>, removed=<none>, restarted=clangd, unchanged=pyright',
+        'LSP reconcile result: added=<none>, removed=<none>, restarted=clangd, unchanged=pyright, failed=<none>',
       );
+    });
+
+    it('reports added server startup failures without caching the failed hash', async () => {
+      const { manager, privateView } = createReconcileManager();
+      vi.mocked(privateView.startServer)
+        .mockImplementationOnce(async (_name, handle) => {
+          (handle as { status: string }).status = 'FAILED';
+        })
+        .mockImplementationOnce(async (_name, handle) => {
+          (handle as { status: string }).status = 'READY';
+        });
+
+      const first = await manager.reconcileServerConfigs([serverConfig]);
+      const second = await manager.reconcileServerConfigs([serverConfig]);
+
+      expect(first).toMatchObject({
+        added: [],
+        failed: ['clangd'],
+        unchanged: [],
+      });
+      expect(second).toMatchObject({
+        added: [],
+        restarted: ['clangd'],
+        failed: [],
+        unchanged: [],
+      });
+      expect(privateView.startServer).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports restarted server startup failures without caching the failed hash', async () => {
+      const { manager, privateView } = createReconcileManager();
+      manager.setServerConfigs([serverConfig]);
+      vi.mocked(privateView.startServer)
+        .mockImplementationOnce(async (_name, handle) => {
+          (handle as { status: string }).status = 'FAILED';
+        })
+        .mockImplementationOnce(async (_name, handle) => {
+          (handle as { status: string }).status = 'READY';
+        });
+      const changedConfig = { ...serverConfig, args: ['--log=verbose'] };
+
+      const first = await manager.reconcileServerConfigs([changedConfig]);
+      const second = await manager.reconcileServerConfigs([changedConfig]);
+
+      expect(first).toMatchObject({
+        restarted: [],
+        failed: ['clangd'],
+        unchanged: [],
+      });
+      expect(second).toMatchObject({
+        restarted: ['clangd'],
+        failed: [],
+        unchanged: [],
+      });
+      expect(privateView.startServer).toHaveBeenCalledTimes(2);
     });
 
     it('serializes concurrent reconcile calls', async () => {
@@ -415,6 +471,32 @@ describe('LspServerManager', () => {
     expect(process.kill).toHaveBeenCalledOnce();
   });
 
+  it('logs and continues when killing an owned process throws', async () => {
+    const manager = createTrustedManager();
+    const connection = createMockConnection();
+    const killError = new Error('kill failed');
+    const process = createMockProcess({
+      kill: vi.fn(() => {
+        throw killError;
+      }),
+    });
+    manager.setServerConfigs([serverConfig]);
+    const handle = manager.getHandles().get('clangd');
+    expect(handle).toBeDefined();
+    handle!.connection = connection;
+    handle!.process = process as unknown as ChildProcess;
+    handle!.status = 'READY';
+
+    await expect(manager.stopAll()).resolves.toBeUndefined();
+
+    expect(process.kill).toHaveBeenCalledOnce();
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'Error killing LSP server clangd process:',
+      killError,
+    );
+    expect(manager.getHandles().size).toBe(0);
+  });
+
   it('clears shutdown timeout when shutdown completes first', async () => {
     vi.useFakeTimers();
     const manager = createTrustedManager();
@@ -450,6 +532,55 @@ describe('LspServerManager', () => {
     expect(connection.end).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('uses the default shutdown timeout when none is configured', async () => {
+    vi.useFakeTimers();
+    const manager = createTrustedManager();
+    const connection = createMockConnection({
+      shutdown: vi.fn(() => new Promise<void>(() => {})),
+    });
+    manager.setServerConfigs([serverConfig]);
+    const handle = manager.getHandles().get('clangd');
+    expect(handle).toBeDefined();
+    handle!.connection = connection;
+    handle!.status = 'READY';
+
+    const stopAll = manager.stopAll();
+    await vi.advanceTimersByTimeAsync(5000);
+    await stopAll;
+
+    expect(connection.end).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('waits for an in-flight startup before releasing server resources', async () => {
+    const manager = createTrustedManager();
+    const connection = createMockConnection();
+    const process = createMockProcess();
+    manager.setServerConfigs([serverConfig]);
+    const handle = manager.getHandles().get('clangd');
+    expect(handle).toBeDefined();
+    let resolveStartup!: () => void;
+    handle!.startingPromise = new Promise<void>((resolve) => {
+      resolveStartup = () => {
+        handle!.connection = connection;
+        handle!.process = process as unknown as ChildProcess;
+        resolve();
+      };
+    });
+
+    const stopAll = manager.stopAll();
+    await Promise.resolve();
+    expect(connection.end).not.toHaveBeenCalled();
+    expect(process.kill).not.toHaveBeenCalled();
+
+    resolveStartup();
+    await stopAll;
+
+    expect(connection.shutdown).toHaveBeenCalledOnce();
+    expect(connection.end).toHaveBeenCalledOnce();
+    expect(process.kill).toHaveBeenCalledOnce();
+  });
 });
 
 function createMockConnection(
@@ -468,12 +599,17 @@ function createMockConnection(
   };
 }
 
-function createMockProcess(): {
+function createMockProcess(
+  overrides: {
+    exitCode?: number | null;
+    kill?: ReturnType<typeof vi.fn>;
+  } = {},
+): {
   exitCode: number | null;
   kill: ReturnType<typeof vi.fn>;
 } {
   return {
-    exitCode: null,
-    kill: vi.fn(),
+    exitCode: overrides.exitCode ?? null,
+    kill: overrides.kill ?? vi.fn(),
   };
 }

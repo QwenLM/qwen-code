@@ -1099,6 +1099,8 @@ export function registerLspHotReload(
             result.reconcile.restarted,
           )}, unchanged=${formatRuntimeReloadNames(
             result.reconcile.unchanged,
+          )}, failed=${formatRuntimeReloadNames(
+            getRuntimeReloadFailedNames(result.reconcile),
           )}, skipped=${formatRuntimeReloadNames(
             result.skipped.map((server) => server.name),
           )}`,
@@ -1122,4 +1124,14 @@ export function registerLspHotReload(
 
 function formatRuntimeReloadNames(names: readonly string[]): string {
   return names.length === 0 ? '<none>' : names.join(',');
+}
+
+/**
+ * Reads the optional failed bucket defensively because the CLI may typecheck
+ * against stale core dist declarations during local development.
+ */
+function getRuntimeReloadFailedNames(reconcile: {
+  failed?: readonly string[];
+}): readonly string[] {
+  return reconcile.failed ?? [];
 }

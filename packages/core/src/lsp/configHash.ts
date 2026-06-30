@@ -22,7 +22,7 @@ function sortJsonValue(value: unknown): unknown {
 }
 
 export function lspServerConfigHash(config: LspServerConfig): string {
-  const stableConfig = sortJsonValue({
+  const hashInput = {
     name: config.name,
     languages: config.languages,
     transport: config.transport,
@@ -40,7 +40,8 @@ export function lspServerConfigHash(config: LspServerConfig): string {
     maxRestarts: config.maxRestarts,
     trustRequired: config.trustRequired,
     socket: config.socket,
-  });
+  } satisfies Record<keyof LspServerConfig, unknown>;
+  const stableConfig = sortJsonValue(hashInput);
   return createHash('sha256')
     .update(JSON.stringify(stableConfig))
     .digest('hex');

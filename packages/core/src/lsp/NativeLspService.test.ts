@@ -171,6 +171,7 @@ describe('NativeLspService', () => {
         removed: [],
         restarted: [],
         unchanged: [],
+        failed: [],
       }));
       (service as unknown as { serverManager: unknown }).serverManager = {
         reconcileServerConfigs,
@@ -274,6 +275,7 @@ describe('NativeLspService', () => {
         removed: [],
         restarted: [],
         unchanged: [],
+        failed: [],
       }));
       (service as unknown as { serverManager: unknown }).serverManager = {
         reconcileServerConfigs,
@@ -293,6 +295,53 @@ describe('NativeLspService', () => {
           reason: 'server_trust_required',
         },
       ]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('discoverAndPrepare skips trust-required servers in untrusted workspaces', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-discover-'));
+    try {
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          trusted: {
+            command: 'trusted-language-server',
+            languages: ['typescript'],
+            trustRequired: true,
+          },
+          untrusted: {
+            command: 'untrusted-language-server',
+            languages: ['javascript'],
+            trustRequired: false,
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { requireTrustedWorkspace: false, workspaceRoot: tempDir },
+      );
+
+      await service.discoverAndPrepare();
+
+      const handles = Array.from(
+        (
+          service as unknown as {
+            serverManager: { getHandles: () => Map<string, unknown> };
+          }
+        ).serverManager
+          .getHandles()
+          .keys(),
+      );
+      expect(handles).toEqual(['untrusted-language-server']);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

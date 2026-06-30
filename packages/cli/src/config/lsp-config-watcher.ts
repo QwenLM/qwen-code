@@ -33,8 +33,9 @@ export type LspConfigChangeListener = (
 
 interface LspConfigSnapshot {
   exists: boolean;
-  /** Canonical JSON string. Undefined means the file exists but is invalid. */
+  /** Canonical JSON string. Undefined means the file exists but is invalid or unreadable. */
   canonical?: string;
+  error?: string;
 }
 
 /**
@@ -144,13 +145,16 @@ export class LspConfigWatcher {
       debugLogger.warn(
         `Invalid .lsp.json; keeping existing LSP runtime state.`,
       );
-      this.lastSnapshot = after;
-      await this.notifyListener({
+      const notified = await this.notifyListener({
         path: this.configPath,
         changeType: 'invalid',
         error:
+          after.error ??
           'Invalid JSON in .lsp.json; existing LSP runtime state is unchanged.',
       });
+      if (notified) {
+        this.lastSnapshot = after;
+      }
       return;
     }
 
@@ -171,8 +175,10 @@ export class LspConfigWatcher {
             : 'modified',
     };
     debugLogger.info(`LSP config changed: ${event.changeType} ${event.path}`);
-    this.lastSnapshot = after;
-    await this.notifyListener(event);
+    const notified = await this.notifyListener(event);
+    if (notified) {
+      this.lastSnapshot = after;
+    }
   }
 
   /**
@@ -180,22 +186,42 @@ export class LspConfigWatcher {
    * file removed during a filesystem race still reconciles servers to empty.
    */
   private readSnapshot(): LspConfigSnapshot {
+    let raw: string;
     try {
-      const raw = fs.readFileSync(this.configPath, 'utf-8');
-      const parsed = JSON.parse(raw) as unknown;
-      return { exists: true, canonical: canonicalize(parsed) };
+      raw = fs.readFileSync(this.configPath, 'utf-8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return { exists: false };
       }
+      debugLogger.warn('Failed to read .lsp.json:', error);
+      return {
+        exists: true,
+        error:
+          'Failed to read .lsp.json; existing LSP runtime state is unchanged.',
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return { exists: true, canonical: canonicalize(parsed) };
+    } catch (error) {
       debugLogger.warn('Failed to parse .lsp.json:', error);
-      return { exists: true };
+      return {
+        exists: true,
+        error:
+          'Invalid JSON in .lsp.json; existing LSP runtime state is unchanged.',
+      };
     }
   }
 
-  /** Runs the listener with timeout isolation so a hung reload cannot stall CLI. */
-  private async notifyListener(event: LspConfigChangeEvent): Promise<void> {
-    if (!this.listener) return;
+  /**
+   * Runs the listener with timeout isolation so a hung reload cannot stall CLI.
+   *
+   * Returns whether the listener completed successfully; callers use this to
+   * decide whether the semantic snapshot can advance or should be retried.
+   */
+  private async notifyListener(event: LspConfigChangeEvent): Promise<boolean> {
+    if (!this.listener) return true;
     const TIMEOUT_MS = LspConfigWatcher.LISTENER_TIMEOUT_MS;
     let timerId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
@@ -221,8 +247,10 @@ export class LspConfigWatcher {
         Promise.resolve().then(() => this.listener?.(event)),
         timeoutPromise,
       ]);
+      return true;
     } catch (error) {
       debugLogger.warn('LSP config change listener error:', error);
+      return false;
     } finally {
       if (timerId !== undefined) clearTimeout(timerId);
     }

@@ -268,6 +268,7 @@ export interface LspReconcileResult {
   removed: string[];
   restarted: string[];
   unchanged: string[];
+  failed: string[];
 }
 
 export interface LspServiceReinitializeResult {

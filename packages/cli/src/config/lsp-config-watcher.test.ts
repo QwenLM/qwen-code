@@ -48,7 +48,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
 type TestableWatcher = {
   listener?: (event: unknown) => void | Promise<void>;
   handleChange(): Promise<void>;
-  notifyListener(event: unknown): Promise<void>;
+  notifyListener(event: unknown): Promise<boolean>;
 };
 
 const tempDirs: string[] = [];
@@ -130,6 +130,53 @@ describe('LspConfigWatcher', () => {
     });
   });
 
+  it('reports read errors separately from invalid JSON', async () => {
+    const dir = makeTempDir();
+    const configPath = path.join(dir, '.lsp.json');
+    const watcher = new LspConfigWatcher(dir) as unknown as TestableWatcher;
+    const listener = vi.fn();
+    watcher.listener = listener;
+    fs.mkdirSync(configPath);
+
+    await watcher.handleChange();
+
+    expect(listener).toHaveBeenCalledWith({
+      path: configPath,
+      changeType: 'invalid',
+      error:
+        'Failed to read .lsp.json; existing LSP runtime state is unchanged.',
+    });
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'Failed to read .lsp.json:',
+      expect.objectContaining({ code: 'EISDIR' }),
+    );
+  });
+
+  it('retries the same config content when listener notification fails', async () => {
+    const dir = makeTempDir();
+    const configPath = path.join(dir, '.lsp.json');
+    const watcher = new LspConfigWatcher(dir) as unknown as TestableWatcher;
+    const listener = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('reload failed'))
+      .mockResolvedValueOnce(undefined);
+    watcher.listener = listener;
+
+    fs.writeFileSync(configPath, '{"typescript":{"command":"tsserver"}}');
+    await watcher.handleChange();
+    await watcher.handleChange();
+
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener).toHaveBeenNthCalledWith(1, {
+      path: configPath,
+      changeType: 'created',
+    });
+    expect(listener).toHaveBeenNthCalledWith(2, {
+      path: configPath,
+      changeType: 'created',
+    });
+  });
+
   it('debounces duplicate filesystem events', async () => {
     vi.useFakeTimers();
     const dir = makeTempDir();
@@ -162,7 +209,7 @@ describe('LspConfigWatcher', () => {
       changeType: 'modified',
     });
     await vi.advanceTimersByTimeAsync(LspConfigWatcher.LISTENER_TIMEOUT_MS);
-    await expect(notifyPromise).resolves.toBeUndefined();
+    await expect(notifyPromise).resolves.toBe(false);
 
     expect(debugLoggerMock.warn).toHaveBeenCalledWith(
       'LSP config change listener error:',
