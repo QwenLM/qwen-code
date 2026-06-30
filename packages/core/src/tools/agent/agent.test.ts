@@ -560,9 +560,8 @@ describe('AgentTool', () => {
         // AgentTool execute() in a unit test would require mocking
         // most of the agent runtime; the isolation check itself is
         // what the test is guarding.)
-        const { GitWorktreeService } = await import(
-          '../../services/gitWorktreeService.js'
-        );
+        const { GitWorktreeService } =
+          await import('../../services/gitWorktreeService.js');
         const svc = new GitWorktreeService(repo);
         const dirty = await svc.hasWorktreeChanges(repo);
         expect(dirty).toBe(true);
@@ -593,9 +592,8 @@ describe('AgentTool', () => {
         execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
           cwd: repo,
         });
-        const { GitWorktreeService } = await import(
-          '../../services/gitWorktreeService.js'
-        );
+        const { GitWorktreeService } =
+          await import('../../services/gitWorktreeService.js');
         const svc = new GitWorktreeService(repo);
         expect(await svc.hasWorktreeChanges(repo)).toBe(false);
       } finally {
@@ -776,6 +774,82 @@ describe('AgentTool', () => {
       expect(display.type).toBe('task_execution');
       expect(display.status).toBe('completed');
       expect(display.subagentName).toBe('file-search');
+    });
+
+    it('strips internal analysis and summary tags from subagent result', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        [
+          '<analysis>',
+          'Scratchpad details should stay out of the parent context.',
+          '</analysis>',
+          '',
+          '<summary>',
+          'Task completed successfully',
+          '',
+          '- Found the target file',
+          '</summary>',
+        ].join('\n'),
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe(
+        'Task completed successfully\n\n- Found the target file',
+      );
+      expect(llmText).not.toContain('<analysis>');
+      expect(llmText).not.toContain('<summary>');
+    });
+
+    it('preserves diagnostic tags from failed subagent result', async () => {
+      const raw = '<analysis>debug</analysis><summary>partial</summary>';
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(raw);
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(raw);
+    });
+
+    it('explains successful subagents with no model-visible output', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(
+        '(subagent produced no model-visible output)',
+      );
     });
 
     it('passes custom ignore files into worktree isolation file service', async () => {
@@ -2430,8 +2504,7 @@ describe('AgentTool', () => {
 
     it('should clear pendingConfirmation via onConfirm callback (terminal UI path)', async () => {
       let capturedOnConfirm:
-        | ((outcome: ToolConfirmationOutcome) => Promise<void>)
-        | undefined;
+        ((outcome: ToolConfirmationOutcome) => Promise<void>) | undefined;
       const snapshots: Array<{ hasPendingConfirmation: boolean }> = [];
 
       const invocation = createInvocationWithEventDrivenAgent((emitter) => {
@@ -2616,6 +2689,52 @@ describe('AgentTool', () => {
       expect(display.status).toBe('background');
     });
 
+    it('stores sanitized background results in the registry', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch</analysis><summary>visible</summary>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        'visible',
+        expect.any(Object),
+      );
+    });
+
+    it('stores a fallback for background results with no model-visible text', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        '(subagent produced no model-visible output)',
+        expect.any(Object),
+      );
+    });
+
     it('routes owned monitor notifications into a background agent external input queue', async () => {
       const params: AgentParams = {
         description: 'Start monitor',
@@ -2637,8 +2756,7 @@ describe('AgentTool', () => {
         monitorRegistry.setAgentNotificationCallback.mock.calls.find(
           ([id, cb]) => id === agentId && typeof cb === 'function',
         )?.[1] as
-          | ((displayText: string, modelText: string) => void)
-          | undefined;
+          ((displayText: string, modelText: string) => void) | undefined;
       expect(callback).toBeDefined();
 
       callback?.('Monitor "logs" event #1: ready', '<task-notification />');
@@ -2965,8 +3083,7 @@ describe('AgentTool', () => {
         monitorRegistry.setAgentNotificationCallback.mock.calls.find(
           ([id, cb]) => id === agentId && typeof cb === 'function',
         )?.[1] as
-          | ((displayText: string, modelText: string) => void)
-          | undefined;
+          ((displayText: string, modelText: string) => void) | undefined;
       expect(callback).toBeDefined();
 
       callback?.('Monitor "logs" event #1: ready', '<task-notification />');
