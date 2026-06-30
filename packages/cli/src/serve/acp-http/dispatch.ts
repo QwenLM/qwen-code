@@ -1397,6 +1397,12 @@ export class AcpDispatcher {
           // until timeout/teardown. A cross-connection voter that never streamed
           // the request has no own entry — leave the originator's for teardown.
           this.dropOwnPendingPermission(conn, requestId);
+          // Log the success too (every failure branch logs): an operator
+          // grepping a stuck prompt can then tell "vote accepted here" apart
+          // from "vote never arrived" or "vote landed on another connection".
+          writeStderrLine(
+            `qwen serve: /acp session/permission vote accepted (${logSafe(sessionId)}, requestId ${logSafe(requestId)}, connection ${logSafe(conn.connectionId.slice(0, 8))})`,
+          );
           this.replyConn(conn, id, {});
           return;
         }

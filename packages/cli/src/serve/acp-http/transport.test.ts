@@ -1602,6 +1602,67 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('session/permission drops a malformed answers payload (non-string values)', async () => {
+    let forwarded: unknown;
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      _requestId: string,
+      resp: unknown,
+    ) => {
+      forwarded = resp;
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-bad-ans',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 51,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 52,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-bad-ans',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+          // Non-string value → not an object map of strings → dropped.
+          answers: { q1: 42 },
+        },
+      });
+      expect((await connReader.next()) as unknown).toMatchObject({ id: 52 });
+      // The vote still lands, but the malformed answers are not forwarded.
+      expect(forwarded).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
   it('session/permission forwards an object _meta and drops a non-object _meta', async () => {
     const seen: unknown[] = [];
     bridge.respondToSessionPermission = ((

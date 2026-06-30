@@ -908,6 +908,21 @@ export class ConnectionRegistry {
   }
 
   findPendingClientRequest(id: string): PendingClientRequestRef | undefined {
+    // Fast path: server-minted ids embed their originating connection
+    // (`_qwen_perm_<connectionId>_<counter>`, connectionId is a hyphenated
+    // `randomUUID()` with no underscores), so the owning connection is the
+    // substring before the last `_` — an O(1) lookup instead of scanning all
+    // connections on every client response.
+    if (id.startsWith('_qwen_perm_')) {
+      const body = id.slice('_qwen_perm_'.length);
+      const lastUnderscore = body.lastIndexOf('_');
+      if (lastUnderscore > 0) {
+        const conn = this.byId.get(body.slice(0, lastUnderscore));
+        const req = conn?.pending.get(id);
+        if (conn && req) return { conn, id, req };
+      }
+    }
+    // Fallback for client-chosen ids that don't match the server format.
     for (const conn of this.byId.values()) {
       const req = conn.pending.get(id);
       if (req) return { conn, id, req };
