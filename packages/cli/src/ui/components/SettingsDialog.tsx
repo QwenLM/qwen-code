@@ -44,12 +44,20 @@ import {
   type SettingsValue,
   TOGGLE_TYPES,
 } from '../../config/settingsSchema.js';
+import { AboutBox } from './AboutBox.js';
+import { StatsDialog } from './StatsDialog.js';
+import {
+  getExtendedSystemInfo,
+  type ExtendedSystemInfo,
+} from '../../utils/systemInfo.js';
+import type { CommandContext } from '../commands/types.js';
 
 interface SettingsDialogProps {
   settings: LoadedSettings;
   onSelect: (settingName: string | undefined, scope: SettingScope) => void;
   onRestartRequest?: () => void;
   availableTerminalHeight?: number;
+  width?: number;
   config?: Config;
 }
 
@@ -57,11 +65,69 @@ const debugLogger = createDebugLogger('SETTINGS_DIALOG');
 
 const maxItemsToShow = 8;
 
+// Top tab bar for the settings dialog, mirroring Claude Code's /config layout.
+// The "Settings" tab hosts the editable settings list; the others surface the
+// data shown by the matching slash commands (/status, /stats).
+type ConfigTab = 'settings' | 'status' | 'stats';
+
+const CONFIG_TAB_ORDER: ConfigTab[] = ['settings', 'status', 'stats'];
+
+// Literal t() calls keep the labels extractable for translation.
+function configTabLabel(tab: ConfigTab): string {
+  switch (tab) {
+    case 'settings':
+      return t('Settings');
+    case 'status':
+      return t('Status');
+    case 'stats':
+      return t('Stats');
+    default:
+      return tab;
+  }
+}
+
+function ConfigTabBar({
+  activeTab,
+  focused,
+}: {
+  activeTab: ConfigTab;
+  focused: boolean;
+}): React.JSX.Element {
+  return (
+    <Box>
+      {CONFIG_TAB_ORDER.map((tab) => {
+        const isActive = tab === activeTab;
+        return (
+          <Box key={tab} marginRight={2}>
+            {isActive ? (
+              <Text
+                bold
+                backgroundColor={theme.text.accent}
+                color={theme.background.primary}
+              >
+                {` ${configTabLabel(tab)} `}
+              </Text>
+            ) : (
+              <Text color={theme.text.secondary}>
+                {` ${configTabLabel(tab)} `}
+              </Text>
+            )}
+          </Box>
+        );
+      })}
+      <Text color={theme.text.secondary} dimColor={!focused}>
+        {focused ? t('(←/→ to switch, ↓ to return)') : t('(↑ to switch tabs)')}
+      </Text>
+    </Box>
+  );
+}
+
 export function SettingsDialog({
   settings,
   onSelect,
   onRestartRequest,
   availableTerminalHeight,
+  width,
   config,
 }: SettingsDialogProps): React.JSX.Element {
   // Get vim mode context to sync vim mode changes
@@ -81,6 +147,19 @@ export function SettingsDialog({
   const [activeSettingIndex, setActiveSettingIndex] = useState(0);
   // Scroll offset for settings
   const [scrollOffset, setScrollOffset] = useState(0);
+
+  // Top tab bar state (Settings / Status / Stats).
+  const [activeTab, setActiveTab] = useState<ConfigTab>('settings');
+  // Which region currently holds keyboard focus. On the Settings tab the focus
+  // moves vertically: tab bar -> search box -> settings list. Other tabs only
+  // have the tab bar and their content view.
+  const [focusZone, setFocusZone] = useState<'tabs' | 'search' | 'list'>(
+    'list',
+  );
+  // Free-text query backing the "Search settings…" box.
+  const [searchQuery, setSearchQuery] = useState('');
+  // Lazily-loaded system info for the Status tab (mirrors `/status`).
+  const [systemInfo, setSystemInfo] = useState<ExtendedSystemInfo | null>(null);
 
   // Local pending settings state for the selected scope
   const [pendingSettings, setPendingSettings] = useState<Settings>(() =>
@@ -268,7 +347,15 @@ export function SettingsDialog({
     });
   };
 
-  const items = generateSettingsItems();
+  const allItems = generateSettingsItems();
+  // Filter the visible settings by the search query (case-insensitive,
+  // matched against the localized label).
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const items = normalizedQuery
+    ? allItems.filter((item) =>
+        item.label.toLowerCase().includes(normalizedQuery),
+      )
+    : allItems;
 
   // Generic edit state
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -284,6 +371,36 @@ export function SettingsDialog({
     const id = setInterval(() => setCursorVisible((v) => !v), 500);
     return () => clearInterval(id);
   }, [editingKey]);
+
+  // Keep the selection valid as the search query narrows the list.
+  useEffect(() => {
+    setActiveSettingIndex(0);
+    setScrollOffset(0);
+  }, [searchQuery]);
+
+  // Load system info for the Status tab the same way `/status` does. We only
+  // need config + settings from the command context, both available as props.
+  useEffect(() => {
+    if (activeTab !== 'status') {
+      return;
+    }
+    let cancelled = false;
+    const ctx = {
+      services: { config, settings },
+    } as unknown as CommandContext;
+    getExtendedSystemInfo(ctx)
+      .then((info) => {
+        if (!cancelled) {
+          setSystemInfo(info);
+        }
+      })
+      .catch(() => {
+        // Leave systemInfo null; the tab renders a short fallback line.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, config, settings]);
 
   const startEditing = (key: string, initial?: string) => {
     setEditingKey(key);
@@ -416,15 +533,20 @@ export function SettingsDialog({
     setMode('settings');
   };
 
-  // Get the description for the currently active setting
+  // Get the description for the currently active setting (only while the list
+  // itself is focused, so nothing looks "active" from the tabs/search zones).
   const activeDescription =
-    mode === 'settings' && items[activeSettingIndex]?.description
+    activeTab === 'settings' &&
+    mode === 'settings' &&
+    focusZone === 'list' &&
+    items[activeSettingIndex]?.description
       ? items[activeSettingIndex].description
       : undefined;
 
   // Height constraint calculations similar to ThemeDialog
   const DIALOG_PADDING = 2;
-  const SETTINGS_TITLE_HEIGHT = 2; // "Settings" title + spacing
+  const TAB_BAR_HEIGHT = 2; // Top tab bar + spacing below it
+  const SEARCH_BOX_HEIGHT = 4; // Bordered search box (3 rows) + spacing
   const SCROLL_ARROWS_HEIGHT = 2; // Up and down arrows
   const DESCRIPTION_HEIGHT = 2; // Description line + margin
   const BOTTOM_HELP_TEXT_HEIGHT = 1; // Help text
@@ -437,7 +559,8 @@ export function SettingsDialog({
   // Calculate fixed height (scope selection is now in a separate view, not included here)
   const totalFixedHeight =
     DIALOG_PADDING +
-    SETTINGS_TITLE_HEIGHT +
+    TAB_BAR_HEIGHT +
+    SEARCH_BOX_HEIGHT +
     SCROLL_ARROWS_HEIGHT +
     DESCRIPTION_HEIGHT +
     BOTTOM_HELP_TEXT_HEIGHT +
@@ -469,6 +592,80 @@ export function SettingsDialog({
   useKeypress(
     (key) => {
       const { name, ctrl } = key;
+
+      const cycleTab = (direction: 1 | -1) => {
+        setActiveTab((current) => {
+          const index = CONFIG_TAB_ORDER.indexOf(current);
+          const next =
+            (index + direction + CONFIG_TAB_ORDER.length) %
+            CONFIG_TAB_ORDER.length;
+          return CONFIG_TAB_ORDER[next];
+        });
+      };
+
+      // While the top tab bar has focus, keys only drive tab switching.
+      if (focusZone === 'tabs') {
+        if (name === 'left') {
+          cycleTab(-1);
+        } else if (name === 'right' || name === 'tab') {
+          cycleTab(1);
+        } else if (name === 'down' || name === 'return') {
+          // Move down into the tab's content: the search box on the Settings
+          // tab, otherwise the data view.
+          setFocusZone(activeTab === 'settings' ? 'search' : 'list');
+        } else if (name === 'escape') {
+          onSelect(undefined, selectedScope);
+        }
+        return;
+      }
+
+      // Status / Stats tabs render their own data view.
+      if (activeTab !== 'settings') {
+        if (name === 'up') {
+          // Climb back to the tab bar from any data view.
+          setFocusZone('tabs');
+          return;
+        }
+        // The Stats tab embeds StatsDialog, which handles Tab/Esc/r/←→ itself
+        // while focused; don't double-handle those keys here.
+        if (activeTab === 'stats') {
+          return;
+        }
+        if (name === 'escape') {
+          onSelect(undefined, selectedScope);
+        }
+        return;
+      }
+
+      // Settings tab, search box focused: type to filter; ↑ to tabs, ↓ to list.
+      if (focusZone === 'search') {
+        if (name === 'up') {
+          setFocusZone('tabs');
+        } else if (name === 'down' || name === 'return') {
+          setFocusZone('list');
+        } else if (name === 'tab') {
+          setMode((prev) => (prev === 'settings' ? 'scope' : 'settings'));
+        } else if (name === 'escape') {
+          if (searchQuery) {
+            setSearchQuery('');
+          } else {
+            onSelect(undefined, selectedScope);
+          }
+        } else if (name === 'backspace') {
+          setSearchQuery((q) => q.slice(0, -1));
+        } else if (
+          !ctrl &&
+          name !== 'space' &&
+          typeof key.sequence === 'string' &&
+          key.sequence.length === 1 &&
+          key.sequence >= ' '
+        ) {
+          setSearchQuery((q) => q + key.sequence);
+        }
+        return;
+      }
+
+      // Settings tab, list focused (focusZone === 'list').
       if (name === 'tab') {
         setMode((prev) => (prev === 'settings' ? 'scope' : 'settings'));
       }
@@ -567,16 +764,15 @@ export function SettingsDialog({
           if (editingKey) {
             commitEdit(editingKey);
           }
-          const newIndex =
-            activeSettingIndex > 0 ? activeSettingIndex - 1 : items.length - 1;
-          setActiveSettingIndex(newIndex);
-          // Adjust scroll offset for wrap-around
-          if (newIndex === items.length - 1) {
-            setScrollOffset(
-              Math.max(0, items.length - effectiveMaxItemsToShow),
-            );
-          } else if (newIndex < scrollOffset) {
-            setScrollOffset(newIndex);
+          // At the top of the list, ↑ moves focus up to the search box.
+          if (activeSettingIndex === 0) {
+            setFocusZone('search');
+          } else {
+            const newIndex = activeSettingIndex - 1;
+            setActiveSettingIndex(newIndex);
+            if (newIndex < scrollOffset) {
+              setScrollOffset(newIndex);
+            }
           }
         } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
           // ↓/j/Ctrl+N all move selection down. If editing, commit first.
@@ -762,6 +958,21 @@ export function SettingsDialog({
               );
             }
           }
+        } else if (name === 'backspace' && searchQuery.length > 0) {
+          // Editing the query moves focus up into the search box.
+          setFocusZone('search');
+          setSearchQuery((q) => q.slice(0, -1));
+        } else if (
+          !ctrl &&
+          name !== 'space' &&
+          typeof key.sequence === 'string' &&
+          key.sequence.length === 1 &&
+          key.sequence >= ' ' &&
+          !/^[0-9]$/.test(key.sequence)
+        ) {
+          // Typing a printable key jumps to the search box and filters.
+          setFocusZone('search');
+          setSearchQuery((q) => q + key.sequence);
         }
       }
       if (showRestartPrompt && name === 'r') {
@@ -795,6 +1006,13 @@ export function SettingsDialog({
       if (name === 'escape') {
         if (editingKey) {
           commitEdit(editingKey);
+        } else if (
+          activeTab === 'settings' &&
+          mode === 'settings' &&
+          searchQuery
+        ) {
+          // First Esc clears an active search; a second Esc closes the dialog.
+          setSearchQuery('');
         } else {
           onSelect(undefined, selectedScope);
         }
@@ -811,17 +1029,63 @@ export function SettingsDialog({
       padding={1}
       width="100%"
     >
-      {mode === 'settings' ? (
+      <ConfigTabBar activeTab={activeTab} focused={focusZone === 'tabs'} />
+      <Box height={1} />
+      {activeTab !== 'settings' ? (
         <Box flexDirection="column" flexGrow={1}>
-          <Text bold={mode === 'settings'} wrap="truncate">
-            {mode === 'settings' ? '> ' : '  '}
-            {t('Settings')}
-          </Text>
+          {activeTab === 'status' ? (
+            systemInfo ? (
+              <AboutBox {...systemInfo} />
+            ) : (
+              <Text color={theme.text.secondary}>{t('Loading status…')}</Text>
+            )
+          ) : (
+            // The Stats tab embeds the full /stats dashboard (Session /
+            // Activity / Efficiency sub-tabs). It only consumes keyboard input
+            // while this tab's content is focused.
+            <StatsDialog
+              onClose={() => onSelect(undefined, selectedScope)}
+              isFocused={focusZone === 'list'}
+              width={width ? width - 4 : undefined}
+              availableHeight={
+                availableTerminalHeight != null
+                  ? availableTerminalHeight - 4
+                  : undefined
+              }
+            />
+          )}
+        </Box>
+      ) : mode === 'settings' ? (
+        <Box flexDirection="column" flexGrow={1}>
+          <Box
+            borderStyle="round"
+            borderColor={
+              focusZone === 'search'
+                ? theme.border.focused
+                : theme.border.default
+            }
+            paddingX={1}
+            width="100%"
+          >
+            <Text color={theme.text.secondary}>{'⌕ '}</Text>
+            {searchQuery ? (
+              <Text color={theme.text.primary}>{searchQuery}</Text>
+            ) : (
+              <Text color={theme.text.secondary}>{t('Search settings…')}</Text>
+            )}
+          </Box>
           <Box height={1} />
           {showScrollUp && <Text color={theme.text.secondary}>▲</Text>}
+          {items.length === 0 && (
+            <Text color={theme.text.secondary}>
+              {t('No settings match your search.')}
+            </Text>
+          )}
           {visibleItems.map((item, idx) => {
             const isActive =
-              mode === 'settings' && activeSettingIndex === idx + scrollOffset;
+              mode === 'settings' &&
+              focusZone === 'list' &&
+              activeSettingIndex === idx + scrollOffset;
 
             const scopeSettings = settings.forScope(selectedScope).settings;
             const mergedSettings = settings.merged;
@@ -962,13 +1226,17 @@ export function SettingsDialog({
           </Text>
         </Box>
       )}
-      <Box marginTop={activeDescription && mode === 'settings' ? 0 : 1}>
-        <Text color={theme.text.secondary} wrap="truncate">
-          {mode === 'settings'
-            ? t('(Use Enter to select, Tab to configure scope)')
-            : t('(Use Enter to apply scope, Tab to go back)')}
-        </Text>
-      </Box>
+      {/* Status / Stats tabs surface their own hints (and the tab bar shows
+          "↑ to switch tabs"), so only the Settings tab needs this footer. */}
+      {activeTab === 'settings' && (
+        <Box marginTop={activeDescription && mode === 'settings' ? 0 : 1}>
+          <Text color={theme.text.secondary} wrap="truncate">
+            {mode === 'settings'
+              ? t('(Use Enter to select, Tab to configure scope)')
+              : t('(Use Enter to apply scope, Tab to go back)')}
+          </Text>
+        </Box>
+      )}
       {showRestartPrompt && (
         <Text color={theme.status.warning}>
           {t(

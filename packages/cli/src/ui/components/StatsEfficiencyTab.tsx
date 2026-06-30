@@ -21,12 +21,20 @@ import { t } from '../../i18n/index.js';
 export const EfficiencyTab: React.FC<{
   data: StatsData;
   bodyWidth: number;
-}> = ({ data, bodyWidth }) => {
+  /** When set, only the top N models are listed (the rest collapse into a
+   * "+N more" line). Used when the tab is embedded in a height-limited view. */
+  maxModelRows?: number;
+}> = ({ data, bodyWidth, maxModelRows }) => {
   const SERIES_COLORS = getSeriesColors();
   const cardWidth = Math.floor((bodyWidth - 4) / 3);
-  const modelEntries = Object.entries(data.report.models).sort(
+  const allModelEntries = Object.entries(data.report.models).sort(
     (a, b) => b[1].totalTokens - a[1].totalTokens,
   );
+  const modelEntries =
+    maxModelRows != null && allModelEntries.length > maxModelRows
+      ? allModelEntries.slice(0, maxModelRows)
+      : allModelEntries;
+  const hiddenModelCount = allModelEntries.length - modelEntries.length;
 
   return (
     <Box flexDirection="column">
@@ -219,6 +227,13 @@ export const EfficiencyTab: React.FC<{
               />
             );
           })}
+          {hiddenModelCount > 0 && (
+            <Text color={theme.text.secondary}>
+              {t('  +{{count}} more (run /stats for the full list)', {
+                count: String(hiddenModelCount),
+              })}
+            </Text>
+          )}
         </Box>
       )}
 

@@ -379,7 +379,7 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
-    it('wraps around when at the top of the list', async () => {
+    it('moves focus up through the search box to the tab bar', async () => {
       const settings = createMockSettings();
       const onSelect = vi.fn();
 
@@ -389,21 +389,29 @@ describe('SettingsDialog', () => {
         </KeypressProvider>,
       );
 
-      // Try to go up from first item
+      const firstKey = getDialogSettingKeys()[0];
+      const firstLabel = firstKey
+        ? (getSettingDefinition(firstKey)?.label ?? firstKey)
+        : '';
+
+      // The first item is highlighted while the list is focused.
+      expect(lastFrame()).toContain(`● ${firstLabel}`);
+
+      // ↑ from the first item moves focus to the search box: the list highlight
+      // disappears and the tab bar is not yet focused.
       act(() => {
         stdin.write(TerminalKeys.UP_ARROW);
       });
-
       await wait();
+      expect(lastFrame()).not.toContain(`● ${firstLabel}`);
+      expect(lastFrame()).not.toContain('↓ to return');
 
-      const lastKey = getDialogSettingKeys().at(-1);
-      expect(lastKey).toBeDefined();
-
-      const lastLabel = lastKey
-        ? (getSettingDefinition(lastKey)?.label ?? lastKey)
-        : '';
-
-      expect(lastFrame()).toContain(`● ${lastLabel}`);
+      // ↑ again moves up to the tab bar (which shows its focused hint).
+      act(() => {
+        stdin.write(TerminalKeys.UP_ARROW);
+      });
+      await wait();
+      expect(lastFrame()).toContain('↓ to return');
 
       unmount();
     });
@@ -1415,6 +1423,157 @@ describe('SettingsDialog', () => {
       await wait();
 
       expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+
+      unmount();
+    });
+  });
+
+  describe('Config Tabs and Search', () => {
+    it('renders the tab bar with all three tabs and a search box', () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      const output = lastFrame();
+      for (const tab of ['Settings', 'Status', 'Stats']) {
+        expect(output).toContain(tab);
+      }
+      // The search box is shown with its magnifier glyph and placeholder.
+      expect(output).toContain('⌕');
+      expect(output).toContain('Search settings…');
+
+      unmount();
+    });
+
+    it('filters the settings list as the user types', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      const vimLabel = getSettingDefinition('general.vimMode')?.label ?? '';
+      const themeLabel = getSettingDefinition('ui.theme')?.label ?? '';
+      expect(vimLabel).not.toBe('');
+      expect(themeLabel).not.toBe('');
+
+      // Type "vim" one character at a time into the search box.
+      for (const ch of 'vim') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+
+      const output = lastFrame();
+      // The query is reflected in the search box...
+      expect(output).toContain('⌕ vim');
+      // ...the matching setting stays visible...
+      expect(output).toContain(vimLabel);
+      // ...and a non-matching setting is filtered out.
+      expect(output).not.toContain(themeLabel);
+
+      unmount();
+    });
+
+    it('shows a hint when nothing matches the query', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      for (const ch of 'zzz') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+
+      expect(lastFrame()).toContain('No settings match your search.');
+
+      unmount();
+    });
+
+    it('clears the search query on Escape before closing', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      for (const ch of 'vim') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+      expect(lastFrame()).toContain('⌕ vim');
+
+      // First Escape clears the query without closing the dialog. A lone ESC
+      // is delivered with a small disambiguation delay, so poll for the result.
+      act(() => {
+        stdin.write(TerminalKeys.ESCAPE);
+      });
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Search settings…');
+      });
+      expect(onSelect).not.toHaveBeenCalled();
+
+      // Second Escape closes the dialog.
+      act(() => {
+        stdin.write(TerminalKeys.ESCAPE);
+      });
+      await waitFor(() => {
+        expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+      });
+
+      unmount();
+    });
+
+    it('shows the data view when navigating to a non-Settings tab', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      // From the list: Up -> search box, Up -> tab bar, Right -> "Status" tab.
+      act(() => {
+        stdin.write(TerminalKeys.UP_ARROW);
+      });
+      await wait();
+      act(() => {
+        stdin.write(TerminalKeys.UP_ARROW);
+      });
+      await wait();
+      act(() => {
+        stdin.write(TerminalKeys.RIGHT_ARROW);
+      });
+      await wait();
+
+      const output = lastFrame();
+      // Leaving the Settings tab hides its search box, and the focused tab bar
+      // shows its own navigation hint.
+      expect(output).not.toContain('Search settings…');
+      expect(output).toContain('↓ to return');
 
       unmount();
     });

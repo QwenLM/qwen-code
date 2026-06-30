@@ -27,7 +27,10 @@ import { SessionTab } from './StatsSessionTab.js';
 import { ActivityTab } from './StatsActivityTab.js';
 import { EfficiencyTab } from './StatsEfficiencyTab.js';
 
-const StatsTabs: React.FC<{ activeTab: StatsTab }> = ({ activeTab }) => (
+const StatsTabs: React.FC<{ activeTab: StatsTab; hint?: string }> = ({
+  activeTab,
+  hint,
+}) => (
   <Box flexDirection="row">
     {TAB_DEFS.map(({ tab, label }) => {
       const active = tab === activeTab;
@@ -42,6 +45,11 @@ const StatsTabs: React.FC<{ activeTab: StatsTab }> = ({ activeTab }) => (
         </Box>
       );
     })}
+    {hint && (
+      <Box marginLeft={2}>
+        <Text color={theme.text.secondary}>{hint}</Text>
+      </Box>
+    )}
   </Box>
 );
 
@@ -86,9 +94,25 @@ function buildCurrentSessionRecord(
 interface StatsDialogProps {
   onClose: () => void;
   width?: number;
+  /**
+   * When false, the dialog stops consuming keyboard input. Used when the dialog
+   * is embedded inside another view (e.g. the Settings dialog's Stats tab) so it
+   * only reacts to keys while that tab's content is focused.
+   */
+  isFocused?: boolean;
+  /**
+   * Rows available for the dialog content. When set (embedded mode), the
+   * Efficiency tab's model table is capped so it cannot overflow the host view.
+   */
+  availableHeight?: number;
 }
 
-export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
+export const StatsDialog: React.FC<StatsDialogProps> = ({
+  onClose,
+  width,
+  isFocused = true,
+  availableHeight,
+}) => {
   const [activeTab, setActiveTab] = useState<StatsTab>('session');
   const [rangeIndex, setRangeIndex] = useState(0);
   const [chartMonthOffset, setChartMonthOffset] = useState(0);
@@ -176,7 +200,7 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
         return;
       }
     },
-    { isActive: true },
+    { isActive: isFocused },
   );
 
   const hintText =
@@ -199,7 +223,10 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
           paddingY={1}
           width={safeWidth - 2}
         >
-          <StatsTabs activeTab={activeTab} />
+          <StatsTabs
+            activeTab={activeTab}
+            hint={availableHeight != null ? t('(Tab to switch)') : undefined}
+          />
 
           <Box marginTop={1}>
             {activeTab === 'session' && <SessionTab />}
@@ -220,7 +247,18 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
               />
             )}
             {activeTab === 'efficiency' && !loading && data && (
-              <EfficiencyTab data={data} bodyWidth={bodyWidth} />
+              <EfficiencyTab
+                data={data}
+                bodyWidth={bodyWidth}
+                maxModelRows={
+                  availableHeight != null
+                    ? Math.max(
+                        3,
+                        availableHeight - 24 - data.toolLeaderboard.length,
+                      )
+                    : undefined
+                }
+              />
             )}
           </Box>
 
