@@ -40,7 +40,7 @@ function resolveCdPath(input: string, baseDir: string): string {
     return path.normalize(os.homedir());
   }
 
-  if (input.startsWith('~/')) {
+  if (input.startsWith('~/') || input.startsWith('~\\')) {
     return path.normalize(path.join(os.homedir(), input.slice(2)));
   }
 

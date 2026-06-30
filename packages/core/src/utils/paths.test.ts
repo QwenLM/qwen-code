@@ -419,6 +419,12 @@ describe('resolvePath', () => {
     expect(result).toBe(path.join(homeDir, 'documents/file.txt'));
   });
 
+  it('expands Windows-style tilde-prefixed paths to home directory', () => {
+    const homeDir = os.homedir();
+    const result = resolvePath('/some/base', '~\\documents\\file.txt');
+    expect(result).toBe(path.join(homeDir, 'documents\\file.txt'));
+  });
+
   it('uses baseDir when provided for relative paths', () => {
     const baseDir = '/custom/base';
     const result = resolvePath(baseDir, './relative/path');
@@ -617,6 +623,9 @@ describe('resolveAndValidatePath', () => {
         allowedDirectories: [workspaceRoot, fakeHome],
       });
       expect(resolveAndValidatePath(configWithHome, '~/project')).toBe(
+        homeSubdir,
+      );
+      expect(resolveAndValidatePath(configWithHome, '~\\project')).toBe(
         homeSubdir,
       );
       expect(resolveAndValidatePath(configWithHome, '~')).toBe(fakeHome);

@@ -329,7 +329,7 @@ export function resolvePath(
 
   if (relativePath === '~') {
     return homeDir;
-  } else if (relativePath.startsWith('~/')) {
+  } else if (relativePath.startsWith('~/') || relativePath.startsWith('~\\')) {
     return path.join(homeDir, relativePath.slice(2));
   } else if (path.isAbsolute(relativePath)) {
     return relativePath;

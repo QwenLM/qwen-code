@@ -205,6 +205,23 @@ describe('cdCommand', () => {
     });
   });
 
+  it('resolves a Windows-style home-relative path from the home directory', async () => {
+    const missingName = `qwen-cd-missing-${process.pid}-${Date.now()}`;
+    const expectedPath = path.normalize(path.join(os.homedir(), missingName));
+
+    const result = (await cdCommand.action?.(
+      context,
+      `~\\${missingName}`,
+    )) as MessageActionReturn;
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: `Couldn't find a directory at ${expectedPath}.`,
+    });
+    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+  });
+
   it('moves to a path with escaped spaces', async () => {
     const spacedDir = path.join(tmpDir, 'space dir');
     fs.mkdirSync(spacedDir);
