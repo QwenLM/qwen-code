@@ -482,6 +482,9 @@ export class SessionService {
    * Public accessor: returns both the current custom title and its source
    * for a given session. Used by `ChatRecordingService` on resume to
    * preserve the persisted `titleSource` rather than defaulting to manual.
+   *
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   getSessionTitleInfo(sessionId: string): {
     title?: string;
@@ -619,6 +622,9 @@ export class SessionService {
    * of multi-MB sessions. Call this lazily, only when a specific
    * session's message count is about to be displayed (e.g., from a
    * preview panel) or computed from a resumed conversation.
+   *
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async countSessionMessages(sessionId: string): Promise<number> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -920,7 +926,9 @@ export class SessionService {
    * Reconstructs the full conversation from tree-structured records.
    *
    * @param sessionId The session ID to load
-   * @returns Session data for resumption, or null if not found
+   * @returns Session data for resumption, or undefined if not found
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async loadSession(
     sessionId: string,
@@ -1225,6 +1233,8 @@ export class SessionService {
    *   existing callers are unchanged — pass `'auto'` only for titles produced
    *   by the auto-title generator.
    * @returns true if renamed successfully, false if session not found
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async renameSession(
     sessionId: string,
@@ -1298,6 +1308,8 @@ export class SessionService {
    *
    * @throws If source does not exist, source is empty, source belongs to a
    *   different project, or the target file already exists.
+   * @remarks Only checks active source sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async forkSession(
     sourceSessionId: string,
@@ -1428,6 +1440,8 @@ export class SessionService {
    *
    * @param sessionId The session ID to look up
    * @returns The custom title, or undefined if none set
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   getSessionTitle(sessionId: string): string | undefined {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -1444,6 +1458,8 @@ export class SessionService {
    *
    * @param title The custom title to search for (case-insensitive exact match)
    * @returns Array of matching session list items
+   * @remarks Only searches active sessions. Archived title search is not
+   * supported.
    */
   async findSessionsByTitle(title: string): Promise<SessionListItem[]> {
     const normalizedTitle = title.toLowerCase().trim();
@@ -1620,6 +1636,8 @@ export class SessionService {
    *
    * @param sessionId The session ID to check
    * @returns true if session exists and belongs to current project
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async sessionExists(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
