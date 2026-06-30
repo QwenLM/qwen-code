@@ -1369,6 +1369,7 @@ export abstract class ChannelBase {
               envelope,
               this.channelMemoryErrorMessage(error),
             );
+            this.instructedSessions.delete(sessionId);
           }
         }
         if (channelMemory) {

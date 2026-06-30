@@ -61,18 +61,18 @@ describe('channel memory', () => {
     expect(filePath).not.toContain('raw-thread-id');
   });
 
-  it('preserves allowed dots in channel names', () => {
+  it('keeps a readable channel-name slug in the path', () => {
     const filePath = getChannelMemoryFilePath({
       channelName: 'team..bot',
       chatId: 'chat-1',
     });
     const relativeSegments = path.relative(qwenHome, filePath).split(path.sep);
 
-    expect(relativeSegments).toContain('team..bot');
+    expect(relativeSegments[2]).toMatch(/^team\.\.bot-[a-f0-9]{16}$/u);
   });
 
   it.each(['.', '..'])(
-    'uses underscore for exact %s channel segment',
+    'does not use exact %s as the channel directory segment',
     (channelName) => {
       const filePath = getChannelMemoryFilePath({
         channelName,
@@ -86,9 +86,22 @@ describe('channel memory', () => {
       expect(relativeSegments).not.toContain('..');
       expect(relativeSegments[0]).toBe('channels');
       expect(relativeSegments[1]).toBe('memory');
-      expect(relativeSegments[2]).toBe('_');
+      expect(relativeSegments[2]).toMatch(/^[._]+-[a-f0-9]{16}$/u);
     },
   );
+
+  it('uses different paths for colliding sanitized channel names', () => {
+    const first = getChannelMemoryFilePath({
+      channelName: 'ops/alerts',
+      chatId: 'chat-1',
+    });
+    const second = getChannelMemoryFilePath({
+      channelName: 'ops alerts',
+      chatId: 'chat-1',
+    });
+
+    expect(first).not.toBe(second);
+  });
 
   it('uses different paths for different thread ids', () => {
     const target: ChannelMemoryTarget = {
@@ -163,6 +176,20 @@ describe('channel memory', () => {
         'a'.repeat(MAX_CHANNEL_MEMORY_BYTES),
       ),
     ).rejects.toThrow('Channel memory exceeds maximum size');
+  });
+
+  it('continues appends after a rejected append', async () => {
+    const target: ChannelMemoryTarget = {
+      channelName: 'prod',
+      chatId: 'chat-1',
+    };
+
+    await expect(
+      appendChannelMemory(target, 'a'.repeat(MAX_CHANNEL_MEMORY_BYTES)),
+    ).rejects.toThrow('Channel memory exceeds maximum size');
+    await appendChannelMemory(target, 'after failure');
+
+    await expect(readChannelMemory(target)).resolves.toBe('after failure\n');
   });
 
   it('keeps concurrent appends within the maximum size', async () => {

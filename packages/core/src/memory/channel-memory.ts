@@ -41,11 +41,12 @@ function isMissingFile(error: unknown): boolean {
 }
 
 function safeChannelName(channelName: string): string {
-  const safeName = channelName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
-  if (safeName === '.' || safeName === '..') {
-    return '_';
-  }
-  return safeName || '_';
+  const slug = channelName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 20) || '_';
+  const hash = createHash('sha256')
+    .update(channelName)
+    .digest('hex')
+    .slice(0, 16);
+  return `${slug}-${hash}`;
 }
 
 function hashedThreadPath(target: ChannelMemoryTarget): string {
@@ -77,10 +78,13 @@ async function serializeAppend<T>(
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const queued = previous.then(() => current);
+  const queued = previous.then(
+    () => current,
+    () => current,
+  );
   pendingAppends.set(filePath, queued);
 
-  await previous;
+  await previous.catch(() => {});
   try {
     return await task();
   } finally {
@@ -95,29 +99,31 @@ export async function readChannelMemory(
   target: ChannelMemoryTarget,
 ): Promise<string> {
   const filePath = getChannelMemoryFilePath(target);
-  let size: number;
-  try {
-    size = (await fs.stat(filePath)).size;
-  } catch (error) {
-    if (isMissingFile(error)) {
+  return serializeAppend(filePath, async () => {
+    let size: number;
+    try {
+      size = (await fs.stat(filePath)).size;
+    } catch (error) {
+      if (isMissingFile(error)) {
+        return '';
+      }
+      throw error;
+    }
+    if (size > MAX_CHANNEL_MEMORY_BYTES) {
+      process.stderr.write(
+        `[channel-memory] ${filePath} is ${size} bytes, exceeding ${MAX_CHANNEL_MEMORY_BYTES}; treating as empty\n`,
+      );
       return '';
     }
-    throw error;
-  }
-  if (size > MAX_CHANNEL_MEMORY_BYTES) {
-    process.stderr.write(
-      `[channel-memory] ${filePath} is ${size} bytes, exceeding ${MAX_CHANNEL_MEMORY_BYTES}; treating as empty\n`,
-    );
-    return '';
-  }
-  try {
-    return await fs.readFile(filePath, 'utf8');
-  } catch (error) {
-    if (isMissingFile(error)) {
-      return '';
+    try {
+      return await fs.readFile(filePath, 'utf8');
+    } catch (error) {
+      if (isMissingFile(error)) {
+        return '';
+      }
+      throw error;
     }
-    throw error;
-  }
+  });
 }
 
 export async function appendChannelMemory(

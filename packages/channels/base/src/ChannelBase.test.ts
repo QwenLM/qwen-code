@@ -2321,10 +2321,7 @@ describe('ChannelBase', () => {
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
 
-      await expect(
-        ch.handleInbound(envelope({ text: 'first', senderId: 'alice' })),
-      ).rejects.toThrow('memory boom');
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('memory boom'),
       );
@@ -2332,8 +2329,12 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
 
-      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
+      expect(firstPrompt).toBe('Use repo conventions.\n\nfirst');
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
       expect(promptText).toContain(
         'Channel memory for this chat:\nUse staging by default.',
       );
@@ -2370,13 +2371,16 @@ describe('ChannelBase', () => {
       );
 
       rejectMemory(new Error('memory boom'));
-      await expect(first).rejects.toThrow('memory boom');
+      await first;
       await second;
 
       expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(2);
-      expect(bridge.prompt).toHaveBeenCalledTimes(1);
-      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
+      expect(firstPrompt).toBe('Use repo conventions.\n\nfirst');
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
       expect(promptText).toContain(
         'Channel memory for this chat:\nUse staging by default.',
       );
