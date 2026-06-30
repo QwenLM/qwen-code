@@ -370,6 +370,35 @@ describe('ChannelBase', () => {
       expect(prompt).toContain('- [User 1] new');
     });
 
+    it('uses wildcard groupHistoryLimit when a group omits its own limit', async () => {
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 5,
+          groups: {
+            '*': { requireMention: true, groupHistoryLimit: 1 },
+            chat1: { requireMention: true },
+          },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: false, text: 'old' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: false, text: 'new' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '@bot current' }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).not.toContain('old');
+      expect(prompt).toContain('- [User 1] new');
+    });
+
     it('keeps stored sender names from forging history markers', async () => {
       const ch = createChannel(
         {

@@ -826,10 +826,13 @@ export abstract class ChannelBase {
     if (!envelope.isGroup) {
       return 0;
     }
-    const groupCfg =
-      this.config.groups[envelope.chatId] || this.config.groups['*'];
+    const groupCfg = this.config.groups[envelope.chatId];
+    const wildcardGroupCfg = this.config.groups['*'];
     const configured =
-      groupCfg?.groupHistoryLimit ?? this.config.groupHistoryLimit ?? 0;
+      groupCfg?.groupHistoryLimit ??
+      wildcardGroupCfg?.groupHistoryLimit ??
+      this.config.groupHistoryLimit ??
+      0;
     if (!Number.isFinite(configured) || configured <= 0) {
       return 0;
     }
