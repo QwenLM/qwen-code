@@ -5299,7 +5299,7 @@ describe('Session', () => {
         const roots = resolveHomeLoopResolverRoots({
           homeDir: '',
           homeQwenDir,
-          qwenHome: undefined,
+          qwenHome: '',
         });
 
         // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
