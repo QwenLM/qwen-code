@@ -109,6 +109,9 @@ export class QQChannel extends ChannelBase {
   /** Whether this process has never received READY (cold start vs RESUME fallback). */
   private coldStart: boolean = true;
 
+  /** Track onToolCall invocations for diagnostic purposes (capped log output). */
+  private toolCallCount = 0;
+
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
   /** Track the latest user messageId per chatId for proper reply (msg_id). */
@@ -506,9 +509,6 @@ export class QQChannel extends ChannelBase {
       state!.timer = null;
       const toFlush = state!.buffer;
       if (toFlush) {
-        process.stderr.write(
-          `[QQ:${this.name}] idleFlush (${toFlush.length} chars)\n`,
-        );
         this.sendMessage(state!.chatId, toFlush).catch((err) => {
           process.stderr.write(
             `[QQ:${this.name}] idleFlush send failed: ${err}\n`,
@@ -557,6 +557,12 @@ export class QQChannel extends ChannelBase {
    * than waiting for the tool call to complete.
    */
   override onToolCall(_chatId: string, event: ToolCallEvent): void {
+    this.toolCallCount++;
+    if (this.toolCallCount <= 3) {
+      process.stderr.write(
+        `[QQ:${this.name}] onToolCall #${this.toolCallCount} session=${event.sessionId} tool=${event.title} hasState=${this.streamState.has(event.sessionId)}\n`,
+      );
+    }
     // Only flush the triggering session — flushing all sessions would
     // prematurely send partial buffers from unrelated concurrent conversations.
     const state = this.streamState.get(event.sessionId);
@@ -1427,7 +1433,7 @@ export class QQChannel extends ChannelBase {
 
     if (!isAtBot) {
       process.stderr.write(
-        `[QQ:${this.name}] @all msg from ${sanitizeLogText(safeName, 64)} in ${sanitizeLogText(chatId, 64)} — not @bot, forwarding as non-mention\n`,
+        `[QQ:${this.name}] @all msg in ${sanitizeLogText(chatId, 32)} (isAtBot=false)\n`,
       );
     }
 
