@@ -2581,9 +2581,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const wtSuffix = formatWorktreeSuffix(
               await cleanupWorktreeIsolation(),
             );
+            const modelVisibleText = toModelVisibleSubagentResult(
+              subagentRawText,
+              terminateMode,
+            );
             const finalText =
               appendStopHookBlockingCapWarning(
-                toModelVisibleSubagentResult(subagentRawText, terminateMode),
+                terminateMode === AgentTerminateMode.GOAL
+                  ? modelVisibleText ||
+                      '(subagent produced no model-visible output)'
+                  : modelVisibleText,
                 stopHookWarning,
               ) + wtSuffix;
             const completionStats = getCompletionStats();

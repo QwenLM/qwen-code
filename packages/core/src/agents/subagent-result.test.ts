@@ -41,6 +41,11 @@ describe('toModelVisibleSubagentResult', () => {
       '<summary>visible <analysis>hidden scratch</analysis></summary>',
       'visible',
     ],
+    ['<analysis>outer<analysis>inner</analysis>LEAKED</analysis>', ''],
+    [
+      '<summary>visible <analysis>outer<analysis>inner</analysis>LEAKED</analysis></summary>',
+      'visible',
+    ],
     ['<summary>Done<analysis/>leaked</summary>', 'Done leaked'],
     ['literal </analysis> marker', 'literal </analysis> marker'],
   ])('returns model-visible text for %j', (input, expected) => {

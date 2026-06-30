@@ -935,11 +935,15 @@ export class BackgroundAgentResumeService {
           }
 
           const terminateMode = subagent.getTerminateMode();
+          const modelVisibleText = toModelVisibleSubagentResult(
+            subagent.getFinalText(),
+            terminateMode,
+          );
           const finalText = appendStopHookBlockingCapWarning(
-            toModelVisibleSubagentResult(
-              subagent.getFinalText(),
-              terminateMode,
-            ),
+            terminateMode === AgentTerminateMode.GOAL
+              ? modelVisibleText ||
+                  '(subagent produced no model-visible output)'
+              : modelVisibleText,
             stopHookWarning,
           );
           const stats = getCompletionStats(subagent, liveToolCallCount);

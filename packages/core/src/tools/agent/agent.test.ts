@@ -2712,6 +2712,29 @@ describe('AgentTool', () => {
       );
     });
 
+    it('stores a fallback for background results with no model-visible text', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        '(subagent produced no model-visible output)',
+        expect.any(Object),
+      );
+    });
+
     it('routes owned monitor notifications into a background agent external input queue', async () => {
       const params: AgentParams = {
         description: 'Start monitor',
