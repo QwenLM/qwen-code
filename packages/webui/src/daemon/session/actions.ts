@@ -814,7 +814,6 @@ export function createDaemonSessionActions({
         return await session.client.removePendingPrompt(
           opts.sessionId,
           promptId,
-          session.clientId ? { clientId: session.clientId } : undefined,
         );
       }
       return await session.removePendingPrompt(promptId);
