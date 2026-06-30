@@ -214,9 +214,9 @@ describe('ChannelLoopScheduler', () => {
         lastFinishedAt: '2026-06-30T01:05:00.000Z',
       },
     ];
-    const nextFireTime = vi.fn((_, after: Date) => {
-      return new Date(after.getTime() + 60_000);
-    });
+    const nextFireTime = vi.fn(
+      (_, after: Date) => new Date(after.getTime() + 60_000),
+    );
     const scheduler = new ChannelLoopScheduler({
       store,
       channels: new Map([['feishu-main', { runLoopPrompt }]]),
