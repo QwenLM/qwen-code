@@ -181,8 +181,19 @@ interface ChannelInfo {
    * restore fails while another is still healthy.
    */
   pendingRestoreIds: Set<string>;
+  /**
+   * `newSession` calls currently executing on this channel but not yet
+   * registered in `sessionIds`. This is channel-scoped so one workspace/thread
+   * spawn cannot keep another empty failed channel alive.
+   */
+  sessionSpawnsInFlight: number;
   /** Workspace-level control calls that use the shared channel without a session. */
   workspaceControlInFlight: number;
+  /**
+   * Set when an empty channel should be reaped after overlapping
+   * session/workspace-control work drains.
+   */
+  emptyReapPending: boolean;
   /**
    * Cached channel-close race for workspace-scoped status requests. Workspace
    * status can be polled frequently by dashboards, so keep one promise per
@@ -984,16 +995,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   function hasNoChannelWork(
     ci: ChannelInfo,
-    opts?: { ignoreCurrentSpawn?: boolean },
+    opts?: { ignoreCurrentSessionSpawn?: boolean },
   ): boolean {
-    const inFlightSpawnCount = inFlightSpawns.size;
+    const inFlightSpawnCount =
+      ci.sessionSpawnsInFlight -
+      (opts?.ignoreCurrentSessionSpawn === true ? 1 : 0);
     return (
       ci.sessionIds.size === 0 &&
       ci.pendingRestoreIds.size === 0 &&
       ci.workspaceControlInFlight === 0 &&
-      (inFlightSpawnCount === 0 ||
-        (opts?.ignoreCurrentSpawn === true && inFlightSpawnCount === 1))
+      inFlightSpawnCount === 0
     );
+  }
+
+  async function reapPendingEmptyChannel(ci: ChannelInfo): Promise<void> {
+    if (!ci.emptyReapPending || ci.isDying || !hasNoChannelWork(ci)) return;
+    ci.emptyReapPending = false;
+    ci.isDying = true;
+    await ci.channel.kill().catch(() => {
+      /* best-effort — channel.exited handler still runs */
+    });
   }
 
   async function withWorkspaceControl<T>(
@@ -1008,6 +1029,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         0,
         ci.workspaceControlInFlight - 1,
       );
+      await reapPendingEmptyChannel(ci);
     }
   }
 
@@ -1340,7 +1362,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         client,
         sessionIds: new Set(),
         pendingRestoreIds: new Set(),
+        sessionSpawnsInFlight: 0,
         workspaceControlInFlight: 0,
+        emptyReapPending: false,
         isDying: false,
         handshakeComplete: false,
       };
@@ -1546,106 +1570,119 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `ensureChannel`, never spawning a fresh one. Tear down the
     // empty channel so the next attempt gets a clean spawn.
     const ci = await ensureChannel();
+    ci.sessionSpawnsInFlight++;
+    let sessionRegistered = false;
     let newSessionResp: {
       sessionId: string;
       models?: { currentModelId?: unknown } | null;
       modes?: { currentModeId?: unknown } | null;
     };
     try {
-      newSessionResp = await telemetry.withSpan(
-        'session.new',
-        {
-          'qwen-code.daemon.bridge.operation': 'session.new',
-          'qwen-code.daemon.session_scope': effectiveScope,
-        },
-        async () =>
-          await withTimeout(
-            ci.connection.newSession({
-              cwd: boundWorkspace,
-              mcpServers: [],
-            }),
-            initTimeoutMs,
-            'newSession',
-          ),
+      try {
+        newSessionResp = await telemetry.withSpan(
+          'session.new',
+          {
+            'qwen-code.daemon.bridge.operation': 'session.new',
+            'qwen-code.daemon.session_scope': effectiveScope,
+          },
+          async () =>
+            await withTimeout(
+              ci.connection.newSession({
+                cwd: boundWorkspace,
+                mcpServers: [],
+              }),
+              initTimeoutMs,
+              'newSession',
+            ),
+        );
+      } catch (err) {
+        // Only reap when this newSession was the channel's first/only
+        // attempt — a populated channel keeps running for its other
+        // live sessions. If other work is still using the empty channel,
+        // arm a deferred reap so the last blocker tears it down.
+        if (hasNoChannelWork(ci, { ignoreCurrentSessionSpawn: true })) {
+          // Mark dying SYNCHRONOUSLY so a concurrent `spawnOrAttach`
+          // calling `ensureChannel()` between this point and the
+          // `channel.exited` cleanup spawns a fresh channel instead of
+          // attaching to the one we're about to tear down. `channelInfo`
+          // stays set until OS reap so `killAllSync` mid-SIGTERM still
+          // finds a target (BkUyD invariant).
+          ci.isDying = true;
+          await ci.channel.kill().catch(() => {
+            /* best-effort — channel.exited handler still runs */
+          });
+        } else {
+          ci.emptyReapPending = true;
+        }
+        throw err;
+      }
+
+      // Late-shutdown re-check (BUy4U): shutdown() may have flipped
+      // while we were in `connection.newSession` (~1s on cold start).
+      if (shuttingDown) {
+        // Don't kill the channel — see comment above. Just throw.
+        throw new Error('AcpSessionBridge is shutting down');
+      }
+
+      const entry = createSessionEntry(
+        ci,
+        newSessionResp.sessionId,
+        boundWorkspace,
       );
-    } catch (err) {
-      // Only reap when this newSession was the channel's first/only
-      // attempt — a populated channel keeps running for its other
-      // live sessions.
-      if (hasNoChannelWork(ci, { ignoreCurrentSpawn: true })) {
-        // Mark dying SYNCHRONOUSLY so a concurrent `spawnOrAttach`
-        // calling `ensureChannel()` between this point and the
-        // `channel.exited` cleanup spawns a fresh channel instead of
-        // attaching to the one we're about to tear down. `channelInfo`
-        // stays set until OS reap so `killAllSync` mid-SIGTERM still
-        // finds a target (BkUyD invariant).
-        ci.isDying = true;
-        await ci.channel.kill().catch(() => {
-          /* best-effort — channel.exited handler still runs */
+      sessionRegistered = true;
+      seedSnapshotCaches(entry, newSessionResp);
+      const clientId = registerClient(entry, requestedClientId);
+      // `defaultEntry` is the single-scope attach target — only sessions
+      // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
+      // never become the attach target, otherwise a later omitted-scope
+      // (or daemon-default-`single`) caller would attach to what its
+      // sender promised was an isolated session. Subsequent same-scope
+      // spawns also don't overwrite (first wins).
+      if (effectiveScope === 'single' && !defaultEntry) defaultEntry = entry;
+
+      // ACP `newSession` doesn't take a model id; honor the caller's
+      // `modelServiceId` via `unstable_setSessionModel`. See
+      // `applyModelServiceId` for rationale (race against
+      // transportClosedReject, publish model_switched on success,
+      // model_switch_failed on failure, don't tear down the session).
+      if (modelServiceId) {
+        await applyModelServiceId(
+          entry,
+          modelServiceId,
+          initTimeoutMs,
+          clientId,
+        ).catch(() => {
+          // Already published `model_switch_failed`; session stays
+          // operational on the agent's default model.
         });
       }
-      throw err;
-    }
 
-    // Late-shutdown re-check (BUy4U): shutdown() may have flipped
-    // while we were in `connection.newSession` (~1s on cold start).
-    if (shuttingDown) {
-      // Don't kill the channel — see comment above. Just throw.
-      throw new Error('AcpSessionBridge is shutting down');
-    }
+      // Bd1zc: re-check that the entry is still live before returning.
+      // The model-switch call yields and races against
+      // `channel.exited` — if the child crashed during the model
+      // switch, the exited handler already removed the entry from
+      // byId. Without this check, the caller would get HTTP 200 with
+      // a sessionId that already 404s on every subsequent request.
+      if (!byId.has(entry.sessionId)) {
+        throw new Error(
+          `Session ${entry.sessionId} died during model-switch ` +
+            `initialization`,
+        );
+      }
 
-    const entry = createSessionEntry(
-      ci,
-      newSessionResp.sessionId,
-      boundWorkspace,
-    );
-    seedSnapshotCaches(entry, newSessionResp);
-    const clientId = registerClient(entry, requestedClientId);
-    // `defaultEntry` is the single-scope attach target — only sessions
-    // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
-    // never become the attach target, otherwise a later omitted-scope
-    // (or daemon-default-`single`) caller would attach to what its
-    // sender promised was an isolated session. Subsequent same-scope
-    // spawns also don't overwrite (first wins).
-    if (effectiveScope === 'single' && !defaultEntry) defaultEntry = entry;
-
-    // ACP `newSession` doesn't take a model id; honor the caller's
-    // `modelServiceId` via `unstable_setSessionModel`. See
-    // `applyModelServiceId` for rationale (race against
-    // transportClosedReject, publish model_switched on success,
-    // model_switch_failed on failure, don't tear down the session).
-    if (modelServiceId) {
-      await applyModelServiceId(
-        entry,
-        modelServiceId,
-        initTimeoutMs,
+      return {
+        sessionId: entry.sessionId,
+        workspaceCwd: entry.workspaceCwd,
+        attached: false,
         clientId,
-      ).catch(() => {
-        // Already published `model_switch_failed`; session stays
-        // operational on the agent's default model.
-      });
+        createdAt: entry.createdAt,
+      };
+    } finally {
+      ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
+      if (!sessionRegistered) {
+        await reapPendingEmptyChannel(ci);
+      }
     }
-
-    // Bd1zc: re-check that the entry is still live before returning.
-    // The model-switch call yields and races against
-    // `channel.exited` — if the child crashed during the model
-    // switch, the exited handler already removed the entry from
-    // byId. Without this check, the caller would get HTTP 200 with
-    // a sessionId that already 404s on every subsequent request.
-    if (!byId.has(entry.sessionId)) {
-      throw new Error(
-        `Session ${entry.sessionId} died during model-switch ` +
-          `initialization`,
-      );
-    }
-
-    return {
-      sessionId: entry.sessionId,
-      workspaceCwd: entry.workspaceCwd,
-      attached: false,
-      clientId,
-      createdAt: entry.createdAt,
-    };
   }
 
   /**

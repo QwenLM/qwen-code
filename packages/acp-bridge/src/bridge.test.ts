@@ -2256,6 +2256,47 @@ describe('createAcpSessionBridge', () => {
     void firstErr;
   });
 
+  it('reaps an empty failed channel after overlapping thread spawns drain', async () => {
+    const handles: ChannelHandle[] = [];
+    const failures = [deferred<never>(), deferred<never>()];
+    let failureIndex = 0;
+    const factory: ChannelFactory = async () => {
+      const firstChannel = handles.length === 0;
+      const h = makeChannel({
+        sessionIdPrefix: `c${handles.length}`,
+        newSessionImpl: firstChannel
+          ? () => failures[failureIndex++]!.promise
+          : undefined,
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({
+      channelFactory: factory,
+      sessionScope: 'thread',
+    });
+
+    const first = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(handles).toHaveLength(1);
+    expect(handles[0]!.agent.newSessionCalls).toHaveLength(2);
+
+    failures[0]!.reject(new Error('first failed'));
+    await expect(first).rejects.toThrow();
+    expect(handles[0]!.killed).toBe(false);
+
+    failures[1]!.reject(new Error('second failed'));
+    await expect(second).rejects.toThrow();
+    expect(handles[0]!.killed).toBe(true);
+
+    const retry = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(handles).toHaveLength(2);
+    expect(retry.sessionId).toContain('c1');
+  });
+
   it('killAllSync force-kills BOTH the dying channel AND the fresh attach-target (BkUyD overwrite race)', async () => {
     // The killSession → spawnOrAttach race opens a window where two
     // channels are simultaneously "alive" from the daemon's

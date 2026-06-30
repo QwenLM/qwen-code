@@ -186,6 +186,28 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
   });
 
+  it('denies dangling symlink leaves inside memory roots', async () => {
+    const outsideDir = path.join(tempDir, 'outside');
+    await fs.mkdir(outsideDir, { recursive: true });
+
+    const link = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+      'link.md',
+    );
+    await fs.symlink(path.join(outsideDir, 'missing.md'), link);
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot),
+    );
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: link,
+      }),
+    ).resolves.toBe('deny');
+  });
+
   it('allows only read-only shell commands when shell is enabled', async () => {
     const disabled = permissionManager(
       createMemoryScopedAgentConfig({} as Config, projectRoot),

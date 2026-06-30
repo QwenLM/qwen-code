@@ -83,6 +83,11 @@ function realpathExistingOrNew(filePath: string): string | undefined {
     return fs.realpathSync(filePath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
+    try {
+      if (fs.lstatSync(filePath).isSymbolicLink()) return undefined;
+    } catch {
+      // The leaf is truly absent; resolve the closest existing parent.
+    }
     return realpathNewPath(filePath);
   }
 }
