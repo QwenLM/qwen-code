@@ -1022,7 +1022,7 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useApprovalModeCommand(settings, config);
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
-    useEffortCommand(settings, config);
+    useEffortCommand(settings, config, historyManager.addItem);
 
   const auth = useAuthCommand(
     settings,

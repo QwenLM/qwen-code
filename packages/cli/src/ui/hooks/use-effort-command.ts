@@ -8,6 +8,8 @@ import { useState, useCallback } from 'react';
 import type { Config, ReasoningEffort } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { MessageType, type HistoryItemWithoutId } from '../types.js';
+import { t } from '../../i18n/index.js';
 
 interface UseEffortCommandReturn {
   isEffortDialogOpen: boolean;
@@ -18,6 +20,7 @@ interface UseEffortCommandReturn {
 export const useEffortCommand = (
   loadedSettings: LoadedSettings,
   config: Config,
+  addItem?: (item: HistoryItemWithoutId, baseTimestamp: number) => void,
 ): UseEffortCommandReturn => {
   const [isEffortDialogOpen, setIsEffortDialogOpen] = useState(false);
 
@@ -40,11 +43,28 @@ export const useEffortCommand = (
           'model.reasoningEffort',
           effort,
         );
+        // `setReasoningEffort` is a no-op when thinking is explicitly disabled
+        // (`reasoning: false`). Mirror the slash-command path's read-back check
+        // so the dialog doesn't silently close with nothing applied: the tier is
+        // still persisted for future sessions, but tell the user it won't take
+        // effect until thinking is re-enabled.
+        if (addItem && config.getReasoningEffort() !== effort) {
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: t(
+                'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
+                { tier: effort },
+              ),
+            },
+            Date.now(),
+          );
+        }
       } finally {
         setIsEffortDialogOpen(false);
       }
     },
-    [config, loadedSettings],
+    [config, loadedSettings, addItem],
   );
 
   return {

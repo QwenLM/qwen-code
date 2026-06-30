@@ -118,10 +118,17 @@ export const effortCommand: SlashCommand = {
       };
     }
 
+    // Report the requested tier, not an effective one: provider adapters clamp
+    // per active model (e.g. 'max' → 'high' on most Anthropic models, xhigh/max
+    // → HIGH on Gemini), and that resolution happens per request at send time,
+    // so the actual tier on the wire may differ from what's shown here.
     return {
       type: 'message',
       messageType: 'info',
-      content: t('Reasoning effort: {{tier}}', { tier }),
+      content: t(
+        'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
+        { tier },
+      ),
     };
   },
 };

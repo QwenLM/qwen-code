@@ -42,10 +42,13 @@ export function EffortDialog({
     key: tier,
   }));
 
-  const initialIndex = Math.max(
-    0,
-    REASONING_EFFORT_TIERS.indexOf(currentEffort ?? 'high'),
-  );
+  // Only pre-select when an effort is actually configured. When it's unset,
+  // start the cursor at the top (index 0) rather than highlighting 'high',
+  // which would mislead the user into thinking 'high' is their current setting
+  // when in fact the model/provider default applies.
+  const initialIndex = currentEffort
+    ? Math.max(0, REASONING_EFFORT_TIERS.indexOf(currentEffort))
+    : 0;
 
   const handleSelect = useCallback(
     (effort: ReasoningEffort) => {
@@ -86,6 +89,13 @@ export function EffortDialog({
         isFocused
         showNumbers
       />
+      {!currentEffort && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} wrap="truncate">
+            {t('No effort configured — using the model/provider default.')}
+          </Text>
+        </Box>
+      )}
       <Box marginTop={1}>
         <Text color={theme.text.secondary} wrap="truncate">
           {t('(Use Enter to select, Esc to cancel)')}
