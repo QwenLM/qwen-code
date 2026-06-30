@@ -56,6 +56,8 @@ afterEach(() => {
 type UserMessage = Extract<Message, { role: 'user' }>;
 type ToolGroupMessage = Extract<Message, { role: 'tool_group' }>;
 type AssistantMessage = Extract<Message, { role: 'assistant' }>;
+type ThinkingMessage = Extract<Message, { role: 'thinking' }>;
+type PlanMessage = Extract<Message, { role: 'plan' }>;
 
 const userMsg = (id: string): UserMessage => ({
   id,
@@ -71,6 +73,16 @@ const asstMsg = (id: string): AssistantMessage => ({
   id,
   role: 'assistant',
   content: 'answer',
+});
+const thinkingMsg = (id: string): ThinkingMessage => ({
+  id,
+  role: 'thinking',
+  content: 'thinking',
+});
+const planMsg = (id: string): PlanMessage => ({
+  id,
+  role: 'plan',
+  todos: [{ id: 'todo-1', content: 'step one', status: 'pending' }],
 });
 
 function mount(
@@ -193,6 +205,41 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
     click(toggle(c, 'u1'));
     expect(isCollapsed(c, 'g1')).toBe(true);
+  });
+
+  it('renders the session timeline in the left gutter without expanding turns', () => {
+    const c = mount([
+      userMsg('u1'),
+      thinkingMsg('think1'),
+      asstMsg('mid1'),
+      toolMsg('g1'),
+      planMsg('plan1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+
+    const timeline = c.querySelector('[data-testid="session-timeline"]');
+    expect(timeline).not.toBeNull();
+    const entries = Array.from(
+      c.querySelectorAll('[data-testid="session-timeline-entry"]'),
+    );
+    expect(entries.map((entry) => entry.getAttribute('data-turn-id'))).toEqual([
+      'u1',
+      'u2',
+    ]);
+    expect(entries[0]?.getAttribute('data-node-kinds')).toBe(
+      'thought,commentary,tool,plan',
+    );
+    const details = Array.from(
+      c.querySelectorAll('[data-testid="session-timeline-detail"]'),
+    );
+    expect(details).toHaveLength(2);
+    expect(details[0]?.getAttribute('data-detail')).toContain(
+      'thinking · answer · 1 tool call · plan update',
+    );
+    expect(isCollapsed(c, 'g1')).toBe(true);
+    expect(c.querySelector('[data-testid="turn-timeline-row"]')).toBeNull();
   });
 
   it('scrollToMessage auto-expands the collapsed turn that holds the target', () => {

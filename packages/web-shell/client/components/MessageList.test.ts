@@ -4,6 +4,8 @@ import {
   applyTurnCollapse,
   findDisplayItemIndex,
   findTurnIdForIndex,
+  getSessionTimelineEntries,
+  getTurnTimelineNode,
   getDisplayItemVirtualKey,
   groupParallelAgents,
   shouldUseVirtualScroll,
@@ -296,6 +298,135 @@ describe('groupParallelAgents', () => {
     if (items[1].type === 'message') {
       expect(items[1].message.id).toBe('t2');
     }
+  });
+});
+
+describe('getTurnTimelineNode', () => {
+  const item = (message: Message): DisplayItem => ({
+    type: 'message',
+    key: message.id,
+    message,
+  });
+
+  it('classifies thinking blocks as thought nodes', () => {
+    expect(
+      getTurnTimelineNode(item(makeThinkingMessage('think'))),
+    ).toMatchObject({
+      kind: 'thought',
+    });
+  });
+
+  it('classifies mid-turn assistant text as commentary nodes', () => {
+    expect(
+      getTurnTimelineNode(item(makeAssistantMessage('assistant'))),
+    ).toMatchObject({
+      kind: 'commentary',
+    });
+  });
+
+  it('does not add a node to the final assistant answer', () => {
+    expect(
+      getTurnTimelineNode({
+        ...item(makeAssistantMessage('assistant')),
+        turnCollapse: {
+          turnId: 'user',
+          collapsed: false,
+          hiddenCount: 1,
+        },
+      }),
+    ).toMatchObject({
+      kind: 'none',
+    });
+  });
+
+  it('classifies tool groups and plans', () => {
+    expect(
+      getTurnTimelineNode(item(makeMultiToolGroup('tools'))),
+    ).toMatchObject({
+      kind: 'tool',
+      label: '2 tool calls',
+    });
+    expect(getTurnTimelineNode(item(makePlanMessage('plan')))).toMatchObject({
+      kind: 'plan',
+    });
+  });
+
+  it('classifies grouped parallel agents', () => {
+    const [agents] = groupParallelAgents([
+      makeAgentToolGroup('a1', 'Agent', 1000),
+      makeAgentToolGroup('a2', 'Agent', 2000),
+    ]);
+    expect(getTurnTimelineNode(agents)).toMatchObject({
+      kind: 'agents',
+      timestamp: 1000,
+    });
+  });
+
+  it('classifies mid-turn status and ignores plain user rows', () => {
+    expect(
+      getTurnTimelineNode(
+        item({
+          id: 'status',
+          role: 'system',
+          content: 'inserted',
+          variant: 'info',
+          source: 'mid_turn_message_injected',
+        }),
+      ),
+    ).toMatchObject({ kind: 'status' });
+    expect(getTurnTimelineNode(item(makeUserMessage('user')))).toMatchObject({
+      kind: 'none',
+    });
+  });
+});
+
+describe('getSessionTimelineEntries', () => {
+  it('builds one entry per user turn', () => {
+    expect(
+      getSessionTimelineEntries([
+        makeUserMessage('u1'),
+        makeThinkingMessage('think'),
+        makeMultiToolGroup('tools'),
+        makePlanMessage('plan'),
+        makeAssistantMessage('a1'),
+        makeUserMessage('u2'),
+        makeAssistantMessage('a2'),
+      ]),
+    ).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'pondering · 2 tool calls · plan update',
+        timestamp: undefined,
+        nodeKinds: ['thought', 'tool', 'plan'],
+      },
+      {
+        id: 'u2',
+        label: 'hello',
+        detail: 'No activity',
+        timestamp: undefined,
+        nodeKinds: [],
+      },
+    ]);
+  });
+
+  it('keeps mid-turn assistant updates but ignores the final answer', () => {
+    expect(
+      getSessionTimelineEntries([
+        makeUserMessage('u1'),
+        makeAssistantMessage('mid'),
+        makeThinkingMessage('think'),
+        makeAssistantMessage('final'),
+      ]),
+    ).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'response · pondering',
+        timestamp: undefined,
+        nodeKinds: ['commentary', 'thought'],
+      },
+    ]);
   });
 });
 

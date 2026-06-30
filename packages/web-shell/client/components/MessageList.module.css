@@ -69,6 +69,219 @@
   overflow: hidden;
 }
 
+.sessionTimelineLayer {
+  position: sticky;
+  top: 50%;
+  z-index: 4;
+  width: 0 !important;
+  height: 0;
+  margin-right: 0 !important;
+  margin-left: 0 !important;
+  transition: none;
+  pointer-events: none;
+}
+
+.sessionTimelinePanel {
+  position: absolute;
+  top: 0;
+  left: 22px;
+  width: 86px;
+  overflow: visible;
+  color: var(--muted-foreground);
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+
+.sessionTimelineList {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sessionTimelineItem {
+  position: relative;
+  height: 8px;
+}
+
+.sessionTimelineButton {
+  position: relative;
+  top: -4px;
+  display: flex;
+  align-items: center;
+  width: 58px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sessionTimelineButton:focus-visible {
+  outline: none;
+}
+
+.sessionTimelineTick {
+  display: block;
+  width: 12px;
+  height: 4px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--muted-foreground) 30%, transparent);
+  transform-origin: left center;
+  transition:
+    background-color 160ms cubic-bezier(0.25, 1, 0.5, 1),
+    transform 180ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.sessionTimelineButton:hover .sessionTimelineTick,
+.sessionTimelineButton:focus-visible .sessionTimelineTick {
+  background: color-mix(in srgb, var(--foreground) 94%, transparent);
+  transform: scaleX(4.4);
+}
+
+.sessionTimelineItem:has(.sessionTimelineButton:hover)
+  + .sessionTimelineItem
+  .sessionTimelineTick,
+.sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
+  + .sessionTimelineItem
+  .sessionTimelineTick,
+.sessionTimelineItem:has(+ .sessionTimelineItem .sessionTimelineButton:hover)
+  .sessionTimelineTick,
+.sessionTimelineItem:has(
+    + .sessionTimelineItem .sessionTimelineButton:focus-visible
+  )
+  .sessionTimelineTick {
+  transform: scaleX(3.4);
+}
+
+.sessionTimelineItem:has(.sessionTimelineButton:hover)
+  + .sessionTimelineItem
+  + .sessionTimelineItem
+  .sessionTimelineTick,
+.sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
+  + .sessionTimelineItem
+  + .sessionTimelineItem
+  .sessionTimelineTick,
+.sessionTimelineItem:has(
+    + .sessionTimelineItem + .sessionTimelineItem .sessionTimelineButton:hover
+  )
+  .sessionTimelineTick,
+.sessionTimelineItem:has(
+    + .sessionTimelineItem
+      + .sessionTimelineItem
+      .sessionTimelineButton:focus-visible
+  )
+  .sessionTimelineTick {
+  transform: scaleX(2.4);
+}
+
+.sessionTimelineItem:has(.sessionTimelineButton:hover)
+  + .sessionTimelineItem
+  + .sessionTimelineItem
+  + .sessionTimelineItem
+  .sessionTimelineTick,
+.sessionTimelineItem:has(.sessionTimelineButton:focus-visible)
+  + .sessionTimelineItem
+  + .sessionTimelineItem
+  + .sessionTimelineItem
+  .sessionTimelineTick,
+.sessionTimelineItem:has(
+    + .sessionTimelineItem
+      + .sessionTimelineItem
+      + .sessionTimelineItem
+      .sessionTimelineButton:hover
+  )
+  .sessionTimelineTick,
+.sessionTimelineItem:has(
+    + .sessionTimelineItem
+      + .sessionTimelineItem
+      + .sessionTimelineItem
+      .sessionTimelineButton:focus-visible
+  )
+  .sessionTimelineTick {
+  transform: scaleX(1.6);
+}
+
+.sessionTimelineButtonCurrent .sessionTimelineTick {
+  background: color-mix(in srgb, var(--foreground) 82%, transparent);
+}
+
+.sessionTimelineDetails {
+  position: absolute;
+  top: 50%;
+  left: 72px;
+  z-index: 1;
+  box-sizing: border-box;
+  display: grid;
+  gap: 6px;
+  width: min(350px, calc(100vw - 150px));
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--background) 96%, white);
+  box-shadow: 0 10px 28px color-mix(in srgb, black 10%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  transform: translate3d(-8px, -50%, 0) scale(0.985);
+  transform-origin: left center;
+  transition:
+    opacity 160ms cubic-bezier(0.25, 1, 0.5, 1),
+    transform 180ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.sessionTimelineButton:hover .sessionTimelineDetails,
+.sessionTimelineButton:focus-visible .sessionTimelineDetails {
+  opacity: 1;
+  transform: translate3d(0, -50%, 0) scale(1);
+}
+
+.sessionTimelineDetails::before {
+  content: attr(data-title);
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionTimelineDetails::after {
+  content: attr(data-detail);
+  display: -webkit-box;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--muted-foreground) 86%, transparent);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionTimelineTick,
+  .sessionTimelineDetails {
+    transition-duration: 0.01ms;
+  }
+}
+
+@media (max-width: 720px) {
+  .sessionTimelinePanel {
+    display: none;
+  }
+}
+
+@container message-content (width < 1160px) {
+  .sessionTimelinePanel {
+    display: none;
+  }
+}
+
 @keyframes row-flash {
   0%,
   30% {

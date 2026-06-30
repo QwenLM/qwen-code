@@ -99,6 +99,29 @@ export type DisplayItem =
       timestamp?: number;
     };
 
+export type TurnTimelineNodeKind =
+  | 'thought'
+  | 'commentary'
+  | 'tool'
+  | 'agents'
+  | 'plan'
+  | 'status'
+  | 'none';
+
+export interface TurnTimelineNode {
+  kind: TurnTimelineNodeKind;
+  timestamp?: number;
+  label?: string;
+}
+
+export interface SessionTimelineEntry {
+  id: string;
+  label: string;
+  detail: string;
+  timestamp?: number;
+  nodeKinds: TurnTimelineNodeKind[];
+}
+
 function isAgentOnlyToolGroup(msg: Message): boolean {
   return (
     msg.role === 'tool_group' &&
@@ -391,6 +414,206 @@ function isMidTurnInjectedDebugMessage(message: {
       'mid_turn_message_injected (unrecognized daemon event):',
     ) === true
   );
+}
+
+export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
+  if (item.type === 'parallel_agents') {
+    return {
+      kind: 'agents',
+      timestamp: item.timestamp,
+      label: 'Parallel agents',
+    };
+  }
+  if (item.type !== 'message') return { kind: 'none' };
+
+  const { message } = item;
+  switch (message.role) {
+    case 'thinking':
+      return {
+        kind: 'thought',
+        timestamp: message.timestamp,
+        label: 'Thinking',
+      };
+    case 'assistant':
+      if (item.turnCollapse)
+        return { kind: 'none', timestamp: message.timestamp };
+      return {
+        kind: 'commentary',
+        timestamp: message.timestamp,
+        label: 'Assistant update',
+      };
+    case 'tool_group': {
+      const count = message.tools.length;
+      return {
+        kind: 'tool',
+        timestamp: message.timestamp,
+        label: `${count} tool call${count === 1 ? '' : 's'}`,
+      };
+    }
+    case 'plan':
+      return {
+        kind: 'plan',
+        timestamp: message.timestamp,
+        label: 'Plan update',
+      };
+    case 'system':
+      return isMidTurnInjectedDebugMessage(message)
+        ? {
+            kind: 'status',
+            timestamp: message.timestamp,
+            label: 'Status update',
+          }
+        : { kind: 'none', timestamp: message.timestamp };
+    case 'user':
+    case 'user_shell':
+    case 'btw':
+    case 'insight_progress':
+    case 'insight_ready':
+    case 'insight_error':
+      return { kind: 'none', timestamp: message.timestamp };
+    default: {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _exhaustive: never = message;
+      return { kind: 'none' };
+    }
+  }
+}
+
+function compactTimelineText(raw: string, maxLength: number): string {
+  const compact = raw.replace(/\s+/g, ' ').trim();
+  if (!compact) return '';
+  return compact.length > maxLength
+    ? `${compact.slice(0, maxLength - 1)}…`
+    : compact;
+}
+
+function timelineLabelForTurn(message: Message): string {
+  const raw =
+    message.role === 'user'
+      ? message.content
+      : message.role === 'user_shell'
+        ? message.command
+        : '';
+  const compact = compactTimelineText(raw, 32);
+  if (!compact) return 'User turn';
+  return compact;
+}
+
+function isTurnStartMessage(message: Message): boolean {
+  return message.role === 'user' || message.role === 'user_shell';
+}
+
+function timelineDetailSnippetForMessage(message: Message): string {
+  switch (message.role) {
+    case 'thinking':
+    case 'assistant':
+      return compactTimelineText(message.content, 120);
+    case 'tool_group': {
+      const count = message.tools.length;
+      return `${count} tool call${count === 1 ? '' : 's'}`;
+    }
+    case 'plan':
+      return 'plan update';
+    case 'system':
+      return isMidTurnInjectedDebugMessage(message)
+        ? compactTimelineText(message.content, 120)
+        : '';
+    case 'user':
+    case 'user_shell':
+    case 'btw':
+    case 'insight_progress':
+    case 'insight_ready':
+    case 'insight_error':
+      return '';
+    default: {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _exhaustive: never = message;
+      return '';
+    }
+  }
+}
+
+function timelineDetailForTurn(
+  turnItems: readonly Message[],
+  finalAssistantIndex: number,
+  nodeKinds: readonly TurnTimelineNodeKind[],
+): string {
+  const snippets: string[] = [];
+  for (let i = 0; i < turnItems.length; i += 1) {
+    if (i === finalAssistantIndex) continue;
+    const snippet = timelineDetailSnippetForMessage(turnItems[i]!);
+    if (snippet) snippets.push(snippet);
+  }
+
+  const detail = compactTimelineText(snippets.join(' · '), 180);
+  if (detail) return detail;
+  if (nodeKinds.length > 0) {
+    return nodeKinds
+      .map((kind) => SESSION_TIMELINE_KIND_LABEL[kind])
+      .join(' · ');
+  }
+  return 'No activity';
+}
+
+export function getSessionTimelineEntries(
+  messages: readonly Message[],
+): SessionTimelineEntry[] {
+  const entries: SessionTimelineEntry[] = [];
+  let turnStart: Message | null = null;
+  let turnItems: Message[] = [];
+
+  const pushTurn = () => {
+    if (!turnStart) return;
+    let finalAssistantIndex = -1;
+    for (let i = turnItems.length - 1; i >= 0; i -= 1) {
+      const item = turnItems[i];
+      if (
+        item?.role === 'assistant' &&
+        item.content.trim().length > 0 &&
+        !item.isStreaming
+      ) {
+        finalAssistantIndex = i;
+        break;
+      }
+    }
+
+    const nodeKinds: TurnTimelineNodeKind[] = [];
+    for (let i = 0; i < turnItems.length; i += 1) {
+      if (i === finalAssistantIndex) continue;
+      const item = turnItems[i]!;
+      const node = getTurnTimelineNode({
+        type: 'message',
+        key: item.id,
+        message: item,
+      });
+      if (node.kind !== 'none' && !nodeKinds.includes(node.kind)) {
+        nodeKinds.push(node.kind);
+      }
+    }
+
+    entries.push({
+      id: turnStart.id,
+      label: timelineLabelForTurn(turnStart),
+      detail: timelineDetailForTurn(turnItems, finalAssistantIndex, nodeKinds),
+      timestamp: turnStart.timestamp,
+      nodeKinds,
+    });
+  };
+
+  for (const message of messages) {
+    if (isTurnStartMessage(message)) {
+      pushTurn();
+      turnStart = message;
+      turnItems = [];
+      continue;
+    }
+    if (turnStart) {
+      turnItems.push(message);
+    }
+  }
+  pushTurn();
+
+  return entries;
 }
 
 function isExecutionWorkStep(item: DisplayItem): boolean {
@@ -1037,6 +1260,78 @@ const TurnContent = memo(function TurnContent({
   );
 });
 
+const SESSION_TIMELINE_KIND_LABEL: Record<TurnTimelineNodeKind, string> = {
+  thought: 'thinking',
+  commentary: 'assistant update',
+  tool: 'tool calls',
+  agents: 'parallel agents',
+  plan: 'plan update',
+  status: 'status update',
+  none: 'turn',
+};
+
+const SessionTimeline = memo(function SessionTimeline({
+  entries,
+  currentTurnId,
+  onSelect,
+}: {
+  entries: readonly SessionTimelineEntry[];
+  currentTurnId: string | null;
+  onSelect: (turnId: string) => void;
+}) {
+  if (entries.length === 0) return null;
+
+  return (
+    <div className={styles.sessionTimelineLayer} aria-hidden="false">
+      <nav
+        className={styles.sessionTimelinePanel}
+        aria-label="Session timeline"
+        data-testid="session-timeline"
+      >
+        <ol className={styles.sessionTimelineList}>
+          {entries.map((entry, index) => {
+            const isCurrent = entry.id === currentTurnId;
+            const nodeKinds = entry.nodeKinds.join(',');
+            const titleParts = [
+              `Turn ${index + 1}: ${entry.label}`,
+              entry.detail,
+            ];
+            return (
+              <li
+                key={entry.id}
+                className={styles.sessionTimelineItem}
+                data-testid="session-timeline-entry"
+                data-turn-id={entry.id}
+                data-node-kinds={nodeKinds}
+              >
+                <button
+                  type="button"
+                  className={joinClassNames(
+                    styles.sessionTimelineButton,
+                    isCurrent ? styles.sessionTimelineButtonCurrent : undefined,
+                  )}
+                  aria-label={titleParts.join('. ')}
+                  title={titleParts.join(' · ')}
+                  onClick={() => onSelect(entry.id)}
+                >
+                  <span className={styles.sessionTimelineTick} />
+                  <span
+                    className={styles.sessionTimelineDetails}
+                    data-testid="session-timeline-detail"
+                    data-title={entry.label}
+                    data-detail={entry.detail}
+                    aria-hidden="true"
+                  />
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      </nav>
+    </div>
+  );
+});
+
 function joinClassNames(
   ...classNames: Array<string | undefined>
 ): string | undefined {
@@ -1077,6 +1372,14 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     );
     const displayItems = useMemo(
       () => groupParallelAgents(mergedMessages),
+      [mergedMessages],
+    );
+    const sessionTimelineEntries = useMemo(
+      () => getSessionTimelineEntries(mergedMessages),
+      [mergedMessages],
+    );
+    const currentTimelineTurnId = useMemo(
+      () => getLastUserMessageId(mergedMessages),
       [mergedMessages],
     );
     const lastCompletedAssistantId = useMemo(() => {
@@ -1701,6 +2004,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     return (
       <div ref={containerRef} className={styles.list}>
+        <SessionTimeline
+          entries={sessionTimelineEntries}
+          currentTurnId={currentTimelineTurnId}
+          onSelect={scrollToMessage}
+        />
         {useVirtualScroll ? (
           <div
             style={{
