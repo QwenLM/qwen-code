@@ -338,13 +338,7 @@ export abstract class ChannelBase {
           throw new ChannelLoopSkippedError('loop dropped before delivery');
         }
         if (response) {
-          try {
-            await this.pushProactive(job.target, response);
-          } catch (err) {
-            process.stderr.write(
-              `[${this.name}] failed to deliver loop ${job.id} proactively: ${err instanceof Error ? err.message : err}\n`,
-            );
-          }
+          await this.pushProactive(job.target, response);
         }
         return response;
       } finally {
@@ -423,8 +417,6 @@ export abstract class ChannelBase {
     } catch (err) {
       if (err instanceof Error && err.message === 'loop timed out') {
         promptState.cancelled = true;
-        this.bumpSessionGeneration(sessionId);
-        this.onSessionDied(sessionId);
         promptBridge.cancelSession(sessionId).catch((cancelErr) => {
           process.stderr.write(
             `[${this.name}] cancelSession failed for timed out loop ${jobId} in session ${sessionId}: ${
@@ -444,13 +436,6 @@ export abstract class ChannelBase {
   onSessionDied(sessionId: string): void {
     this.router.removeSessionId(sessionId);
     this.instructedSessions.delete(sessionId);
-  }
-
-  private bumpSessionGeneration(sessionId: string): void {
-    this.sessionGenerations.set(
-      sessionId,
-      (this.sessionGenerations.get(sessionId) ?? 0) + 1,
-    );
   }
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {

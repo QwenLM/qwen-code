@@ -73,14 +73,58 @@ describe('ChannelLoopScheduler', () => {
       expect(store.list).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(store.list).toHaveBeenCalledTimes(2);
+      expect(store.list).toHaveBeenCalledTimes(3);
 
       scheduler.stop();
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(store.list).toHaveBeenCalledTimes(2);
+      expect(store.list).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
       scheduler.stop();
+    }
+  });
+
+  it('clears stale running state and logs startup diagnostics', async () => {
+    jobs = [
+      {
+        ...baseJob,
+        runningSince: '2026-06-30T00:59:00.000Z',
+      },
+      {
+        ...baseJob,
+        id: 'job-2',
+        enabled: false,
+      },
+    ];
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs + 60_000),
+      intervalMs: 1_000,
+    });
+
+    vi.useFakeTimers();
+    try {
+      scheduler.start();
+
+      await vi.waitFor(() => {
+        expect(store.update).toHaveBeenCalledWith('job-1', {
+          runningSince: undefined,
+        });
+      });
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[scheduler] started, tick interval 1000ms, jobs 2, enabled 1, cleared stale running 1',
+        ),
+      );
+    } finally {
+      vi.useRealTimers();
+      scheduler.stop();
+      writeSpy.mockRestore();
     }
   });
 
@@ -277,6 +321,9 @@ describe('ChannelLoopScheduler', () => {
   it('records failures and disables a job after repeated errors', async () => {
     jobs = [{ ...baseJob, consecutiveFailures: 4 }];
     runLoopPrompt.mockRejectedValue(new Error('cannot cold send'));
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const scheduler = new ChannelLoopScheduler({
       store,
       channels: new Map([['feishu-main', { runLoopPrompt }]]),
@@ -301,6 +348,12 @@ describe('ChannelLoopScheduler', () => {
       });
     });
     expect(store.disable).not.toHaveBeenCalled();
+    expect(writeSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '[scheduler] loop job-1 auto-disabled after 5 consecutive failures',
+      ),
+    );
+    writeSpy.mockRestore();
   });
 
   it('disables one-shot loops after a failed attempt', async () => {

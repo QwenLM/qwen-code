@@ -5121,6 +5121,63 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('keeps queued user messages after a loop timeout', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(() => new Promise<string>(() => undefined))
+        .mockResolvedValueOnce('user response');
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      vi.useFakeTimers();
+      try {
+        const loopRun = ch.runLoopPrompt(
+          {
+            id: 'job-1',
+            channelName: 'test-chan',
+            target: {
+              channelName: 'test-chan',
+              senderId: 'alice',
+              chatId: 'chat1',
+              isGroup: false,
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            label: 'daily summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Alice',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+            runCount: 0,
+          },
+          { timeoutMs: 1000 },
+        );
+        const loopResult = loopRun.catch((error: unknown) => error);
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        const queuedUserTurn = ch.handleInbound(
+          envelope({ text: 'still here', senderId: 'alice' }),
+        );
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await expect(loopResult).resolves.toMatchObject({
+          message: 'loop timed out',
+        });
+        await queuedUserTurn;
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-1',
+          '[The user sent a new message while you were working. Their previous request has been cancelled.]\n\nstill here',
+          expect.any(Object),
+        );
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'user response' }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('fails a queued loop when the session was cleared before it ran', async () => {
       let resolveFirstPrompt: (value: string) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
@@ -5221,7 +5278,7 @@ describe('ChannelBase', () => {
       expect(ch.proactive).toEqual([]);
     });
 
-    it('evicts the bridge session after a loop timeout', async () => {
+    it('keeps the bridge session after a loop timeout', async () => {
       let rejectLatePrompt: (error: Error) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>)
         .mockImplementationOnce(
@@ -5290,9 +5347,9 @@ describe('ChannelBase', () => {
           runCount: 0,
         });
 
-        expect(bridge.newSession).toHaveBeenCalledTimes(2);
+        expect(bridge.newSession).toHaveBeenCalledTimes(1);
         expect(bridge.prompt).toHaveBeenLastCalledWith(
-          's-2',
+          's-1',
           '[Loop "daily summary" created by Alice]\n\npost again',
           {},
         );
@@ -5345,6 +5402,46 @@ describe('ChannelBase', () => {
       await expect(loopRun).rejects.toThrow('loop cancelled before delivery');
 
       expect(ch.proactive).toEqual([]);
+    });
+
+    it('fails the loop when proactive delivery fails', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        'loop response',
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      vi.spyOn(
+        ch as unknown as {
+          pushProactive: (
+            target: { chatId: string },
+            text: string,
+          ) => Promise<void>;
+        },
+        'pushProactive',
+      ).mockRejectedValue(new Error('api down'));
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow('api down');
     });
 
     it('disables a stored job when its sender is no longer allowed', async () => {

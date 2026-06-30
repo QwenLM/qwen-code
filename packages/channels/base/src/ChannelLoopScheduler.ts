@@ -50,9 +50,12 @@ export class ChannelLoopScheduler {
 
   start(): void {
     if (this.timer) return;
-    void this.tick().catch((err) => {
-      process.stderr.write(`[scheduler] initial tick failed: ${err}\n`);
-    });
+    const startup = this.reconcileStartupState();
+    void startup
+      .then(() => this.tick())
+      .catch((err) => {
+        process.stderr.write(`[scheduler] initial tick failed: ${err}\n`);
+      });
     this.timer = setInterval(() => {
       void this.tick().catch((err) => {
         process.stderr.write(`[scheduler] interval tick failed: ${err}\n`);
@@ -69,6 +72,18 @@ export class ChannelLoopScheduler {
     this.runningTick = undefined;
     this.generation++;
     this.inFlightJobs.clear();
+  }
+
+  private async reconcileStartupState(): Promise<void> {
+    const jobs = await this.store.list();
+    const staleRunning = jobs.filter((job) => job.runningSince);
+    for (const job of staleRunning) {
+      await this.clearRunningSince(job.id);
+    }
+    const enabledCount = jobs.filter((job) => job.enabled).length;
+    process.stderr.write(
+      `[scheduler] started, tick interval ${this.intervalMs}ms, jobs ${jobs.length}, enabled ${enabledCount}, cleared stale running ${staleRunning.length}\n`,
+    );
   }
 
   async tick(): Promise<void> {
@@ -250,6 +265,9 @@ export class ChannelLoopScheduler {
     }
     if (consecutiveFailures >= this.maxConsecutiveFailures) {
       patch.enabled = false;
+      process.stderr.write(
+        `[scheduler] loop ${job.id} auto-disabled after ${consecutiveFailures} consecutive failures\n`,
+      );
     }
     await this.store.update(job.id, patch);
   }
