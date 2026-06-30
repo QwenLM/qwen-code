@@ -2655,7 +2655,7 @@ class QwenAgent implements Agent {
     uiTelemetryService.removeSession(sessionId);
     this.sessions.delete(sessionId);
 
-    if (flushError !== undefined) {
+    if (flushError !== undefined && opts?.requireFlush === true) {
       throw flushError;
     }
   }
