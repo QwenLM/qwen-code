@@ -2038,6 +2038,46 @@ describe('runQwenServe channel worker supervisor', () => {
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
+  it('keeps serve running when worker pidfile metadata cannot be written', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-pidfile-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    pidfile.writeServeServiceInfo.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(worker.start).toHaveBeenCalled();
+      expect(pidfile.writeServeServiceInfo).toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('passes a loopback daemon URL to workers when serve binds a wildcard host', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-loopback-')),
@@ -2186,6 +2226,7 @@ describe('runQwenServe channel worker supervisor', () => {
           expect.objectContaining({
             code: 'channel_worker_exited',
             severity: 'warning',
+            message: 'Channel worker is exited (pid=1234, code=1).',
           }),
         ]),
         runtime: {

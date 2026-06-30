@@ -9,7 +9,9 @@ const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
 const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
 const mockLoadSettings = vi.hoisted(() =>
-  vi.fn(() => ({ merged: { proxy: 'http://settings-proxy:8080' } })),
+  vi.fn((_cwd?: string, _opts?: unknown) => ({
+    merged: { proxy: 'http://settings-proxy:8080' as string | undefined },
+  })),
 );
 const mockResolveProxyUrl = vi.hoisted(() =>
   vi.fn((_cliProxy?: string, settingsProxy?: string) => settingsProxy),
@@ -19,6 +21,24 @@ const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockSanitizeLogText = vi.hoisted(() =>
   vi.fn((value: unknown) => String(value).replace(/[\r\n]/g, ' ')),
 );
+const mockDefaultDaemonClientCapabilities = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({
+    v: 1,
+    mode: 'http-bridge',
+    features: [],
+    modelServices: [],
+    workspaceCwd: '/workspace',
+  }),
+);
+const mockDefaultDaemonClient = vi.hoisted(() =>
+  vi.fn(() => ({
+    capabilities: mockDefaultDaemonClientCapabilities,
+  })),
+);
+const mockDefaultDaemonSessionClient = vi.hoisted(() => ({
+  createOrAttach: vi.fn(),
+  load: vi.fn(),
+}));
 
 const mockBridgeStart = vi.hoisted(() => vi.fn());
 const mockBridgeStop = vi.hoisted(() => vi.fn());
@@ -96,6 +116,11 @@ vi.mock('@qwen-code/channel-base', () => ({
   SessionRouter: mockSessionRouter,
 }));
 
+vi.mock('@qwen-code/sdk/daemon', () => ({
+  DaemonClient: mockDefaultDaemonClient,
+  DaemonSessionClient: mockDefaultDaemonSessionClient,
+}));
+
 import {
   createDaemonChannelBridgeFacade,
   createDaemonSessionFactory,
@@ -158,6 +183,13 @@ function createSdk() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockDefaultDaemonClientCapabilities.mockResolvedValue({
+    v: 1,
+    mode: 'http-bridge',
+    features: [],
+    modelServices: [],
+    workspaceCwd: '/workspace',
+  });
   mockBridgeStart.mockResolvedValue(undefined);
   mockCreateChannel.mockImplementation((name: string) => ({
     connect: vi.fn().mockResolvedValue(undefined),
@@ -181,6 +213,27 @@ function mockProcessExit(): void {
   vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
     throw new Error(`process.exit ${code ?? 0}`);
   }) as never);
+}
+
+function mockProcessExitNoThrow() {
+  return vi
+    .spyOn(process, 'exit')
+    .mockImplementation((() => undefined) as never);
+}
+
+function stubProcessSend(send: NodeJS.Process['send']): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'send');
+  Object.defineProperty(process, 'send', {
+    configurable: true,
+    value: send,
+  });
+  return () => {
+    if (descriptor) {
+      Object.defineProperty(process, 'send', descriptor);
+    } else {
+      delete (process as { send?: NodeJS.Process['send'] }).send;
+    }
+  };
 }
 
 describe('createDaemonSessionFactory', () => {
@@ -297,6 +350,8 @@ describe('runChannelDaemonWorker', () => {
   it('starts selected channels through a daemon-backed bridge facade', async () => {
     const sdk = createSdk();
     const ready = vi.fn();
+    const settings = { merged: { proxy: 'http://settings-proxy:8080' } };
+    mockLoadSettings.mockReturnValueOnce(settings);
 
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
@@ -340,6 +395,10 @@ describe('runChannelDaemonWorker', () => {
       undefined,
       'http://settings-proxy:8080',
     );
+    expect(mockLoadSettings).toHaveBeenCalledWith('/workspace', {
+      skipLoadEnvironment: true,
+    });
+    expect(mockLoadChannelsConfig).toHaveBeenCalledWith('/workspace', settings);
     expect(mockSessionsPath).not.toHaveBeenCalled();
     expect(mockSessionRouter.mock.calls[0]![3]).toBeUndefined();
     expect(ready).toHaveBeenCalledWith({
@@ -473,6 +532,34 @@ describe('runChannelDaemonWorker', () => {
     expect(mockBridgeStop).toHaveBeenCalled();
   });
 
+  it('does not repopulate daemon-private env from worker settings loads', async () => {
+    const sdk = createSdk();
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['QWEN_DAEMON_TOKEN'];
+    mockLoadSettings.mockImplementationOnce((_cwd?: string, opts?: unknown) => {
+      if (
+        !opts ||
+        typeof opts !== 'object' ||
+        !('skipLoadEnvironment' in opts) ||
+        !opts.skipLoadEnvironment
+      ) {
+        process.env['QWEN_SERVER_TOKEN'] = 'restored-server-token';
+      }
+      return { merged: { proxy: undefined } };
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      daemonToken: 'daemon-token',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+  });
+
   it('disconnects a constructed adapter when connect fails', async () => {
     const sdk = createSdk();
     const disconnect = vi.fn();
@@ -586,5 +673,93 @@ describe('daemonWorkerCommand', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       '[Channel] daemon worker failed: QWEN_DAEMON_URL is required.',
     );
+  });
+
+  it('sends ready from the command handler and exits cleanly on SIGTERM', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith({
+          type: 'ready',
+          channels: ['telegram'],
+          pid: process.pid,
+        });
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+
+      expect(mockBridgeStop).toHaveBeenCalled();
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('exits cleanly when the parent IPC disconnects', async () => {
+    const exit = mockProcessExitNoThrow();
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(mockBridgeStart).toHaveBeenCalled();
+      });
+
+      process.emit('disconnect');
+      await handler;
+
+      expect(exit).toHaveBeenCalledWith(0);
+      expect(mockBridgeStop).toHaveBeenCalled();
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('force exits when a second signal arrives during shutdown', async () => {
+    const exit = mockProcessExitNoThrow();
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', '1');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(mockBridgeStart).toHaveBeenCalled();
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      process.emit('SIGINT', 'SIGINT');
+      await handler;
+
+      expect(exit).toHaveBeenNthCalledWith(1, 1);
+    } finally {
+      restoreSend();
+    }
   });
 });

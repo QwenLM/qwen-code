@@ -1791,11 +1791,19 @@ export async function runQwenServe(
   const writeChannelWorkerPidfile = (): void => {
     if (!opts.channelSelection || !channelServicePidfile) return;
     const snapshot = channelWorker.snapshot();
-    channelServicePidfile.writeServeServiceInfo({
-      channels: snapshot.channels,
-      servePid: process.pid,
-      workerPid: snapshot.pid,
-    });
+    try {
+      channelServicePidfile.writeServeServiceInfo({
+        channels: snapshot.channels,
+        servePid: process.pid,
+        workerPid: snapshot.pid,
+      });
+    } catch (err) {
+      daemonLog.warn(
+        `failed to write channel worker pidfile metadata: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   };
 
   const handleBridge =

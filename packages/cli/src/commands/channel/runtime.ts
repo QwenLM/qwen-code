@@ -9,7 +9,7 @@ import type {
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import { sanitizeLogText } from '@qwen-code/channel-base';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from '../extensions/utils.js';
 import { getPlugin, registerPlugin } from './channel-registry.js';
@@ -30,8 +30,8 @@ export function sessionsPath(): string {
 
 export function loadChannelsConfig(
   cwd: string = process.cwd(),
+  settings: LoadedSettings = loadSettings(cwd),
 ): Record<string, unknown> {
-  const settings = loadSettings(cwd);
   const channels = (
     settings.merged as unknown as { channels?: Record<string, unknown> }
   ).channels;

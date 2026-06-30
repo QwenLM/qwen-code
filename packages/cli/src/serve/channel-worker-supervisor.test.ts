@@ -311,6 +311,35 @@ describe('createChannelWorkerSupervisor', () => {
     );
   });
 
+  it('does not throw when onExit bookkeeping fails', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onExit: () => {
+        throw new Error('pidfile cleanup failed');
+      },
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+
+    expect(() => child.emit('exit', 1, null)).not.toThrow();
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'exited',
+      exitCode: 1,
+    });
+  });
+
   it('does not notify onExit when stopping a ready worker intentionally', async () => {
     const child = new FakeChild();
     const onExit = vi.fn();

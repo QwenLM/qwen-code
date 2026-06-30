@@ -108,6 +108,17 @@ function isReadyMessage(
   );
 }
 
+function notifyExit(
+  onExit: ((snapshot: ChannelWorkerSnapshot) => void) | undefined,
+  snapshot: ChannelWorkerSnapshot,
+): void {
+  try {
+    onExit?.(snapshot);
+  } catch {
+    // onExit is bookkeeping; worker exit handling must not crash the daemon.
+  }
+}
+
 function waitForExit(
   child: ChannelWorkerChild,
   timeoutMs: number,
@@ -267,7 +278,7 @@ export function createChannelWorkerSupervisor(
           );
           if (ready && !stopping && !exitNotified) {
             exitNotified = true;
-            opts.onExit?.(snapshotCopy());
+            notifyExit(opts.onExit, snapshotCopy());
           }
           if (!settled) {
             failBeforeReady(new Error(message));

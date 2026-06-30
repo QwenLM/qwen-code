@@ -225,12 +225,14 @@ export async function runChannelDaemonWorker(
   }
 
   await loadChannelsFromExtensions();
-  const settings = loadSettings(daemonWorkspace);
+  const settings = loadSettings(daemonWorkspace, {
+    skipLoadEnvironment: true,
+  });
   const proxy = resolveProxyUrl(
     undefined,
     settings.merged.proxy as string | undefined,
   );
-  const channelsConfig = loadChannelsConfig(daemonWorkspace);
+  const channelsConfig = loadChannelsConfig(daemonWorkspace, settings);
   const names = selectedChannelNames(channelsConfig, opts.selection);
   const parsed = await parseConfiguredChannels(channelsConfig, names, {
     defaultCwd: daemonWorkspace,
@@ -331,7 +333,11 @@ export async function runChannelDaemonWorker(
     };
   } catch (err) {
     disconnectAll();
-    bridge.stop();
+    try {
+      bridge.stop();
+    } catch {
+      // best-effort during startup rollback
+    }
     throw err;
   }
 }
@@ -403,9 +409,15 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       });
 
       let shuttingDown = false;
+      let finish!: () => void;
+      const finished = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
       const shutdown = async (reason: NodeJS.Signals | 'disconnect') => {
         if (shuttingDown) {
           process.exit(1);
+          finish();
+          return;
         }
         shuttingDown = true;
         try {
@@ -421,13 +433,20 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
             `[Channel] daemon worker failed to shut down after ${safeReason}: ${safeMessage}`,
           );
           process.exit(1);
+        } finally {
+          finish();
         }
+      };
+      const onDisconnect = () => {
+        void shutdown('disconnect');
       };
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
-      process.once('disconnect', () => {
-        void shutdown('disconnect');
-      });
+      process.once('disconnect', onDisconnect);
+      await finished;
+      process.removeListener('SIGINT', shutdown);
+      process.removeListener('SIGTERM', shutdown);
+      process.removeListener('disconnect', onDisconnect);
     } catch (err) {
       const safeMessage = sanitizeLogText(
         err instanceof Error ? err.message : String(err),
@@ -436,7 +455,5 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       writeStderrLine(`[Channel] daemon worker failed: ${safeMessage}`);
       process.exit(1);
     }
-
-    await new Promise<void>(() => {});
   },
 };

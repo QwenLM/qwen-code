@@ -507,10 +507,20 @@ function pushRuntimeIssues(
     channelWorker.enabled &&
     (channelWorker.state === 'exited' || channelWorker.state === 'failed')
   ) {
+    const detailParts = [
+      channelWorker.pid !== undefined ? `pid=${channelWorker.pid}` : undefined,
+      channelWorker.exitCode !== undefined
+        ? `code=${channelWorker.exitCode ?? 'null'}`
+        : undefined,
+      channelWorker.signal ? `signal=${channelWorker.signal}` : undefined,
+    ].filter(Boolean);
+    const details =
+      detailParts.length > 0 ? ` (${detailParts.join(', ')})` : '';
+    const error = channelWorker.error ? `: ${channelWorker.error}` : '';
     issues.push({
       code: 'channel_worker_exited',
       severity: 'warning',
-      message: `Channel worker is ${channelWorker.state}.`,
+      message: `Channel worker is ${channelWorker.state}${details}${error}.`,
       section: 'runtime.channelWorker',
     });
   }
