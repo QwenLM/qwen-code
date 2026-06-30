@@ -34,6 +34,7 @@ import type {
   IndividualToolCallDisplay,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
+import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
@@ -333,12 +334,16 @@ export function mapToDisplay(
             ),
             // Full detail for the Ctrl+O transcript (§4.9): derived from the
             // already-persisted functionResponse parts; NOT char-capped (the
-            // bound is whatever core already applied). Used only by the
+            // bound is whatever core already applied). Consumed ONLY by the
             // transcript's fullDetail render for collapsible (read/search/list)
-            // tools whose summary resultDisplay is just a count.
-            detailedDisplay: getToolResponseDisplayText(
-              trackedCall.response.responseParts,
-            ),
+            // tools whose summary resultDisplay is just a count — so gate the
+            // extraction on `isCollapsibleTool(displayName)` to avoid storing a
+            // large (~25K char) string on every edit/write/command/agent call
+            // that the renderer would never use. Mirrors ToolMessage's
+            // `usingDetailedDisplay` gate, which also keys off the display name.
+            detailedDisplay: isCollapsibleTool(displayName)
+              ? getToolResponseDisplayText(trackedCall.response.responseParts)
+              : undefined,
             confirmationDetails: undefined,
           };
         case 'error':

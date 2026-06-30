@@ -688,8 +688,14 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCollapsibleTool(name) &&
     typeof detailedDisplay === 'string' &&
     detailedDisplay.length > 0;
+  // `detailedDisplay` is RAW, un-sanitized tool output (file contents, grep
+  // hits, directory listings). A malicious repo could embed terminal control
+  // sequences (e.g. `\x1b[?1049l` to drop the alt-screen, OSC 52 clipboard
+  // writes) that would execute when the transcript renders the full content
+  // unfiltered. Neutralize them with the same escaper used for agent
+  // names/descriptions above before it reaches `<Text>`.
   const effectiveResultDisplay = usingDetailedDisplay
-    ? detailedDisplay
+    ? escapeAnsiCtrlCodes(detailedDisplay)
     : resultDisplay;
 
   // detailedDisplay is RAW tool output (file content, grep hits, directory

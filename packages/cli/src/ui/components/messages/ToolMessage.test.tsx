@@ -318,6 +318,32 @@ describe('<ToolMessage />', () => {
       expect(output).toContain('heading from file');
     });
 
+    it('escapes ANSI/control sequences in detailedDisplay (no raw injection)', () => {
+      // A malicious file read by a collapsible tool could embed terminal
+      // control sequences; the transcript must render them inert, not execute
+      // them. \x1b[?1049l would drop the alt-screen; OSC 52 writes the
+      // clipboard. After escaping, the raw ESC byte must not survive.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="evil.txt"
+          resultDisplay="Read 1 file"
+          detailedDisplay={'before\x1b[?1049lafter\x1b]52;c;ZXZpbA==\x07end'}
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      // The visible text survives; the raw ESC (\x1b) control byte does not.
+      expect(output).toContain('before');
+      expect(output).toContain('after');
+      expect(output).toContain('end');
+      expect(output).not.toContain('\x1b[?1049l');
+      expect(output).not.toContain('\x1b]52;');
+    });
+
     it('keeps the summary when forced but NOT in fullDetail mode (main-view force)', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage
