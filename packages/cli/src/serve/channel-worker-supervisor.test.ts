@@ -54,6 +54,7 @@ describe('createChannelWorkerSupervisor', () => {
       type: 'ready',
       pid: 54321,
       channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
     });
     await started;
 
@@ -97,6 +98,7 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'running',
       pid: 54321,
       channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
     });
   });
 
@@ -421,9 +423,9 @@ describe('createChannelWorkerSupervisor', () => {
         state: 'exited',
         exitCode: 1,
         signal: null,
-        error: 'ipc failed',
       }),
     );
+    expect(onExit.mock.calls[0]![0]).not.toHaveProperty('error');
   });
 
   it('ignores a late error after a ready worker exit is already recorded', async () => {
@@ -476,6 +478,14 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
     child.emit('error', new Error('ipc failed'));
+
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'running',
+      channels: ['telegram'],
+    });
+    expect(supervisor.snapshot()).not.toHaveProperty('error');
+
     await supervisor.stop();
 
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
@@ -485,7 +495,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
-  it('preserves a ready worker error when force-killing after failed state', async () => {
+  it('force-kills a ready worker after a post-ready error without marking it failed', async () => {
     const child = new FakeChild();
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
@@ -509,10 +519,10 @@ describe('createChannelWorkerSupervisor', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
-      state: 'exited',
+      state: 'stopped',
       signal: 'SIGKILL',
-      error: 'ipc failed',
     });
+    expect(supervisor.snapshot()).not.toHaveProperty('error');
   });
 
   it('kills the worker synchronously on force shutdown', async () => {
@@ -595,12 +605,17 @@ describe('createChannelWorkerSupervisor', () => {
   it('does not report stopped when the worker ignores SIGKILL', async () => {
     vi.useFakeTimers();
     const child = new FakeChild(false);
+    const secondChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(child)
+      .mockReturnValueOnce(secondChild);
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
       daemonUrl: 'http://127.0.0.1:4170',
       workspace: '/workspace',
       selection: { mode: 'all' },
-      spawnWorker: vi.fn(() => child),
+      spawnWorker,
     });
 
     const started = supervisor.start();
@@ -624,6 +639,34 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'failed',
       signal: 'SIGKILL',
       error: 'Channel worker did not exit after SIGKILL.',
+    });
+
+    const restarted = supervisor.start();
+    secondChild.emit('message', {
+      type: 'ready',
+      pid: 22222,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await restarted;
+
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'running',
+      pid: 22222,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+
+    child.emit('exit', 0, null);
+
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'running',
+      pid: 22222,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
     });
   });
 });

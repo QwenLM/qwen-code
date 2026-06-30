@@ -116,6 +116,43 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('warns when a running channel worker only connected part of its requested channels', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          requestedChannels: ['telegram', 'feishu', 'dingtalk'],
+          pid: 1234,
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_partial_connect',
+          severity: 'warning',
+          message:
+            'Channel worker connected 1/3 channel(s). Failed: feishu, dingtalk.',
+          section: 'runtime.channelWorker',
+        }),
+      ]),
+      runtime: {
+        channelWorker: {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          requestedChannels: ['telegram', 'feishu', 'dingtalk'],
+          pid: 1234,
+        },
+      },
+    });
+  });
+
   it('rolls up statuses inside tools, hooks, and extensions', async () => {
     const response = await buildDaemonStatusResponse(
       'full',

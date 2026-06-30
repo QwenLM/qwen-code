@@ -25,6 +25,7 @@ export interface ChannelWorkerSnapshot {
   enabled: boolean;
   state: ChannelWorkerState;
   channels: string[];
+  requestedChannels?: string[];
   pid?: number;
   startedAt?: string;
   exitCode?: number | null;
@@ -99,14 +100,23 @@ function defaultSpawnWorker(
   return child as ChildProcess & ChannelWorkerChild;
 }
 
-function isReadyMessage(
-  message: unknown,
-): message is { type: 'ready'; pid?: number; channels?: string[] } {
+function isReadyMessage(message: unknown): message is {
+  type: 'ready';
+  pid?: number;
+  channels?: string[];
+  requestedChannels?: string[];
+} {
   return (
     typeof message === 'object' &&
     message !== null &&
     (message as { type?: unknown }).type === 'ready'
   );
+}
+
+function requestedChannelNames(
+  selection: ServeChannelSelection,
+): string[] | undefined {
+  return selection.mode === 'names' ? [...selection.names] : undefined;
 }
 
 function notifyExit(
@@ -177,6 +187,9 @@ export function createChannelWorkerSupervisor(
   const snapshotCopy = (): ChannelWorkerSnapshot => ({
     ...snapshot,
     channels: [...snapshot.channels],
+    ...(snapshot.requestedChannels
+      ? { requestedChannels: [...snapshot.requestedChannels] }
+      : {}),
   });
 
   const setExited = (
@@ -218,10 +231,12 @@ export function createChannelWorkerSupervisor(
         workspace: opts.workspace,
         ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
       });
+      const requestedChannels = requestedChannelNames(opts.selection);
       snapshot = {
         enabled: true,
         state: 'starting',
         channels: channelSelectionNames(opts.selection),
+        ...(requestedChannels ? { requestedChannels } : {}),
         startedAt: new Date().toISOString(),
       };
       child = spawnWorker(process.execPath, argv, {
@@ -232,6 +247,7 @@ export function createChannelWorkerSupervisor(
       if (child.pid !== undefined) {
         snapshot = { ...snapshot, pid: child.pid };
       }
+      const startedChild = child;
 
       await new Promise<void>((resolve, reject) => {
         let settled = false;
@@ -242,7 +258,7 @@ export function createChannelWorkerSupervisor(
             clearTimeout(startupTimer);
             startupTimer = undefined;
           }
-          child?.removeListener('message', settleReady);
+          startedChild.removeListener('message', settleReady);
         }
         function failBeforeReady(err: Error) {
           if (settled) return;
@@ -252,24 +268,30 @@ export function createChannelWorkerSupervisor(
         }
         function settleReady(message: unknown) {
           if (settled || !isReadyMessage(message)) return;
+          if (child !== startedChild) return;
           settled = true;
           ready = true;
           cleanupReadyWait();
-          snapshot = {
+          const next: ChannelWorkerSnapshot = {
             ...snapshot,
             state: 'running',
-            pid: message.pid ?? child?.pid,
+            pid: message.pid ?? startedChild.pid,
             channels:
               message.channels && message.channels.length > 0
-                ? message.channels
-                : snapshot.channels,
+                ? [...message.channels]
+                : [...snapshot.channels],
           };
+          if (message.requestedChannels?.length) {
+            next.requestedChannels = [...message.requestedChannels];
+          }
+          snapshot = next;
           resolve();
         }
         function settleExit(
           code: number | null,
           signal: NodeJS.Signals | null,
         ) {
+          if (child !== startedChild) return;
           exitObserved = true;
           const state = ready ? 'exited' : 'failed';
           const message = `Channel worker exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'}).`;
@@ -289,7 +311,8 @@ export function createChannelWorkerSupervisor(
           child = undefined;
         }
         function settleError(err: Error) {
-          if (exitObserved || (settled && child === undefined)) return;
+          if (child !== startedChild || exitObserved) return;
+          if (settled && ready) return;
           snapshot = {
             ...snapshot,
             state: 'failed',
@@ -309,12 +332,14 @@ export function createChannelWorkerSupervisor(
             error,
           };
           failBeforeReady(new Error(error));
-          child?.kill('SIGTERM');
+          if (child === startedChild) {
+            child.kill('SIGTERM');
+          }
         }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
         startupTimer.unref();
-        child!.on('message', settleReady);
-        child!.once('exit', settleExit);
-        child!.once('error', settleError);
+        startedChild.on('message', settleReady);
+        startedChild.once('exit', settleExit);
+        startedChild.once('error', settleError);
       });
     },
     async stop() {
@@ -335,6 +360,8 @@ export function createChannelWorkerSupervisor(
         const killed = waitForExit(child, 2_000);
         child.kill('SIGKILL');
         if (!(await killed)) {
+          child = undefined;
+          stopping = false;
           snapshot = {
             ...snapshot,
             state: 'failed',
@@ -371,7 +398,7 @@ export function createChannelWorkerSupervisor(
       }
     },
     snapshot() {
-      return { ...snapshot, channels: [...snapshot.channels] };
+      return snapshotCopy();
     },
   };
 }

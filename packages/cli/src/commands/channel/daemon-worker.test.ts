@@ -403,6 +403,7 @@ describe('runChannelDaemonWorker', () => {
     expect(mockSessionRouter.mock.calls[0]![3]).toBeUndefined();
     expect(ready).toHaveBeenCalledWith({
       channels: ['telegram'],
+      requestedChannels: ['telegram'],
       pid: process.pid,
     });
 
@@ -641,6 +642,50 @@ describe('runChannelDaemonWorker', () => {
     expect(mockBridgeStop).toHaveBeenCalled();
   });
 
+  it('reports requested channels when only some adapters connect', async () => {
+    const sdk = createSdk();
+    const telegramDisconnect = vi.fn();
+    const feishuDisconnect = vi.fn();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      parsedTelegram,
+      parsedFeishu,
+    ]);
+    mockCreateChannel
+      .mockResolvedValueOnce({
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: telegramDisconnect,
+        name: 'telegram',
+      })
+      .mockResolvedValueOnce({
+        connect: vi.fn().mockRejectedValue(new Error('feishu boom')),
+        disconnect: feishuDisconnect,
+        name: 'feishu',
+      });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(handle.channels).toEqual(['telegram']);
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram', 'feishu'],
+      pid: process.pid,
+    });
+    expect(feishuDisconnect).toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] Failed to connect "feishu": feishu boom',
+    );
+
+    await handle.close();
+    expect(telegramDisconnect).toHaveBeenCalled();
+  });
+
   it('rolls back startup when aborted during channel connect', async () => {
     const sdk = createSdk();
     const controller = new AbortController();
@@ -856,6 +901,7 @@ describe('daemonWorkerCommand', () => {
         expect(send).toHaveBeenCalledWith({
           type: 'ready',
           channels: ['telegram'],
+          requestedChannels: ['telegram'],
           pid: process.pid,
         });
       });

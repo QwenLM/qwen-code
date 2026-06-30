@@ -79,6 +79,7 @@ interface DaemonSdkLike {
 interface ChannelDaemonWorkerReady {
   pid: number;
   channels: string[];
+  requestedChannels: string[];
 }
 
 export interface ChannelDaemonWorkerHandle {
@@ -382,7 +383,11 @@ export async function runChannelDaemonWorker(
       throw new Error('No channels connected.');
     }
 
-    opts.sendReady?.({ channels: connected, pid: process.pid });
+    opts.sendReady?.({
+      channels: connected,
+      requestedChannels: parsed.map((p) => p.name),
+      pid: process.pid,
+    });
 
     return {
       channels: connected,

@@ -64,6 +64,7 @@ export interface DaemonStatusIssue {
     | 'rate_limit_hits'
     | 'workspace_status_unavailable'
     | 'channel_worker_exited'
+    | 'channel_worker_partial_connect'
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed';
   severity: IssueSeverity;
@@ -523,6 +524,27 @@ function pushRuntimeIssues(
       message: `Channel worker is ${channelWorker.state}${details}${error}.`,
       section: 'runtime.channelWorker',
     });
+  }
+
+  if (
+    channelWorker.enabled &&
+    channelWorker.state === 'running' &&
+    channelWorker.requestedChannels !== undefined
+  ) {
+    const connected = new Set(channelWorker.channels);
+    const failed = channelWorker.requestedChannels.filter(
+      (channel) => !connected.has(channel),
+    );
+    if (failed.length > 0) {
+      issues.push({
+        code: 'channel_worker_partial_connect',
+        severity: 'warning',
+        message:
+          `Channel worker connected ${channelWorker.channels.length}/${channelWorker.requestedChannels.length} channel(s). ` +
+          `Failed: ${failed.join(', ')}.`,
+        section: 'runtime.channelWorker',
+      });
+    }
   }
 }
 
