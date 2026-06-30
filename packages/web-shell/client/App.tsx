@@ -932,6 +932,8 @@ export function App({
         ) {
           return;
         }
+        e.stopPropagation();
+        e.preventDefault();
         closeMobileDrawer();
       }
     };

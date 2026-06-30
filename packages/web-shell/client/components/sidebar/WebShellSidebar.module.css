@@ -635,6 +635,8 @@
 
   .sidebar.mobileOpen {
     display: flex;
+    position: relative;
+    z-index: 50;
     width: var(--web-shell-sidebar-width, 260px);
     min-width: var(--web-shell-sidebar-width, 260px);
   }
