@@ -614,20 +614,66 @@ describe('ExitPlanModeTool', () => {
 
       const result = await tool.build(params).execute(signal);
 
-      // Should return plan_summary (NOT rejected) so user is not trapped
+      // Should return plan_summary (NOT rejected) while staying in plan mode.
       expect(result.returnDisplay).toEqual({
         type: 'plan_summary',
-        message: expect.stringContaining('confirm whether to execute'),
+        message: expect.stringContaining('plan mode remains active'),
         plan: params.plan,
       });
+      expect(result.returnDisplay).not.toEqual(
+        expect.objectContaining({ rejected: true }),
+      );
       expect(result.llmContent).toContain('Ask the user');
       // Should NOT set gate pending flags
       expect(gateState.needsUserPending).toBe(false);
       expect(gateState.capEscalationPending).toBe(false);
-      // Should restore to DEFAULT (not pre-plan YOLO) to force confirmation dialog
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+      // Should stay in PLAN mode until the user explicitly approves.
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalledWith(
         ApprovalMode.DEFAULT,
       );
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
+    });
+
+    it('should preserve plan mode when gate is unavailable for a minimal plan', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const gateState = {
+        entryId: 1,
+        reviewCount: 0,
+        gateMode: 'capped' as const,
+        enteredByModel: true,
+        lastFindings: [],
+        capEscalationPending: false,
+        needsUserPending: false,
+      };
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        gateState,
+      );
+      mockedRunPlanApprovalGate.mockResolvedValue({
+        kind: 'unavailable',
+        reason: 'review model timed out',
+      });
+
+      const params: ExitPlanModeParams = {
+        plan: 'x',
+        originalRequest: 'Test minimal fallback',
+      };
+      const signal = new AbortController().signal;
+
+      const result = await tool.build(params).execute(signal);
+
+      expect(result.returnDisplay).toEqual({
+        type: 'plan_summary',
+        message: expect.stringContaining('plan mode remains active'),
+        plan: params.plan,
+      });
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
     });
   });
