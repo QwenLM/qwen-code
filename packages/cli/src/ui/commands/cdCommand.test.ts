@@ -222,6 +222,37 @@ describe('cdCommand', () => {
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
   });
 
+  it('moves to a Windows-style home-relative directory', async () => {
+    const homeSubdir = fs.mkdtempSync(
+      path.join(os.homedir(), `qwen-cd-ok-${process.pid}-`),
+    );
+
+    try {
+      const result = (await cdCommand.action?.(
+        context,
+        `~\\${path.basename(homeSubdir)}`,
+      )) as MessageActionReturn;
+      const realCurrentDir = await realpath(currentDir);
+      const realHomeSubdir = await realpath(homeSubdir);
+
+      expect(relocateWorkingDirectory).toHaveBeenCalledWith(
+        realHomeSubdir,
+        realHomeSubdir,
+      );
+      expect(addWorkingDirectoryChangedContext).toHaveBeenCalledWith(
+        realCurrentDir,
+        realHomeSubdir,
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: `Moved to ${realHomeSubdir}.`,
+      });
+    } finally {
+      fs.rmSync(homeSubdir, { recursive: true, force: true });
+    }
+  });
+
   it('moves to a path with escaped spaces', async () => {
     const spacedDir = path.join(tmpDir, 'space dir');
     fs.mkdirSync(spacedDir);

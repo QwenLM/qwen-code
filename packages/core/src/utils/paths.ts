@@ -84,7 +84,7 @@ export function tildeifyPath(filePath: string): string {
  * @param p - The path to expand.
  * @returns The expanded path.
  */
-export function expandTilde(p: string): string {
+function expandTilde(p: string): string {
   if (!p) {
     return '';
   }
@@ -92,9 +92,12 @@ export function expandTilde(p: string): string {
     return os.homedir();
   }
   if (p === '~/' || p === '~\\') {
-    return os.homedir() + path.sep;
+    return os.homedir();
   }
-  if (p.startsWith('~/') || p.startsWith('~\\')) {
+  if (p.startsWith('~/')) {
+    return path.join(os.homedir(), p.substring(2));
+  }
+  if (p.startsWith('~\\')) {
     return path.join(
       os.homedir(),
       ...p
@@ -115,16 +118,27 @@ export function expandHomeDir(p: string): string {
   if (!p) {
     return '';
   }
-  if (p.toLowerCase().startsWith('%userprofile%')) {
+  const userProfilePrefix = '%userprofile%';
+  const lowerPath = p.toLowerCase();
+  if (lowerPath === userProfilePrefix) {
+    return path.normalize(os.homedir());
+  }
+  if (
+    lowerPath.startsWith(`${userProfilePrefix}/`) ||
+    lowerPath.startsWith(`${userProfilePrefix}\\`)
+  ) {
     return path.normalize(
       path.join(
         os.homedir(),
         ...p
-          .substring('%userprofile%'.length)
+          .substring(userProfilePrefix.length + 1)
           .split(/[/\\]+/)
           .filter(Boolean),
       ),
     );
+  }
+  if (lowerPath.startsWith(userProfilePrefix)) {
+    return path.normalize(os.homedir() + p.substring(userProfilePrefix.length));
   }
   return path.normalize(expandTilde(p));
 }

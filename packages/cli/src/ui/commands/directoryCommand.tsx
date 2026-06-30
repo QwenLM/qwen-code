@@ -11,7 +11,6 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   loadServerHierarchicalMemory,
@@ -75,10 +74,10 @@ function getPathCompletions(
   const trimmed = partial.trim();
   if (!trimmed) return [];
 
-  const expanded = trimmed.startsWith('~')
-    ? trimmed.replace(/^~/, os.homedir())
-    : trimmed;
-  const endsWithSep = expanded.endsWith('/') || expanded.endsWith(path.sep);
+  const inputEndsWithSep = trimmed.endsWith('/') || trimmed.endsWith('\\');
+  const expanded = expandHomeDir(trimmed);
+  const endsWithSep =
+    inputEndsWithSep || expanded.endsWith('/') || expanded.endsWith(path.sep);
   const searchDir = endsWithSep ? expanded : path.dirname(expanded);
   const namePrefix = endsWithSep ? '' : path.basename(expanded);
 

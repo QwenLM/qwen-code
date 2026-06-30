@@ -25,7 +25,6 @@ import {
   isSubpath,
   shortenPath,
   tildeifyPath,
-  expandTilde,
   expandHomeDir,
   getProjectHash,
   _resetValidatePathCacheForTest,
@@ -400,6 +399,11 @@ describe('resolvePath', () => {
     const cwd = process.cwd();
     const result = resolvePath(undefined, 'src/main.ts');
     expect(result).toBe(path.resolve(cwd, 'src/main.ts'));
+  });
+
+  it('resolves empty paths against the provided base directory', () => {
+    const result = resolvePath('/base/dir', '');
+    expect(result).toBe(path.resolve('/base/dir', ''));
   });
 
   it('returns absolute paths unchanged', () => {
@@ -930,35 +934,6 @@ describe('getProjectHash', () => {
   });
 });
 
-describe('expandTilde', () => {
-  const homeDir = os.homedir();
-
-  it('should return empty string for empty input', () => {
-    expect(expandTilde('')).toBe('');
-  });
-
-  it('should expand ~ to home directory', () => {
-    expect(expandTilde('~')).toBe(homeDir);
-  });
-
-  it('should expand ~/path to home directory path', () => {
-    expect(expandTilde('~/documents')).toBe(path.join(homeDir, 'documents'));
-  });
-
-  it('should expand Windows-style ~\\path to home directory path', () => {
-    expect(expandTilde('~\\documents')).toBe(path.join(homeDir, 'documents'));
-  });
-
-  it('should preserve trailing separators for home directory paths', () => {
-    expect(expandTilde('~/')).toBe(homeDir + path.sep);
-    expect(expandTilde('~\\')).toBe(homeDir + path.sep);
-  });
-
-  it('should not expand ~path (no slash)', () => {
-    expect(expandTilde('~documents')).toBe('~documents');
-  });
-});
-
 describe('expandHomeDir', () => {
   const homeDir = os.homedir();
 
@@ -978,6 +953,18 @@ describe('expandHomeDir', () => {
     expect(expandHomeDir('~\\documents')).toBe(path.join(homeDir, 'documents'));
   });
 
+  it('should handle mixed separators in Windows-style tilde paths', () => {
+    expect(expandHomeDir('~\\foo/bar\\baz')).toBe(
+      path.join(homeDir, 'foo', 'bar', 'baz'),
+    );
+  });
+
+  it('should preserve legacy POSIX tilde path semantics', () => {
+    expect(expandHomeDir('~/foo\\bar')).toBe(
+      path.normalize(path.join(homeDir, 'foo\\bar')),
+    );
+  });
+
   it('should not expand ~path (no slash)', () => {
     expect(expandHomeDir('~documents')).toBe('~documents');
   });
@@ -990,6 +977,12 @@ describe('expandHomeDir', () => {
   it('should expand %userprofile%\\path to home directory path', () => {
     const result = expandHomeDir('%userprofile%\\documents');
     expect(result).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should preserve legacy %USERPROFILE% prefix semantics without a separator', () => {
+    expect(expandHomeDir('%USERPROFILE%foo')).toBe(
+      path.normalize(`${homeDir}foo`),
+    );
   });
 
   it('should return regular absolute path unchanged (but normalized)', () => {

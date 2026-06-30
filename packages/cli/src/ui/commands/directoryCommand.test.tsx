@@ -506,6 +506,33 @@ describe('getDirPathCompletions', () => {
       });
     });
 
+    it('should complete Windows-style home-relative paths', () => {
+      const homeSubdir = fs.mkdtempSync(
+        path.join(os.homedir(), `qwen-dir-complete-${process.pid}-`),
+      );
+      const partialName = path.basename(homeSubdir).slice(0, -2);
+
+      try {
+        const results = getDirPathCompletions(`~\\${partialName}`);
+
+        expect(results.length).toBeGreaterThan(0);
+        expect(
+          results.some(
+            (suggestion) => suggestion.value === homeSubdir + path.sep,
+          ),
+        ).toBe(true);
+        results.forEach((suggestion) => {
+          expect(suggestion.isDirectory).toBe(true);
+          expect(path.basename(suggestion.value.slice(0, -1))).toContain(
+            partialName,
+          );
+          expect(suggestion.value.endsWith(path.sep)).toBe(true);
+        });
+      } finally {
+        fs.rmSync(homeSubdir, { recursive: true, force: true });
+      }
+    });
+
     it('should support comma-separated paths with isDirectory flag on last segment', () => {
       const multiPath = `${tempTestDir}, ${tempTestDir}/`;
       const results = getDirPathCompletions(multiPath);
