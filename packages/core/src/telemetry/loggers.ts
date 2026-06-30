@@ -195,6 +195,10 @@ export function logUserPrompt(config: Config, event: UserPromptEvent): void {
     attributes['auth_type'] = event.auth_type;
   }
 
+  if (event.model) {
+    attributes['model'] = event.model;
+  }
+
   if (shouldLogUserPrompts(config)) {
     attributes['prompt'] = event.prompt;
   }

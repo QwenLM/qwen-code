@@ -640,6 +640,11 @@ export async function runNonInteractive(
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
               inlineModelOverride = slashCommandResult.modelOverride;
+              if (inlineModelOverride !== undefined) {
+                debugLogger.debug(
+                  `[runNonInteractive] inline model override captured: ${inlineModelOverride}`,
+                );
+              }
               slashHandled = true;
               break;
             case 'message': {
@@ -850,6 +855,11 @@ export async function runNonInteractive(
       // undefined-clears case) are skipped so they cannot silently revert the
       // submitted prompt to the session model mid-turn.
       const inlineModelOverrideActive = inlineModelOverride !== undefined;
+      if (inlineModelOverrideActive) {
+        debugLogger.debug(
+          `[runNonInteractive] inline model override active for turn: ${inlineModelOverride}`,
+        );
+      }
       // Session-scoped because the synthetic `structured_output` tool can
       // be invoked from EITHER the main assistant-turn loop or from a
       // drain-turn (queued notification / cron prompt); whichever fires

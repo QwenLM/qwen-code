@@ -106,6 +106,35 @@ import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+// The per-turn model override is held in two coupled refs: the model id and a
+// flag marking whether it came from an explicit inline `/model <id> <prompt>`
+// (which must win over skill-tool overrides for the rest of the turn). The two
+// always move together; these helpers are the single place that writes both so
+// the invariant (inline flag true => model id set) can't be broken by editing
+// one ref in isolation, and every set/clear is traceable via debug logs.
+function applyModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+  value: string | undefined,
+  isInline: boolean,
+): void {
+  modelOverrideRef.current = value;
+  inlineActiveRef.current = isInline;
+  debugLogger.debug(
+    `model override ${
+      value === undefined ? 'cleared' : `set to ${value}`
+    } (inline=${isInline})`,
+  );
+}
+
+function clearModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+): void {
+  applyModelOverride(modelOverrideRef, inlineActiveRef, undefined, false);
+}
+
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
@@ -999,8 +1028,12 @@ export const useGeminiStream = (
               // skipped for ToolResult/Retry — persists across the tool loop,
               // then clears on the next user turn.
               if (slashCommandResult.modelOverride) {
-                modelOverrideRef.current = slashCommandResult.modelOverride;
-                inlineModelOverrideActiveRef.current = true;
+                applyModelOverride(
+                  modelOverrideRef,
+                  inlineModelOverrideActiveRef,
+                  slashCommandResult.modelOverride,
+                  true,
+                );
               }
 
               return {
@@ -2182,12 +2215,26 @@ export const useGeminiStream = (
         // explicit inline `/model <id> <prompt>` override: that is a one-off
         // for the original prompt, so a retry reverts to the session model and
         // lets skill-tool overrides apply again.
+        const droppingInlineOverrideOnRetry =
+          submitType === SendMessageType.Retry &&
+          inlineModelOverrideActiveRef.current;
         if (
           submitType !== SendMessageType.Retry ||
           inlineModelOverrideActiveRef.current
         ) {
-          modelOverrideRef.current = undefined;
-          inlineModelOverrideActiveRef.current = false;
+          // The retry re-sends the same prompt on the session model, which may
+          // differ from the one-shot override. Tell the user so the model
+          // switch isn't silent.
+          if (droppingInlineOverrideOnRetry) {
+            addItem(
+              {
+                type: 'info',
+                text: `Inline model override cleared on retry — retrying on the session model (${config.getModel()}).`,
+              },
+              userMessageTimestamp,
+            );
+          }
+          clearModelOverride(modelOverrideRef, inlineModelOverrideActiveRef);
         }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -2276,6 +2323,7 @@ export const useGeminiStream = (
                 prompt_id,
                 config.getContentGeneratorConfig()?.authType,
                 queryToSend,
+                modelOverrideRef.current ?? config.getModel(),
               ),
             );
           }
@@ -2769,11 +2817,21 @@ export const useGeminiStream = (
       // turn, so skip skill-tool writes (including the undefined-clears case)
       // while it is active.
       for (const toolCall of geminiTools) {
-        if (
-          !inlineModelOverrideActiveRef.current &&
-          'modelOverride' in toolCall.response
-        ) {
-          modelOverrideRef.current = toolCall.response.modelOverride;
+        if ('modelOverride' in toolCall.response) {
+          if (inlineModelOverrideActiveRef.current) {
+            debugLogger.debug(
+              `skill-tool model override (${String(
+                toolCall.response.modelOverride,
+              )}) blocked: inline override active`,
+            );
+          } else {
+            applyModelOverride(
+              modelOverrideRef,
+              inlineModelOverrideActiveRef,
+              toolCall.response.modelOverride,
+              false,
+            );
+          }
         }
       }
 
