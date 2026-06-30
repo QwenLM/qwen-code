@@ -242,13 +242,14 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         proxy: settingsProxy,
-        scheduleController: {
+        scheduleController: expect.objectContaining({
           create: expect.any(Function),
           createForTarget: expect.any(Function),
           listForTarget: expect.any(Function),
           disable: expect.any(Function),
           validateCron: expect.any(Function),
-        },
+          nextFireTime: expect.any(Function),
+        }),
       }),
     );
   });
