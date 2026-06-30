@@ -27,7 +27,7 @@ const SENSITIVE_KEY_PATTERNS = [
   /apikey/i,
   /api[_-]?key/i,
   /secret/i,
-  /token/i,
+  /(?:^|\.)token(?:$|\.)/i,
   /password/i,
   /credential/i,
   /private[_-]?key/i,
@@ -58,6 +58,8 @@ function findClosestKey(input: string): string | undefined {
   let bestDistance = Infinity;
 
   for (const key of allKeys) {
+    const def = getSettingDefinition(key);
+    if (!def || !SETTABLE_TYPES.has(def.type)) continue;
     const distance = levenshteinDistance(
       input.toLowerCase(),
       key.toLowerCase(),
@@ -98,14 +100,9 @@ function levenshteinDistance(a: string, b: string): number {
 function coerceValue(
   def: SettingDefinition,
   rawValue: string | undefined,
-  isToggle: boolean,
-  currentValue: unknown,
 ): { value: unknown; error?: string } {
   switch (def.type) {
     case 'boolean': {
-      if (isToggle) {
-        return { value: !currentValue };
-      }
       const normalised = rawValue?.toLowerCase().trim();
       if (normalised === 'true' || normalised === '1') return { value: true };
       if (normalised === 'false' || normalised === '0') return { value: false };
@@ -118,14 +115,6 @@ function coerceValue(
     }
 
     case 'number': {
-      if (isToggle) {
-        return {
-          value: undefined,
-          error: t(
-            'Cannot toggle a number setting. Provide a value: key=<number>.',
-          ),
-        };
-      }
       if (!rawValue || rawValue.trim() === '') {
         return {
           value: undefined,
@@ -151,14 +140,6 @@ function coerceValue(
     }
 
     case 'string': {
-      if (isToggle) {
-        return {
-          value: undefined,
-          error: t(
-            'Cannot toggle a string setting. Provide a value: key=<value>.',
-          ),
-        };
-      }
       const strValue = rawValue ?? '';
       const validationError = validateSettingValue(def, strValue);
       if (validationError) {
@@ -168,17 +149,6 @@ function coerceValue(
     }
 
     case 'enum': {
-      if (isToggle) {
-        return {
-          value: undefined,
-          error: t(
-            'Cannot toggle an enum setting. Provide one of: {{options}}.',
-            {
-              options: def.options?.map((o) => o.value).join(', ') ?? '',
-            },
-          ),
-        };
-      }
       const validValues = def.options?.map((o) => o.value) ?? [];
       if (!validValues.includes(rawValue as never)) {
         return {
@@ -324,7 +294,38 @@ export const configCommand: SlashCommand = {
       };
     }
 
-    const result = coerceValue(def, rawValue, isToggle, currentValue);
+    if (isToggle && def.type === 'boolean') {
+      const newValue = !currentValue;
+      try {
+        context.services.settings.setValues([
+          { scope: SettingScope.User, key, value: newValue },
+        ]);
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Failed to set "{{key}}": {{error}}', {
+            key,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        };
+      }
+      let message = t('Set {{key}} = {{value}}', {
+        key,
+        value: String(newValue),
+      });
+      if (def.requiresRestart) {
+        message +=
+          '\n' + t('(This setting requires a restart to take effect.)');
+      }
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: message,
+      };
+    }
+
+    const result = coerceValue(def, rawValue);
     if (result.error) {
       return {
         type: 'message',
@@ -334,7 +335,9 @@ export const configCommand: SlashCommand = {
     }
 
     try {
-      context.services.settings.setValue(SettingScope.User, key, result.value);
+      context.services.settings.setValues([
+        { scope: SettingScope.User, key, value: result.value },
+      ]);
     } catch (error) {
       return {
         type: 'message',
@@ -348,7 +351,7 @@ export const configCommand: SlashCommand = {
 
     const displayValue = isSensitiveKey(key)
       ? maskValue(result.value)
-      : JSON.stringify(result.value);
+      : formatValue(result.value);
     let message = t('Set {{key}} = {{value}}', {
       key,
       value: displayValue,

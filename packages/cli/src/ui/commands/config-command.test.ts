@@ -10,10 +10,10 @@ import { CommandKind } from './types.js';
 import type { CommandContext } from './types.js';
 
 function createMockContext(mergedSettings: Record<string, unknown> = {}) {
-  const setValueMock = vi.fn();
+  const setValuesMock = vi.fn();
   const mockSettings = {
     merged: mergedSettings,
-    setValue: setValueMock,
+    setValues: setValuesMock,
   };
 
   const ctx = {
@@ -24,7 +24,7 @@ function createMockContext(mergedSettings: Record<string, unknown> = {}) {
     },
   } as unknown as CommandContext;
 
-  return { ctx, setValueMock };
+  return { ctx, setValuesMock };
 }
 
 describe('configCommand', () => {
@@ -45,7 +45,7 @@ describe('configCommand', () => {
 
   describe('set boolean value', () => {
     it('sets a boolean setting to true', async () => {
-      const { ctx, setValueMock } = createMockContext({
+      const { ctx, setValuesMock } = createMockContext({
         general: { vimMode: false },
       });
       const result = await configCommand.action!(ctx, 'general.vimMode=true');
@@ -55,15 +55,13 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('general.vimMode'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.vimMode',
-        true,
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'general.vimMode', value: true },
+      ]);
     });
 
     it('sets a boolean setting to false', async () => {
-      const { ctx, setValueMock } = createMockContext({
+      const { ctx, setValuesMock } = createMockContext({
         general: { vimMode: true },
       });
       const result = await configCommand.action!(ctx, 'general.vimMode=false');
@@ -73,15 +71,13 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('false'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.vimMode',
-        false,
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'general.vimMode', value: false },
+      ]);
     });
 
     it('accepts case-insensitive boolean values', async () => {
-      const { ctx, setValueMock } = createMockContext({});
+      const { ctx, setValuesMock } = createMockContext({});
       const result = await configCommand.action!(ctx, 'general.vimMode=True');
 
       expect(result).toEqual({
@@ -89,15 +85,13 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('general.vimMode'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.vimMode',
-        true,
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'general.vimMode', value: true },
+      ]);
     });
 
     it('accepts 1 and 0 as boolean values', async () => {
-      const { ctx, setValueMock } = createMockContext({});
+      const { ctx, setValuesMock } = createMockContext({});
 
       const result1 = await configCommand.action!(ctx, 'general.vimMode=1');
       expect(result1).toEqual({
@@ -105,11 +99,9 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('general.vimMode'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.vimMode',
-        true,
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'general.vimMode', value: true },
+      ]);
 
       const result0 = await configCommand.action!(ctx, 'general.vimMode=0');
       expect(result0).toEqual({
@@ -117,17 +109,15 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('general.vimMode'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.vimMode',
-        false,
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'general.vimMode', value: false },
+      ]);
     });
   });
 
   describe('toggle boolean', () => {
     it('toggles a boolean from false to true', async () => {
-      const { ctx, setValueMock } = createMockContext({
+      const { ctx, setValuesMock } = createMockContext({
         general: { vimMode: false },
       });
       const result = await configCommand.action!(ctx, 'general.vimMode');
@@ -137,15 +127,13 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('true'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.vimMode',
-        true,
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'general.vimMode', value: true },
+      ]);
     });
 
     it('toggles a boolean from true to false', async () => {
-      const { ctx, setValueMock } = createMockContext({
+      const { ctx, setValuesMock } = createMockContext({
         general: { vimMode: true },
       });
       const result = await configCommand.action!(ctx, 'general.vimMode');
@@ -155,11 +143,9 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('false'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.vimMode',
-        false,
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'general.vimMode', value: false },
+      ]);
     });
 
     it('toggles undefined boolean to true', async () => {
@@ -189,7 +175,7 @@ describe('configCommand', () => {
 
   describe('enum settings', () => {
     it('sets a valid enum value', async () => {
-      const { ctx, setValueMock } = createMockContext({});
+      const { ctx, setValuesMock } = createMockContext({});
       const result = await configCommand.action!(
         ctx,
         'tools.approvalMode=auto',
@@ -200,11 +186,9 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('auto'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'tools.approvalMode',
-        'auto',
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'tools.approvalMode', value: 'auto' },
+      ]);
     });
 
     it('returns error for invalid enum value', async () => {
@@ -235,7 +219,7 @@ describe('configCommand', () => {
 
   describe('string settings', () => {
     it('sets a string value', async () => {
-      const { ctx, setValueMock } = createMockContext({});
+      const { ctx, setValuesMock } = createMockContext({});
       const result = await configCommand.action!(
         ctx,
         'general.preferredEditor=vim',
@@ -246,11 +230,9 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('vim'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.preferredEditor',
-        'vim',
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'general.preferredEditor', value: 'vim' },
+      ]);
     });
 
     it('shows current value when toggling string', async () => {
@@ -272,7 +254,7 @@ describe('configCommand', () => {
 
   describe('number settings', () => {
     it('sets a number value', async () => {
-      const { ctx, setValueMock } = createMockContext({});
+      const { ctx, setValuesMock } = createMockContext({});
       const result = await configCommand.action!(
         ctx,
         'general.sessionRecapAwayThresholdMinutes=10',
@@ -283,11 +265,13 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('10'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'general.sessionRecapAwayThresholdMinutes',
-        10,
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        {
+          scope: 'User',
+          key: 'general.sessionRecapAwayThresholdMinutes',
+          value: 10,
+        },
+      ]);
     });
 
     it('returns error for invalid number value', async () => {
@@ -502,7 +486,7 @@ describe('configCommand', () => {
 
   describe('whitespace handling', () => {
     it('trims whitespace from value after = sign', async () => {
-      const { ctx, setValueMock } = createMockContext({});
+      const { ctx, setValuesMock } = createMockContext({});
       const result = await configCommand.action!(
         ctx,
         'tools.approvalMode= auto ',
@@ -513,21 +497,19 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('auto'),
       });
-      expect(setValueMock).toHaveBeenCalledWith(
-        'User',
-        'tools.approvalMode',
-        'auto',
-      );
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'tools.approvalMode', value: 'auto' },
+      ]);
     });
   });
 
   describe('setValue error handling', () => {
-    it('returns error message when setValue throws', async () => {
+    it('returns error message when setValues throws', async () => {
       const { ctx } = createMockContext({});
       const settings = ctx.services.settings as unknown as {
-        setValue: ReturnType<typeof vi.fn>;
+        setValues: ReturnType<typeof vi.fn>;
       };
-      settings.setValue.mockImplementation(() => {
+      settings.setValues.mockImplementation(() => {
         throw new Error('Permission denied');
       });
 
