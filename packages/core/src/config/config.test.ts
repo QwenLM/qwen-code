@@ -374,11 +374,36 @@ describe('matchesServerPattern', () => {
     expect(matchesServerPattern('myXserver', 'my.server')).toBe(false);
     expect(matchesServerPattern('a+b', 'a+b')).toBe(true);
     expect(matchesServerPattern('a^b', 'a^b')).toBe(true);
+    expect(matchesServerPattern('a$b', 'a$b')).toBe(true);
+    expect(matchesServerPattern('aXb', 'a$b')).toBe(false);
   });
 
   it('combines glob with exact segments', () => {
     expect(matchesServerPattern('foo-bar-baz', 'foo-*-baz')).toBe(true);
     expect(matchesServerPattern('foo-bar-qux', 'foo-*-baz')).toBe(false);
+  });
+
+  it('handles empty name', () => {
+    expect(matchesServerPattern('', '*')).toBe(true);
+    expect(matchesServerPattern('', '?')).toBe(false);
+    expect(matchesServerPattern('', '')).toBe(true);
+  });
+
+  it('handles consecutive * in pattern', () => {
+    expect(matchesServerPattern('puppeteer', '**puppeteer**')).toBe(true);
+    expect(matchesServerPattern('abc', 'a**c')).toBe(true);
+  });
+
+  it('handles ? at pattern boundaries', () => {
+    expect(matchesServerPattern('abc', '?bc')).toBe(true);
+    expect(matchesServerPattern('abc', 'ab?')).toBe(true);
+    expect(matchesServerPattern('abc', '???')).toBe(true);
+    expect(matchesServerPattern('ab', '???')).toBe(false);
+  });
+
+  it('rejects when pattern is longer than name', () => {
+    expect(matchesServerPattern('ab', 'a*b*c')).toBe(false);
+    expect(matchesServerPattern('abc', 'a*b*c')).toBe(true);
   });
 });
 
@@ -1139,14 +1164,24 @@ describe('Server Config (config.ts)', () => {
         'puppeteer',
         'my-puppeteer-server',
       ]);
+      expect(Object.keys(result!)).not.toContain('playwright');
     });
 
     it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
-      const config = new Config({ ...baseParams });
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          'my-puppeteer': srvA,
+          playwright: srvB,
+        },
+      });
       config.setExcludedMcpServers(['*puppeteer*']);
       expect(config.isMcpServerDisabled('puppeteer')).toBe(true);
       expect(config.isMcpServerDisabled('my-puppeteer')).toBe(true);
       expect(config.isMcpServerDisabled('playwright')).toBe(false);
+      expect(config.getMcpServers()!['puppeteer']).toBeDefined();
+      expect(config.getMcpServers()!['my-puppeteer']).toBeDefined();
     });
 
     it('getMcpServerUnavailableReason classifies by glob match', async () => {
@@ -1196,6 +1231,41 @@ describe('Server Config (config.ts)', () => {
       expect(
         config.getMcpServerUnavailableReason('playwright'),
       ).toBeUndefined();
+    });
+
+    it('exclude takes precedence when both lists use globs', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { puppeteer: srvA, playwright: srvB },
+      });
+      await config.reinitializeMcpServers({
+        puppeteer: srvA,
+        playwright: srvB,
+      });
+
+      config.setAllowedMcpServers(['*puppeteer*']);
+      config.setExcludedMcpServers(['puppeteer']);
+      expect(config.getMcpServerUnavailableReason('puppeteer')).toBe(
+        'excluded',
+      );
+      expect(config.isMcpServerDisabled('puppeteer')).toBe(true);
+    });
+
+    it('getBlockedMcpServers returns servers not matching allowed glob', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          'my-puppeteer': srvA,
+          playwright: srvB,
+        },
+      });
+      config.setAllowedMcpServers(['*puppeteer*']);
+      const blocked = config.getBlockedMcpServers();
+      const blockedNames = blocked.map((s) => s.name);
+      expect(blockedNames).toContain('playwright');
+      expect(blockedNames).not.toContain('puppeteer');
+      expect(blockedNames).not.toContain('my-puppeteer');
     });
   });
 
