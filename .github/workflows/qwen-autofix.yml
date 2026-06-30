@@ -93,9 +93,8 @@ jobs:
           FORCED_PR: '${{ inputs.pr_number }}'
           EVENT_NAME: '${{ github.event_name }}'
           BUG_LABEL: 'type/bug'
-          ISSUE_IS_BUG: "${{ contains(github.event.issue.labels.*.name, 'type/bug') }}"
-          ISSUE_IS_READY: "${{ contains(github.event.issue.labels.*.name, 'status/ready-for-agent') }}"
           ISSUE_LABEL: '${{ github.event.label.name }}'
+          ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
           ISSUE_STATE: '${{ github.event.issue.state }}'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
@@ -118,9 +117,15 @@ jobs:
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
-                if [[ "${ISSUE_STATE}" == 'open' && "${ISSUE_IS_BUG}" == 'true' && "${ISSUE_IS_READY}" == 'true' ]] \
+                issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                label_is_trigger=false
+                [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" ]] && label_is_trigger=true
+                if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_bug}" == 'true' && "${issue_is_ready}" == 'true' ]] \
                   && [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" ]]; then
                   DO_ISSUE=true
+                else
+                  echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} trigger_label=${label_is_trigger} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                 fi
               fi
               ;;
@@ -210,6 +215,11 @@ jobs:
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             elif [[ "$(jq -r '.state // ""' "${forced_issue_json}")" != 'OPEN' ]]; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} is not open; skipping."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            elif ! jq -e --arg bug "${BUG_LABEL}" --arg ready "${READY_FOR_AGENT_LABEL}" \
+              '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))' \
+              "${forced_issue_json}" > /dev/null; then
+              echo "⏭️ Forced issue #${FORCED_ISSUE} is missing ${BUG_LABEL} or ${READY_FOR_AGENT_LABEL}; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             else
               if ! jq -c '[. + {autofixTier: 0}]' "${forced_issue_json}" > "${WORKDIR}/candidates.json"; then

@@ -63,6 +63,30 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('-label:${READY_FOR_AGENT_LABEL}');
   });
 
+  it('keeps label-triggered issue routing guarded and diagnosable', () => {
+    expect(workflow).toContain(
+      "ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'",
+    );
+    expect(workflow).toContain(
+      'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
+    );
+    expect(workflow).toContain('bug=${issue_is_bug}');
+    expect(workflow).toContain('ready=${issue_is_ready}');
+    expect(workflow).toContain('trigger_label=${label_is_trigger}');
+    expect(workflow).toContain(
+      '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))',
+    );
+    expect(workflow).toContain(
+      'is missing ${BUG_LABEL} or ${READY_FOR_AGENT_LABEL}; skipping.',
+    );
+    expect(workflow).not.toContain(
+      "contains(github.event.issue.labels.*.name, 'type/bug')",
+    );
+    expect(workflow).not.toContain(
+      "contains(github.event.issue.labels.*.name, 'status/ready-for-agent')",
+    );
+  });
+
   it('checks unattended filtering uses maintainer association gates', () => {
     expect(filterUnattendedCandidates.length).toBeGreaterThan(0);
     expect(filterUnattendedCandidates).toContain('authorAssociation');
