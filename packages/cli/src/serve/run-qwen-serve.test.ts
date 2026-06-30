@@ -663,6 +663,79 @@ describe('runQwenServe TLS (--tls-cert / --tls-key)', () => {
     }
   });
 
+  it('rejects an unparseable certificate at boot', async () => {
+    // A readable file whose contents aren't a valid PEM cert must hit the
+    // X509Certificate parse catch and surface the framed message rather than
+    // a raw OpenSSL string.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, 'not a real certificate');
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            tlsCert: certPath,
+            tlsKey: keyPath,
+          },
+          { bridge: minimalBridge() },
+        ),
+      ).rejects.toThrow(/is not a valid certificate/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects a cert/key mismatch at boot', async () => {
+    // TEST_TLS_CERT and TEST_TLS_KEY_EXPIRED come from different keypairs, so
+    // https.createServer's createSecureContext throws a raw OpenSSL
+    // key-values-mismatch string. Assert it's wrapped into the actionable
+    // "could not be loaded (do they match?)" framing.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY_EXPIRED);
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            tlsCert: certPath,
+            tlsKey: keyPath,
+          },
+          { bridge: minimalBridge() },
+        ),
+      ).rejects.toThrow(/could not be loaded/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
   it('serves over https when both cert and key are valid', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),

@@ -251,16 +251,19 @@ By default the daemon serves plain HTTP. That's fine on `localhost`, but a phone
 #    also trust this CA — mkcert prints where the root cert lives.
 mkcert -install
 
-# 2. Generate a cert for your machine's LAN IP.
-mkcert 192.168.1.100
+# 2. Generate a cert for your machine's LAN IP. Add localhost / 127.0.0.1 to
+#    the SANs too: with `--open`, the daemon rewrites the browser URL to
+#    127.0.0.1, so a cert scoped to only the LAN IP would be rejected with
+#    ERR_CERT_COMMON_NAME_INVALID. (mkcert names the output after all hosts.)
+mkcert 192.168.1.100 localhost 127.0.0.1
 
 # 3. Start the daemon over HTTPS. Non-loopback binds still require a token,
 #    and the browser Origin must be allowed through CORS.
 qwen serve \
   --hostname 0.0.0.0 \
   --token "$(openssl rand -hex 32)" \
-  --tls-cert ./192.168.1.100.pem \
-  --tls-key ./192.168.1.100-key.pem \
+  --tls-cert "./192.168.1.100+2.pem" \
+  --tls-key "./192.168.1.100+2-key.pem" \
   --allow-origin "https://192.168.1.100:4170"
 # → qwen serve listening on https://0.0.0.0:4170
 ```

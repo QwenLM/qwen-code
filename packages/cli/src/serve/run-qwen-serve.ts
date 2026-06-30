@@ -1196,10 +1196,22 @@ export async function runQwenServe(
           `${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    if (new Date(x509.validTo).getTime() < Date.now()) {
+    const now = Date.now();
+    if (new Date(x509.validTo).getTime() < now) {
       throw new Error(
         `--tls-cert "${opts.tlsCert}" expired on ${x509.validTo}. ` +
           `Renew the certificate and restart.`,
+      );
+    }
+    // Symmetric to the expiry guard: a cert whose validity window hasn't
+    // started yet (notBefore > now, e.g. clock skew or a freshly minted
+    // cert) also boots cleanly but fails every handshake client-side with
+    // NET::ERR_CERT_DATE_INVALID. Fail loud here too.
+    if (new Date(x509.validFrom).getTime() > now) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" is not yet valid (validFrom: ` +
+          `${x509.validFrom}). Check the certificate's notBefore date or ` +
+          `the system clock.`,
       );
     }
     tlsOptions = { cert, key };

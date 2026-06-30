@@ -672,6 +672,17 @@ export function mountAcpHttp(
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        // RFC 7230 §5.4: browsers omit the port suffix when it matches the
+        // scheme default (http→80, https→443). On TLS/port 443 the browser
+        // sends `Host: localhost`, which won't match `localhost:443` and
+        // every WS upgrade is rejected. Mirror the REST host allowlist
+        // (auth.ts) and accept the port-less forms on default ports.
+        if (localPort === 80 || localPort === 443) {
+          allowed.add('localhost');
+          allowed.add('127.0.0.1');
+          allowed.add('[::1]');
+          allowed.add('host.docker.internal');
+        }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
