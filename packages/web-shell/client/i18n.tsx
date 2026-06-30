@@ -453,8 +453,6 @@ const EN: Messages = {
   'queue.insertCommandDisabled':
     "Commands can't be inserted into the running turn; they run after it finishes.",
   'queue.insertFailed': 'Failed to insert queued message',
-  'queue.footer':
-    'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
   'queue.more': (v) => `... (+${v?.count ?? 0} more)`,
   'midTurn.inserted': (v) => `Inserted message: ${v?.message ?? ''}`,
@@ -1643,7 +1641,6 @@ const ZH: Messages = {
   'queue.insert': '插入',
   'queue.insertCommandDisabled': '命令无法插入当前回合，会在回合结束后执行。',
   'queue.insertFailed': '插入排队消息失败',
-  'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
   'queue.more': (v) => `...（还有 ${v?.count ?? 0} 条）`,
   'midTurn.inserted': (v) => `已插入消息：${v?.message ?? ''}`,

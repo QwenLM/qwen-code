@@ -289,9 +289,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
               >
                 {modeIndicator.label}
               </span>
-              {!compact && (
-                <span className={styles.modeHint}>{t('status.modeHint')}</span>
-              )}
+              <span className={styles.modeHint}>{t('status.modeHint')}</span>
             </button>
           )}
           {!compact && (

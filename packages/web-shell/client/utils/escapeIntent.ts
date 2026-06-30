@@ -3,6 +3,14 @@
 // without mounting the whole app. The listener owns the side effects (timers,
 // cancel/clear handlers); this module only decides what a press means.
 
+/**
+ * Confirm windows for the two-press Escape gesture, in milliseconds. The cancel
+ * window also drives the countdown ring's animation duration (passed to CSS as a
+ * custom property), so it stays the single source of truth for that timing.
+ */
+export const ESC_CANCEL_CONFIRM_WINDOW_MS = 2000;
+export const ESC_CLEAR_CONFIRM_WINDOW_MS = 500;
+
 export type EscArmedAction = 'cancel' | 'clear';
 
 export interface EscapeContext {

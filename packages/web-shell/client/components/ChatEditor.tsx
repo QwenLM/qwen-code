@@ -32,6 +32,7 @@ import {
 } from '../hooks/useComposerCore';
 import { ModeIcon } from './ModeIcon';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { ESC_CANCEL_CONFIRM_WINDOW_MS } from '../utils/escapeIntent';
 import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
 
@@ -1557,6 +1558,13 @@ export const ChatEditor = memo(
                   }
                   disabled={
                     isRunning ? !onCancel : core.disabled || !core.hasContent
+                  }
+                  style={
+                    isRunning && cancelArmed
+                      ? ({
+                          '--esc-countdown-duration': `${ESC_CANCEL_CONFIRM_WINDOW_MS}ms`,
+                        } as CSSProperties)
+                      : undefined
                   }
                   onClick={(e) => {
                     e.stopPropagation();

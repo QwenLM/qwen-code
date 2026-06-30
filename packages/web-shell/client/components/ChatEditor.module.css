@@ -996,8 +996,9 @@
   initial-value: 100%;
 }
 
-/* Countdown ring around the armed button. Its duration matches
-   ESC_CANCEL_CONFIRM_WINDOW_MS in App.tsx — keep the two in sync. */
+/* Countdown ring around the armed button. Its duration comes from
+   --esc-countdown-duration, set by ChatEditor from ESC_CANCEL_CONFIRM_WINDOW_MS,
+   so the JS confirm window is the single source of truth (fallback below). */
 .sendBtnArmed::after {
   content: '';
   position: absolute;
@@ -1017,7 +1018,7 @@
     transparent calc(100% - 2px),
     #000 calc(100% - 2px)
   );
-  animation: escCountdown 2000ms linear forwards;
+  animation: escCountdown var(--esc-countdown-duration, 2000ms) linear forwards;
   pointer-events: none;
 }
 

@@ -6,7 +6,7 @@ import deleteIconUrl from '../assets/icons/delete.svg';
 import editIconUrl from '../assets/icons/edit.svg';
 import insertIconUrl from '../assets/icons/insert.svg';
 import queueIconUrl from '../assets/icons/queue.svg';
-import styles from '../App.module.css';
+import styles from './QueuedPromptDisplay.module.css';
 
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 

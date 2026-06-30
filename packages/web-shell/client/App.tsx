@@ -95,7 +95,11 @@ import {
 } from './utils/copyCommand';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
-import { decideEscapeIntent } from './utils/escapeIntent';
+import {
+  decideEscapeIntent,
+  ESC_CANCEL_CONFIRM_WINDOW_MS,
+  ESC_CLEAR_CONFIRM_WINDOW_MS,
+} from './utils/escapeIntent';
 import { canDrainQueue } from './utils/queueDrain';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
@@ -1234,6 +1238,10 @@ export function App({
   const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  // A bump-only signal to re-run the drain effect without changing queuedPrompts
+  // identity (which would needlessly invalidate queuedTexts and re-render the
+  // composer). Used by the turn-start safety net below.
+  const [drainTick, setDrainTick] = useState(0);
   const queuedTexts = useMemo(
     () => queuedPrompts.map((prompt) => prompt.text),
     [queuedPrompts],
@@ -3077,13 +3085,14 @@ export function App({
     }
     popNextQueuedPrompt();
 
-    // Arm the gate SYNCHRONOUSLY, before the setState in popNextQueuedPrompt
-    // triggers a re-render: the daemon flips `streamingState` asynchronously, so
-    // without this the effect re-runs in the same tick and pops a second prompt
-    // before the first registers as streaming — both fire back-to-back and the
-    // first is lost. Cleared once this prompt's turn starts (streamingState
-    // effect), with a safety-net timer for a prompt that never streams (e.g. a
-    // queued slash command).
+    // Arm the gate SYNCHRONOUSLY here, immediately after the pop — the daemon
+    // flips `streamingState` asynchronously, so otherwise this effect re-runs in
+    // the same tick (via the pop's setState) and pops a second prompt before the
+    // first registers as streaming, losing the first. Keep every guard ABOVE the
+    // pop: an early return between the pop and this line would strand the popped
+    // prompt (dequeued but never submitted or re-queued). Cleared once this
+    // prompt's turn starts (streamingState effect); a safety-net timer covers a
+    // prompt that never streams (e.g. a queued slash command).
     awaitingTurnStartRef.current = true;
     if (awaitingTurnStartTimerRef.current) {
       clearTimeout(awaitingTurnStartTimerRef.current);
@@ -3092,10 +3101,11 @@ export function App({
     awaitingTurnStartTimerRef.current = setTimeout(() => {
       awaitingTurnStartRef.current = false;
       awaitingTurnStartTimerRef.current = null;
-      // Opening the gate touched only a ref. Nudge a re-render (same queue
-      // contents) so the drain effect re-evaluates and picks up anything still
-      // queued behind a prompt that never streamed (e.g. a local command).
-      setQueuedPrompts((prev) => [...prev]);
+      // Opening the gate touched only a ref. Bump a dedicated tick so the drain
+      // effect re-evaluates and picks up anything still queued behind a prompt
+      // that never streamed (e.g. a local command) — without changing the queue
+      // identity, which would re-render the composer for a no-op data change.
+      setDrainTick((t) => t + 1);
     }, TURN_START_GATE_SAFETY_MS);
 
     drainingQueueRef.current = true;
@@ -3135,6 +3145,7 @@ export function App({
     popNextQueuedPrompt,
     queuedPrompts,
     streamingState,
+    drainTick,
   ]);
 
   // The drained prompt's turn has started — release the drain gate. From here
@@ -3296,8 +3307,6 @@ export function App({
   useEffect(() => {
     // Arm a two-press action: the first Esc shows the affordance and starts a
     // confirm window; a second Esc within it confirms, any other key resets it.
-    const ESC_CANCEL_CONFIRM_WINDOW_MS = 2000;
-    const ESC_CLEAR_CONFIRM_WINDOW_MS = 500;
     const armEscape = (action: 'cancel' | 'clear', windowMs: number) => {
       escArmedActionRef.current = action;
       if (action === 'cancel') setCancelArmed(true);

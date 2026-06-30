@@ -1,0 +1,106 @@
+.queuedPrompts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: calc(100% - 32px);
+  margin: 0 auto -8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.queuedPrompt {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 28px;
+  color: var(--foreground);
+}
+
+.queuedPrompt + .queuedPrompt {
+  border-top: 0;
+}
+
+.queuedPromptIcon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--secondary-foreground);
+}
+
+.queuedPromptMaskIcon,
+.queuedPromptActionIcon {
+  display: inline-block;
+  flex-shrink: 0;
+  background: currentColor;
+  mask: var(--queued-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--queued-icon-url) center / contain no-repeat;
+}
+
+.queuedPromptMaskIcon {
+  width: 14px;
+  height: 14px;
+}
+
+.queuedPromptText {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queuedPromptActions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  color: var(--secondary-foreground);
+}
+
+.queuedPromptAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--secondary-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  padding: 3px 6px;
+}
+
+.queuedPromptActionIcon {
+  width: 14px;
+  height: 14px;
+}
+
+.queuedPromptAction:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.queuedPromptAction:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.queuedPromptAction:disabled:hover {
+  color: var(--secondary-foreground);
+}
