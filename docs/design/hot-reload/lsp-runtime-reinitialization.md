@@ -144,6 +144,7 @@ interface LspReconcileResult {
   removed: string[];
   restarted: string[];
   unchanged: string[];
+  failed: string[];
 }
 ```
 
@@ -158,11 +159,18 @@ Concurrency:
 - If a new config arrives while a server is still starting, wait for
   `handle.startingPromise` before stopping it. Reuse the existing startup lock
   instead of adding an extra per-server lock.
+- `stopServer()` itself must await `handle.startingPromise` after setting
+  `stopRequested`, so `stopAll()`, remove, and restart paths all cover crash
+  restarts that are still assigning their connection/process.
 
 Failure behavior:
 
 - If a newly added or changed server fails to start, keep the handle and mark it
   as `FAILED` so `/lsp` can explain the failure.
+- Do not count a failed start as `added` or `restarted`; report it in
+  `failed`.
+- Do not cache the config hash for a failed start. A later save with the same
+  config must retry instead of being classified as `unchanged`.
 - If startup fails after a connection or process has been created, release that
   connection/process before returning. Failed initialization must not leave a
   language server process or socket connection alive behind a `FAILED` handle.
@@ -176,6 +184,11 @@ Resource cleanup:
   and end the LSP connection, then kill the spawned process if it is still
   alive. This matters for `tcp`/`socket` transports that were launched with a
   `command`; closing the socket alone is not enough.
+- `process.kill()` must be isolated with its own error handling. A process that
+  exits during cleanup must not abort the rest of reconcile.
+- Graceful shutdown must always have a bounded wait. If the server config does
+  not specify `shutdownTimeout`, use the default shutdown timeout instead of
+  awaiting `connection.shutdown()` forever.
 - Shutdown timeout timers must be cleared when shutdown completes or fails so a
   large timeout does not retain the handle longer than necessary.
 - `NativeLspService.stop()` must clear `openedDocuments` and `lastConnections`
@@ -200,8 +213,12 @@ Flow:
 3. Merge configs using the current precedence.
 4. Apply the LSP admission filter before reconcile.
 5. Call `serverManager.reconcileServerConfigs(serverConfigs)`.
-6. Clear `openedDocuments` and `lastConnections` only for removed and restarted
-   servers; preserve document state for unchanged servers.
+6. Clear `openedDocuments` and `lastConnections` only for removed, restarted,
+   and failed servers; preserve document state for unchanged servers.
+
+Initial discovery should use the same admission filter before calling
+`setServerConfigs()`. This keeps startup and hot reload status consistent for
+per-server `trustRequired` filtering in untrusted workspaces.
 
 `.lsp.json` parse failures need special handling: do not treat parse failure as
 empty config. The watcher should report an invalid-config event so the CLI can
@@ -328,12 +345,18 @@ with a smaller responsibility:
 - debounce for 300 ms;
 - compare `.lsp.json` before/after using parse + canonicalize so formatting-only
   changes do not trigger reload;
-- on parse failure, notify the listener with an invalid-config event for
-  user-visible feedback, but do not trigger LSP reinitialization. Preserve the
-  old runtime state and log the parse error. File deletion is a separate event
-  and should notify the reload listener, producing empty workspace config;
+- treat `ENOENT` as deletion;
+- distinguish JSON parse failures from other read failures. Both should notify
+  the listener with a user-visible invalid-config event and preserve the old
+  runtime state, but the error message must reflect whether the file was invalid
+  JSON or unreadable;
+- file deletion is a separate event and should notify the reload listener,
+  producing empty workspace config;
 - run callbacks serially;
-- use listener timeout and failure isolation matching `SettingsWatcher`.
+- use listener timeout and failure isolation matching `SettingsWatcher`;
+- advance the stored semantic snapshot only after listener notification succeeds.
+  If the listener throws or times out, retain the previous snapshot so saving the
+  same content again retries the reload.
 
 Register the watcher only when `config.isLspEnabled()` and the client supports
 `reinitialize()`. On change, call:
@@ -404,10 +427,16 @@ environment-dependent, so they are not required.
 - stopping a `tcp`/`socket` server launched by `command` closes the connection
   and kills the owned process;
 - shutdown timeout timers are cleared when shutdown completes first;
+- missing `shutdownTimeout` still uses the default shutdown timeout and cannot
+  block reconcile forever;
+- `stopAll()` waits for in-flight startup before releasing resources;
+- `process.kill()` errors are logged and do not abort cleanup;
 - one server startup failure does not affect another server's reconcile;
 - concurrent reconciles run serially;
 - `stopAll()` and `clearServerHandles()` clear the hash map;
-- reconcile return value only contains added/removed/restarted/unchanged, not
+- failed starts are reported in `failed`, are not reported as added/restarted,
+  and do not cache their config hash;
+- reconcile return value contains added/removed/restarted/unchanged/failed, not
   admission skipped.
 
 Mock `createLspConnection`, initialization, and shutdown in tests. Do not start
@@ -421,6 +450,8 @@ real language servers.
   manager reconcile;
 - deleting `.lsp.json` treats workspace config as empty and triggers reconcile;
 - untrusted workspace stops all servers and does not reconcile/start;
+- initial discovery applies the same per-server `trustRequired` admission filter
+  as hot reload;
 - if a CLI allow-list is implemented, the upper bound filters admitted configs;
 - service-level return value aggregates admission skipped reasons;
 - restarted/removed servers only clear their own document tracking.
@@ -443,10 +474,13 @@ real language servers.
 - ignores formatting-only changes after canonical parse;
 - parse failure emits an invalid-config notification for user-visible feedback
   and does not trigger LSP reinitialization;
+- non-ENOENT read failure emits a user-visible read-failure message and does not
+  trigger LSP reinitialization;
 - deleting `.lsp.json` triggers the reload listener;
 - duplicate file events are debounced;
 - slow listeners run serially;
-- listener failure does not affect later notifications.
+- listener failure does not advance the stored snapshot and the same content can
+  be retried by a later notification.
 
 `packages/cli/src/ui/AppContainer.test.tsx` or the corresponding event test
 
