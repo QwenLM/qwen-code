@@ -1276,7 +1276,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       {
         localReadRoots: [
           '/project/.qwen/tmp',
-          '/project/subagents',
+          path.join('/project', 'subagents'),
           '/tmp/qwen-global-temp',
           '/project/.qwen/memory',
           '/tmp/user-memory',
