@@ -953,7 +953,7 @@ describe('daemonWorkerCommand', () => {
     }
   });
 
-  it('force exits when the parent disconnects during async setup', async () => {
+  it('exits after startup rollback when the parent disconnects during async setup', async () => {
     const exit = mockProcessExitNoThrow();
     const send = vi.fn();
     const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
@@ -984,6 +984,11 @@ describe('daemonWorkerCommand', () => {
       });
 
       process.emit('disconnect');
+      expect(exit).not.toHaveBeenCalled();
+      expect(disconnect).not.toHaveBeenCalled();
+      expect(mockBridgeStop).not.toHaveBeenCalled();
+      expect(mockRouterClearAll).not.toHaveBeenCalled();
+
       await handler;
 
       expect(exit).toHaveBeenCalledWith(1);

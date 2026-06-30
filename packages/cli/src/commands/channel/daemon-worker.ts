@@ -478,8 +478,12 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       pendingShutdownReason = reason;
     };
     const onEarlyDisconnect = () => {
+      if (pendingShutdownReason) {
+        process.exit(1);
+        return;
+      }
+      pendingShutdownReason = 'disconnect';
       startupAbortController.abort();
-      process.exit(1);
     };
     process.on('SIGINT', onEarlyShutdown);
     process.on('SIGTERM', onEarlyShutdown);
