@@ -20,7 +20,8 @@
 // Critical findings become inline comments (see SKILL.md Step 9).
 
 import type { CommandModule } from 'yargs';
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { gh, ghApiAll, currentUser, ensureAuthenticated } from './lib/gh.js';
 
@@ -103,6 +104,10 @@ export async function runPostSuggestions(
   // bodies without arg-length or quoting issues. The payload file sits next
   // to `out` so it inherits the per-target temp prefix and is swept by
   // `qwen review cleanup`. Written inside try so finally cleanup is safe.
+  // Ensure the output directory exists before any write — the caller may
+  // pass `--out .qwen/tmp/...` before that dir has been created, which would
+  // otherwise crash the payload/report writes below with a raw ENOENT.
+  mkdirSync(dirname(out), { recursive: true });
   const payloadPath = `${out}.payload.json`;
 
   let commentId: number;
@@ -119,7 +124,13 @@ export async function runPostSuggestions(
         '--input',
         payloadPath,
       );
-      commentId = (JSON.parse(raw) as { id: number }).id;
+      try {
+        commentId = (JSON.parse(raw) as { id: number }).id;
+      } catch {
+        throw new Error(
+          `gh api returned unparseable output for PATCH on PR #${prNumber}: ${raw.slice(0, 200)}`,
+        );
+      }
       action = 'updated';
     } else {
       const raw = gh(
@@ -130,7 +141,13 @@ export async function runPostSuggestions(
         '--input',
         payloadPath,
       );
-      commentId = (JSON.parse(raw) as { id: number }).id;
+      try {
+        commentId = (JSON.parse(raw) as { id: number }).id;
+      } catch {
+        throw new Error(
+          `gh api returned unparseable output for POST on PR #${prNumber}: ${raw.slice(0, 200)}`,
+        );
+      }
       action = 'created';
     }
   } finally {
