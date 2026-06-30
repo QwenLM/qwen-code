@@ -206,7 +206,7 @@ const useResultDisplayRenderer = (
       const totalStr = progress.total != null ? `/${progress.total}` : '';
       return {
         type: 'string',
-        data: `⏳ [${progress.progress}${totalStr}] ${msg}`,
+        data: `◌ [${progress.progress}${totalStr}] ${msg}`,
       };
     }
 
@@ -341,7 +341,7 @@ const SubagentExecutionRenderer: React.FC<{
     return (
       <Box paddingLeft={1}>
         <Text color={theme.text.secondary} dimColor>
-          ⏳ Queued approval:{' '}
+          ◌ Queued approval:{' '}
         </Text>
         <Text dimColor>{agentLabel}</Text>
       </Box>

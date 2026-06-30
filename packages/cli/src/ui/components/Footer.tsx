@@ -108,7 +108,7 @@ export const Footer: React.FC = () => {
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
-      node: <Text color={theme.status.success}>🔒 {sandboxInfo}</Text>,
+      node: <Text color={theme.status.success}>{sandboxInfo}</Text>,
     });
   }
   if (config.isSafeMode()) {
@@ -220,7 +220,7 @@ export const Footer: React.FC = () => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (
             <Text color={theme.text.accent} wrap="truncate">
-              {`⚙ ${t('workflow active')}`}
+              {`▷ ${t('workflow active')}`}
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>

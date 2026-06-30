@@ -166,7 +166,7 @@ export function emitAutoModeEntryNotices(opts: {
     (stripped.persistent.length > 0 || stripped.session.length > 0)
   ) {
     const lines = [
-      'ℹ️ Auto mode temporarily disabled these allow rules',
+      'ℹ Auto mode temporarily disabled these allow rules',
       '   (they would bypass the classifier):',
       ...stripped.persistent.map((r) => `   - ${r.raw} (from user settings)`),
       ...stripped.session.map((r) => `   - ${r.raw} (session)`),

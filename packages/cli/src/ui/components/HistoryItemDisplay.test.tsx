@@ -99,7 +99,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Read txt files');
   });
 
-  it('renders the dim 🔎 notice for "vision_notice" type', () => {
+  it('renders the dim ◎ notice for "vision_notice" type', () => {
     const item: HistoryItem = {
       ...baseItem,
       type: MessageType.VISION_NOTICE,
@@ -109,7 +109,7 @@ describe('<HistoryItemDisplay />', () => {
       <HistoryItemDisplay {...baseItem} item={item} />,
     );
     const output = lastFrame() ?? '';
-    expect(output).toContain('🔎');
+    expect(output).toContain('◎');
     expect(output).toContain('Converted 1 image(s) to text via vm.');
   });
 

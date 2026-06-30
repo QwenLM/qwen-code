@@ -8,6 +8,9 @@ import { describe, it, expect, expectTypeOf } from 'vitest';
 import * as Public from '../../src/index.js';
 import {
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
   asKnownDaemonEvent,
 } from '../../src/daemon/events.js';
 // Type-only imports also exercise the public entry: any name missing
@@ -38,6 +41,15 @@ import type {
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedData,
   DaemonPermissionResolvedEvent,
+  DaemonPendingPromptAddedData,
+  DaemonPendingPromptAddedEvent,
+  DaemonPendingPromptStartedData,
+  DaemonPendingPromptStartedEvent,
+  DaemonPendingPromptCompletedData,
+  DaemonPendingPromptCompletedEvent,
+  DaemonPendingPromptEvent,
+  DaemonPendingPromptSummary,
+  DaemonPendingPromptsResult,
   DaemonSessionLspStatus,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
@@ -80,6 +92,13 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(typeof Public.reduceDaemonSessionEvent).toBe('function');
     expect(typeof Public.reduceDaemonSessionEvents).toBe('function');
     expect(typeof Public.createDaemonSessionViewState).toBe('function');
+    expect(Public.PENDING_PROMPT_ADDED_EVENT).toBe(PENDING_PROMPT_ADDED_EVENT);
+    expect(Public.PENDING_PROMPT_STARTED_EVENT).toBe(
+      PENDING_PROMPT_STARTED_EVENT,
+    );
+    expect(Public.PENDING_PROMPT_COMPLETED_EVENT).toBe(
+      PENDING_PROMPT_COMPLETED_EVENT,
+    );
     // F2 (#4175 commit 6 review fix — claude-opus-4-7 W121): pin
     // `isWorkspaceScopedBudgetEvent` to the SDK public surface. PR
     // description + event JSDoc tell consumers to use this helper to
@@ -124,6 +143,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionUpdateEvent>().not.toBeNever();
     expectTypeOf<DaemonPermissionRequestEvent>().not.toBeNever();
     expectTypeOf<DaemonPermissionResolvedEvent>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptAddedEvent>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptStartedEvent>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptCompletedEvent>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptEvent>().not.toBeNever();
     expectTypeOf<DaemonModelSwitchedEvent>().not.toBeNever();
     expectTypeOf<DaemonModelSwitchFailedEvent>().not.toBeNever();
     expectTypeOf<DaemonSessionDiedEvent>().not.toBeNever();
@@ -133,6 +156,11 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionUpdateData>().not.toBeNever();
     expectTypeOf<DaemonPermissionRequestData>().not.toBeNever();
     expectTypeOf<DaemonPermissionResolvedData>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptAddedData>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptStartedData>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptCompletedData>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptSummary>().not.toBeNever();
+    expectTypeOf<DaemonPendingPromptsResult>().not.toBeNever();
     expectTypeOf<DaemonModelSwitchedData>().not.toBeNever();
     expectTypeOf<DaemonModelSwitchFailedData>().not.toBeNever();
     expectTypeOf<DaemonSessionDiedData>().not.toBeNever();

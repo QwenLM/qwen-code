@@ -320,7 +320,7 @@ export default {
   'Open in editor': "Ouvrir dans l'éditeur",
   'Edit tools': 'Modifier les outils',
   'Edit color': 'Modifier la couleur',
-  '❌ Error:': '❌ Erreur :',
+  '✗ Error:': '✗ Erreur :',
   'Are you sure you want to delete agent "{{name}}"?':
     'Êtes-vous sûr de vouloir supprimer l\'agent "{{name}}" ?',
 
@@ -329,13 +329,13 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Niveau projet (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'Niveau utilisateur (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Sous-agent créé avec succès !',
+  '✓ Subagent Created Successfully!': '✓ Sous-agent créé avec succès !',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'Le sous-agent "{{name}}" a été enregistré au niveau {{level}}.',
   'Name: ': 'Nom : ',
   'Location: ': 'Emplacement : ',
-  '❌ Error saving subagent:':
-    '❌ Erreur lors de la sauvegarde du sous-agent :',
+  '✗ Error saving subagent:':
+    '✗ Erreur lors de la sauvegarde du sous-agent :',
   'Warnings:': 'Avertissements :',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'Le nom "{{name}}" existe déjà au niveau {{level}} - le sous-agent existant sera écrasé',
@@ -1260,9 +1260,9 @@ export default {
     'Choisissez comment poursuivre votre session :',
   'Start new chat session': 'Démarrer une nouvelle session de chat',
   'Continue previous conversation': 'Continuer la conversation précédente',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Bon retour ! (Dernière mise à jour : {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Objectif global :',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Bon retour ! (Dernière mise à jour : {{timeAgo}})',
+  'Overall Goal:': 'Objectif global :',
   'Connect a Provider': 'Connecter un fournisseur',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Vous devez connecter un fournisseur pour continuer. Appuyez à nouveau sur Ctrl+C pour quitter.',
@@ -1430,8 +1430,8 @@ export default {
   // Statut MCP
   // ============================================================================
   'No MCP servers configured.': 'Aucun MCP servers configuré.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ Les MCP servers démarrent ({{count}} en initialisation)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ Les MCP servers démarrent ({{count}} en initialisation)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Remarque : Le premier démarrage peut prendre plus de temps. La disponibilité des outils se mettra à jour automatiquement.',
   'Configured MCP servers:': 'MCP servers configurés :',
@@ -1455,7 +1455,7 @@ export default {
   'Prompts:': 'Invites :',
   'Resources:': 'Ressources :',
   Blocked: 'Bloqué',
-  '💡 Tips:': '💡 Conseils :',
+  '★ Tips:': '★ Conseils :',
   Use: 'Utilisez',
   'to show server and tool descriptions':
     'pour afficher les descriptions des serveurs et des outils',
@@ -1904,8 +1904,8 @@ export default {
   'Select authentication method:':
     "Sélectionner la méthode d'authentification :",
   '\n=== Authentication Status ===\n': "\n=== Statut d'authentification ===\n",
-  '⚠️  No authentication method configured.\n':
-    "⚠️  Aucune méthode d'authentification configurée.\n",
+  '⚠  No authentication method configured.\n':
+    "⚠  Aucune méthode d'authentification configurée.\n",
   'Run one of the following commands to get started:\n':
     "Exécutez l'une des commandes suivantes pour commencer :\n",
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1928,8 +1928,8 @@ export default {
   '  Current Model: {{model}}': '  Modèle actuel : {{model}}',
   '  Config Version: {{version}}': '  Version de config : {{version}}',
   '  Status: API key configured\n': '  Statut : API Key configurée\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    "⚠️  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    "⚠  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
   '  Issue: API key not found in environment or settings\n':
     "  Problème : API Key introuvable dans l'environnement ou les paramètres\n",
   '  Run `qwen auth coding-plan` to re-configure.\n':
