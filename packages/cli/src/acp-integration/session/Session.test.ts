@@ -2515,7 +2515,6 @@ describe('Session', () => {
         ];
         const toolLoopState = {
           totalToolCalls: 0,
-          invalidToolParamErrorCount: 0,
           invalidToolParamErrors: new Map<string, number>(),
           loopDetected: false,
         };
@@ -2581,6 +2580,25 @@ describe('Session', () => {
 
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'read_0',
+                name: 'read_file',
+                response: {
+                  error: expect.stringContaining('loop detection'),
+                },
+              }),
+            }),
+            expect.objectContaining({
+              text: expect.stringContaining(
+                'terminated because the model exceeded tool-call safety limits',
+              ),
+            }),
+          ]),
+        });
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
             'Stopping ACP turn after 101 tool calls in one turn.',
@@ -2621,7 +2639,6 @@ describe('Session', () => {
         });
         const toolLoopState = {
           totalToolCalls: 0,
-          invalidToolParamErrorCount: 0,
           invalidToolParamErrors: new Map<string, number>(),
           loopDetected: false,
         };
@@ -2668,6 +2685,63 @@ describe('Session', () => {
             'Stopping ACP turn after repeated tool parameter errors',
           ),
         );
+      });
+
+      it('stops concurrent Agent batches after Promise.race observes loop detection', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const build = vi.fn().mockImplementation(() => {
+          throw new Error('Invalid subagent_type: bad');
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        const functionCalls: FunctionCall[] = Array.from(
+          { length: 3 },
+          (_, index) => ({
+            id: `agent_${index}`,
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: `bad_${index}` },
+          }),
+        );
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-race-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(build).toHaveBeenCalledTimes(3);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_0',
+          'agent_1',
+          'agent_2',
+        ]);
       });
 
       it('clears duplicate provider id tracking between ACP prompts', async () => {

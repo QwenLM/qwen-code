@@ -217,7 +217,6 @@ type RunToolResult = {
 
 type DaemonToolLoopState = {
   totalToolCalls: number;
-  invalidToolParamErrorCount: number;
   invalidToolParamErrors: Map<string, number>;
   loopDetected: boolean;
 };
@@ -235,7 +234,6 @@ const LOOP_DETECTED_CONTEXT_MESSAGE =
 function createDaemonToolLoopState(): DaemonToolLoopState {
   return {
     totalToolCalls: 0,
-    invalidToolParamErrorCount: 0,
     invalidToolParamErrors: new Map(),
     loopDetected: false,
   };
@@ -285,7 +283,6 @@ function recordDaemonInvalidToolParams(
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
   const key = toolName;
-  loopState.invalidToolParamErrorCount++;
   const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
   loopState.invalidToolParamErrors.set(key, count);
   if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
@@ -3771,7 +3768,13 @@ export class Session implements SessionContext {
       )
     ) {
       return {
-        parts: [],
+        parts: functionCalls.map((fc) => ({
+          functionResponse: {
+            id: fc.id ?? `${fc.name}-${Date.now()}`,
+            name: fc.name ?? 'unknown_tool',
+            response: { error: LOOP_DETECTED_SKIP_MESSAGE },
+          },
+        })),
         stopAfterPermissionCancel: false,
         loopDetected: true,
       };
@@ -4053,7 +4056,7 @@ export class Session implements SessionContext {
           }
           if (
             toolLoopState &&
-            toolLoopState.invalidToolParamErrorCount > 0 &&
+            toolLoopState.invalidToolParamErrors.size > 0 &&
             executing.size > 0
           ) {
             await Promise.all(executing);
