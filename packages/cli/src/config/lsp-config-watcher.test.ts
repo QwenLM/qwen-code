@@ -193,7 +193,44 @@ describe('LspConfigWatcher', () => {
     await vi.advanceTimersByTimeAsync(LspConfigWatcher.DEBOUNCE_MS);
 
     expect(listener).toHaveBeenCalledTimes(1);
-    watcher.stopWatching();
+    await watcher.stopWatching();
+  });
+
+  it('waits for an active listener before stopping', async () => {
+    vi.useFakeTimers();
+    const dir = makeTempDir();
+    const configPath = path.join(dir, '.lsp.json');
+    let resolveListener: (() => void) | undefined;
+    const listener = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveListener = resolve;
+        }),
+    );
+    const watcher = new LspConfigWatcher(dir);
+    watcher.startWatching(listener);
+    const onAll = chokidarMock.handlers.get('all');
+    expect(onAll).toBeDefined();
+
+    fs.writeFileSync(configPath, '{"typescript":{"command":"tsserver"}}');
+    onAll?.('add', configPath);
+    await vi.advanceTimersByTimeAsync(LspConfigWatcher.DEBOUNCE_MS);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    let stopped = false;
+    const stopPromise = watcher.stopWatching().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+
+    expect(stopped).toBe(false);
+    expect(chokidarMock.watcher.close).not.toHaveBeenCalled();
+
+    resolveListener?.();
+    await stopPromise;
+
+    expect(stopped).toBe(true);
+    expect(chokidarMock.watcher.close).toHaveBeenCalledOnce();
   });
 
   // Listener timeout is the isolation boundary between file watching and the

@@ -1066,7 +1066,7 @@ export function createNonInteractivePromptId(sessionId: string): string {
  */
 export function registerLspHotReload(
   config: Config,
-  registerCleanup: (fn: () => void) => void,
+  registerCleanup: (fn: () => void | Promise<void>) => void,
 ): void {
   if (
     config.isLspEnabled?.() !== true ||
@@ -1087,9 +1087,11 @@ export function registerLspHotReload(
     debugLogger.info(
       `Reloading LSP server settings: changeType=${event.changeType}, path=${event.path}`,
     );
+    let errorReported = false;
     try {
       const result = await config.reinitializeLsp();
       if (result) {
+        const failedServers = getRuntimeReloadFailedNames(result.reconcile);
         debugLogger.info(
           `Reloaded LSP server settings: added=${formatRuntimeReloadNames(
             result.reconcile.added,
@@ -1100,11 +1102,19 @@ export function registerLspHotReload(
           )}, unchanged=${formatRuntimeReloadNames(
             result.reconcile.unchanged,
           )}, failed=${formatRuntimeReloadNames(
-            getRuntimeReloadFailedNames(result.reconcile),
+            failedServers,
           )}, skipped=${formatRuntimeReloadNames(
             result.skipped.map((server) => server.name),
           )}`,
         );
+        if (failedServers.length > 0) {
+          const message = `Failed to reload LSP server settings for: ${formatRuntimeReloadNames(
+            failedServers,
+          )}. Existing LSP state is partially unchanged. Run with --debug for details.`;
+          appEvents.emit(AppEvent.LogError, message);
+          errorReported = true;
+          throw new Error(message);
+        }
       } else {
         debugLogger.info(
           'Skipped LSP server settings reload because LSP is disabled or no client is available',
@@ -1113,10 +1123,13 @@ export function registerLspHotReload(
       appEvents.emit(AppEvent.LspStatusChanged);
     } catch (error) {
       debugLogger.warn('Failed to reload LSP server settings:', error);
-      appEvents.emit(
-        AppEvent.LogError,
-        'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.',
-      );
+      if (!errorReported) {
+        appEvents.emit(
+          AppEvent.LogError,
+          'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.',
+        );
+      }
+      throw error;
     }
   });
   registerCleanup(() => lspConfigWatcher.stopWatching());

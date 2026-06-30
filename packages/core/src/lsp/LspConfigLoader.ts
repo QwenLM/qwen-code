@@ -51,7 +51,7 @@ export class LspConfigLoader {
     try {
       const configContent = fs.readFileSync(lspConfigPath, 'utf-8');
       const data = JSON.parse(configContent);
-      return { ok: true, configs: this.parseConfigSource(data, lspConfigPath) };
+      return this.parseUserConfigSourceStrict(data, lspConfigPath);
     } catch (error) {
       return {
         ok: false,
@@ -207,6 +207,44 @@ export class LspConfigLoader {
     }
 
     return configs;
+  }
+
+  private parseUserConfigSourceStrict(
+    source: unknown,
+    origin: string,
+  ): LspUserConfigLoadResult {
+    if (!this.isRecord(source)) {
+      return {
+        ok: false,
+        error: new Error(`LSP config in ${origin} must be an object`),
+      };
+    }
+
+    const configs: LspServerConfig[] = [];
+    for (const [key, spec] of Object.entries(source)) {
+      if (!this.isRecord(spec)) {
+        return {
+          ok: false,
+          error: new Error(
+            `LSP config error in ${origin}: ${key} must be an object`,
+          ),
+        };
+      }
+
+      const languages = [key];
+      const name =
+        typeof spec['command'] === 'string' ? (spec['command'] as string) : key;
+      const config = this.buildServerConfig(name, languages, spec, origin);
+      if (!config) {
+        return {
+          ok: false,
+          error: new Error(`Invalid LSP server config in ${origin}: ${key}`),
+        };
+      }
+      configs.push(config);
+    }
+
+    return { ok: true, configs };
   }
 
   private resolveExtensionConfigPath(

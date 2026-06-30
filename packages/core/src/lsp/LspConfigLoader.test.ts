@@ -154,6 +154,41 @@ describe('LspConfigLoader config-driven behavior', () => {
       mock.restore();
     }
   });
+
+  it('strict user config loading rejects invalid server entries', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            transport: 'stdio',
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const result = await loader.loadUserConfigsStrict();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain(
+        'Invalid LSP server config in /workspace/.lsp.json: typescript',
+      );
+    }
+  });
+
+  it('strict user config loading accepts empty object as explicit empty config', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({}),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const result = await loader.loadUserConfigsStrict();
+
+    expect(result).toEqual({ ok: true, configs: [] });
+  });
 });
 
 describe('LspConfigLoader extension configs', () => {

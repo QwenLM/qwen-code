@@ -218,6 +218,41 @@ describe('NativeLspService', () => {
     }
   });
 
+  test('reinitialize preserves runtime state on invalid server entries', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-invalid-'));
+    try {
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            transport: 'stdio',
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const reconcileServerConfigs = vi.fn();
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+      };
+
+      await expect(service.reinitialize()).rejects.toThrow(
+        'Invalid LSP server config',
+      );
+      expect(reconcileServerConfigs).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('reinitialize stops all servers when trusted workspace is required but unavailable', async () => {
     const tempConfig = new MockConfig();
     vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);

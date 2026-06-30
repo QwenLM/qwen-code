@@ -49,6 +49,7 @@ export class LspConfigWatcher {
   private watcher?: FSWatcher;
   private listener?: LspConfigChangeListener;
   private refreshTimer: NodeJS.Timeout | null = null;
+  private activeDrain?: Promise<void>;
   private processing = false;
   private pending = false;
   private started = false;
@@ -91,19 +92,24 @@ export class LspConfigWatcher {
     }
   }
 
-  stopWatching(): void {
+  async stopWatching(): Promise<void> {
     if (!this.started) return;
     this.started = false;
     debugLogger.info(`Stopping LSP config watcher for ${this.configPath}`);
-    this.listener = undefined;
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
     this.pending = false;
-    this.watcher?.close().catch((error) => {
+
+    await this.activeDrain;
+    this.listener = undefined;
+
+    try {
+      await this.watcher?.close();
+    } catch (error) {
       debugLogger.warn('LSP config watcher close error:', error);
-    });
+    }
     this.watcher = undefined;
   }
 
@@ -112,8 +118,14 @@ export class LspConfigWatcher {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
-      void this.drainPendingChange().catch((error) => {
+      const activeDrain = this.drainPendingChange().catch((error) => {
         debugLogger.warn('LSP config watcher refresh error:', error);
+      });
+      this.activeDrain = activeDrain;
+      void activeDrain.finally(() => {
+        if (this.activeDrain === activeDrain) {
+          this.activeDrain = undefined;
+        }
       });
     }, LspConfigWatcher.DEBOUNCE_MS);
   }

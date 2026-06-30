@@ -520,7 +520,7 @@ describe('gemini.tsx main function', () => {
       expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
     });
 
-    it('emits a user-visible error when reload fails', async () => {
+    it('emits a user-visible error and rejects when reload fails', async () => {
       const reinitializeLsp = vi.fn(async () => {
         throw new Error('invalid lsp json');
       });
@@ -535,14 +535,51 @@ describe('gemini.tsx main function', () => {
         vi.fn(),
       );
 
-      await lspConfigWatcherMock.instances[0]?.listener?.({
-        path: '/workspace/.lsp.json',
-        changeType: 'modified',
-      });
+      await expect(
+        lspConfigWatcherMock.instances[0]?.listener?.({
+          path: '/workspace/.lsp.json',
+          changeType: 'modified',
+        }),
+      ).rejects.toThrow('invalid lsp json');
 
       expect(appEvents.emit).toHaveBeenCalledWith(
         AppEvent.LogError,
         'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.',
+      );
+    });
+
+    it('emits a user-visible error and rejects when reload has failed servers', async () => {
+      const reinitializeLsp = vi.fn(async () => ({
+        reconcile: {
+          added: [],
+          removed: [],
+          restarted: [],
+          unchanged: [],
+          failed: ['clangd'],
+        },
+        skipped: [],
+      }));
+
+      registerLspHotReload(
+        {
+          isLspEnabled: () => true,
+          getLspClient: () => ({ reinitialize: vi.fn() }),
+          getProjectRoot: () => '/workspace',
+          reinitializeLsp,
+        } as unknown as Config,
+        vi.fn(),
+      );
+
+      await expect(
+        lspConfigWatcherMock.instances[0]?.listener?.({
+          path: '/workspace/.lsp.json',
+          changeType: 'modified',
+        }),
+      ).rejects.toThrow('Failed to reload LSP server settings for: clangd');
+
+      expect(appEvents.emit).toHaveBeenCalledWith(
+        AppEvent.LogError,
+        'Failed to reload LSP server settings for: clangd. Existing LSP state is partially unchanged. Run with --debug for details.',
       );
     });
 

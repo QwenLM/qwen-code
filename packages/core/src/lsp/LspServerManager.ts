@@ -389,6 +389,18 @@ export class LspServerManager {
     // Check if command exists
     if (handle.config.command) {
       const commandCwd = handle.config.workspaceFolder ?? this.workspaceRoot;
+      // Check path safety before any command probe can spawn the configured
+      // executable.
+      if (
+        !this.isPathSafe(handle.config.command, this.workspaceRoot, commandCwd)
+      ) {
+        debugLogger.warn(
+          `LSP server ${name} command path is unsafe: ${handle.config.command}`,
+        );
+        handle.status = 'FAILED';
+        return;
+      }
+
       if (
         !(await this.commandExists(
           handle.config.command,
@@ -398,17 +410,6 @@ export class LspServerManager {
       ) {
         debugLogger.warn(
           `LSP server ${name} command not found: ${handle.config.command}`,
-        );
-        handle.status = 'FAILED';
-        return;
-      }
-
-      // Check path safety
-      if (
-        !this.isPathSafe(handle.config.command, this.workspaceRoot, commandCwd)
-      ) {
-        debugLogger.warn(
-          `LSP server ${name} command path is unsafe: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
         return;

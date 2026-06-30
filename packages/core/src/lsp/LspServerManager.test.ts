@@ -448,6 +448,42 @@ describe('LspServerManager', () => {
     );
   });
 
+  it('does not probe command existence for unsafe command paths', async () => {
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    const isPathSafe = vi
+      .spyOn(
+        manager as unknown as {
+          isPathSafe: () => boolean;
+        },
+        'isPathSafe',
+      )
+      .mockReturnValue(false);
+    const commandExists = vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    );
+
+    manager.setServerConfigs([
+      { ...serverConfig, command: '../../outside/payload' },
+    ]);
+    await manager.startAll();
+
+    expect(isPathSafe).toHaveBeenCalledOnce();
+    expect(commandExists).not.toHaveBeenCalled();
+    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'LSP server clangd command path is unsafe: ../../outside/payload',
+    );
+  });
+
   it('kills owned process after graceful shutdown for socket transports', async () => {
     const manager = createTrustedManager();
     const connection = createMockConnection();
