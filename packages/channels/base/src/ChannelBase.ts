@@ -490,6 +490,7 @@ export abstract class ChannelBase {
         this.channelMemoryTarget(envelope),
         args.trim(),
       );
+      this.invalidateSessionContext(envelope);
       await this.sendMessage(envelope.chatId, 'Channel memory updated.');
       return true;
     });
@@ -532,6 +533,7 @@ export abstract class ChannelBase {
       const result = await channelMemory.clearChannelMemory(
         this.channelMemoryTarget(envelope),
       );
+      this.invalidateSessionContext(envelope);
       await this.sendMessage(
         envelope.chatId,
         result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
@@ -646,6 +648,18 @@ export abstract class ChannelBase {
       chatId: envelope.chatId,
       threadId: envelope.threadId,
     };
+  }
+
+  private invalidateSessionContext(envelope: Envelope): void {
+    const sessionId = this.router.getSession(
+      this.name,
+      envelope.senderId,
+      envelope.chatId,
+      envelope.threadId,
+    );
+    if (sessionId) {
+      this.instructedSessions.delete(sessionId);
+    }
   }
 
   private isAuthorizedForChannelMemory(envelope: Envelope): boolean {
@@ -1080,9 +1094,23 @@ export abstract class ChannelBase {
       }
     }
 
-    // Prepend channel instructions on first message of a session
-    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-      promptText = `${this.config.instructions}\n\n${promptText}`;
+    // Prepend channel context on first message of a session
+    if (!this.instructedSessions.has(sessionId)) {
+      const context: string[] = [];
+      const channelMemory = (
+        await this.channelMemory?.readChannelMemory(
+          this.channelMemoryTarget(envelope),
+        )
+      )?.trim();
+      if (channelMemory) {
+        context.push(`Channel memory for this chat:\n${channelMemory}`);
+      }
+      if (this.config.instructions) {
+        context.push(this.config.instructions);
+      }
+      if (context.length > 0) {
+        promptText = `${context.join('\n\n')}\n\n${promptText}`;
+      }
       this.instructedSessions.add(sessionId);
     }
 

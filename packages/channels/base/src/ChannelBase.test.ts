@@ -1765,6 +1765,112 @@ describe('ChannelBase', () => {
       const secondPrompt = (bridge.prompt as any).mock.calls[1][1] as string;
       expect(secondPrompt).not.toContain('Be concise.');
     });
+
+    it('injects channel memory before instructions and user prompt on first session prompt', async () => {
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockResolvedValue('Use staging by default.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe(
+        [
+          'Channel memory for this chat:\nUse staging by default.',
+          'Use repo conventions.',
+          'ship it',
+        ].join('\n\n'),
+      );
+    });
+
+    it('does not read or inject memory again in the same session', async () => {
+      let reads = 0;
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return 'Use staging by default.';
+        }),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(reads).toBe(1);
+      expect(secondPrompt).not.toContain('Channel memory for this chat');
+    });
+
+    it('/remember-channel invalidates current session context after append', async () => {
+      let memory = 'old memory';
+      let reads = 0;
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return memory;
+        }),
+        appendChannelMemory: vi
+          .fn()
+          .mockImplementation(async (_target: unknown, text: string) => {
+            memory = `${memory}\n${text}`;
+            return { changed: true };
+          }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '/remember-channel new memory', senderId: 'alice' }),
+      );
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      const latestPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(reads).toBe(2);
+      expect(latestPrompt).toContain('new memory');
+    });
+
+    it('/forget-channel confirm invalidates current session context after clear', async () => {
+      let memory = 'old memory';
+      let reads = 0;
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return memory;
+        }),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockImplementation(async () => {
+          memory = '';
+          return { changed: true };
+        }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
+      );
+      await ch.handleInbound(envelope({ text: 'second', senderId: 'alice' }));
+
+      const latestPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(reads).toBe(2);
+      expect(latestPrompt).not.toContain('old memory');
+      expect(latestPrompt).not.toContain('Channel memory for this chat');
+    });
   });
 
   describe('multiplayer identity (sender attribution)', () => {
