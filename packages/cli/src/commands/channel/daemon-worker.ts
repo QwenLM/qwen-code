@@ -10,6 +10,12 @@ import type {
 } from '@qwen-code/channel-base';
 import type { ServeChannelSelection } from '../../serve/types.js';
 import { normalizeServeChannelSelection } from '../../serve/channel-selection.js';
+import {
+  CHANNEL_DAEMON_WORKER_SENTINEL,
+  QWEN_DAEMON_TOKEN_ENV,
+  QWEN_DAEMON_URL_ENV,
+  QWEN_DAEMON_WORKSPACE_ENV,
+} from '../../serve/channel-worker-env.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   createChannel,
@@ -23,7 +29,7 @@ import {
 } from './runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
-export const CHANNEL_DAEMON_WORKER_SENTINEL = 'QWEN_CHANNEL_DAEMON_WORKER';
+const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -132,6 +138,10 @@ export function createDaemonChannelBridgeFacade(
     cancelSession: bridge.cancelSession.bind(bridge),
   };
 
+  if (bridge.getAvailableCommands) {
+    facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
+  }
+
   if (!opts.exposeShellCommand || !bridge.shellCommand) {
     return facade;
   }
@@ -212,7 +222,9 @@ export async function runChannelDaemonWorker(
   await loadChannelsFromExtensions();
   const channelsConfig = loadChannelsConfig(daemonWorkspace);
   const names = selectedChannelNames(channelsConfig, opts.selection);
-  const parsed = await parseConfiguredChannels(channelsConfig, names);
+  const parsed = await parseConfiguredChannels(channelsConfig, names, {
+    defaultCwd: daemonWorkspace,
+  });
   validateChannelWorkspaces(parsed, daemonWorkspace);
   const modelServiceId = firstModel(parsed);
 
@@ -226,6 +238,18 @@ export async function runChannelDaemonWorker(
     ...(modelServiceId ? { modelServiceId } : {}),
   });
   await bridge.start();
+
+  const channels = new Map<string, ChannelBase>();
+  const connected: string[] = [];
+  const disconnectAll = () => {
+    for (const channel of channels.values()) {
+      try {
+        channel.disconnect();
+      } catch {
+        // best-effort
+      }
+    }
+  };
 
   try {
     const bridgeFacade = createDaemonChannelBridgeFacade(bridge, {
@@ -243,7 +267,6 @@ export async function runChannelDaemonWorker(
       router.setChannelScope(name, config.sessionScope);
     }
 
-    const channels = new Map<string, ChannelBase>();
     for (const { name, config } of parsed) {
       channels.set(
         name,
@@ -253,7 +276,6 @@ export async function runChannelDaemonWorker(
     registerToolCallDispatch(bridgeFacade, router, channels);
     registerSessionCleanup(bridgeFacade, router, channels);
 
-    const connected: string[] = [];
     for (const [name, channel] of channels) {
       try {
         await channel.connect();
@@ -263,6 +285,11 @@ export async function runChannelDaemonWorker(
         writeStderrLine(
           `[Channel] Failed to connect "${name}": ${err instanceof Error ? err.message : String(err)}`,
         );
+        try {
+          channel.disconnect();
+        } catch {
+          // best-effort
+        }
       }
     }
 
@@ -275,18 +302,13 @@ export async function runChannelDaemonWorker(
     return {
       channels: connected,
       async close() {
-        for (const name of connected) {
-          try {
-            channels.get(name)?.disconnect();
-          } catch {
-            // best-effort
-          }
-        }
+        disconnectAll();
         router.clearAll();
         bridge.stop();
       },
     };
   } catch (err) {
+    disconnectAll();
     bridge.stop();
     throw err;
   }
@@ -318,14 +340,17 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       if (process.env[CHANNEL_DAEMON_WORKER_SENTINEL] !== '1') {
         throw new Error('daemon-worker is an internal qwen serve command.');
       }
+      const daemonToken = process.env[QWEN_DAEMON_TOKEN_ENV];
+      delete process.env[QWEN_DAEMON_TOKEN_ENV];
+      delete process.env[QWEN_SERVER_TOKEN_ENV];
       const selection = normalizeServeChannelSelection(argv.channel);
       if (!selection) {
         throw new Error('--channel is required.');
       }
       const handle = await runChannelDaemonWorker({
-        daemonUrl: readRequiredEnv('QWEN_DAEMON_URL'),
-        daemonToken: process.env['QWEN_DAEMON_TOKEN'],
-        workspace: readRequiredEnv('QWEN_DAEMON_WORKSPACE'),
+        daemonUrl: readRequiredEnv(QWEN_DAEMON_URL_ENV),
+        daemonToken,
+        workspace: readRequiredEnv(QWEN_DAEMON_WORKSPACE_ENV),
         selection,
         sendReady: (ready) => {
           process.send?.({ type: 'ready', ...ready });
@@ -333,7 +358,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       });
 
       let shuttingDown = false;
-      const shutdown = async (signal: NodeJS.Signals) => {
+      const shutdown = async (reason: NodeJS.Signals | 'disconnect') => {
         if (shuttingDown) {
           process.exit(1);
         }
@@ -343,7 +368,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           process.exit(0);
         } catch (err) {
           writeStderrLine(
-            `[Channel] daemon worker failed to shut down after ${signal}: ${
+            `[Channel] daemon worker failed to shut down after ${reason}: ${
               err instanceof Error ? err.message : String(err)
             }`,
           );
@@ -352,6 +377,9 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       };
       process.once('SIGINT', shutdown);
       process.once('SIGTERM', shutdown);
+      process.once('disconnect', () => {
+        void shutdown('disconnect');
+      });
     } catch (err) {
       writeStderrLine(
         `[Channel] daemon worker failed: ${err instanceof Error ? err.message : String(err)}`,

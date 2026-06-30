@@ -111,14 +111,17 @@ export function readServiceInfo(): ServiceInfo | null {
   return info;
 }
 
-function writeInfo(info: ServiceInfo): void {
+function writeInfo(info: ServiceInfo, flag: 'w' | 'wx' = 'w'): void {
   const filePath = pidFilePath();
   const dir = path.dirname(filePath);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
-  writeFileSync(filePath, JSON.stringify(info, null, 2), 'utf-8');
+  writeFileSync(filePath, JSON.stringify(info, null, 2), {
+    encoding: 'utf-8',
+    flag,
+  });
 }
 
 /** Write PID file with current standalone channel process info. */
@@ -154,12 +157,57 @@ export function writeServeServiceInfo({
   writeInfo(info);
 }
 
+export function reserveServeServiceInfo({
+  channels,
+  servePid = process.pid,
+}: {
+  channels: string[];
+  servePid?: number;
+}): void {
+  const info: ServiceInfo = {
+    owner: 'serve',
+    pid: servePid,
+    startedAt: new Date().toISOString(),
+    channels,
+    servePid,
+  };
+
+  writeInfo(info, 'wx');
+}
+
 /** Delete the PID file. */
 export function removeServiceInfo(): void {
   const filePath = pidFilePath();
   if (existsSync(filePath)) {
     unlinkPidFile(filePath);
   }
+}
+
+export function removeServeServiceInfo(
+  servePid: number = process.pid,
+): boolean {
+  const filePath = pidFilePath();
+  if (!existsSync(filePath)) return false;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return false;
+  }
+
+  const info = parseServiceInfo(parsed);
+  if (
+    !info ||
+    info.owner !== 'serve' ||
+    info.servePid !== servePid ||
+    info.pid !== servePid
+  ) {
+    return false;
+  }
+
+  unlinkPidFile(filePath);
+  return true;
 }
 
 /**

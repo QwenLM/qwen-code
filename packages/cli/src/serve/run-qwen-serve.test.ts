@@ -29,6 +29,7 @@ import type {
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ServiceInfo } from '../commands/channel/pidfile.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -1296,9 +1297,11 @@ describe('runQwenServe channel worker supervisor', () => {
 
   function makePidfileDeps() {
     return {
-      readServiceInfo: vi.fn(() => null),
+      readServiceInfo: vi.fn<() => ServiceInfo | null>(() => null),
       writeServeServiceInfo: vi.fn(),
+      reserveServeServiceInfo: vi.fn(),
       removeServiceInfo: vi.fn(),
+      removeServeServiceInfo: vi.fn(() => true),
     };
   }
 
@@ -1336,6 +1339,10 @@ describe('runQwenServe channel worker supervisor', () => {
     );
 
     expect(worker.start).toHaveBeenCalledTimes(1);
+    expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      servePid: process.pid,
+    });
     expect(pidfile.writeServeServiceInfo).toHaveBeenCalledWith({
       channels: ['telegram'],
       servePid: process.pid,
@@ -1345,7 +1352,7 @@ describe('runQwenServe channel worker supervisor', () => {
     await handle.close();
 
     expect(order).toEqual(['worker', 'bridge']);
-    expect(pidfile.removeServiceInfo).toHaveBeenCalledTimes(1);
+    expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
   it('reports a warning when the ready channel worker exits', async () => {
@@ -1420,6 +1427,7 @@ describe('runQwenServe channel worker supervisor', () => {
     });
     worker.start.mockRejectedValueOnce(new Error('worker failed before ready'));
 
+    const pidfile = makePidfileDeps();
     await expect(
       runQwenServe(
         {
@@ -1433,12 +1441,56 @@ describe('runQwenServe channel worker supervisor', () => {
         {
           bridge,
           channelWorkerSupervisorFactory: vi.fn(() => worker),
-          channelServicePidfile: makePidfileDeps(),
+          channelServicePidfile: pidfile,
         },
       ),
     ).rejects.toThrow('worker failed before ready');
 
     expect(bridge.shutdown).toHaveBeenCalled();
+    expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('refuses to start when another channel service is already running', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-busy-')),
+    );
+    const workerFactory = vi.fn(() =>
+      makeWorker({
+        enabled: true,
+        state: 'running',
+        pid: 1234,
+        channels: ['telegram'],
+      }),
+    );
+    const pidfile = makePidfileDeps();
+    pidfile.readServiceInfo.mockReturnValueOnce({
+      owner: 'serve',
+      pid: 9999,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+      servePid: 9999,
+    });
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge: makeFakeBridge(),
+          channelWorkerSupervisorFactory: workerFactory,
+          channelServicePidfile: pidfile,
+        },
+      ),
+    ).rejects.toThrow('Channel service is already running under qwen serve');
+
+    expect(workerFactory).not.toHaveBeenCalled();
+    expect(pidfile.reserveServeServiceInfo).not.toHaveBeenCalled();
   });
 });
 

@@ -45,6 +45,7 @@ function resolveOptionalStringField(
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
+  defaultCwd: string = process.cwd(),
 ): Promise<ChannelConfig & Record<string, unknown>> {
   if (!rawConfig['type']) {
     throw new Error(`Channel "${name}" is missing required field "type".`);
@@ -90,7 +91,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
-    cwd: resolvePath((rawConfig['cwd'] as string) || process.cwd()),
+    cwd: resolvePath((rawConfig['cwd'] as string) || defaultCwd),
     approvalMode: rawConfig['approvalMode'] as string | undefined,
     instructions: rawConfig['instructions'] as string | undefined,
     model: rawConfig['model'] as string | undefined,

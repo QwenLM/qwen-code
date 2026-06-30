@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createChannelWorkerSupervisor,
   type ChannelWorkerChild,
@@ -16,7 +16,12 @@ class FakeChild extends EventEmitter implements ChannelWorkerChild {
 }
 
 describe('createChannelWorkerSupervisor', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('passes daemon connection details through env without putting token in argv', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'serve-token');
     const child = new FakeChild();
     const spawnWorker = vi.fn(
       (_execPath: string, _argv: string[], _options: unknown) => child,
@@ -57,8 +62,12 @@ describe('createChannelWorkerSupervisor', () => {
           QWEN_CODE_NO_RELAUNCH: 'true',
           QWEN_CHANNEL_DAEMON_WORKER: '1',
         }),
+        cwd: '/workspace',
       }),
     );
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    expect(env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     const argv = spawnWorker.mock.calls[0]![1];
     expect(argv).not.toContain('secret-token');
     expect(supervisor.snapshot()).toMatchObject({
@@ -66,6 +75,32 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'running',
       pid: 54321,
       channels: ['telegram', 'feishu'],
+    });
+  });
+
+  it('ignores non-ready IPC messages before the ready message', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', { type: 'not-ready' });
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'running',
+      channels: ['telegram'],
     });
   });
 
@@ -87,6 +122,27 @@ describe('createChannelWorkerSupervisor', () => {
       enabled: true,
       state: 'failed',
       exitCode: 1,
+    });
+  });
+
+  it('rejects startup when the worker never becomes ready', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      startupTimeoutMs: 1,
+      spawnWorker: vi.fn(() => child),
+    });
+
+    await expect(supervisor.start()).rejects.toThrow(
+      'Channel worker did not become ready within 1ms.',
+    );
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'failed',
+      error: 'Channel worker did not become ready within 1ms.',
     });
   });
 
@@ -163,5 +219,30 @@ describe('createChannelWorkerSupervisor', () => {
     supervisor.killAllSync();
 
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('does not clobber failed startup state on force shutdown', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('exit', 1, null);
+    await expect(started).rejects.toThrow('Channel worker exited before ready');
+
+    supervisor.killAllSync();
+
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'failed',
+      exitCode: 1,
+      error: expect.stringContaining('Channel worker exited before ready'),
+    });
   });
 });

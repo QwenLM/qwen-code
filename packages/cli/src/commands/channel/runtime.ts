@@ -163,6 +163,7 @@ export function registerSessionCleanup(
 export async function parseConfiguredChannels(
   channelsConfig: Record<string, unknown>,
   selectedNames: string[],
+  opts: { defaultCwd?: string } = {},
 ): Promise<ParsedChannel[]> {
   const parsed: ParsedChannel[] = [];
   for (const name of selectedNames) {
@@ -172,6 +173,7 @@ export async function parseConfiguredChannels(
         config: await parseChannelConfig(
           name,
           channelsConfig[name] as Record<string, unknown>,
+          opts.defaultCwd,
         ),
       });
     } catch (err) {

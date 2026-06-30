@@ -1,7 +1,15 @@
 import { fork } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import type { ServeChannelSelection } from './types.js';
-import { CHANNEL_DAEMON_WORKER_SENTINEL } from '../commands/channel/daemon-worker.js';
+import {
+  CHANNEL_DAEMON_WORKER_SENTINEL,
+  QWEN_DAEMON_TOKEN_ENV,
+  QWEN_DAEMON_URL_ENV,
+  QWEN_DAEMON_WORKSPACE_ENV,
+} from './channel-worker-env.js';
+
+const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
+const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 
 export type ChannelWorkerState =
   | 'disabled'
@@ -33,6 +41,8 @@ export interface ChannelWorkerChild {
   pid?: number;
   killed?: boolean;
   kill(signal?: NodeJS.Signals | number): boolean;
+  on(event: 'message', listener: (message: unknown) => void): this;
+  removeListener(event: 'message', listener: (message: unknown) => void): this;
   once(event: 'message', listener: (message: unknown) => void): this;
   once(
     event: 'exit',
@@ -45,6 +55,7 @@ export type SpawnChannelWorker = (
   execPath: string,
   argv: string[],
   options: {
+    cwd: string;
     env: NodeJS.ProcessEnv;
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'];
   },
@@ -56,6 +67,7 @@ export interface CreateChannelWorkerSupervisorOptions {
   daemonToken?: string;
   workspace: string;
   selection: ServeChannelSelection;
+  startupTimeoutMs?: number;
   spawnWorker?: SpawnChannelWorker;
 }
 
@@ -72,12 +84,14 @@ function defaultSpawnWorker(
   execPath: string,
   argv: string[],
   options: {
+    cwd: string;
     env: NodeJS.ProcessEnv;
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'];
   },
 ): ChannelWorkerChild {
   const child = fork(argv[0]!, argv.slice(1), {
     execPath,
+    cwd: options.cwd,
     env: options.env,
     stdio: options.stdio,
   });
@@ -128,12 +142,14 @@ export function createChannelWorkerSupervisor(
     state: ChannelWorkerState,
     code: number | null,
     signal: NodeJS.Signals | null,
+    error?: string,
   ) => {
     snapshot = {
       ...snapshot,
       state,
       exitCode: code,
       signal,
+      ...(error ? { error } : {}),
     };
   };
 
@@ -150,10 +166,14 @@ export function createChannelWorkerSupervisor(
         ...process.env,
         QWEN_CODE_NO_RELAUNCH: 'true',
         [CHANNEL_DAEMON_WORKER_SENTINEL]: '1',
-        QWEN_DAEMON_URL: opts.daemonUrl,
-        QWEN_DAEMON_TOKEN: opts.daemonToken ?? '',
-        QWEN_DAEMON_WORKSPACE: opts.workspace,
+        [QWEN_DAEMON_URL_ENV]: opts.daemonUrl,
+        [QWEN_DAEMON_WORKSPACE_ENV]: opts.workspace,
       };
+      delete env[QWEN_SERVER_TOKEN_ENV];
+      delete env[QWEN_DAEMON_TOKEN_ENV];
+      if (opts.daemonToken) {
+        env[QWEN_DAEMON_TOKEN_ENV] = opts.daemonToken;
+      }
       snapshot = {
         enabled: true,
         state: 'starting',
@@ -161,6 +181,7 @@ export function createChannelWorkerSupervisor(
         startedAt: new Date().toISOString(),
       };
       child = spawnWorker(process.execPath, argv, {
+        cwd: opts.workspace,
         env,
         stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
       });
@@ -170,10 +191,25 @@ export function createChannelWorkerSupervisor(
 
       await new Promise<void>((resolve, reject) => {
         let settled = false;
-        const settleReady = (message: unknown) => {
+        let startupTimer: NodeJS.Timeout | undefined;
+        function cleanupReadyWait() {
+          if (startupTimer) {
+            clearTimeout(startupTimer);
+            startupTimer = undefined;
+          }
+          child?.removeListener('message', settleReady);
+        }
+        function failBeforeReady(err: Error) {
+          if (settled) return;
+          settled = true;
+          cleanupReadyWait();
+          reject(err);
+        }
+        function settleReady(message: unknown) {
           if (settled || !isReadyMessage(message)) return;
           settled = true;
           ready = true;
+          cleanupReadyWait();
           snapshot = {
             ...snapshot,
             state: 'running',
@@ -184,30 +220,41 @@ export function createChannelWorkerSupervisor(
                 : snapshot.channels,
           };
           resolve();
-        };
-        const settleExit = (
+        }
+        function settleExit(
           code: number | null,
           signal: NodeJS.Signals | null,
-        ) => {
+        ) {
           const state = ready ? 'exited' : 'failed';
-          setExited(state, code, signal);
+          const message = `Channel worker exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'}).`;
+          setExited(state, code, signal, ready ? undefined : message);
           if (!settled) {
-            settled = true;
-            reject(
-              new Error(
-                `Channel worker exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'}).`,
-              ),
-            );
+            failBeforeReady(new Error(message));
           }
-        };
-        const settleError = (err: Error) => {
-          snapshot = { ...snapshot, state: ready ? 'exited' : 'failed' };
+        }
+        function settleError(err: Error) {
+          snapshot = {
+            ...snapshot,
+            state: ready ? 'exited' : 'failed',
+            error: err.message,
+          };
           if (!settled) {
-            settled = true;
-            reject(err);
+            failBeforeReady(err);
           }
-        };
-        child!.once('message', settleReady);
+        }
+        startupTimer = setTimeout(() => {
+          const timeoutMs =
+            opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
+          const error = `Channel worker did not become ready within ${timeoutMs}ms.`;
+          snapshot = {
+            ...snapshot,
+            state: 'failed',
+            error,
+          };
+          failBeforeReady(new Error(error));
+        }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
+        startupTimer.unref();
+        child!.on('message', settleReady);
         child!.once('exit', settleExit);
         child!.once('error', settleError);
       });
@@ -232,8 +279,14 @@ export function createChannelWorkerSupervisor(
       snapshot = { ...snapshot, state: 'stopped' };
     },
     killAllSync() {
-      if (!child || snapshot.state === 'exited' || snapshot.state === 'stopped')
+      if (
+        !child ||
+        snapshot.state === 'exited' ||
+        snapshot.state === 'failed' ||
+        snapshot.state === 'stopped'
+      ) {
         return;
+      }
       child.kill('SIGKILL');
       snapshot = {
         ...snapshot,
@@ -257,6 +310,6 @@ export function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor
     async start() {},
     async stop() {},
     killAllSync() {},
-    snapshot: () => snapshot,
+    snapshot: () => ({ ...snapshot, channels: [] }),
   };
 }

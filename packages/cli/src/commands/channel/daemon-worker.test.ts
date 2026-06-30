@@ -20,11 +20,13 @@ const mockBridgeLoadSession = vi.hoisted(() => vi.fn());
 const mockBridgePrompt = vi.hoisted(() => vi.fn());
 const mockBridgeCancelSession = vi.hoisted(() => vi.fn());
 const mockBridgeShellCommand = vi.hoisted(() => vi.fn());
+const mockBridgeGetAvailableCommands = vi.hoisted(() => vi.fn(() => []));
 const mockDaemonChannelBridge = vi.hoisted(() =>
   vi.fn(() => ({
     get availableCommands() {
       return [];
     },
+    getAvailableCommands: mockBridgeGetAvailableCommands,
     on: mockBridgeOn,
     off: mockBridgeOff,
     newSession: mockBridgeNewSession,
@@ -227,6 +229,31 @@ describe('createDaemonChannelBridgeFacade', () => {
 
     expect(facade.shellCommand).toBeTypeOf('function');
   });
+
+  it('preserves session-scoped available commands when present', () => {
+    const getAvailableCommands = vi.fn(() => [
+      { name: 'status', description: 'Show status' },
+    ]);
+    const bridge = {
+      availableCommands: [],
+      getAvailableCommands,
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect(facade.getAvailableCommands?.('session-1')).toEqual([
+      { name: 'status', description: 'Show status' },
+    ]);
+    expect(getAvailableCommands).toHaveBeenCalledWith('session-1');
+  });
 });
 
 describe('runChannelDaemonWorker', () => {
@@ -251,6 +278,7 @@ describe('runChannelDaemonWorker', () => {
     expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
       expect.any(Object),
       ['telegram'],
+      { defaultCwd: '/workspace' },
     );
     expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -296,6 +324,7 @@ describe('runChannelDaemonWorker', () => {
     expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
       expect.any(Object),
       ['telegram', 'feishu'],
+      { defaultCwd: '/workspace' },
     );
     expect(mockSessionRouter).toHaveBeenCalledTimes(1);
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith(
@@ -368,6 +397,28 @@ describe('runChannelDaemonWorker', () => {
       }),
     ).rejects.toThrow('adapter boom');
 
+    expect(mockBridgeStop).toHaveBeenCalled();
+  });
+
+  it('disconnects a constructed adapter when connect fails', async () => {
+    const sdk = createSdk();
+    const disconnect = vi.fn();
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockRejectedValue(new Error('connect boom')),
+      disconnect,
+      name: 'telegram',
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow('No channels connected.');
+
+    expect(disconnect).toHaveBeenCalled();
     expect(mockBridgeStop).toHaveBeenCalled();
   });
 

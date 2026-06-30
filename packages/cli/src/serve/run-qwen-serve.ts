@@ -76,22 +76,15 @@ import {
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
-import {
-  createChannelWorkerSupervisor,
-  createDisabledChannelWorkerSupervisor,
-  type ChannelWorkerSupervisor,
-  type CreateChannelWorkerSupervisorOptions,
+import type {
+  ChannelWorkerSupervisor,
+  CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
-import { findCliEntryPath } from '../commands/channel/config-utils.js';
-import {
-  readServiceInfo,
-  removeServiceInfo,
-  writeServeServiceInfo,
-} from '../commands/channel/pidfile.js';
+import type { ServiceInfo } from '../commands/channel/pidfile.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 // Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
@@ -415,6 +408,67 @@ type SettingsRuntime = typeof import('../config/settings.js');
 type LoadedSettingsAdapterRuntime =
   typeof import('../config/loadedSettingsAdapter.js');
 type TrustedFoldersRuntime = typeof import('../config/trustedFolders.js');
+type ChannelServicePidfile = {
+  readServiceInfo(): ServiceInfo | null;
+  writeServeServiceInfo(opts: {
+    channels: string[];
+    servePid?: number;
+    workerPid?: number;
+  }): void;
+  reserveServeServiceInfo?(opts: {
+    channels: string[];
+    servePid?: number;
+  }): void;
+  removeServiceInfo(): void;
+  removeServeServiceInfo?(servePid?: number): boolean;
+};
+type ChannelWorkerRuntime = {
+  createChannelWorkerSupervisor(
+    opts: CreateChannelWorkerSupervisorOptions,
+  ): ChannelWorkerSupervisor;
+  channelServicePidfile: ChannelServicePidfile;
+};
+
+let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
+async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
+  channelWorkerRuntimePromise ??= Promise.all([
+    import('./channel-worker-supervisor.js'),
+    import('../commands/channel/pidfile.js'),
+  ]).then(([supervisor, pidfile]) => ({
+    createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
+    channelServicePidfile: pidfile,
+  }));
+  return channelWorkerRuntimePromise;
+}
+
+function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
+  const snapshot = {
+    enabled: false,
+    state: 'disabled' as const,
+    channels: [],
+  };
+  return {
+    async start() {},
+    async stop() {},
+    killAllSync() {},
+    snapshot: () => ({ ...snapshot, channels: [] }),
+  };
+}
+
+function findCliEntryPathForServe(): string {
+  const mainModule = process.argv[1];
+  if (mainModule) {
+    return path.resolve(mainModule);
+  }
+  throw new Error('Cannot determine CLI entry path');
+}
+
+function channelSelectionPidfileNames(
+  selection: ServeOptions['channelSelection'],
+): string[] {
+  if (!selection) return [];
+  return selection.mode === 'all' ? ['all'] : [...selection.names];
+}
 
 function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
@@ -514,11 +568,7 @@ export interface RunQwenServeDeps {
   channelWorkerSupervisorFactory?: (
     opts: CreateChannelWorkerSupervisorOptions,
   ) => ChannelWorkerSupervisor;
-  channelServicePidfile?: {
-    readServiceInfo: typeof readServiceInfo;
-    writeServeServiceInfo: typeof writeServeServiceInfo;
-    removeServiceInfo: typeof removeServiceInfo;
-  };
+  channelServicePidfile?: ChannelServicePidfile;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -1134,10 +1184,81 @@ export async function runQwenServe(
       optsIn.cdpTunnelOverWs ??
       process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
   };
-  const channelServicePidfile = deps.channelServicePidfile ?? {
-    readServiceInfo,
-    writeServeServiceInfo,
-    removeServiceInfo,
+  const channelRuntime = opts.channelSelection
+    ? await loadChannelWorkerRuntime()
+    : undefined;
+  const channelServicePidfile =
+    deps.channelServicePidfile ?? channelRuntime?.channelServicePidfile;
+  let channelPidfileReserved = false;
+  const removeCurrentServePidfile = (): void => {
+    if (!opts.channelSelection || !channelServicePidfile) return;
+    if (!channelPidfileReserved) return;
+    if (channelServicePidfile.removeServeServiceInfo) {
+      if (channelServicePidfile.removeServeServiceInfo(process.pid)) {
+        channelPidfileReserved = false;
+      }
+      return;
+    }
+    const info = channelServicePidfile.readServiceInfo();
+    if (
+      info?.owner === 'serve' &&
+      info.pid === process.pid &&
+      info.servePid === process.pid
+    ) {
+      channelServicePidfile.removeServiceInfo();
+      channelPidfileReserved = false;
+    }
+  };
+  const reserveChannelServicePidfile = (): void => {
+    if (!opts.channelSelection) return;
+    if (!channelServicePidfile) {
+      throw new Error('Channel service pidfile runtime is not available.');
+    }
+    const channelPidfileNames = channelSelectionPidfileNames(
+      opts.channelSelection,
+    );
+    const existingChannelService = channelServicePidfile.readServiceInfo();
+    if (existingChannelService) {
+      const owner =
+        existingChannelService.owner === 'serve'
+          ? 'qwen serve'
+          : 'qwen channel start';
+      throw new Error(
+        `Channel service is already running under ${owner} (PID ${existingChannelService.pid}). Stop it before starting qwen serve --channel.`,
+      );
+    }
+    try {
+      if (channelServicePidfile.reserveServeServiceInfo) {
+        channelServicePidfile.reserveServeServiceInfo({
+          channels: channelPidfileNames,
+          servePid: process.pid,
+        });
+      } else {
+        channelServicePidfile.writeServeServiceInfo({
+          channels: channelPidfileNames,
+          servePid: process.pid,
+        });
+      }
+      channelPidfileReserved = true;
+    } catch (err) {
+      if (err && typeof err === 'object' && 'code' in err) {
+        const code = (err as { code?: unknown }).code;
+        if (code === 'EEXIST') {
+          const info = channelServicePidfile.readServiceInfo();
+          if (info) {
+            const owner =
+              info.owner === 'serve' ? 'qwen serve' : 'qwen channel start';
+            throw new Error(
+              `Channel service is already running under ${owner} (PID ${info.pid}). Stop it before starting qwen serve --channel.`,
+            );
+          }
+          throw new Error(
+            'Channel service is already starting. Retry after the current startup finishes.',
+          );
+        }
+      }
+      throw err;
+    }
   };
   validateRateLimitOptions(opts);
 
@@ -1278,18 +1399,6 @@ export async function runQwenServe(
   // server.ts's raw `opts.workspace` and clients see one path on
   // `/capabilities` but another on `POST /session` responses.
   const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
-  if (opts.channelSelection) {
-    const existingChannelService = channelServicePidfile.readServiceInfo();
-    if (existingChannelService) {
-      const owner =
-        existingChannelService.owner === 'serve'
-          ? 'qwen serve'
-          : 'qwen channel start';
-      throw new Error(
-        `Channel service is already running under ${owner} (PID ${existingChannelService.pid}). Stop it before starting qwen serve --channel.`,
-      );
-    }
-  }
 
   // Read a lightweight settings summary once at boot for startup-time fields
   // used before the full runtime settings loader is allowed onto the hot path.
@@ -1555,7 +1664,7 @@ export async function runQwenServe(
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
   const writeChannelWorkerPidfile = (): void => {
-    if (!opts.channelSelection) return;
+    if (!opts.channelSelection || !channelServicePidfile) return;
     const snapshot = channelWorker.snapshot();
     channelServicePidfile.writeServeServiceInfo({
       channels: snapshot.channels,
@@ -2001,6 +2110,8 @@ export async function runQwenServe(
     );
   }
 
+  reserveChannelServicePidfile();
+
   return await new Promise<RunHandle>((resolve, reject) => {
     const server = app.listen(opts.port, listenHostname, () => {
       startup.listenerReadyAt = new Date().toISOString();
@@ -2039,16 +2150,28 @@ export async function runQwenServe(
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
-      if (opts.channelSelection) {
-        channelWorker = (
-          deps.channelWorkerSupervisorFactory ?? createChannelWorkerSupervisor
-        )({
-          cliEntryPath: findCliEntryPath(),
-          daemonUrl: url,
-          ...(token ? { daemonToken: token } : {}),
-          workspace: boundWorkspace,
-          selection: opts.channelSelection,
-        });
+      try {
+        if (opts.channelSelection) {
+          const createSupervisor =
+            deps.channelWorkerSupervisorFactory ??
+            channelRuntime?.createChannelWorkerSupervisor;
+          if (!createSupervisor) {
+            throw new Error(
+              'Channel worker supervisor runtime is not available.',
+            );
+          }
+          channelWorker = createSupervisor({
+            cliEntryPath: findCliEntryPathForServe(),
+            daemonUrl: url,
+            ...(token ? { daemonToken: token } : {}),
+            workspace: boundWorkspace,
+            selection: opts.channelSelection,
+          });
+        }
+      } catch (err) {
+        removeCurrentServePidfile();
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
       }
       writeStdoutLine(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
@@ -2141,6 +2264,7 @@ export async function runQwenServe(
         writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
         daemonLog.error('runtime startup failed', error);
         markRuntimeFailed(error);
+        removeCurrentServePidfile();
         await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
       };
       const startBridgePreheat = (bridge: AcpSessionBridge): void => {
@@ -2231,6 +2355,7 @@ export async function runQwenServe(
           try {
             channelWorker.killAllSync();
             bridgeRef?.killAllSync();
+            removeCurrentServePidfile();
           } catch (err) {
             daemonLog.error(
               'force-kill error',
@@ -2401,9 +2526,7 @@ export async function runQwenServe(
                     err instanceof Error ? err : null,
                   );
                 });
-                if (opts.channelSelection) {
-                  channelServicePidfile.removeServiceInfo();
-                }
+                removeCurrentServePidfile();
                 const bridgeForShutdown = bridgeRef;
                 if (bridgeForShutdown) {
                   await bridgeForShutdown.shutdown().catch((err) => {
@@ -2522,6 +2645,9 @@ export async function runQwenServe(
         );
       }
     });
-    server.once('error', reject);
+    server.once('error', (err) => {
+      removeCurrentServePidfile();
+      reject(err);
+    });
   });
 }
