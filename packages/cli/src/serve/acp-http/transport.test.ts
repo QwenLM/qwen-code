@@ -1094,6 +1094,198 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('session/permission without requestId → INVALID_PARAMS', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/permission',
+      params: { outcome: { outcome: 'selected', optionId: 'allow' } },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('`requestId` is required');
+  });
+
+  it.each([
+    ['non-object outcome', 'nope'],
+    ['unrecognized outcome value', { outcome: 'maybe' }],
+    ['selected missing optionId', { outcome: 'selected' }],
+    ['selected empty optionId', { outcome: 'selected', optionId: '' }],
+    ['selected non-string optionId', { outcome: 'selected', optionId: 123 }],
+  ])(
+    'session/permission rejects %s → INVALID_PARAMS',
+    async (_label, outcome) => {
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 21,
+        method: 'session/permission',
+        params: { requestId: 'perm-bad', outcome },
+      });
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; message: string };
+      }>;
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.message).toContain('`outcome` must be');
+    },
+  );
+
+  it('session/permission with outcome `cancelled` resolves the bridge', async () => {
+    let resolvedWith: unknown;
+    bridge.respondToSessionPermission = ((
+      sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      resolvedWith = { sessionId, requestId, resp };
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-cancel',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 22,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 23,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-cancel',
+          outcome: { outcome: 'cancelled' },
+        },
+      });
+      const ack = (await connReader.next()) as { id: number; result?: unknown };
+      expect(ack).toEqual({ jsonrpc: '2.0', id: 23, result: {} });
+      expect(resolvedWith).toEqual({
+        sessionId: 'sess-1',
+        requestId: 'perm-cancel',
+        resp: { outcome: { outcome: 'cancelled' } },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission infers sessionId and retains the entry when the bridge rejects the vote', async () => {
+    // The bridge mediator has nothing to resolve (already voted/cancelled).
+    bridge.respondToSessionPermission = (() => false) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-rej',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 24,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next();
+      // No `sessionId` param: the handler must infer it from the pending
+      // entry (the `sessionId === undefined` lookup branch).
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 25,
+        method: 'session/permission',
+        params: {
+          requestId: 'perm-rej',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const first = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      };
+      expect(first.id).toBe(25);
+      expect(first.error.code).toBe(-32602);
+      expect(first.error.message).toContain('not accepted');
+      expect(first.error.data?.httpStatus).toBe(409);
+      // A rejected vote must NOT delete the pending entry. A retry on the same
+      // requestId (still no sessionId) must therefore still resolve to the
+      // entry and hit the bridge again (409), NOT fall through to the 404
+      // "no pending permission request" path.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 26,
+        method: 'session/permission',
+        params: {
+          requestId: 'perm-rej',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const second = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      };
+      expect(second.id).toBe(26);
+      expect(second.error.data?.httpStatus).toBe(409);
+      expect(second.error.message).toContain('not accepted');
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
   it('standard session/set_config_option (model) routes to the bridge', async () => {
     const connId = await initialize();
     await newSession(connId);

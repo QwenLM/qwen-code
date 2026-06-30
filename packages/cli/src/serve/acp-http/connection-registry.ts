@@ -468,7 +468,16 @@ export class ConnectionRegistry {
     return undefined;
   }
 
-  findPendingPermission(
+  /**
+   * Locate the single pending permission entry matching `requestId` (and
+   * optionally `sessionId`). Shared by {@link findPendingPermission} and
+   * {@link deletePendingPermission} so the matching predicate lives in one
+   * place — a future change to the predicate cannot let find and delete drift
+   * apart. Permission request IDs are connection-qualified
+   * (`_qwen_perm_<connectionId>_N`) and therefore globally unique, so at most
+   * one entry can match across the whole registry.
+   */
+  private findPendingPermissionEntry(
     requestId: string,
     sessionId?: string,
   ): PendingClientRequestRef | undefined {
@@ -486,17 +495,17 @@ export class ConnectionRegistry {
     return undefined;
   }
 
+  findPendingPermission(
+    requestId: string,
+    sessionId?: string,
+  ): PendingClientRequestRef | undefined {
+    return this.findPendingPermissionEntry(requestId, sessionId);
+  }
+
   deletePendingPermission(sessionId: string, requestId: string): void {
-    for (const conn of this.byId.values()) {
-      for (const [id, req] of conn.pending) {
-        if (
-          req.kind === 'permission' &&
-          req.sessionId === sessionId &&
-          req.bridgeRequestId === requestId
-        ) {
-          conn.pending.delete(id);
-        }
-      }
+    const match = this.findPendingPermissionEntry(requestId, sessionId);
+    if (match) {
+      match.conn.pending.delete(match.id);
     }
   }
 

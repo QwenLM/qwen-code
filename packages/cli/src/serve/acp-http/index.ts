@@ -175,8 +175,16 @@ export function mountAcpHttp(
   // cancel it on the bridge so the agent's prompt isn't left blocked.
   const registry = new ConnectionRegistry(
     (req, clientId) => {
+      // Defensive, matching the `detachClient` callback below: if a future
+      // refactor introduces async work between registry and dispatcher
+      // creation, a teardown racing in here must not crash
+      // `abandonPendingForSession`. Log and report "not cancelled" instead of
+      // throwing through the teardown path.
       if (!dispatcherRef.current) {
-        throw new Error('ACP dispatcher not initialized');
+        writeStderrLine(
+          'qwen serve: /acp abandonPending called before dispatcher initialized (skipped)',
+        );
+        return false;
       }
       return dispatcherRef.current.cancelAbandonedPermission(req, clientId);
     },

@@ -1068,6 +1068,13 @@ export class AcpDispatcher {
           const requestId =
             typeof params['requestId'] === 'string' ? params['requestId'] : '';
           if (!requestId) {
+            // Every failure mode below logs to stderr: a stuck permission
+            // prompt is otherwise undebuggable from the server side (the
+            // legacy `resolveClientResponse` path logs its vote/cancel
+            // failures the same way).
+            writeStderrLine(
+              `qwen serve: /acp session/permission rejected: \`requestId\` is required`,
+            );
             if (id !== undefined) {
               conn.sendConn(
                 error(id, RPC.INVALID_PARAMS, '`requestId` is required'),
@@ -1087,6 +1094,9 @@ export class AcpDispatcher {
           );
           const sessionId = sessionIdParam ?? pendingRef?.req.sessionId;
           if (!sessionId) {
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote dropped: no pending request for requestId ${logSafe(requestId)}`,
+            );
             if (id !== undefined) {
               conn.sendConn(
                 error(id, RPC.INVALID_PARAMS, 'No pending permission request', {
@@ -1097,7 +1107,12 @@ export class AcpDispatcher {
             }
             return;
           }
-          if (!this.requireOwned(conn, sessionId, id)) return;
+          if (!this.requireOwned(conn, sessionId, id)) {
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote rejected: session ${logSafe(sessionId)} not owned by this connection (requestId ${logSafe(requestId)})`,
+            );
+            return;
+          }
           const accepted = this.bridge.respondToSessionPermission(
             sessionId,
             requestId,
@@ -1105,18 +1120,26 @@ export class AcpDispatcher {
             this.sessionCtx(conn, sessionId, loopback),
           );
           if (!accepted) {
-            this.registry?.deletePendingPermission(sessionId, requestId);
+            // The bridge mediator had no outstanding request to resolve
+            // (already voted/cancelled — e.g. a duplicate or racing vote).
+            // Do NOT delete the registry entry here: matching the legacy
+            // `resolveClientResponse` contract, keep it until teardown's
+            // `abandonPendingForSession` releases the mediator. Deleting now
+            // would (a) conflate "no pending entry" with "bridge rejected a
+            // present vote" and (b) make a legitimate retry on another
+            // connection fail with a misleading "no pending" error.
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote not accepted by bridge (${logSafe(sessionId)}, requestId ${logSafe(requestId)})`,
+            );
             if (id !== undefined) {
               conn.sendConn(
                 error(
                   id,
                   RPC.INVALID_PARAMS,
-                  sessionIdParam
-                    ? 'No pending permission request for session'
-                    : 'No pending permission request',
+                  'Permission vote not accepted (request already resolved)',
                   {
-                    httpStatus: 404,
-                    ...(sessionIdParam ? { sessionId } : {}),
+                    httpStatus: 409,
+                    sessionId,
                     requestId,
                   },
                 ),
