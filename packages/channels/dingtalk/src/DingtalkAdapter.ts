@@ -162,15 +162,27 @@ export class DingtalkChannel extends ChannelBase {
       )} messageId=${sanitizeLogText(messageId, 80)} bytes=${decoded.bytes}\n`,
     );
 
+    if ((type === 'CALLBACK' || type === 'EVENT') && (!topic || !messageId)) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Ignoring downstream with invalid routing headers.\n`,
+      );
+      return;
+    }
+
+    const normalizedMsg = {
+      ...msg,
+      headers: { ...headers, topic, messageId },
+    } as DWClientDownStream;
+
     switch (type) {
       case 'SYSTEM':
-        this.callDownStreamHandler(client, 'onSystem', msg);
+        this.callDownStreamHandler(client, 'onSystem', normalizedMsg);
         break;
       case 'EVENT':
-        this.callDownStreamHandler(client, 'onEvent', msg);
+        this.callDownStreamHandler(client, 'onEvent', normalizedMsg);
         break;
       case 'CALLBACK':
-        this.callDownStreamHandler(client, 'onCallback', msg);
+        this.callDownStreamHandler(client, 'onCallback', normalizedMsg);
         break;
       default:
         process.stderr.write(
@@ -618,12 +630,12 @@ export class DingtalkChannel extends ChannelBase {
         typeof downstream.data === 'string'
           ? JSON.parse(downstream.data)
           : (downstream.data as DingTalkMessageData);
-      const msgId =
-        typeof data.msgId === 'string'
-          ? data.msgId
-          : typeof downstream.headers.messageId === 'string'
-            ? downstream.headers.messageId
-            : undefined;
+      const dataMsgId = typeof data.msgId === 'string' ? data.msgId : undefined;
+      const headerMsgId =
+        typeof downstream.headers.messageId === 'string'
+          ? downstream.headers.messageId
+          : undefined;
+      const msgId = dataMsgId || headerMsgId;
 
       // Dedup: DingTalk retries unACKed messages
       if (msgId && this.seenMessages.has(msgId)) {

@@ -402,6 +402,37 @@ describe('DingtalkChannel downstream logging', () => {
     expect(client.onEvent).not.toHaveBeenCalled();
     expect(client.onCallback).not.toHaveBeenCalled();
   });
+
+  it('rejects callback frames with invalid routing headers before dispatch', () => {
+    createChannel();
+    const client = latestMockClient() as {
+      onDownStream(data: Buffer): void;
+      onCallback: ReturnType<typeof vi.fn>;
+    };
+    const raw = Buffer.from(
+      JSON.stringify({
+        specVersion: '1.0',
+        type: 'CALLBACK',
+        headers: {
+          messageId: 'message-1',
+          topic: ['robot'],
+        },
+        data: '{"msgId":"m1"}',
+      }),
+    );
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    expect(() => client.onDownStream(raw)).not.toThrow();
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    writeSpy.mockRestore();
+
+    expect(logged).toContain(
+      '[DingTalk:test-dingtalk] Ignoring downstream with invalid routing headers.',
+    );
+    expect(client.onCallback).not.toHaveBeenCalled();
+  });
 });
 
 describe('DingtalkChannel sender attribution', () => {
@@ -475,6 +506,44 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(logged).toContain(
       '[DingTalk:test-dingtalk] message msgId=header-m1 conversationId=cid123 isGroup=true isMentioned=true senderNick= senderStaffId= senderId=',
+    );
+  });
+
+  it('falls back to downstream header messageId when body msgId is empty', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: '',
+        conversationType: '1',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        isInAtList: false,
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'header-m1' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: 'header-m1',
+      }),
     );
   });
 });
