@@ -655,6 +655,8 @@ export default {
     '（此设置需要重启才能生效。）',
   '(Security-sensitive setting — verify you are not exposing credentials.)':
     '（安全敏感设置 — 请确认您没有泄露凭据。）',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    '出于安全原因，禁止通过 /config 将 tools.approvalMode 设置为 "yolo"。如果您了解相关风险，请直接编辑 settings.json。',
   '(empty)': '（空）',
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   Settings: '设置',

@@ -503,6 +503,40 @@ describe('configCommand', () => {
     });
   });
 
+  describe('security blocklist', () => {
+    it('blocks setting tools.approvalMode to yolo', async () => {
+      const { ctx, setValuesMock } = createMockContext({});
+      const result = await configCommand.action!(
+        ctx,
+        'tools.approvalMode=yolo',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('blocked'),
+      });
+      expect(setValuesMock).not.toHaveBeenCalled();
+    });
+
+    it('allows setting tools.approvalMode to non-yolo values', async () => {
+      const { ctx, setValuesMock } = createMockContext({});
+      const result = await configCommand.action!(
+        ctx,
+        'tools.approvalMode=auto',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('auto'),
+      });
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'tools.approvalMode', value: 'auto' },
+      ]);
+    });
+  });
+
   describe('setValue error handling', () => {
     it('returns error message when setValues throws', async () => {
       const { ctx } = createMockContext({});

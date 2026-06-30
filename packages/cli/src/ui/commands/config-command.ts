@@ -334,6 +334,16 @@ export const configCommand: SlashCommand = {
       };
     }
 
+    if (key === 'tools.approvalMode' && result.value === 'yolo') {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.',
+        ),
+      };
+    }
+
     try {
       context.services.settings.setValues([
         { scope: SettingScope.User, key, value: result.value },
