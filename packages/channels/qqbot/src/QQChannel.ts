@@ -406,10 +406,7 @@ export class QQChannel extends ChannelBase {
         return;
       }
 
-      // Update msgSeqMap to the actual sent seq after fallback.
-      // When markdown succeeds, sentSeq === nextSeq and the set() above
-      // is already correct. When the plain-text fallback fires,
-      // sentSeq === nextSeq + 1 and the map still holds nextSeq — fix it.
+      // Sync msgSeqMap if the actual sent seq differs from the pre-send estimate.
       if (msgId && sentSeq !== nextSeq) {
         this.msgSeqMap.set(msgId, sentSeq);
       }
