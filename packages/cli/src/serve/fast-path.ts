@@ -415,7 +415,7 @@ function emitHeadlessYoloWarning(
   const warning = getHeadlessYoloSafetyWarning({
     getApprovalMode: () => settings.tools?.approvalMode,
     getSandbox: () => settings.tools?.sandbox,
-  } as Parameters<typeof getHeadlessYoloSafetyWarning>[0]);
+  });
   if (warning) {
     writeStderrLine(warning);
   }
