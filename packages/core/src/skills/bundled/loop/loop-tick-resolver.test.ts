@@ -548,10 +548,38 @@ describe('LoopTickResolver', () => {
         homeQwenDir: root,
         allowProjectFile: () => true,
       });
-      expect(atRoot.homeLoopLabel()).toBe(`$QWEN_HOME${path.sep}loop.md`);
+      expect(atRoot.homeLoopLabel()).toBe('$QWEN_HOME/loop.md');
       // The garbled, separator-less form must never appear.
       expect(atRoot.homeLoopLabel()).not.toContain('$QWEN_HOMEloop.md');
     } finally {
+      if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = prevQwenHome;
+    }
+  });
+
+  it('homeLoopLabel uses a forward slash in the $QWEN_HOME label even with Windows separators', async () => {
+    const prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = 'C:\\qwen';
+    vi.resetModules();
+    vi.doMock('node:path', async (importActual) => {
+      const actual = await importActual<typeof import('node:path')>();
+      return { ...actual, sep: '\\' };
+    });
+    try {
+      const { LoopTickResolver: WindowsPathResolver } = await import(
+        './loop-tick-resolver.js'
+      );
+      const windowsPathResolver = new WindowsPathResolver({
+        projectRoot: 'C:\\project',
+        homeDir: 'C:\\qwen',
+        homeQwenDir: 'C:\\qwen',
+        allowProjectFile: () => true,
+      });
+
+      expect(windowsPathResolver.homeLoopLabel()).toBe('$QWEN_HOME/loop.md');
+    } finally {
+      vi.doUnmock('node:path');
+      vi.resetModules();
       if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
       else process.env['QWEN_HOME'] = prevQwenHome;
     }
