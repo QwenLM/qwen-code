@@ -800,6 +800,7 @@ export function useQueuedPrompts({
 
   const clearQueuedPrompts = useCallback((): boolean => {
     if (queuedPromptsRef.current.length === 0) return false;
+    const clearSessionId = latestSessionIdRef.current;
     const submittingPrompts = queuedPromptsRef.current.filter(
       (prompt) => prompt.serverState === 'submitting',
     );
@@ -865,6 +866,7 @@ export function useQueuedPrompts({
         }),
       );
 
+      if (latestSessionIdRef.current !== clearSessionId) return;
       const restoredPrompts = failedPrompts.map((prompt) => ({
         ...prompt,
         isRemoving: false,
