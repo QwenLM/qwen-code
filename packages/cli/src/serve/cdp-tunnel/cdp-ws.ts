@@ -172,6 +172,16 @@ export function attachCdpClient(
     }
   };
 
+  link.onAttachFailure = (reason: string) => {
+    log(`qwen serve: /cdp attach failed (${reason}); closing puppeteer socket`);
+    dispose(`cdp_attach failed: ${reason}`);
+    try {
+      ws.close(CLOSE_NORMAL, 'cdp attach failed');
+    } catch {
+      // already closing
+    }
+  };
+
   ws.on('pong', () => {
     heartbeatAlive = true;
   });

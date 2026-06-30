@@ -155,6 +155,8 @@ export class CdpReverseLink {
   private pendingAttach: { id: number; pending: PendingCommand } | undefined;
   /** Called when the extension reports the tab detached. */
   onDetach: ((reason: string) => void) | undefined;
+  /** Called when lazy `cdp_attach` fails before any page command can run. */
+  onAttachFailure: ((reason: string) => void) | undefined;
 
   constructor(
     private readonly sendToExtension: CdpSendToExtension,
@@ -255,6 +257,12 @@ export class CdpReverseLink {
       },
       (err) => {
         this.attached = false;
+        this.onAttachFailure?.(
+          err instanceof Error
+            ? err.message
+            : ((err as { message?: string } | undefined)?.message ??
+                String(err)),
+        );
         throw err;
       },
     );
@@ -339,6 +347,11 @@ export class CdpReverseLink {
     const reason =
       typeof frame.reason === 'string' ? frame.reason : 'tab detached';
     this.attached = false;
+    if (this.pendingAttach) {
+      clearTimeout(this.pendingAttach.pending.timer);
+      this.pendingAttach.pending.reject({ code: -32000, message: reason });
+      this.pendingAttach = undefined;
+    }
     this.onDetach?.(reason);
   }
 

@@ -64,6 +64,33 @@ const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
 const requireFromHere = createRequire(import.meta.url);
 
+export function buildChromeDevToolsMcpRuntimeConfigFromPackage(
+  localPort: number | undefined,
+  pkgJsonPath: string,
+  pkgBin: string | Record<string, string> | undefined,
+): Record<string, unknown> | undefined {
+  if (
+    localPort === undefined ||
+    !Number.isInteger(localPort) ||
+    localPort <= 0
+  ) {
+    return undefined;
+  }
+  const binRel =
+    typeof pkgBin === 'string' ? pkgBin : Object.values(pkgBin ?? {})[0];
+  if (!binRel) return undefined;
+  const pkgDir = path.dirname(pkgJsonPath);
+  const binPath = path.resolve(pkgDir, binRel);
+  const binRelToPkg = path.relative(pkgDir, binPath);
+  if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
+    return undefined;
+  }
+  return {
+    command: process.execPath,
+    args: [binPath, '--wsEndpoint', `ws://127.0.0.1:${localPort}/cdp`],
+  };
+}
+
 function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
 ): Record<string, unknown> | undefined {
@@ -81,19 +108,11 @@ function buildChromeDevToolsMcpRuntimeConfig(
     const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
       bin?: string | Record<string, string>;
     };
-    const binRel =
-      typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin ?? {})[0];
-    if (!binRel) return undefined;
-    const pkgDir = path.dirname(pkgJsonPath);
-    const binPath = path.resolve(pkgDir, binRel);
-    const binRelToPkg = path.relative(pkgDir, binPath);
-    if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
-      return undefined;
-    }
-    return {
-      command: process.execPath,
-      args: [binPath, '--wsEndpoint', `ws://127.0.0.1:${localPort}/cdp`],
-    };
+    return buildChromeDevToolsMcpRuntimeConfigFromPackage(
+      localPort,
+      pkgJsonPath,
+      pkg.bin,
+    );
   } catch {
     return undefined;
   }

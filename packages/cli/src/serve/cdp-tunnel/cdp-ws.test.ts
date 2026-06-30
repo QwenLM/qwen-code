@@ -154,6 +154,35 @@ describe('attachCdpClient (Plan C #5626)', () => {
     });
   });
 
+  it('closes and clears the binding when lazy attach fails', async () => {
+    const { bridge, sent } = makeBridge();
+    const ws = new FakeWs();
+    bind(ws, makeRegistry(bridge).registry);
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        id: 1,
+        method: 'Runtime.evaluate',
+        sessionId: 'qwen-cdp-page-session',
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(sent[0]).toMatchObject({ type: 'cdp_attach' }),
+    );
+    const attachId = (sent[0] as { id: number }).id;
+    bridge.routeInbound({
+      type: 'cdp_attached',
+      id: attachId,
+      error: { message: 'Permission denied' },
+    });
+
+    await vi.waitFor(() => expect(ws.closed?.code).toBe(1000));
+    expect(ws.closed?.reason).toBe('cdp attach failed');
+    expect(bridge.cdpBound).toBe(false);
+  });
+
   it('onExtensionGone closes the puppeteer socket without sending a release', () => {
     const { bridge, sent } = makeBridge();
     const ws = new FakeWs();

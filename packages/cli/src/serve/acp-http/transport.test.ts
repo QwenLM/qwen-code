@@ -42,7 +42,10 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import { mountAcpHttp } from './index.js';
+import {
+  buildChromeDevToolsMcpRuntimeConfigFromPackage,
+  mountAcpHttp,
+} from './index.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
 import {
   MAX_TRUST_REASON_LENGTH,
@@ -69,6 +72,51 @@ vi.mock('../../services/setup-github.js', async () => {
     ...actual,
     setupGithub: setupGithubMocks.setupGithub,
   };
+});
+
+describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
+  const pkgJsonPath = path.join('/tmp/chrome-devtools-mcp', 'package.json');
+
+  it.each([undefined, 0, -1, 1.5] as const)(
+    'rejects invalid localPort=%s',
+    (localPort) => {
+      expect(
+        buildChromeDevToolsMcpRuntimeConfigFromPackage(
+          localPort,
+          pkgJsonPath,
+          'bin/cli.js',
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it('rejects missing and escaping bin paths', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {}),
+    ).toBeUndefined();
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(
+        4170,
+        pkgJsonPath,
+        '../evil.js',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('builds the stdio config for a package-local bin', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {
+        cli: 'bin/cli.js',
+      }),
+    ).toEqual({
+      command: process.execPath,
+      args: [
+        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
+        '--wsEndpoint',
+        'ws://127.0.0.1:4170/cdp',
+      ],
+    });
+  });
 });
 
 /**

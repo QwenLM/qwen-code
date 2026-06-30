@@ -232,10 +232,8 @@ describe('qwen serve — capabilities envelope', () => {
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
     // `workspace_trust`, `workspace_github_setup`, and
-    // `workspace_reload`. `client_mcp_over_ws` is also present by
-    // default. The CLI serve path always wires `persistSetting`,
-    // the workspace service, and route-local
-    // workspace helpers).
+    // `workspace_reload`. The CLI serve path always wires `persistSetting`, the
+    // workspace service, and route-local workspace helpers).
     expect(caps.features).toEqual([
       'health',
       'daemon_status',
@@ -304,7 +302,6 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_extensions',
       'session_branch',
       'workspace_reload',
-      'client_mcp_over_ws',
       'voice_transcribe',
     ]);
   });

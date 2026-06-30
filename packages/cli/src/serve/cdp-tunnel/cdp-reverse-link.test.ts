@@ -102,6 +102,24 @@ describe('CdpReverseLink (Plan C #5626)', () => {
     expect(onDetach).toHaveBeenCalledWith('DevTools opened');
   });
 
+  it('rejects a pending attach on detach and ignores the stale attach ack', async () => {
+    const { link, sent } = setup();
+    const attachP = link.attach();
+    attachP.catch(() => undefined);
+    const attachId = (sent[0] as { id: number }).id;
+
+    link.handleInbound({ type: 'cdp_detach', reason: 'tab went away' });
+    await expect(attachP).rejects.toMatchObject({ message: 'tab went away' });
+
+    link.handleInbound({ type: 'cdp_attached', id: attachId });
+    const cmdP = link.forwardToTab('Runtime.evaluate', undefined);
+    cmdP.catch(() => undefined);
+    await Promise.resolve();
+
+    expect(sent.filter((f) => f.type === 'cdp_attach')).toHaveLength(2);
+    expect(sent.some((f) => f.type === 'cdp_command')).toBe(false);
+  });
+
   it('dispose rejects pending commands and refuses new ones', async () => {
     const { link } = setup();
     const inflight = link.forwardToTab('Runtime.enable', undefined);
