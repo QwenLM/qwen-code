@@ -56,7 +56,9 @@ describe('ChannelCronScheduler', () => {
 
     await scheduler.tick();
 
-    expect(runScheduledPrompt).toHaveBeenCalledWith(baseJob);
+    expect(runScheduledPrompt).toHaveBeenCalledWith(baseJob, {
+      timeoutMs: 300_000,
+    });
     expect(store.update).toHaveBeenCalledWith('job-1', {
       lastFiredAt: '2026-06-30T01:05:30.000Z',
       lastStatus: 'ok',
@@ -94,7 +96,48 @@ describe('ChannelCronScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.disable).toHaveBeenCalledWith('job-1');
+    expect(store.update).toHaveBeenCalledWith('job-1', {
+      lastFiredAt: '2026-06-30T01:05:30.000Z',
+      lastStatus: 'ok',
+      lastError: undefined,
+      consecutiveFailures: 0,
+      enabled: false,
+    });
+    expect(store.disable).not.toHaveBeenCalled();
+  });
+
+  it('clears abandoned in-flight state when stopped', async () => {
+    runScheduledPrompt.mockImplementation(() => new Promise(() => undefined));
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    void scheduler.tick();
+    await vi.waitFor(() => expect(runScheduledPrompt).toHaveBeenCalledOnce());
+
+    scheduler.stop();
+    void scheduler.tick();
+
+    await vi.waitFor(() => expect(runScheduledPrompt).toHaveBeenCalledTimes(2));
+  });
+
+  it('passes the timeout budget to the channel runner', async () => {
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+      jobTimeoutMs: 1234,
+    });
+
+    await scheduler.tick();
+
+    expect(runScheduledPrompt).toHaveBeenCalledWith(baseJob, {
+      timeoutMs: 1234,
+    });
   });
 
   it('records failures and disables a job after repeated errors', async () => {
@@ -151,7 +194,9 @@ describe('ChannelCronScheduler', () => {
 
     void scheduler.tick();
     await vi.waitFor(() => {
-      expect(runScheduledPrompt).toHaveBeenCalledWith(secondJob);
+      expect(runScheduledPrompt).toHaveBeenCalledWith(secondJob, {
+        timeoutMs: 300_000,
+      });
     });
   });
 
@@ -191,6 +236,7 @@ describe('ChannelCronScheduler', () => {
 
     expect(runScheduledPrompt).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'job-2' }),
+      { timeoutMs: 300_000 },
     );
   });
 });

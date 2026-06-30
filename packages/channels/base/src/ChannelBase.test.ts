@@ -4729,6 +4729,82 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('starts the scheduled timeout after the queued turn begins', async () => {
+      let resolveFirstPrompt: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveFirstPrompt = resolve;
+            }),
+        )
+        .mockImplementationOnce(() => new Promise<string>(() => undefined));
+      const ch = createChannel({
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+      });
+      ch.proactiveSupported = true;
+
+      vi.useFakeTimers();
+      try {
+        const inbound = ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'group-1',
+            text: 'first task',
+          }),
+        );
+        await vi.waitFor(() => {
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+
+        const scheduled = ch.runScheduledPrompt(
+          {
+            id: 'job-1',
+            channelName: 'test-chan',
+            target: {
+              channelName: 'test-chan',
+              senderId: 'alice',
+              chatId: 'group-1',
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            label: 'daily summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Alice',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+          },
+          { timeoutMs: 1000 },
+        );
+        let settled = false;
+        void scheduled.catch(() => {
+          settled = true;
+        });
+
+        await vi.advanceTimersByTimeAsync(5000);
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+
+        resolveFirstPrompt('first response');
+        await inbound;
+        await vi.waitFor(() => {
+          expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        });
+
+        await vi.advanceTimersByTimeAsync(1000);
+        await expect(scheduled).rejects.toThrow('scheduled job timed out');
+        expect(bridge.cancelSession).toHaveBeenCalledWith(expect.any(String));
+        expect(ch.proactive).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('disables a stored job when its sender is no longer allowed', async () => {
       const disable = vi.fn().mockResolvedValue(true);
       const ch = createChannel(
