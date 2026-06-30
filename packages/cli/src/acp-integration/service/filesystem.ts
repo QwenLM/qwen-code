@@ -105,24 +105,7 @@ async function resolveRealPath(value: string): Promise<string | undefined> {
   }
 }
 
-async function resolveNearestExistingParent(
-  filePath: string,
-): Promise<string | undefined> {
-  let current = path.dirname(path.resolve(filePath));
-
-  while (true) {
-    const realCurrent = await resolveRealPath(current);
-    if (realCurrent) return realCurrent;
-
-    const parent = path.dirname(current);
-    if (parent === current) return undefined;
-    current = parent;
-  }
-}
-
 export class AcpFileSystemService implements FileSystemService {
-  private resolvedLocalReadRoots?: Promise<string[]>;
-
   constructor(
     private readonly connection: AgentSideConnection,
     private readonly sessionId: string,
@@ -158,7 +141,7 @@ export class AcpFileSystemService implements FileSystemService {
         ? await this.getLocalReadFallbackPath(params.path)
         : undefined;
       if (shouldTryLocalReadFallback && !fallbackPath) {
-        debugLogger.debug('Local read fallback skipped - no matching root', {
+        debugLogger.debug('Local read fallback skipped - no safe local path', {
           path: params.path,
           errorKind,
         });
@@ -232,11 +215,11 @@ export class AcpFileSystemService implements FileSystemService {
     return this.fallback.findFiles(fileName, searchPaths);
   }
 
-  private getResolvedLocalReadRoots(): Promise<string[]> {
-    this.resolvedLocalReadRoots ??= Promise.all(
+  private async getResolvedLocalReadRoots(): Promise<string[]> {
+    const roots = await Promise.all(
       (this.options.localReadRoots ?? []).map(resolveRealPath),
-    ).then((roots) => roots.filter((root): root is string => Boolean(root)));
-    return this.resolvedLocalReadRoots;
+    );
+    return roots.filter((root): root is string => Boolean(root));
   }
 
   private async getLocalReadFallbackPath(
@@ -244,13 +227,11 @@ export class AcpFileSystemService implements FileSystemService {
   ): Promise<string | undefined> {
     const normalizedFilePath = path.resolve(filePath);
     const realFilePath = await resolveRealPath(normalizedFilePath);
-    const comparisonPath =
-      realFilePath ?? (await resolveNearestExistingParent(normalizedFilePath));
-    if (!comparisonPath) return undefined;
+    if (!realFilePath) return undefined;
 
     for (const realRoot of await this.getResolvedLocalReadRoots()) {
-      if (isSubpath(realRoot, comparisonPath)) {
-        return realFilePath ?? normalizedFilePath;
+      if (isSubpath(realRoot, realFilePath)) {
+        return realFilePath;
       }
     }
     return undefined;

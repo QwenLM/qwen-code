@@ -571,7 +571,7 @@ describe('AcpFileSystemService', () => {
       });
     });
 
-    it('falls back to local reads for missing files under allowed local roots', async () => {
+    it('does not fall back to local reads for missing files under allowed local roots', async () => {
       await withTempRoot(async (tempRoot) => {
         const localRoot = path.join(tempRoot, 'skills');
         const filePath = path.join(localRoot, 'missing.md');
@@ -583,17 +583,6 @@ describe('AcpFileSystemService', () => {
           readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
         } as unknown as AgentSideConnection;
         const fallback = createFallback();
-        const missingFileError = Object.assign(
-          new Error(`File not found: ${filePath}`),
-          {
-            code: 'ENOENT',
-            errno: -2,
-            path: filePath,
-          },
-        );
-        (fallback.readTextFile as ReturnType<typeof vi.fn>).mockRejectedValue(
-          missingFileError,
-        );
 
         const svc = new AcpFileSystemService(
           client,
@@ -603,12 +592,16 @@ describe('AcpFileSystemService', () => {
           { localReadRoots: [localRoot] },
         );
 
-        await expect(svc.readTextFile({ path: filePath })).rejects.toBe(
-          missingFileError,
-        );
-        expect(fallback.readTextFile).toHaveBeenCalledWith({
-          path: filePath,
+        const err = await svc
+          .readTextFile({ path: filePath })
+          .catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(Error);
+        expect(err).toMatchObject({
+          cause: pathOutsideWorkspaceError,
+          message: `path escapes workspace: ${filePath}`,
         });
+        expect(fallback.readTextFile).not.toHaveBeenCalled();
       });
     });
 
@@ -676,7 +669,7 @@ describe('AcpFileSystemService', () => {
         await svc.readTextFile({ path: filePath }).catch(() => undefined);
 
         expect(mockDebugLogger.debug).toHaveBeenCalledWith(
-          'Local read fallback skipped - no matching root',
+          'Local read fallback skipped - no safe local path',
           {
             path: filePath,
             errorKind: 'path_outside_workspace',
@@ -685,7 +678,7 @@ describe('AcpFileSystemService', () => {
       });
     });
 
-    it('resolves configured local read roots only once across fallback reads', async () => {
+    it('resolves configured local read roots for each fallback read', async () => {
       await withTempRoot(async (tempRoot) => {
         const localRoot = path.join(tempRoot, 'skills');
         const firstFilePath = path.join(localRoot, 'first.md');
@@ -728,7 +721,112 @@ describe('AcpFileSystemService', () => {
         const localRootRealpathCalls = vi
           .mocked(fsRealpath)
           .mock.calls.filter(([value]) => value === resolvedLocalRoot);
-        expect(localRootRealpathCalls).toHaveLength(1);
+        expect(localRootRealpathCalls).toHaveLength(2);
+      });
+    });
+
+    it('allows lazily-created local read roots on later fallback reads', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const localRoot = path.join(tempRoot, 'skills');
+        const firstFilePath = path.join(localRoot, 'missing.md');
+        const secondFilePath = path.join(localRoot, 'instructions.md');
+
+        const client = {
+          readTextFile: vi
+            .fn()
+            .mockRejectedValueOnce(createLocalReadFallbackError(firstFilePath))
+            .mockRejectedValueOnce(
+              createLocalReadFallbackError(secondFilePath),
+            ),
+        } as unknown as AgentSideConnection;
+        const fallback = createFallback();
+        (fallback.readTextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
+          content: 'instructions',
+          _meta: { bom: false, encoding: 'utf-8' },
+        });
+
+        const svc = new AcpFileSystemService(
+          client,
+          'session-2e-lazy-root',
+          { readTextFile: true, writeTextFile: true },
+          fallback,
+          { localReadRoots: [localRoot] },
+        );
+
+        await svc.readTextFile({ path: firstFilePath }).catch(() => undefined);
+        expect(fallback.readTextFile).not.toHaveBeenCalled();
+
+        await fs.mkdir(localRoot, { recursive: true });
+        await fs.writeFile(secondFilePath, 'instructions', 'utf8');
+
+        await expect(
+          svc.readTextFile({ path: secondFilePath }),
+        ).resolves.toEqual({
+          content: 'instructions',
+          _meta: { bom: false, encoding: 'utf-8' },
+        });
+        expect(fallback.readTextFile).toHaveBeenCalledWith({
+          path: await fs.realpath(secondFilePath),
+        });
+      });
+    });
+
+    it('logs and excludes local read roots when realpath fails with non-ENOENT', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const localRoot = path.join(tempRoot, 'skills');
+        const filePath = path.join(localRoot, 'instructions.md');
+        await fs.mkdir(localRoot, { recursive: true });
+        await fs.writeFile(filePath, 'instructions', 'utf8');
+
+        const actualFsPromises =
+          await vi.importActual<typeof import('node:fs/promises')>(
+            'node:fs/promises',
+          );
+        vi.mocked(fsRealpath).mockImplementation(async (value) => {
+          if (value === path.resolve(localRoot)) {
+            const err = new Error('permission denied') as NodeJS.ErrnoException;
+            err.code = 'EACCES';
+            throw err;
+          }
+          return actualFsPromises.realpath(value);
+        });
+
+        try {
+          const pathOutsideWorkspaceError =
+            createLocalReadFallbackError(filePath);
+          const client = {
+            readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+          } as unknown as AgentSideConnection;
+          const fallback = createFallback();
+
+          const svc = new AcpFileSystemService(
+            client,
+            'session-2e-root-realpath-failure',
+            { readTextFile: true, writeTextFile: true },
+            fallback,
+            { localReadRoots: [localRoot] },
+          );
+
+          const err = await svc
+            .readTextFile({ path: filePath })
+            .catch((e: unknown) => e);
+
+          expect(err).toBeInstanceOf(Error);
+          expect(err).toMatchObject({
+            cause: pathOutsideWorkspaceError,
+            message: `path escapes workspace: ${filePath}`,
+          });
+          expect(fallback.readTextFile).not.toHaveBeenCalled();
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            'realpath failed during ACP local read fallback check',
+            {
+              path: localRoot,
+              error: 'permission denied',
+            },
+          );
+        } finally {
+          vi.mocked(fsRealpath).mockRestore();
+        }
       });
     });
 
