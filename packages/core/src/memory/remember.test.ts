@@ -121,7 +121,7 @@ describe('remember memory helper', () => {
     });
 
     expect(result).toEqual({
-      summary: 'Saved project memory.',
+      summary: 'Memory update completed.',
       filesTouched: [touched],
       touchedScopes: ['project'],
     });
@@ -144,6 +144,9 @@ describe('remember memory helper', () => {
       'edit',
     ]);
     expect(params.config.getUserMemory()).toBe('');
+    expect(params.config.getDisableAllHooks()).toBe(true);
+    expect(params.config.getHookSystem()).toBeUndefined();
+    expect(params.config.getMessageBus()).toBeUndefined();
     const pm = params.config.getPermissionManager() as PermissionManager;
     await expect(
       pm.evaluate({
@@ -186,7 +189,7 @@ describe('remember memory helper', () => {
     });
 
     expect(result).toEqual({
-      summary: 'Saved project memory.',
+      summary: 'Memory update completed.',
       filesTouched: [projectFile],
       touchedScopes: ['project'],
     });

@@ -848,6 +848,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
   });
 
+  it('initialize advertises workspace memory remember methods', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/remember',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/remember/get',
+    );
+  });
+
   it('initialize advertises _qwen/session/shell when enabled', async () => {
     await restartServer({ sessionShellCommandEnabled: true });
     const { body } = await initializeRaw();
@@ -3781,6 +3796,44 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   describe('memory methods', () => {
+    it('_qwen/workspace/memory/remember queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 79,
+          method: '_qwen/workspace/memory/remember',
+          params: { content: 'remember this', contextMode: 'clean' },
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string; contextMode: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+          contextMode: 'clean',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/workspace/memory/remember/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'No memory files updated.' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
     it('_qwen/workspace/memory/write rejects non-string content', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);

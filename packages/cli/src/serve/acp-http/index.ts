@@ -144,6 +144,7 @@ const WS_READ_METHODS = new Set([
   '_qwen/workspace/agents/list',
   '_qwen/workspace/agents/get',
   '_qwen/workspace/memory',
+  '_qwen/workspace/memory/remember/get',
   '_qwen/workspace/auth/status',
   '_qwen/workspace/auth/device_flow/get',
   '_qwen/file/read',

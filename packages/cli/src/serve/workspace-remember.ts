@@ -106,7 +106,7 @@ function publicErrorMessage(code: string): string {
   return 'Workspace memory remember failed.';
 }
 
-class WorkspaceRememberTaskLane {
+export class WorkspaceRememberTaskLane {
   private static readonly MAX_TASKS = 1000;
   private static readonly MAX_PENDING = 16;
   private readonly tasks = new Map<string, WorkspaceMemoryRememberTaskRecord>();
@@ -164,7 +164,14 @@ class WorkspaceRememberTaskLane {
           contextMode: params.contextMode,
         });
         task.status = 'completed';
-        task.result = result;
+        task.result = {
+          summary:
+            result.filesTouched.length > 0
+              ? 'Memory update completed.'
+              : 'No memory files updated.',
+          filesTouched: result.filesTouched,
+          touchedScopes: result.touchedScopes,
+        };
         task.updatedAt = nowIso();
       } catch (err) {
         const code = errorCode(err);

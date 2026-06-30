@@ -221,7 +221,7 @@ describe('workspace memory remember routes', () => {
       status: 'completed',
       contextMode: 'clean',
       result: {
-        summary: 'saved',
+        summary: 'Memory update completed.',
         touchedScopes: ['project'],
       },
     });
@@ -263,6 +263,11 @@ describe('workspace memory remember routes', () => {
     await request(app)
       .post('/workspace/memory/remember')
       .send({ content: '   ' })
+      .expect(400)
+      .expect((res) => expect(res.body.code).toBe('invalid_content'));
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'x'.repeat(64 * 1024 + 1) })
       .expect(400)
       .expect((res) => expect(res.body.code).toBe('invalid_content'));
     await request(app)

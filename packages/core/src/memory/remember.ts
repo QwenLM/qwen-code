@@ -92,16 +92,24 @@ function buildRememberSystemPrompt(memoryPrompt: string): string {
     '- Use the managed auto-memory system only; do not write QWEN.md or AGENTS.md.',
     '- Do not inspect or depend on any user-visible chat session history.',
     '- Use read/list/search/write/edit tools only inside the managed memory directories.',
-    '- When finished, briefly summarize what memory was saved and where.',
+    '- When finished, report only whether the memory update completed; do not quote or summarize memory content.',
     '',
     memoryPrompt,
   ].join('\n');
 }
 
-function createHiddenRememberConfig(config: Config): Config {
+function createHiddenRememberConfig(
+  config: Config,
+  options: { disableHooks?: boolean } = {},
+): Config {
   const hiddenConfig = Object.create(config) as Config;
   hiddenConfig.getChatRecordingService = () => undefined;
   hiddenConfig.getTranscriptPath = () => '';
+  if (options.disableHooks) {
+    hiddenConfig.getDisableAllHooks = () => true;
+    hiddenConfig.getHookSystem = () => undefined;
+    hiddenConfig.getMessageBus = () => undefined;
+  }
   return hiddenConfig;
 }
 
@@ -154,7 +162,9 @@ export async function runManagedRememberByAgent(params: {
           return cleanConfig;
         })()
       : params.config;
-  const hiddenConfig = createHiddenRememberConfig(baseConfig);
+  const hiddenConfig = createHiddenRememberConfig(baseConfig, {
+    disableHooks: params.contextMode === 'clean',
+  });
   const scopedConfig = createMemoryScopedAgentConfig(
     hiddenConfig,
     params.projectRoot,
@@ -207,7 +217,10 @@ export async function runManagedRememberByAgent(params: {
   ]);
 
   return {
-    summary: result.finalText,
+    summary:
+      filesWritten.length > 0
+        ? 'Memory update completed.'
+        : 'No memory files updated.',
     filesTouched: filesWritten,
     touchedScopes,
   };
