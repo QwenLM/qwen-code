@@ -483,7 +483,7 @@ describe('ChannelBase', () => {
         {
           scheduleController: {
             create: createSchedule,
-            listForTarget: vi.fn(),
+            listForTarget: vi.fn().mockResolvedValue([]),
             disable: vi.fn(),
             validateCron: vi.fn(),
           },
@@ -502,6 +502,7 @@ describe('ChannelBase', () => {
           senderId: 'user1',
           chatId: 'chat1',
           threadId: undefined,
+          isGroup: false,
         },
         cwd: '/tmp',
         cron: '0 9 * * *',
@@ -512,6 +513,108 @@ describe('ChannelBase', () => {
       });
       expect(ch.sent[0]!.text).toContain('Scheduled job job-1');
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/schedule commands require shared-session authorization', async () => {
+      const listForTarget = vi.fn().mockResolvedValue([]);
+      const ch = createChannel(
+        {
+          sessionScope: 'single',
+          allowedUsers: ['owner'],
+        },
+        {
+          scheduleController: {
+            create: vi.fn(),
+            listForTarget,
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+
+      await ch.handleInbound(
+        envelope({ senderId: 'stranger', text: '/schedule list' }),
+      );
+
+      expect(listForTarget).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain('Only authorized members');
+    });
+
+    it('/schedule cancel only disables jobs owned by the caller target', async () => {
+      const listForTarget = vi.fn().mockResolvedValue([]);
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: vi.fn(),
+            listForTarget,
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/schedule cancel job-1' }));
+
+      expect(listForTarget).toHaveBeenCalledWith('test-chan', {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        threadId: undefined,
+        isGroup: false,
+      });
+      expect(disable).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toBe('No scheduled job job-1.');
+    });
+
+    it('/schedule add rejects a target that already has too many jobs', async () => {
+      const existingJobs = Array.from({ length: 10 }, (_, index) => ({
+        id: `job-${index}`,
+      }));
+      const createSchedule = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: createSchedule,
+            listForTarget: vi.fn().mockResolvedValue(existingJobs),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.handleInbound(
+        envelope({ text: '/schedule add "0 9 * * *" post summary' }),
+      );
+
+      expect(createSchedule).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain('Too many scheduled jobs');
+    });
+
+    it('/schedule add rejects oversized prompts before persisting', async () => {
+      const createSchedule = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: createSchedule,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.handleInbound(
+        envelope({ text: `/schedule add "0 9 * * *" ${'x'.repeat(4001)}` }),
+      );
+
+      expect(createSchedule).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain('Scheduled prompt is too long');
     });
 
     it('/schedule add rejects adapters that cannot cold send', async () => {
@@ -4596,6 +4699,100 @@ describe('ChannelBase', () => {
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'scheduled response' },
       ]);
+    });
+
+    it('disables a stored job when its sender is no longer allowed', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {
+          senderPolicy: 'allowlist',
+          allowedUsers: ['alice'],
+        },
+        {
+          scheduleController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runScheduledPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'bob',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Bob',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+        }),
+      ).rejects.toThrow('no longer authorized');
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('drains collected messages after a scheduled prompt completes', async () => {
+      let resolveScheduled: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveScheduled = resolve;
+            }),
+        )
+        .mockResolvedValueOnce('follow-up response');
+      const ch = createChannel({ dispatchMode: 'collect' });
+      ch.proactiveSupported = true;
+
+      const scheduled = ch.runScheduledPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+      });
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+
+      await ch.handleInbound(envelope({ text: 'while scheduled runs' }));
+      resolveScheduled('scheduled response');
+      await scheduled;
+
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      });
+      expect(bridge.prompt).toHaveBeenLastCalledWith(
+        expect.any(String),
+        'while scheduled runs',
+        expect.any(Object),
+      );
     });
   });
 });

@@ -118,4 +118,79 @@ describe('ChannelCronScheduler', () => {
     });
     expect(store.disable).toHaveBeenCalledWith('job-1');
   });
+
+  it('skips jobs for channels owned by another process', async () => {
+    jobs = [{ ...baseJob, channelName: 'other-channel' }];
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    expect(runScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.update).not.toHaveBeenCalled();
+    expect(store.disable).not.toHaveBeenCalled();
+  });
+
+  it('continues firing other due jobs when one job is still running', async () => {
+    const secondJob = { ...baseJob, id: 'job-2' };
+    jobs = [{ ...baseJob }, secondJob];
+    runScheduledPrompt.mockImplementation((job: ChannelCronJob) => {
+      if (job.id === 'job-1') return new Promise(() => undefined);
+      return Promise.resolve();
+    });
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    void scheduler.tick();
+    await vi.waitFor(() => {
+      expect(runScheduledPrompt).toHaveBeenCalledWith(secondJob);
+    });
+  });
+
+  it('rechecks that a job is still enabled before firing', async () => {
+    store.list = vi
+      .fn()
+      .mockResolvedValueOnce([{ ...baseJob }])
+      .mockResolvedValueOnce([{ ...baseJob, enabled: false }]);
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    expect(runScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it('ignores a malformed cron job and still fires later due jobs', async () => {
+    const secondJob = { ...baseJob, id: 'job-2' };
+    jobs = [{ ...baseJob }, secondJob];
+    const nextFireTime = vi.fn((cron: string) => {
+      if (cron === baseJob.cron) throw new Error('impossible cron');
+      return new Date(nowMs - 60_000);
+    });
+    jobs[1] = { ...secondJob, cron: '*/5 * * * *' };
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime,
+    });
+
+    await scheduler.tick();
+
+    expect(runScheduledPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'job-2' }),
+    );
+  });
 });

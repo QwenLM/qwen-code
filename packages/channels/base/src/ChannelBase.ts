@@ -96,6 +96,8 @@ const PARSE_COMMAND_RE = new RegExp(
 /** isSlashCommand: the first whitespace-delimited token alone must be a pure command token. */
 const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 const SCHEDULE_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
+const MAX_SCHEDULE_JOBS_PER_TARGET = 10;
+const MAX_SCHEDULE_PROMPT_CHARS = 4000;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -209,6 +211,11 @@ export abstract class ChannelBase {
     target: SessionTarget,
     text: string,
   ): Promise<void> {
+    if (target.threadId) {
+      process.stderr.write(
+        `[${this.name}] scheduled job target includes threadId but this adapter does not override pushProactive; sending to chat ${sanitizeLogText(target.chatId, 64)}\n`,
+      );
+    }
     await this.sendMessage(target.chatId, text);
   }
 
@@ -233,6 +240,12 @@ export abstract class ChannelBase {
         `Scheduled job ${job.id} belongs to ${job.channelName}, not ${this.name}.`,
       );
     }
+    if (!this.isStoredScheduleTargetAuthorized(job.target, job.createdBy)) {
+      await this.scheduleController?.disable(job.id);
+      throw new Error(
+        `Scheduled job ${job.id} target is no longer authorized.`,
+      );
+    }
 
     const sessionId = await this.router.resolve(
       this.name,
@@ -243,7 +256,7 @@ export abstract class ChannelBase {
     );
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
-    let promptText = `[Scheduled task "${label}" set by ${createdBy}]\n\n${job.prompt}`;
+    let promptText = `[Scheduled task "${label}" set by ${createdBy}]\n\n${sanitizePromptText(job.prompt)}`;
     if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
       promptText = `${this.config.instructions}\n\n${promptText}`;
       this.instructedSessions.add(sessionId);
@@ -277,15 +290,16 @@ export abstract class ChannelBase {
           this.onResponseChunk(job.target.chatId, chunk, sessionId);
         }
       };
-      this.bridge.on('textChunk', onChunk);
+      const promptBridge = this.bridge;
+      promptBridge.on('textChunk', onChunk);
 
       try {
-        const response = await this.bridge.prompt(sessionId, promptText, {});
+        const response = await promptBridge.prompt(sessionId, promptText, {});
         if (!promptState.cancelled && response) {
           await this.pushProactive(job.target, response);
         }
       } finally {
-        this.bridge.off('textChunk', onChunk);
+        promptBridge.off('textChunk', onChunk);
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         if (!promptState.clearEvicted) {
           try {
@@ -300,6 +314,29 @@ export abstract class ChannelBase {
           this.activePrompts.delete(sessionId);
         }
         promptState.resolve();
+        const buffer = this.collectBuffers.get(sessionId);
+        if (stillCurrent && buffer && buffer.length > 0) {
+          this.collectBuffers.delete(sessionId);
+          const lost = buffer.length;
+          const coalesced = buffer.map((b) => b.text).join('\n\n');
+          const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          const syntheticEnvelope: Envelope = {
+            ...lastEnvelope,
+            text: coalesced,
+            alreadyPrefixed: true,
+            referencedText: undefined,
+            attachments: undefined,
+            imageBase64: undefined,
+            imageMimeType: undefined,
+          };
+          this.handleInbound(syntheticEnvelope).catch((err) => {
+            process.stderr.write(
+              `[${this.name}] dropped ${lost} buffered message(s) after scheduled job ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
+                err instanceof Error ? err.message : String(err)
+              }\n`,
+            );
+          });
+        }
       }
     });
     this.sessionQueues.set(
@@ -720,6 +757,13 @@ export abstract class ChannelBase {
       );
       return true;
     }
+    if (!this.isAuthorizedForSharedSession(envelope)) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Only authorized members can use scheduled tasks in this shared session.',
+      );
+      return true;
+    }
 
     const [subcommand = '', ...rest] = args.trim().split(/\s+/u);
     switch (subcommand.toLowerCase()) {
@@ -770,15 +814,29 @@ export abstract class ChannelBase {
       return true;
     }
 
-    const prompt = parsed.prompt.trim();
+    const target = this.scheduleTargetFromEnvelope(envelope);
+    const prompt = sanitizePromptText(parsed.prompt.trim());
+    if (Array.from(prompt).length > MAX_SCHEDULE_PROMPT_CHARS) {
+      await this.sendMessage(
+        envelope.chatId,
+        `Scheduled prompt is too long; keep it under ${MAX_SCHEDULE_PROMPT_CHARS} characters.`,
+      );
+      return true;
+    }
+    const existingJobs = await this.scheduleController.listForTarget(
+      this.name,
+      target,
+    );
+    if (existingJobs.length >= MAX_SCHEDULE_JOBS_PER_TARGET) {
+      await this.sendMessage(
+        envelope.chatId,
+        `Too many scheduled jobs for this chat. Cancel an existing job before adding another.`,
+      );
+      return true;
+    }
     const job = await this.scheduleController.create({
       channelName: this.name,
-      target: {
-        channelName: this.name,
-        senderId: envelope.senderId,
-        chatId: envelope.chatId,
-        threadId: envelope.threadId,
-      },
+      target,
       cwd: this.config.cwd,
       cron: parsed.cron,
       prompt,
@@ -798,12 +856,10 @@ export abstract class ChannelBase {
 
   private async handleScheduleList(envelope: Envelope): Promise<boolean> {
     if (!this.scheduleController) return true;
-    const jobs = await this.scheduleController.listForTarget(this.name, {
-      channelName: this.name,
-      senderId: envelope.senderId,
-      chatId: envelope.chatId,
-      threadId: envelope.threadId,
-    });
+    const jobs = await this.scheduleController.listForTarget(
+      this.name,
+      this.scheduleTargetFromEnvelope(envelope),
+    );
     if (jobs.length === 0) {
       await this.sendMessage(envelope.chatId, 'No scheduled jobs.');
       return true;
@@ -830,12 +886,49 @@ export abstract class ChannelBase {
       await this.sendMessage(envelope.chatId, 'Usage: /schedule cancel <id>');
       return true;
     }
-    const disabled = await this.scheduleController.disable(id);
+    const jobs = await this.scheduleController.listForTarget(
+      this.name,
+      this.scheduleTargetFromEnvelope(envelope),
+    );
+    const match = jobs.find((job) => job.id === id);
+    const disabled = match ? await this.scheduleController.disable(id) : false;
     await this.sendMessage(
       envelope.chatId,
       disabled ? `Cancelled scheduled job ${id}.` : `No scheduled job ${id}.`,
     );
     return true;
+  }
+
+  private scheduleTargetFromEnvelope(envelope: Envelope): SessionTarget {
+    return {
+      channelName: this.name,
+      senderId: envelope.senderId,
+      chatId: envelope.chatId,
+      threadId: envelope.threadId,
+      isGroup: envelope.isGroup,
+    };
+  }
+
+  private isStoredScheduleTargetAuthorized(
+    target: SessionTarget,
+    senderName: string,
+  ): boolean {
+    const envelope: Envelope = {
+      channelName: this.name,
+      senderId: target.senderId,
+      senderName,
+      chatId: target.chatId,
+      text: '',
+      threadId: target.threadId,
+      isGroup: target.isGroup === true,
+      isMentioned: true,
+      isReplyToBot: true,
+    };
+    return (
+      this.groupGate.check(envelope).allowed &&
+      this.gate.check(target.senderId, senderName).allowed &&
+      this.isAuthorizedForSharedSession(envelope)
+    );
   }
 
   /** Check if a message text matches a registered local command. */
