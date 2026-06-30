@@ -22,7 +22,10 @@ import {
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import {
+  isInlineModelOverrideAllowed,
+  parseAcpModelOption,
+} from '../../utils/acpModelUtils.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -606,23 +609,17 @@ export const modelCommand: SlashCommand = {
         // baseUrl/envKey for a different provider. So the target must resolve to
         // the SAME provider identity, not merely the same auth type — otherwise
         // a same-id model owned by a different (e.g. OpenAI-compatible) provider
-        // would be sent to the active endpoint/account. Reject a different auth
-        // type outright, then within the active auth type require the provider
-        // identity available here (baseUrl + envKey) to match the active content
-        // generator. Mismatches are pointed at the two-step `/model <id>` flow,
-        // which does switch providers.
+        // would be sent to the active endpoint/account. Reject an explicit
+        // different auth type outright (the `(authType)` suffix), then require
+        // the provider identity (baseUrl + envKey) to match the active content
+        // generator via the shared check that consumers also enforce. Mismatches
+        // are pointed at the two-step `/model <id>` flow, which does switch
+        // providers.
         const sameAuthType = targetAuthType === authType;
-        const activeBaseUrl = contentGeneratorConfig.baseUrl;
-        const activeEnvKey = contentGeneratorConfig.apiKeyEnvKey;
-        const target = sameAuthType
-          ? availableModels.find(
-              (m) =>
-                m.id === parsed.modelId &&
-                (m.baseUrl ?? undefined) === (activeBaseUrl ?? undefined) &&
-                (m.envKey ?? undefined) === (activeEnvKey ?? undefined),
-            )
-          : undefined;
-        if (!target) {
+        if (
+          !sameAuthType ||
+          !isInlineModelOverrideAllowed(config, parsed.modelId)
+        ) {
           return {
             type: 'message',
             messageType: 'error',

@@ -86,6 +86,7 @@ import {
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   useReactToolScheduler,
@@ -1026,14 +1027,28 @@ export const useGeminiStream = (
               // Runs after the new-user-turn reset above and before the stream
               // is sent, so it applies to this turn and — because the reset is
               // skipped for ToolResult/Retry — persists across the tool loop,
-              // then clears on the next user turn.
+              // then clears on the next user turn. Re-validate provider identity
+              // here rather than trust the producer: any slash command can set
+              // `modelOverride`, so the consumer enforces that it names a model
+              // on the active provider before redirecting API calls to it.
               if (slashCommandResult.modelOverride) {
-                applyModelOverride(
-                  modelOverrideRef,
-                  inlineModelOverrideActiveRef,
-                  slashCommandResult.modelOverride,
-                  true,
-                );
+                if (
+                  isInlineModelOverrideAllowed(
+                    config,
+                    slashCommandResult.modelOverride,
+                  )
+                ) {
+                  applyModelOverride(
+                    modelOverrideRef,
+                    inlineModelOverrideActiveRef,
+                    slashCommandResult.modelOverride,
+                    true,
+                  );
+                } else {
+                  debugLogger.warn(
+                    `ignoring model override '${slashCommandResult.modelOverride}': not a model on the active provider`,
+                  );
+                }
               }
 
               return {

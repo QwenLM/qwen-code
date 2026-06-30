@@ -12,6 +12,7 @@ import type {
   ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
+import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
   executeToolCall,
@@ -639,10 +640,24 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
-              inlineModelOverride = slashCommandResult.modelOverride;
-              if (inlineModelOverride !== undefined) {
+              // Re-validate provider identity rather than trust the producer:
+              // any slash command can set `modelOverride`, so the consumer
+              // enforces that it names a model on the active provider before
+              // redirecting API calls to it.
+              if (
+                slashCommandResult.modelOverride !== undefined &&
+                isInlineModelOverrideAllowed(
+                  config,
+                  slashCommandResult.modelOverride,
+                )
+              ) {
+                inlineModelOverride = slashCommandResult.modelOverride;
                 debugLogger.debug(
                   `[runNonInteractive] inline model override captured: ${inlineModelOverride}`,
+                );
+              } else if (slashCommandResult.modelOverride !== undefined) {
+                debugLogger.warn(
+                  `[runNonInteractive] ignoring model override '${slashCommandResult.modelOverride}': not a model on the active provider`,
                 );
               }
               slashHandled = true;
@@ -850,10 +865,13 @@ export async function runNonInteractive(
       let hasUnsentToolResponse = false;
       let modelOverride: string | undefined = inlineModelOverride;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
-      // turn. Mirrors useGeminiStream's `inlineModelOverrideActiveRef`: while
-      // active, skill-tool `modelOverride` writes (including the
+      // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
-      // submitted prompt to the session model mid-turn.
+      // submitted prompt to the session model mid-turn. Unlike useGeminiStream's
+      // ref-based `applyModelOverride`/`clearModelOverride` helpers, this is a
+      // run-scoped const — non-interactive mode is single-turn, so there is no
+      // retry-clearing or skill-tool takeover to guard against, just the
+      // within-turn precedence above.
       const inlineModelOverrideActive = inlineModelOverride !== undefined;
       if (inlineModelOverrideActive) {
         debugLogger.debug(
