@@ -75,7 +75,6 @@ import {
 import type {
   AcpConnection,
   ConnectionRegistry,
-  PendingClientRequest,
   PendingClientRequestRef,
 } from './connection-registry.js';
 import {
@@ -720,15 +719,13 @@ export class AcpDispatcher {
     return this.registry?.findPendingClientRequest(id);
   }
 
-  private dropResolvedPermission(
-    conn: AcpConnection,
-    id: string,
-    req: PendingClientRequest,
-  ): void {
-    if (this.registry) {
-      this.registry.deletePendingPermission(req.bridgeRequestId, req.sessionId);
-      return;
-    }
+  private dropResolvedPermission(conn: AcpConnection, id: string): void {
+    // Delete the exact resolved entry by its `conn.pending` map key. Under
+    // multi-client attach, sibling connections can hold their own pending
+    // entries sharing this one's `bridgeRequestId` (see
+    // ConnectionRegistry.findPendingPermission), so re-matching by
+    // `bridgeRequestId` could delete a sibling's entry and orphan the one we
+    // just resolved. The siblings' now-moot entries are reaped at teardown.
     conn.pending.delete(id);
   }
 
@@ -3236,7 +3233,7 @@ export class AcpDispatcher {
         >[2],
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
-      this.dropResolvedPermission(pendingConn, id, pending);
+      this.dropResolvedPermission(pendingConn, id);
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
@@ -3249,7 +3246,7 @@ export class AcpDispatcher {
         pending,
         pendingConn.sessions.get(pending.sessionId)?.clientId,
       );
-      if (cancelled) this.dropResolvedPermission(pendingConn, id, pending);
+      if (cancelled) this.dropResolvedPermission(pendingConn, id);
     }
   }
 

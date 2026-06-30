@@ -916,12 +916,20 @@ export class ConnectionRegistry {
   }
 
   /**
-   * Locate the single pending permission entry matching `requestId` (and
-   * optionally `sessionId`). {@link deletePendingPermission} delegates here so
-   * the matching predicate lives in one place — a future change to it cannot
-   * let find and delete drift apart. Permission request IDs are
-   * connection-qualified (`_qwen_perm_<connectionId>_N`) and therefore globally
-   * unique, so at most one entry can match across the whole registry.
+   * Locate a pending permission entry matching `requestId` (a bridge
+   * `bridgeRequestId`, i.e. a per-request `randomUUID()`) and optionally
+   * `sessionId`, returning the first match. {@link deletePendingPermission}
+   * delegates here so the matching predicate lives in one place.
+   *
+   * NOTE: `requestId` is unique per *request*, not per *pending entry*. The
+   * per-entry unique id is the `conn.pending` map key
+   * (`_qwen_perm_<connectionId>_N`), which is NOT what is matched here. A
+   * `permission_request` is delivered to every live subscriber of its session,
+   * so when connections co-own a session (multi-client attach) each mints its
+   * own entry sharing the same `bridgeRequestId`. More than one entry can
+   * therefore match; callers that must act on a *specific* entry (e.g. the
+   * resolve site) should delete by the `conn`/map-key they already hold rather
+   * than re-matching here.
    */
   findPendingPermission(
     requestId: string,
