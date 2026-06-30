@@ -101,6 +101,27 @@ describe('visualClickToOffset', () => {
     expect(visualClickToOffset(buffer, 0, 2)).toBe(3);
   });
 
+  it('keeps a combining mark attached to a wide base character', () => {
+    // '日' (2 cells) + U+0301 (combining acute, 0 cells) renders as one
+    // grapheme, followed by 'x'. Clicking the right cell of '日' must snap
+    // past the full grapheme (code-point offset 2), not between '日' and its
+    // mark. This is the wide-base counterpart of the 'é' (single-width) case,
+    // which never exercises the snap-and-break branch.
+    const decomposed = '日́x';
+    const buffer: ClickableBufferState = {
+      lines: [decomposed],
+      allVisualLines: [decomposed],
+      visualToLogicalMap: [[0, 0]],
+    };
+    // Col 0 → left half of '日' → before it (offset 0).
+    expect(visualClickToOffset(buffer, 0, 0)).toBe(0);
+    // Col 1 → right half of '日' → after the full '日́' grapheme (offset 2),
+    // skipping the zero-width accent.
+    expect(visualClickToOffset(buffer, 0, 1)).toBe(2);
+    // Col 2 → the visible 'x' → after the grapheme (offset 2).
+    expect(visualClickToOffset(buffer, 0, 2)).toBe(2);
+  });
+
   it('clicking past the end of the text lands at the line end', () => {
     const buffer: ClickableBufferState = {
       lines: ['hi'],

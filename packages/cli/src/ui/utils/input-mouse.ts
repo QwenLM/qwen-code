@@ -69,7 +69,20 @@ export function visualClickToOffset(
       // cell of a 2-cell character resolves to the right boundary (offset
       // 1 >= 1).
       const offsetWithinChar = clickVisualCol - accumulatedWidth;
-      codePointIndex = offsetWithinChar >= Math.ceil(charWidth / 2) ? i + 1 : i;
+      if (offsetWithinChar >= Math.ceil(charWidth / 2)) {
+        // Snapped past this glyph — also step over any following zero-width
+        // marks (combining accents, ZWJ) so the cursor lands after the full
+        // grapheme rather than between the base char and its mark.
+        codePointIndex = i + 1;
+        while (
+          codePointIndex < chars.length &&
+          getCachedStringWidth(chars[codePointIndex]!) <= 0
+        ) {
+          codePointIndex++;
+        }
+      } else {
+        codePointIndex = i;
+      }
       break;
     }
     accumulatedWidth += charWidth;
