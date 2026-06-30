@@ -299,6 +299,8 @@ const EN: Messages = {
   'contextUsage.messages': 'Messages',
   'contextUsage.mcpTools': 'MCP tools',
   'contextUsage.model': 'Model',
+  'contextUsage.noSession':
+    'No active session yet. Send your first message before viewing context usage.',
   'contextUsage.noApiResponse':
     'No API response yet. Send a message to see actual usage.',
   'contextUsage.overLimit':
@@ -524,6 +526,8 @@ const EN: Messages = {
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
   'language.usage': 'Usage: /language ui [en|zh-CN]',
+  'localCommand.noSession':
+    'No active session yet. Send your first message before using this command.',
   'local.agents': 'Manage subagents',
   'local.approvalMode': 'Change approval mode',
   'local.auth': 'Connect an LLM provider',
@@ -1499,6 +1503,8 @@ const ZH: Messages = {
   'contextUsage.messages': '消息',
   'contextUsage.mcpTools': 'MCP 工具',
   'contextUsage.model': '模型',
+  'contextUsage.noSession':
+    '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
   'contextUsage.noApiResponse':
     '尚无 API 响应。发送一条消息后可查看实际使用量。',
   'contextUsage.overLimit':
@@ -1712,6 +1718,8 @@ const ZH: Messages = {
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
   'language.usage': '用法：/language ui [en|zh-CN]',
+  'localCommand.noSession':
+    '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'local.agents': '管理智能体',
   'local.approvalMode': '切换审批模式',
   'local.auth': '连接 LLM provider',

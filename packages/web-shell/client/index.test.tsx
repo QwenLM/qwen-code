@@ -7,6 +7,12 @@ import { createRoot, type Root } from 'react-dom/client';
 // top-level boundary sits *outside* the daemon providers (a boundary nested
 // under them couldn't catch their own throw).
 let workspaceShouldThrow = false;
+const sessionProviderProps: Array<Record<string, unknown>> = [];
+let connectionState: { sessionId?: string } = {};
+const actionMocks = {
+  loadSession: vi.fn(() => Promise.resolve()),
+  clearSession: vi.fn(() => Promise.resolve()),
+};
 vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
   const React = await import('react');
   return {
@@ -14,8 +20,17 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
       if (workspaceShouldThrow) throw new Error('provider boom');
       return React.createElement(React.Fragment, null, children);
     },
-    DaemonSessionProvider: ({ children }: { children: React.ReactNode }) =>
-      React.createElement(React.Fragment, null, children),
+    DaemonSessionProvider: ({
+      children,
+      ...props
+    }: {
+      children: React.ReactNode;
+    }) => {
+      sessionProviderProps.push(props);
+      return React.createElement(React.Fragment, null, children);
+    },
+    useConnection: () => connectionState,
+    useActions: () => actionMocks,
   };
 });
 vi.mock('./App', async () => {
@@ -52,6 +67,10 @@ afterEach(() => {
     container.remove();
   }
   workspaceShouldThrow = false;
+  connectionState = {};
+  sessionProviderProps.length = 0;
+  actionMocks.loadSession.mockClear();
+  actionMocks.clearSession.mockClear();
   vi.restoreAllMocks();
 });
 
@@ -60,6 +79,51 @@ describe('WebShellWithProviders top-level boundary', () => {
     const container = render(<WebShellWithProviders />);
     expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('defers session creation until first prompt when no initial session is provided', () => {
+    render(<WebShellWithProviders />);
+    expect(sessionProviderProps[0]).toMatchObject({
+      initialSessionId: undefined,
+    });
+    expect(sessionProviderProps[0]).not.toHaveProperty('deferSessionCreation');
+  });
+
+  it('loads the requested session immediately when initialSessionId is provided', () => {
+    render(<WebShellWithProviders initialSessionId="session-1" />);
+    expect(sessionProviderProps[0]).toMatchObject({
+      initialSessionId: 'session-1',
+    });
+    expect(sessionProviderProps[0]).not.toHaveProperty('deferSessionCreation');
+  });
+
+  it('loads the controlled active session when it differs from the current one', async () => {
+    connectionState = { sessionId: 'session-1' };
+    render(<WebShellWithProviders activeSessionId="session-2" />);
+    await act(async () => {});
+
+    expect(actionMocks.loadSession).toHaveBeenCalledWith('session-2', {
+      deferTranscriptReset: true,
+    });
+    expect(actionMocks.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('does not load when the controlled active session matches the current one', async () => {
+    connectionState = { sessionId: 'session-1' };
+    render(<WebShellWithProviders activeSessionId="session-1" />);
+    await act(async () => {});
+
+    expect(actionMocks.loadSession).not.toHaveBeenCalled();
+    expect(actionMocks.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('clears the current session when controlled activeSessionId is explicitly undefined', async () => {
+    connectionState = { sessionId: 'session-1' };
+    render(<WebShellWithProviders activeSessionId={undefined} />);
+    await act(async () => {});
+
+    expect(actionMocks.clearSession).toHaveBeenCalledOnce();
+    expect(actionMocks.loadSession).not.toHaveBeenCalled();
   });
 
   it('catches a daemon-provider render crash instead of white-screening', () => {

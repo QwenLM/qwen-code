@@ -52,8 +52,12 @@ export interface CreateDaemonSessionActionsArgs {
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
+  manualSessionClearRef: RefBox<boolean>;
+  skipNextCleanupDetachSessionIdRef: RefBox<string | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
+  createDetachedSession: () => Promise<DaemonSessionClient>;
+  getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
   addNotice: AddDaemonSessionNotice;
@@ -62,6 +66,7 @@ export interface CreateDaemonSessionActionsArgs {
   setRestoreSessionId: Dispatch<SetStateAction<string | undefined>>;
   setRestoreMode: Dispatch<SetStateAction<'load' | 'resume'>>;
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
+  setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
 }
 
@@ -73,8 +78,12 @@ export function createDaemonSessionActions({
   pendingSessionLoadRef,
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
+  manualSessionClearRef,
+  skipNextCleanupDetachSessionIdRef,
   passiveAssistantDoneTimerRef,
   getCreateSessionRequest,
+  createDetachedSession,
+  getConnection,
   hasSessionActivePrompt,
   resetCurrentSessionActivePrompt,
   addNotice,
@@ -83,13 +92,34 @@ export function createDaemonSessionActions({
   setRestoreSessionId,
   setRestoreMode,
   setRestoreSessionNonce,
+  setAttachSessionNonce,
   setNewSessionNonce,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
+  function clearActiveSessionState() {
+    for (const [, active] of activePromptsRef.current) {
+      active.controller.abort();
+    }
+    activePromptsRef.current.clear();
+    settledPromptsRef.current.clear();
+    setPromptStatus('idle');
+    clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+    if (pendingSessionLoadRef.current) {
+      clearTimeout(pendingSessionLoadRef.current.timeout);
+      pendingSessionLoadRef.current.reject(
+        new DOMException('Session cleared', 'AbortError'),
+      );
+      pendingSessionLoadRef.current = undefined;
+    }
+    store.reset();
+    setRestoreSessionId(undefined);
+  }
+
   function startSessionSwitch(
     sessionId: string,
     mode: 'load' | 'resume',
     opts?: SessionSwitchOptions,
   ): Promise<void> {
+    manualSessionClearRef.current = false;
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
     if (pendingSessionLoadRef.current) {
@@ -434,37 +464,91 @@ export function createDaemonSessionActions({
     },
 
     async createSession() {
-      const session = requireSessionForAction(
+      try {
+        manualSessionClearRef.current = false;
+        const session = sessionRef.current;
+        const activeSession =
+          session && getConnection().sessionId === session.sessionId
+            ? session
+            : undefined;
+        if (activeSession) {
+          const nextSession = await withActionTimeout(
+            activeSession.client.createOrAttachSession(
+              getCreateSessionRequest(),
+            ),
+            'Create session timed out',
+          );
+          persistStableClientId(nextSession.clientId, nextSession.sessionId);
+          return nextSession;
+        }
+
+        const nextSession = await withActionTimeout(
+          createDetachedSession(),
+          'Create session timed out',
+        );
+        persistStableClientId(nextSession.clientId, nextSession.sessionId);
+        sessionRef.current = nextSession;
+        skipNextCleanupDetachSessionIdRef.current = nextSession.sessionId;
+        setConnection((current) => ({
+          ...current,
+          status: 'connected',
+          sessionId: nextSession.sessionId,
+          ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
+          workspaceCwd: nextSession.workspaceCwd,
+          error: undefined,
+        }));
+        return nextSession;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Create session failed',
+          error,
+          'create_session',
+        );
+      }
+    },
+
+    async attachSession() {
+      requireSessionForAction(
         addNotice,
         sessionRef.current,
-        'Create session failed',
-        'create_session',
+        'Attach session failed',
+        'load_session',
       );
-      const nextSession = await withActionTimeout(
-        session.client.createOrAttachSession(getCreateSessionRequest()),
-        'Create session timed out',
-      );
-      persistStableClientId(nextSession.clientId, nextSession.sessionId);
-      return nextSession;
+      setAttachSessionNonce((nonce) => nonce + 1);
+    },
+
+    async clearSession() {
+      const session = sessionRef.current;
+      manualSessionClearRef.current = true;
+      clearActiveSessionState();
+      sessionRef.current = undefined;
+      if (session) {
+        try {
+          await withActionTimeout(session.detach(), 'Clear session timed out');
+        } catch (error) {
+          console.warn('[DaemonSessionActions] detach on clear failed:', error);
+        }
+      }
+      setConnection((current) => ({
+        status: 'connected',
+        workspaceCwd: current.workspaceCwd,
+        commands: current.commands,
+        skills: current.skills,
+        models: current.models,
+        currentModel: current.currentModel,
+        currentMode: current.currentMode,
+        contextWindow: current.contextWindow,
+        providers: current.providers,
+        supportedCommands: current.supportedCommands,
+        context: current.context,
+        capabilities: current.capabilities,
+      }));
     },
 
     async newSession() {
-      for (const [, active] of activePromptsRef.current) {
-        active.controller.abort();
-      }
-      activePromptsRef.current.clear();
-      settledPromptsRef.current.clear();
-      setPromptStatus('idle');
-      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-      if (pendingSessionLoadRef.current) {
-        clearTimeout(pendingSessionLoadRef.current.timeout);
-        pendingSessionLoadRef.current.reject(
-          new DOMException('New session requested', 'AbortError'),
-        );
-        pendingSessionLoadRef.current = undefined;
-      }
-      store.reset();
-      setRestoreSessionId(undefined);
+      manualSessionClearRef.current = false;
+      clearActiveSessionState();
       setNewSessionNonce((nonce) => nonce + 1);
     },
 

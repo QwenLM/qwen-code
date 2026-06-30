@@ -5,6 +5,8 @@
  */
 
 import {
+  ApprovalMode,
+  APPROVAL_MODES,
   ModelsConfig,
   resolveProviderProtocol,
   tokenLimit,
@@ -97,6 +99,7 @@ function buildWorkspaceProvidersStatus(
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
         ? settings.fastModel
         : undefined;
+    const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
     const explicitModelBaseUrls = buildExplicitModelBaseUrls(
       settings.modelProviders,
@@ -169,6 +172,7 @@ function buildWorkspaceProvidersStatus(
       initialized: true,
       acpChannelLive,
       ...(current ? { current } : {}),
+      approvalMode,
       providers: [...providers.values()],
       ...(resolvedCliConfig.warnings.length > 0
         ? {
@@ -198,6 +202,19 @@ function buildWorkspaceProvidersStatus(
       ],
     };
   }
+}
+
+function resolveApprovalMode(settings: Settings): ApprovalMode {
+  const value = settings.tools?.approvalMode;
+  if (typeof value !== 'string') return ApprovalMode.DEFAULT;
+
+  const normalized = value.trim().toLowerCase().replaceAll('_', '-');
+  const mode = normalized === 'autoedit' ? ApprovalMode.AUTO_EDIT : normalized;
+  if ((APPROVAL_MODES as readonly string[]).includes(mode)) {
+    return mode as ApprovalMode;
+  }
+
+  return ApprovalMode.DEFAULT;
 }
 
 function isMainSelectableModel(model: {

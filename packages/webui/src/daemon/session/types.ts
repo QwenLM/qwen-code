@@ -287,6 +287,8 @@ export interface DaemonSessionActions {
   loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
   resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
   createSession(): Promise<DaemonSession>;
+  attachSession(): Promise<void>;
+  clearSession(): Promise<void>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;

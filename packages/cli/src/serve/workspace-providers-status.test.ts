@@ -122,6 +122,28 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('returns the workspace approval mode', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      tools: { approvalMode: 'yolo' },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('yolo');
+  });
+
+  it('normalizes legacy workspace approval mode spelling', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      tools: { approvalMode: 'auto_edit' },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('auto-edit');
+  });
+
   it('marks only the model matching persisted model.baseUrl as current', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

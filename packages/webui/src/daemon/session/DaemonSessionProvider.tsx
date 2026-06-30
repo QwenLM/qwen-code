@@ -175,27 +175,28 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
  */
 const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 
-export function DaemonSessionProvider({
-  baseUrl,
-  token,
-  workspaceCwd,
-  initialSessionId,
-  clientId,
-  createSessionRequest,
-  maxQueued = 1024,
-  maxBlocks = DEFAULT_MAX_BLOCKS,
-  suppressOwnUserEcho = true,
-  includeRawEvent = false,
-  autoConnect = true,
-  autoReconnect = true,
-  missingSessionBehavior = 'create',
-  reconnectDelayMs = 1_000,
-  maxReconnectDelayMs = 10_000,
-  heartbeatIntervalMs = 30_000,
-  heartbeatFailureThreshold = 3,
-  loadWarnings,
-  children,
-}: DaemonSessionProviderProps) {
+export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
+  const {
+    baseUrl,
+    token,
+    workspaceCwd,
+    initialSessionId,
+    clientId,
+    createSessionRequest,
+    maxQueued = 1024,
+    maxBlocks = DEFAULT_MAX_BLOCKS,
+    suppressOwnUserEcho = true,
+    includeRawEvent = false,
+    autoConnect = true,
+    autoReconnect = true,
+    missingSessionBehavior = 'create',
+    reconnectDelayMs = 1_000,
+    maxReconnectDelayMs = 10_000,
+    heartbeatIntervalMs = 30_000,
+    heartbeatFailureThreshold = 3,
+    loadWarnings,
+    children,
+  } = props;
   const workspace = useOptionalDaemonWorkspace();
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
   const resolvedToken = token ?? workspace?.token;
@@ -206,8 +207,15 @@ export function DaemonSessionProvider({
   workspaceCapabilitiesRef.current = workspace?.capabilities;
   const workspaceGetCapabilitiesRef = useRef(workspace?.getCapabilities);
   workspaceGetCapabilitiesRef.current = workspace?.getCapabilities;
+  const shouldDeferInitialSessionCreation =
+    Object.prototype.hasOwnProperty.call(props, 'initialSessionId') &&
+    initialSessionId === undefined;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
+  const activeWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
+  if (resolvedWorkspaceCwd) {
+    activeWorkspaceCwdRef.current = resolvedWorkspaceCwd;
+  }
 
   const store = useMemo(
     () => createDaemonTranscriptStore({ maxBlocks }),
@@ -225,6 +233,10 @@ export function DaemonSessionProvider({
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const heartbeatSupportedRef = useRef(false);
+  const manualSessionClearRef = useRef(false);
+  const skipNextCleanupDetachSessionIdRef = useRef<string | undefined>(
+    undefined,
+  );
   const settledRestoredActivePromptSessionsRef = useRef<
     WeakSet<DaemonSessionClient>
   >(new WeakSet());
@@ -248,10 +260,14 @@ export function DaemonSessionProvider({
   );
   const [restoreMode, setRestoreMode] = useState<'load' | 'resume'>('load');
   const [restoreSessionNonce, setRestoreSessionNonce] = useState(0);
+  const [attachSessionNonce, setAttachSessionNonce] = useState(0);
   const [newSessionNonce, setNewSessionNonce] = useState(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
     status: autoConnect ? 'connecting' : 'idle',
+    ...(initialSessionId ? { sessionId: initialSessionId } : {}),
   });
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const noticeIdRef = useRef(0);
   const [notices, setNotices] = useState<DaemonSessionNotice[]>([]);
   const addNotice = useCallback<AddDaemonSessionNotice>((input) => {
@@ -341,11 +357,26 @@ export function DaemonSessionProvider({
           let isSameSessionReconnect = false;
           let shouldInjectReplaySnapshot = false;
           let needsStoreReset = false;
+          let attachedExistingSession = false;
           // Only populated when this attempt (re)loads the session: a reused
           // session object carries the snapshot from its original load, whose
           // usage may be older than the in-memory count.
           let replayTokenUsage: DaemonConnectionState['tokenUsage'];
           let replayTokenCount: number | undefined;
+          if (!session) {
+            const existingSession = sessionRef.current;
+            if (
+              existingSession &&
+              !restoreSessionId &&
+              !reconnectSessionId &&
+              !shouldCreateFreshSession
+            ) {
+              session = existingSession;
+              reconnectSessionId = existingSession.sessionId;
+              lastSessionIdRef.current = existingSession.sessionId;
+              attachedExistingSession = true;
+            }
+          }
           if (!session) {
             setConnection((current) => ({
               ...current,
@@ -366,6 +397,34 @@ export function DaemonSessionProvider({
               caps.features.includes('client_heartbeat');
             const effectWorkspaceCwd =
               resolvedWorkspaceCwdRef.current ?? caps.workspaceCwd;
+            activeWorkspaceCwdRef.current = effectWorkspaceCwd;
+            if (
+              (shouldDeferInitialSessionCreation ||
+                manualSessionClearRef.current) &&
+              !restoreSessionId &&
+              !reconnectSessionId &&
+              !shouldCreateFreshSession
+            ) {
+              const providerResult = await Promise.allSettled([
+                client.workspaceProviders(),
+              ]);
+              const providers =
+                providerResult[0].status === 'fulfilled'
+                  ? providerResult[0].value
+                  : undefined;
+              const providerModelStatus = mapProviderStatus(providers);
+              setConnection({
+                status: 'connected',
+                workspaceCwd: effectWorkspaceCwd,
+                models: providerModelStatus.models,
+                currentModel: providerModelStatus.currentModel,
+                currentMode: providerModelStatus.currentMode,
+                contextWindow: providerModelStatus.contextWindow,
+                providers,
+                capabilities: caps,
+              });
+              return;
+            }
             const restoreMethod =
               restoreSessionId && restoreMode === 'resume'
                 ? DaemonSessionClient.resume
@@ -507,31 +566,33 @@ export function DaemonSessionProvider({
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
           const [providerResult, commandResult, contextResult] =
-            await Promise.allSettled([
-              client.workspaceProviders(),
-              activeSession.supportedCommands(),
-              activeSession.context(),
-            ]);
+            attachedExistingSession
+              ? [undefined, undefined, undefined]
+              : await Promise.allSettled([
+                  client.workspaceProviders(),
+                  activeSession.supportedCommands(),
+                  activeSession.context(),
+                ]);
           const providers =
-            providerResult.status === 'fulfilled'
+            providerResult?.status === 'fulfilled'
               ? providerResult.value
               : undefined;
           const supportedCommands =
-            commandResult.status === 'fulfilled'
+            commandResult?.status === 'fulfilled'
               ? commandResult.value
               : undefined;
           const context =
-            contextResult.status === 'fulfilled'
+            contextResult?.status === 'fulfilled'
               ? contextResult.value
               : undefined;
           const loadWarningTexts = [
-            providerResult.status === 'rejected'
+            providerResult?.status === 'rejected'
               ? loadWarningsRef.current?.models
               : undefined,
-            commandResult.status === 'rejected'
+            commandResult?.status === 'rejected'
               ? loadWarningsRef.current?.commands
               : undefined,
-            contextResult.status === 'rejected'
+            contextResult?.status === 'rejected'
               ? loadWarningsRef.current?.context
               : undefined,
           ].filter((warning): warning is string => Boolean(warning));
@@ -556,7 +617,8 @@ export function DaemonSessionProvider({
               ?.contextWindow ??
             providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
-          const currentMode = getCurrentMode(context);
+          const currentMode =
+            getCurrentMode(context) ?? providerModelStatus.currentMode;
 
           setConnection((current) => ({
             status: 'connected',
@@ -567,11 +629,11 @@ export function DaemonSessionProvider({
               ? { clientId: activeSession.clientId }
               : {}),
             workspaceCwd: activeSession.workspaceCwd,
-            commands,
-            skills,
-            models: sessionModels,
-            currentModel: sessionCurrentModel,
-            currentMode,
+            commands: commands.length > 0 ? commands : current.commands,
+            skills: skills.length > 0 ? skills : current.skills,
+            models: sessionModels.length > 0 ? sessionModels : current.models,
+            currentModel: sessionCurrentModel ?? current.currentModel,
+            currentMode: currentMode ?? current.currentMode,
             displayName:
               getSessionDisplayName(activeSession.state) ??
               (current.sessionId === activeSession.sessionId
@@ -596,10 +658,10 @@ export function DaemonSessionProvider({
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
-            contextWindow: sessionContextWindow,
-            providers,
-            supportedCommands,
-            context,
+            contextWindow: sessionContextWindow ?? current.contextWindow,
+            providers: providers ?? current.providers,
+            supportedCommands: supportedCommands ?? current.supportedCommands,
+            context: context ?? current.context,
             capabilities,
             catchingUp:
               isSameSessionReconnect ||
@@ -716,7 +778,6 @@ export function DaemonSessionProvider({
             clearTimeout(pendingLoadToResolve.timeout);
             pendingLoadToResolve.resolve();
           }
-
           let sawEvent = false;
           let resyncRequested = false;
           const requestEpochResetReload = () => {
@@ -1012,6 +1073,12 @@ export function DaemonSessionProvider({
             }));
             return;
           }
+          if (manualSessionClearRef.current) {
+            session = undefined;
+            sessionRef.current = undefined;
+            hasCurrentSessionActivePromptRef.current = () => false;
+            return;
+          }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
@@ -1164,7 +1231,11 @@ export function DaemonSessionProvider({
         );
         pendingSessionLoadRef.current = undefined;
       }
-      if (session?.clientId) {
+      const keepSessionForNextEffect =
+        session?.sessionId === skipNextCleanupDetachSessionIdRef.current;
+      if (keepSessionForNextEffect) {
+        skipNextCleanupDetachSessionIdRef.current = undefined;
+      } else if (session?.clientId) {
         void detachDaemonClient({
           baseUrl: resolvedBaseUrl!,
           token: resolvedToken,
@@ -1174,7 +1245,9 @@ export function DaemonSessionProvider({
           console.warn('[DaemonSessionProvider] detach failed:', err),
         );
       }
-      sessionRef.current = undefined;
+      if (!keepSessionForNextEffect) {
+        sessionRef.current = undefined;
+      }
     };
   }, [
     autoConnect,
@@ -1187,11 +1260,14 @@ export function DaemonSessionProvider({
     sessionScope,
     maxQueued,
     store,
+    initialSessionId,
     restoreSessionId,
     restoreMode,
     restoreSessionNonce,
+    attachSessionNonce,
     newSessionNonce,
     clientId,
+    shouldDeferInitialSessionCreation,
     clearNotices,
     addNotice,
   ]);
@@ -1252,6 +1328,8 @@ export function DaemonSessionProvider({
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
+        manualSessionClearRef,
+        skipNextCleanupDetachSessionIdRef,
         passiveAssistantDoneTimerRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
@@ -1262,17 +1340,41 @@ export function DaemonSessionProvider({
           ...createSessionRequestRef.current,
           sessionScope: 'thread',
           workspaceCwd:
-            resolvedWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
+            activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
         }),
+        createDetachedSession: () => {
+          const client =
+            workspaceClientRef.current ??
+            new DaemonClient({
+              baseUrl: resolvedBaseUrl!,
+              token: resolvedToken,
+            });
+          const request = {
+            ...createSessionRequestRef.current,
+            sessionScope: 'thread' as const,
+            workspaceCwd:
+              activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
+          };
+          const requestClientId = clientId
+            ? clientIdRef.current
+            : getStableClientId(undefined);
+          return DaemonSessionClient.createOrAttach(
+            client,
+            request,
+            requestClientId,
+          );
+        },
+        getConnection: () => connectionRef.current,
         addNotice,
         setConnection,
         setPromptStatus,
         setRestoreSessionId,
         setRestoreMode,
         setRestoreSessionNonce,
+        setAttachSessionNonce,
         setNewSessionNonce,
       }),
-    [addNotice, store],
+    [addNotice, clientId, resolvedBaseUrl, resolvedToken, store],
   );
   return (
     <DaemonStoreContext.Provider value={store}>

@@ -447,6 +447,7 @@ export interface ServeWorkspaceProvidersStatus {
   initialized: boolean;
   acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
+  approvalMode?: string;
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];
 }

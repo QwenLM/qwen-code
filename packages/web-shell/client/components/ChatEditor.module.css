@@ -978,6 +978,15 @@
   background: currentColor;
 }
 
+.loadingIcon {
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: sendBtnLoadingSpin 0.8s linear infinite;
+}
+
 /* Armed-to-cancel state: first Esc primes the stop, the button shows an "Esc"
    hint, a subtle pulse, and a depleting ring counting down the confirm window
    until the second press confirms or the window lapses. */
@@ -1028,6 +1037,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .loadingIcon {
+    animation: none;
+  }
+
   .sendBtnArmed,
   .sendBtnArmed:not(:disabled) {
     animation: none;
@@ -1036,6 +1049,12 @@
   .sendBtnArmed::after {
     animation: none;
     --esc-countdown: 100%;
+  }
+}
+
+@keyframes sendBtnLoadingSpin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

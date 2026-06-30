@@ -257,6 +257,7 @@ interface SendPromptOptionsWithRetry {
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
   retry?: boolean;
+  clearComposerOnPromptStart?: boolean;
 }
 
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
@@ -319,7 +320,7 @@ export interface WebShellSidebarOptions {
 
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
-  onSessionIdChange?: (sessionId: string) => void;
+  onSessionIdChange?: (sessionId: string | undefined) => void;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -396,6 +397,7 @@ export interface WebShellProps {
 
 type SessionActionsWithCreate = {
   createSession: () => Promise<{ sessionId: string }>;
+  attachSession: () => Promise<void>;
 };
 
 const emptyComposerApi: WebShellComposerApi = {
@@ -505,17 +507,6 @@ function assignComposerRef(
     return;
   }
   (ref as React.MutableRefObject<WebShellComposerApi | null>).current = value;
-}
-
-function replaceSessionUrl(sessionId: string): void {
-  if (typeof window === 'undefined') return;
-  const url = new URL(window.location.href);
-  url.pathname = `/session/${encodeURIComponent(sessionId)}`;
-  if (!import.meta.env.DEV) {
-    url.searchParams.delete('token');
-    url.searchParams.delete('daemon');
-  }
-  window.history.replaceState(null, '', url);
 }
 
 function getInitialLanguage(): WebShellLanguage {
@@ -1051,34 +1042,6 @@ export function App({
       editorRef.current?.insertText(suggestion);
     },
   });
-  const sendPrompt = useCallback(
-    (
-      text: string,
-      images?: PromptImage[],
-      opts?: { optimisticUserMessage?: boolean; retry?: boolean },
-    ) => {
-      clearFollowup();
-      const isUserPrompt = !text.trimStart().startsWith('/');
-      if (!opts?.retry && isUserPrompt) {
-        lastSubmittedPromptRef.current = text;
-        lastSubmittedImagesRef.current = images;
-        retriedTurnErrorIdRef.current = null;
-      }
-      setShowRetryHint(false);
-      const promptOptions: SendPromptOptionsWithRetry = {
-        images,
-        optimisticUserMessage: opts?.optimisticUserMessage,
-        retry: opts?.retry,
-      };
-      return (
-        sessionActions.sendPrompt as (
-          promptText: string,
-          options?: SendPromptOptionsWithRetry,
-        ) => ReturnType<typeof sessionActions.sendPrompt>
-      )(text, promptOptions);
-    },
-    [clearFollowup, sessionActions],
-  );
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const localStreamingStartedAtRef = useRef(Date.now());
@@ -1229,10 +1192,100 @@ export function App({
   const [currentModel, setCurrentModel] = useState('');
   const currentModelRef = useRef(currentModel);
   currentModelRef.current = currentModel;
+  const setPendingModel = useCallback((modelId: string) => {
+    currentModelRef.current = modelId;
+    setCurrentModel(modelId);
+  }, []);
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const requireActiveSessionForLocalCommand = useCallback((): boolean => {
+    if (connectionRef.current.sessionId) return true;
+    pushToast('info', t('localCommand.noSession'));
+    return false;
+  }, [pushToast, t]);
   const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
+  const currentModeRef = useRef(currentMode);
+  currentModeRef.current = currentMode;
+  const setPendingMode = useCallback((modeId: string) => {
+    currentModeRef.current = modeId;
+    setCurrentMode(modeId);
+  }, []);
+  const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
+  const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  const ensureSessionForPrompt = useCallback(() => {
+    if (connectionRef.current.sessionId) return Promise.resolve();
+    if (!createSessionPromiseRef.current) {
+      createSessionPromiseRef.current = (async () => {
+        const modelId =
+          currentModelRef.current || connectionRef.current.currentModel;
+        const modeId =
+          currentModeRef.current || connectionRef.current.currentMode;
+        await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).createSession();
+        if (modelId) {
+          await sessionActions.setModel(modelId);
+        }
+        if (modeId && isDaemonApprovalMode(modeId)) {
+          await sessionActions.setApprovalMode(modeId);
+        }
+        await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).attachSession();
+      })().finally(() => {
+        createSessionPromiseRef.current = null;
+      });
+    }
+    return createSessionPromiseRef.current;
+  }, [sessionActions]);
+  const sendPrompt = useCallback(
+    async (
+      text: string,
+      images?: PromptImage[],
+      opts?: {
+        optimisticUserMessage?: boolean;
+        retry?: boolean;
+        clearComposerOnPromptStart?: boolean;
+      },
+    ) => {
+      clearFollowup();
+      const isUserPrompt = !text.trimStart().startsWith('/');
+      if (!opts?.retry && isUserPrompt) {
+        lastSubmittedPromptRef.current = text;
+        lastSubmittedImagesRef.current = images;
+        retriedTurnErrorIdRef.current = null;
+      }
+      setShowRetryHint(false);
+      const shouldShowPreparing = !connectionRef.current.sessionId;
+      if (shouldShowPreparing) {
+        setIsPreparingPrompt(true);
+      }
+      try {
+        await ensureSessionForPrompt();
+      } finally {
+        if (shouldShowPreparing) {
+          setIsPreparingPrompt(false);
+        }
+      }
+      if (opts?.clearComposerOnPromptStart) {
+        editorRef.current?.clear();
+      }
+      const promptOptions: SendPromptOptionsWithRetry = {
+        images,
+        optimisticUserMessage: opts?.optimisticUserMessage,
+        retry: opts?.retry,
+      };
+      const result = (
+        sessionActions.sendPrompt as (
+          promptText: string,
+          options?: SendPromptOptionsWithRetry,
+        ) => ReturnType<typeof sessionActions.sendPrompt>
+      )(text, promptOptions);
+      return result;
+    },
+    [clearFollowup, ensureSessionForPrompt, sessionActions],
+  );
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedTexts = useMemo(
     () => queuedPrompts.map((prompt) => prompt.text),
@@ -1345,6 +1398,7 @@ export function App({
   }, [connection.sessionId]);
 
   const runVisibleRecap = useCallback(() => {
+    if (!requireActiveSessionForLocalCommand()) return;
     const messageId = `local-recap-${nextRecapMessageIdRef.current++}`;
     const anchorIndex = messages.length;
     const anchorAfterId = messages.at(-1)?.id;
@@ -1385,7 +1439,13 @@ export function App({
         }
       },
     );
-  }, [connection.sessionId, messages, sessionActions, t]);
+  }, [
+    connection.sessionId,
+    messages,
+    requireActiveSessionForLocalCommand,
+    sessionActions,
+    t,
+  ]);
 
   const runVisibleBtw = useCallback(
     (rawQuestion: string) => {
@@ -1394,6 +1454,7 @@ export function App({
         pushToast('error', t('btw.empty'));
         return;
       }
+      if (!requireActiveSessionForLocalCommand()) return;
 
       const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
       const sessionId = connection.sessionId;
@@ -1434,7 +1495,13 @@ export function App({
           },
         );
     },
-    [connection.sessionId, pushToast, sessionActions, t],
+    [
+      connection.sessionId,
+      pushToast,
+      requireActiveSessionForLocalCommand,
+      sessionActions,
+      t,
+    ],
   );
 
   const dismissBtwMessage = useCallback(() => {
@@ -1819,6 +1886,10 @@ export function App({
         );
         return;
       }
+      if (!connectionRef.current.sessionId) {
+        setPendingMode(modeId);
+        return;
+      }
       sessionActions
         .setApprovalMode(modeId)
         .then((result) => {
@@ -1853,7 +1924,7 @@ export function App({
           reportError(error, t('local.approvalMode'));
         });
     },
-    [sessionActions, reportError, store, t],
+    [sessionActions, reportError, store, t, setPendingMode],
   );
 
   useEffect(() => {
@@ -1911,9 +1982,6 @@ export function App({
     if (connection.sessionId) {
       setActiveGoal(null);
       onSessionIdChange?.(connection.sessionId);
-      if (!onSessionIdChange) {
-        replaceSessionUrl(connection.sessionId);
-      }
     }
   }, [connection.sessionId, onSessionIdChange]);
 
@@ -2018,6 +2086,7 @@ export function App({
     (commandText: string, detail: boolean) => {
       // Self-guard so every entry point (keyboard, status-bar button, in-chat
       // "context detail" click) defers mid-turn instead of splitting the turn.
+      if (!requireActiveSessionForLocalCommand()) return;
       if (echoOrDeferLocalCommand(commandText)) return;
       sessionActions
         .getContextUsage({ detail })
@@ -2037,6 +2106,7 @@ export function App({
     [
       echoOrDeferLocalCommand,
       store,
+      requireActiveSessionForLocalCommand,
       sessionActions,
       reportError,
       resumeChatBottomFollow,
@@ -2051,6 +2121,7 @@ export function App({
 
   const branchCurrentSession = useCallback(
     (name?: string) => {
+      if (!requireActiveSessionForLocalCommand()) return;
       sessionActions
         .branchSession(name || undefined)
         .then((result) => {
@@ -2067,7 +2138,13 @@ export function App({
           reportError(error, t('branch.failed'));
         });
     },
-    [reportError, sessionActions, store, t],
+    [
+      reportError,
+      requireActiveSessionForLocalCommand,
+      sessionActions,
+      store,
+      t,
+    ],
   );
   const handleBranchCurrentSession = useCallback(() => {
     branchCurrentSession();
@@ -2075,21 +2152,11 @@ export function App({
 
   const createNewSession = useCallback(async () => {
     try {
-      const session = await (
-        sessionActions as typeof sessionActions & SessionActionsWithCreate
-      ).createSession();
-      if (onSessionIdChange) {
-        onSessionIdChange(session.sessionId);
-        return true;
-      }
-      void sessionActions
-        .loadSession(session.sessionId)
-        .catch((error: unknown) =>
-          reportError(error, 'Failed to switch session'),
-        );
+      await sessionActions.clearSession();
+      onSessionIdChange?.(undefined);
       return true;
     } catch (error) {
-      reportError(error, 'Failed to create a new session');
+      reportError(error, 'Failed to start a new chat');
       return false;
     }
   }, [onSessionIdChange, reportError, sessionActions]);
@@ -2122,6 +2189,7 @@ export function App({
   }, [connection.catchingUp, connection.sessionId, sidebarSwitchingSessionId]);
 
   const openTasksPanel = useCallback(() => {
+    if (!requireActiveSessionForLocalCommand()) return;
     sessionActions
       .getTasks()
       .then((snapshot) => {
@@ -2130,7 +2198,7 @@ export function App({
       .catch((error: unknown) => {
         reportError(error, 'Failed to load tasks');
       });
-  }, [reportError, sessionActions]);
+  }, [reportError, requireActiveSessionForLocalCommand, sessionActions]);
 
   const dispatchGoalSet = useCallback(
     (condition: string, setAt: number) => {
@@ -2169,13 +2237,14 @@ export function App({
 
   const handleBusyGoalClear = useCallback(
     (text: string) => {
+      if (!requireActiveSessionForLocalCommand()) return true;
       store.appendLocalUserMessage(text);
       sessionActions.clearGoal().catch((error: unknown) => {
         reportError(error, 'Failed to clear /goal');
       });
       return true;
     },
-    [reportError, sessionActions, store],
+    [reportError, requireActiveSessionForLocalCommand, sessionActions, store],
   );
 
   const loadRewindSnapshots = useCallback(
@@ -2209,6 +2278,16 @@ export function App({
       const goalArg = text.replace(/^\/goal\b/i, '').trim();
       const lowerGoalArg = goalArg.toLowerCase();
       const sendToDaemon = opts?.sendToDaemon ?? true;
+      const sendGoalPrompt = () => {
+        const clearComposerOnPromptStart = !connectionRef.current.sessionId;
+        sendPrompt(text, images, {
+          optimisticUserMessage: false,
+          clearComposerOnPromptStart,
+        }).catch((error: unknown) => {
+          reportError(error, 'Failed to send /goal command');
+        });
+        return clearComposerOnPromptStart ? false : true;
+      };
 
       if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
         if (!sendToDaemon) {
@@ -2223,20 +2302,12 @@ export function App({
           dispatchGoalSet(goalArg, Date.now());
           return true;
         }
-        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
-          (error: unknown) => {
-            reportError(error, 'Failed to send /goal command');
-          },
-        );
-        return true;
+        return sendGoalPrompt();
       }
 
       store.appendLocalUserMessage(text);
       if (sendToDaemon) {
-        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
-          (error: unknown) =>
-            reportError(error, 'Failed to send /goal command'),
-        );
+        return sendGoalPrompt();
       }
       return true;
     },
@@ -2247,6 +2318,7 @@ export function App({
       reportError,
       sendPrompt,
       store,
+      connectionRef,
     ],
   );
 
@@ -2262,16 +2334,30 @@ export function App({
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
       const promptBlocked = streamingStateRef.current !== 'idle';
+      const submitPromptFromEditor = (
+        promptText: string,
+        promptImages: PromptImage[] | undefined,
+        errorMessage: string,
+        opts?: { optimisticUserMessage?: boolean; retry?: boolean },
+      ) => {
+        const clearComposerOnPromptStart = !connectionRef.current.sessionId;
+        sendPrompt(promptText, promptImages, {
+          ...opts,
+          clearComposerOnPromptStart,
+        }).catch((error: unknown) => reportError(error, errorMessage));
+        return clearComposerOnPromptStart ? false : true;
+      };
       if (text.startsWith('/')) {
         const match = text.match(/^\/([\w-]+)/);
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
             if (promptBlocked) return enqueuePrompt(text, images);
-            sendPrompt(text, images).catch((error: unknown) =>
-              reportError(error, 'Failed to send hidden slash command'),
+            return submitPromptFromEditor(
+              text,
+              images,
+              'Failed to send hidden slash command',
             );
-            return true;
           }
           if (cmd === 'help') {
             setShowHelpDialog(true);
@@ -2350,11 +2436,16 @@ export function App({
               const nextLanguage = normalizeLanguage(languageArg);
               handleLanguageChange(nextLanguage);
               if (!promptBlocked) {
-                sendPrompt(`/language ui ${nextLanguage}`)
+                const clearComposerOnPromptStart =
+                  !connectionRef.current.sessionId;
+                sendPrompt(`/language ui ${nextLanguage}`, undefined, {
+                  clearComposerOnPromptStart,
+                })
                   .then(() => sessionActions.refreshCommands())
                   .catch((error: unknown) => {
                     reportError(error, 'Failed to sync /language command');
                   });
+                return clearComposerOnPromptStart ? false : true;
               }
               return true;
             }
@@ -2384,6 +2475,7 @@ export function App({
             return true;
           }
           if (cmd === 'rewind') {
+            if (!requireActiveSessionForLocalCommand()) return true;
             setShowRewindDialog(true);
             return true;
           }
@@ -2395,6 +2487,7 @@ export function App({
           }
           if (cmd === 'fork') {
             if (promptBlocked) return enqueuePrompt(text, images);
+            if (!requireActiveSessionForLocalCommand()) return true;
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
               pushToast('error', t('fork.empty'));
@@ -2432,10 +2525,11 @@ export function App({
             }
             if (modelArg.startsWith('--fast ')) {
               if (promptBlocked) return enqueuePrompt(text, images);
-              sendPrompt(text, images).catch((error: unknown) =>
-                reportError(error, 'Failed to send /model --fast'),
+              return submitPromptFromEditor(
+                text,
+                images,
+                'Failed to send /model --fast',
               );
-              return true;
             }
             if (modelArg === '--voice') {
               if (echoOrDeferLocalCommand(text, images)) return true;
@@ -2452,16 +2546,21 @@ export function App({
             }
             if (modelArg.startsWith('--voice ')) {
               if (promptBlocked) return enqueuePrompt(text, images);
-              sendPrompt(text, images).catch((error: unknown) =>
-                reportError(error, 'Failed to send /model --voice'),
+              return submitPromptFromEditor(
+                text,
+                images,
+                'Failed to send /model --voice',
               );
-              return true;
             }
             if (modelArg) {
+              if (!connectionRef.current.sessionId) {
+                setPendingModel(modelArg);
+                return true;
+              }
               sessionActions
                 .setModel(modelArg)
                 .then(() => {
-                  setCurrentModel(modelArg);
+                  setPendingModel(modelArg);
                 })
                 .catch((error: unknown) => {
                   reportError(error, t('model.switch'));
@@ -2474,12 +2573,25 @@ export function App({
           if (cmd === 'plan') {
             if (promptBlocked) return enqueuePrompt(text, images);
             const prompt = text.slice(match[0].length).trim();
+            if (!connectionRef.current.sessionId) {
+              setPendingMode('plan');
+              if (prompt) {
+                return submitPromptFromEditor(
+                  prompt,
+                  images,
+                  'Failed to send plan prompt',
+                );
+              }
+              return true;
+            }
             sessionActions
               .setApprovalMode('plan')
               .then(() => {
-                setCurrentMode('plan');
+                setPendingMode('plan');
                 if (prompt) {
-                  sendPrompt(prompt, images).catch((error: unknown) =>
+                  sendPrompt(prompt, images, {
+                    clearComposerOnPromptStart: true,
+                  }).catch((error: unknown) =>
                     reportError(error, 'Failed to send plan prompt'),
                   );
                 }
@@ -2487,7 +2599,7 @@ export function App({
               .catch((error: unknown) => {
                 reportError(error, t('mode.plan'));
               });
-            return true;
+            return prompt ? false : true;
           }
           if (cmd === 'approval-mode') {
             const modeArg = text.slice(match[0].length).trim();
@@ -2559,8 +2671,10 @@ export function App({
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
               if (promptBlocked) return enqueuePrompt(text, images);
-              sendPrompt(text, images).catch((error: unknown) =>
-                reportError(error, 'Failed to send /skills command'),
+              return submitPromptFromEditor(
+                text,
+                images,
+                'Failed to send /skills command',
               );
             } else {
               if (echoOrDeferLocalCommand(text, images)) return true;
@@ -2753,13 +2867,7 @@ export function App({
               }
               const clientId = connectionRef.current.clientId;
               if (!clientId) {
-                store.appendLocalUserMessage(text);
-                store.dispatch([
-                  {
-                    type: 'error',
-                    text: t('extensions.install.waitForSession'),
-                  },
-                ]);
+                pushToast('warning', t('extensions.install.waitForSession'));
                 return true;
               }
               store.appendLocalUserMessage(text);
@@ -2810,16 +2918,18 @@ export function App({
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
               if (promptBlocked) return enqueuePrompt(text, images);
-              sendPrompt(text, images).catch((error: unknown) =>
-                reportError(error, 'Failed to send /rename command'),
+              return submitPromptFromEditor(
+                text,
+                images,
+                'Failed to send /rename command',
               );
-              return true;
             }
             const displayName = renameArg.displayName;
             if (!displayName) {
               pushToast('error', t('rename.empty'));
               return true;
             }
+            if (!requireActiveSessionForLocalCommand()) return true;
             sessionActions
               .renameSession(displayName)
               .then(() => {
@@ -2859,6 +2969,7 @@ export function App({
             let statsView: StatsView = 'overview';
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
+            if (!requireActiveSessionForLocalCommand()) return true;
             if (echoOrDeferLocalCommand(text, images)) return true;
             sessionActions
               .getStats()
@@ -2994,24 +3105,19 @@ export function App({
         }
         // Forward slash commands as prompts
         if (promptBlocked) return enqueuePrompt(text, images);
-        sendPrompt(text, images).catch((error: unknown) =>
-          reportError(error, 'Failed to send command'),
-        );
-        return true;
+        return submitPromptFromEditor(text, images, 'Failed to send command');
       } else if (text.startsWith('!')) {
         if (promptBlocked) return enqueuePrompt(text, images);
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
+        if (!requireActiveSessionForLocalCommand()) return true;
         sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
           reportError(error, 'Failed to execute shell command');
         });
         return true;
       } else {
         if (promptBlocked) return enqueuePrompt(text, images);
-        sendPrompt(text, images).catch((error: unknown) =>
-          reportError(error, 'Failed to send message'),
-        );
-        return true;
+        return submitPromptFromEditor(text, images, 'Failed to send message');
       }
     },
     [
@@ -3033,8 +3139,11 @@ export function App({
       reportError,
       runVisibleRecap,
       runVisibleBtw,
+      requireActiveSessionForLocalCommand,
       resumeChatBottomFollow,
       selectedLanguage,
+      setPendingModel,
+      setPendingMode,
       showContextUsage,
       t,
       workspaceActions,
@@ -3361,11 +3470,15 @@ export function App({
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
+      if (!connectionRef.current.sessionId) {
+        setPendingModel(modelId);
+        return;
+      }
       sessionActions
         .setModel(modelId)
         .then((result) => {
           const summary = getModelSwitchSummary(result);
-          setCurrentModel(summary?.modelId ?? modelId);
+          setPendingModel(summary?.modelId ?? modelId);
           if (summary) {
             store.dispatch({
               type: 'debug',
@@ -3379,7 +3492,7 @@ export function App({
           reportError(error, t('model.switch'));
         });
     },
-    [sessionActions, store, reportError, t],
+    [sessionActions, store, reportError, t, setPendingModel],
   );
 
   const handleFastModelSelect = useCallback(
@@ -3459,7 +3572,7 @@ export function App({
     [renderWelcomeFooter, welcomeHeaderProps],
   );
   const isChatEmptyState =
-    displayMessages.length === 0 &&
+    !connection.sessionId &&
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
@@ -3941,8 +4054,13 @@ export function App({
                       onToggleShortcuts={handleToggleShortcuts}
                       onCancel={handleCancel}
                       isRunning={streamingState !== 'idle'}
+                      isPreparing={isPreparingPrompt}
                       cancelArmed={cancelArmed}
-                      disabled={isDisabled || pendingApproval !== null}
+                      disabled={
+                        isDisabled ||
+                        pendingApproval !== null ||
+                        isPreparingPrompt
+                      }
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
@@ -3969,7 +4087,7 @@ export function App({
                       placeholderText={
                         !connected || connection.catchingUp
                           ? t('common.loading')
-                          : streamingState !== 'idle'
+                          : isPreparingPrompt || streamingState !== 'idle'
                             ? t('editor.processing')
                             : t('editor.placeholder')
                       }
