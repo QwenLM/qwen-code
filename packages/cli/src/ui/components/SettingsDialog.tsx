@@ -37,6 +37,7 @@ import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { isPrintableSearchChar } from '../hooks/useSessionSearchInput.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
@@ -50,7 +51,6 @@ import {
   getExtendedSystemInfo,
   type ExtendedSystemInfo,
 } from '../../utils/systemInfo.js';
-import type { CommandContext } from '../commands/types.js';
 
 interface SettingsDialogProps {
   settings: LoadedSettings;
@@ -387,7 +387,7 @@ export function SettingsDialog({
     let cancelled = false;
     const ctx = {
       services: { config, settings },
-    } as unknown as CommandContext;
+    };
     getExtendedSystemInfo(ctx)
       .then((info) => {
         if (!cancelled) {
@@ -975,16 +975,14 @@ export function SettingsDialog({
           // Editing the query moves focus up into the search box.
           setFocusZone('search');
           setSearchQuery((q) => q.slice(0, -1));
-        } else if (
-          !ctrl &&
-          name !== 'space' &&
-          typeof key.sequence === 'string' &&
-          key.sequence.length === 1 &&
-          key.sequence >= ' '
-        ) {
+        } else if (isPrintableSearchChar(key)) {
           // Typing a printable key jumps to the search box and filters.
           // (Digits are handled by the number-edit branch above, which routes
-          // them here when the current setting is not a number.)
+          // them here when the current setting is not a number.) Using the
+          // shared predicate excludes DEL (0x7F) — Backspace's sequence byte —
+          // which an empty-query Backspace would otherwise append as an
+          // invisible character (space toggles a setting via the branch above,
+          // so it never reaches here).
           setFocusZone('search');
           setSearchQuery((q) => q + key.sequence);
         }
@@ -1251,7 +1249,7 @@ export function SettingsDialog({
           </Text>
         </Box>
       )}
-      {showRestartPrompt && (
+      {activeTab === 'settings' && showRestartPrompt && (
         <Text color={theme.status.warning}>
           {t(
             'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',

@@ -27,6 +27,17 @@ import { SessionTab } from './StatsSessionTab.js';
 import { ActivityTab } from './StatsActivityTab.js';
 import { EfficiencyTab } from './StatsEfficiencyTab.js';
 
+// Fixed rows of chrome the embedded Efficiency tab renders around the model
+// table, subtracted from the host's availableHeight when capping the model
+// list. Itemized: dialog border (2) + padding (2) + tab bar (1) + performance
+// cards (3) + cards marginBottom (1) + range indicator (2) + hint row (2) +
+// inter-section spacing + "Models" header (2). A height-based estimate,
+// deliberately left with headroom.
+const EFFICIENCY_CHROME_ROWS = 24;
+// The tool leaderboard, when present, adds its data rows plus 3 fixed rows
+// (title + column header + marginBottom); when empty it renders nothing.
+const TOOL_LEADERBOARD_FIXED_ROWS = 3;
+
 const StatsTabs: React.FC<{ activeTab: StatsTab; hint?: string }> = ({
   activeTab,
   hint,
@@ -254,7 +265,12 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
                   availableHeight != null
                     ? Math.max(
                         3,
-                        availableHeight - 24 - data.toolLeaderboard.length,
+                        availableHeight -
+                          EFFICIENCY_CHROME_ROWS -
+                          (data.toolLeaderboard.length > 0
+                            ? data.toolLeaderboard.length +
+                              TOOL_LEADERBOARD_FIXED_ROWS
+                            : 0),
                       )
                     : undefined
                 }

@@ -1592,6 +1592,51 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
+    it('clears the query on Escape from the list zone before closing', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      // Type a query (focus moves to the search box), then Down to move focus
+      // into the list zone while keeping the query non-empty.
+      for (const ch of 'vim') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+      expect(lastFrame()).toContain('⌕ vim');
+      act(() => {
+        stdin.write(TerminalKeys.DOWN_ARROW);
+      });
+      await wait();
+
+      // First Escape (now handled by the list-zone path) clears the query
+      // without closing the dialog.
+      act(() => {
+        stdin.write(TerminalKeys.ESCAPE);
+      });
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Search settings…');
+      });
+      expect(onSelect).not.toHaveBeenCalled();
+
+      // Second Escape closes the dialog.
+      act(() => {
+        stdin.write(TerminalKeys.ESCAPE);
+      });
+      await waitFor(() => {
+        expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+      });
+
+      unmount();
+    });
+
     it('shows the data view when navigating to a non-Settings tab', async () => {
       const settings = createMockSettings();
       const onSelect = vi.fn();
