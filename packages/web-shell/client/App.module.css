@@ -390,6 +390,15 @@
   padding: 0;
 }
 
+/* Esc-clear hint, shown in the composer's top status slot (where the streaming
+   loader sits) — the two never coexist, so it stays clear of the queue. */
+.escClearStatus {
+  flex-shrink: 0;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
 .emptyWelcomeFooter {
   padding: 12px 0 0;
 }

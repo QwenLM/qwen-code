@@ -978,6 +978,97 @@
   background: currentColor;
 }
 
+/* Armed-to-cancel state: first Esc primes the stop, the button shows an "Esc"
+   hint, a subtle pulse, and a depleting ring counting down the confirm window
+   until the second press confirms or the window lapses. */
+.sendBtnArmed,
+.sendBtnArmed:not(:disabled) {
+  position: relative;
+  border-radius: 50%;
+  background: var(--error-color, #e06c75);
+  animation: sendBtnArmedPulse 1s ease-in-out infinite;
+}
+
+/* Registered so the conic angle can animate smoothly. */
+@property --esc-countdown {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 100%;
+}
+
+/* Countdown ring around the armed button. Its duration matches
+   ESC_CANCEL_CONFIRM_WINDOW_MS in App.tsx — keep the two in sync. */
+.sendBtnArmed::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--error-color, #e06c75) var(--esc-countdown),
+    transparent 0
+  );
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
+  animation: escCountdown 2000ms linear forwards;
+  pointer-events: none;
+}
+
+@keyframes escCountdown {
+  to {
+    --esc-countdown: 0%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sendBtnArmed,
+  .sendBtnArmed:not(:disabled) {
+    animation: none;
+  }
+
+  .sendBtnArmed::after {
+    animation: none;
+    --esc-countdown: 100%;
+  }
+}
+
+.escLabel {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+
+/* Visually hidden but exposed to assistive tech (for aria-live announcements). */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes sendBtnArmedPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
 .images {
   display: flex;
   gap: 6px;

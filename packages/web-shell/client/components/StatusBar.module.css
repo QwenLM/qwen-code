@@ -130,11 +130,6 @@
   text-decoration: underline;
 }
 
-.escapeHint {
-  color: var(--muted-foreground);
-  font-size: 13px;
-}
-
 .model {
   color: var(--muted-foreground);
   font-size: 12px;
