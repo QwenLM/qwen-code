@@ -501,12 +501,6 @@ export class AcpDispatcher {
     return [...new Set(sessionIds as string[])];
   }
 
-  private assertNoArchiveTransition(sessionIds: string[]): void {
-    for (const sessionId of sessionIds) {
-      this.archiveCoordinator.assertNotTransitioning(sessionId);
-    }
-  }
-
   private serializeSessionErrors(
     errors: Array<{ sessionId: string; error: unknown }>,
   ): Array<{ sessionId: string; error: string }> {
@@ -2466,52 +2460,53 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/delete`: {
           const ids = this.parseSessionIds(params);
-          this.assertNoArchiveTransition(ids);
           const closeErrors: Array<{ sessionId: string; error: string }> = [];
           const closedIds: string[] = [];
-          await Promise.allSettled(
-            ids.map(async (sid) => {
-              try {
-                await this.bridge.closeSession(sid);
-                closedIds.push(sid);
-              } catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                if (
-                  err instanceof Error &&
-                  err.name === 'SessionNotFoundError'
-                ) {
+          await this.archiveCoordinator.runExclusiveMany(ids, async () => {
+            await Promise.allSettled(
+              ids.map(async (sid) => {
+                try {
+                  await this.bridge.closeSession(sid);
                   closedIds.push(sid);
-                } else {
-                  const safeSessionId = logSafe(sid.slice(0, 8));
-                  const safeMessage = logSafe(msg);
-                  writeStderrLine(
-                    `qwen serve: /acp sessions/delete closeSession(${safeSessionId}) failed: ${safeMessage}`,
-                  );
-                  closeErrors.push({ sessionId: sid, error: msg });
+                } catch (err) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  if (
+                    err instanceof Error &&
+                    err.name === 'SessionNotFoundError'
+                  ) {
+                    closedIds.push(sid);
+                  } else {
+                    const safeSessionId = logSafe(sid.slice(0, 8));
+                    const safeMessage = logSafe(msg);
+                    writeStderrLine(
+                      `qwen serve: /acp sessions/delete closeSession(${safeSessionId}) failed: ${safeMessage}`,
+                    );
+                    closeErrors.push({ sessionId: sid, error: msg });
+                  }
                 }
-              }
-            }),
-          );
-          const svc = new SessionService(this.boundWorkspace);
-          const removeResult = await svc.removeSessions(closedIds);
-          for (const e of removeResult.errors) {
-            const safeSessionId = logSafe(e.sessionId.slice(0, 8));
-            const safeMessage = logSafe(errMsg(e.error));
-            writeStderrLine(
-              `qwen serve: /acp sessions/delete removeSessions(${safeSessionId}) failed: ${safeMessage}`,
+              }),
             );
-          }
-          this.replyConn(conn, id, {
-            removed: removeResult.removed,
-            notFound: removeResult.notFound,
-            errors: [
-              ...closeErrors,
-              ...removeResult.errors.map((e) => ({
-                sessionId: e.sessionId,
-                error: errMsg(e.error),
-              })),
-            ],
-          } as unknown);
+            const svc = new SessionService(this.boundWorkspace);
+            const removeResult = await svc.removeSessions(closedIds);
+            for (const e of removeResult.errors) {
+              const safeSessionId = logSafe(e.sessionId.slice(0, 8));
+              const safeMessage = logSafe(errMsg(e.error));
+              writeStderrLine(
+                `qwen serve: /acp sessions/delete removeSessions(${safeSessionId}) failed: ${safeMessage}`,
+              );
+            }
+            this.replyConn(conn, id, {
+              removed: removeResult.removed,
+              notFound: removeResult.notFound,
+              errors: [
+                ...closeErrors,
+                ...removeResult.errors.map((e) => ({
+                  sessionId: e.sessionId,
+                  error: errMsg(e.error),
+                })),
+              ],
+            } as unknown);
+          });
           return;
         }
 
@@ -2566,14 +2561,14 @@ export class AcpDispatcher {
           const notFound: string[] = [];
           const errors: Array<{ sessionId: string; error: unknown }> = [];
           await this.archiveCoordinator.runExclusiveMany(ids, async () => {
-            for (const sid of ids) {
-              try {
-                const result = await svc.unarchiveSessions([sid]);
-                unarchived.push(...result.unarchived);
-                alreadyActive.push(...result.alreadyActive);
-                notFound.push(...result.notFound);
-                errors.push(...result.errors);
-              } catch (err) {
+            try {
+              const result = await svc.unarchiveSessions(ids);
+              unarchived.push(...result.unarchived);
+              alreadyActive.push(...result.alreadyActive);
+              notFound.push(...result.notFound);
+              errors.push(...result.errors);
+            } catch (err) {
+              for (const sid of ids) {
                 errors.push({ sessionId: sid, error: err });
               }
             }

@@ -397,7 +397,7 @@ export class SessionService {
     }
     if (fs.existsSync(targetPath)) {
       if (options.failIfTargetExists) {
-        throw new Error(`Archive sidecar conflict: ${targetPath}`);
+        throw new Error('Archive sidecar conflict: destination already exists');
       }
       return false;
     }

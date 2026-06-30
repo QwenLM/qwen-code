@@ -5993,10 +5993,12 @@ describe('createServeApp', () => {
       timestamp: string;
       prompt: string;
       mtime: Date;
+      state?: 'active' | 'archived';
     }): Promise<void> {
       const chatsDir = path.join(
         new Storage(input.cwd).getProjectDir(),
         'chats',
+        ...(input.state === 'archived' ? ['archive'] : []),
       );
       await fsp.mkdir(chatsDir, { recursive: true });
       const filePath = path.join(chatsDir, `${input.sessionId}.jsonl`);
@@ -6278,6 +6280,54 @@ describe('createServeApp', () => {
       );
       const overlap = page1Ids.filter((id: string) => page2Ids.includes(id));
       expect(overlap).toHaveLength(0);
+    });
+
+    it('lists archived sessions without merging live sessions', async () => {
+      for (let i = 0; i < 3; i++) {
+        await writeStoredSession({
+          sessionId: `650e8400-e29b-41d4-a716-44665544${String(i).padStart(4, '0')}`,
+          cwd: WS_BOUND,
+          timestamp: `2026-05-17T13:0${i}:00.000Z`,
+          prompt: `archived prompt ${i}`,
+          mtime: new Date(`2026-05-17T13:1${i}:00.000Z`),
+          state: 'archived',
+        });
+      }
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'live-only',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T14:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?archiveState=archived&size=2`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(2);
+      expect(res.body.nextCursor).toBeDefined();
+      expect(
+        res.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).not.toContain('live-only');
+      expect(
+        res.body.sessions.every(
+          (session: { isArchived?: boolean }) => session.isArchived === true,
+        ),
+      ).toBe(true);
     });
 
     it('merges live sessions only on first page (no cursor)', async () => {
@@ -9224,6 +9274,73 @@ describe('createServeApp', () => {
       await expect(
         fsp.access(path.join(chatsDir, `${sid}.jsonl`)),
       ).resolves.toBeUndefined();
+    });
+
+    it('keeps archive blocked while batch delete is closing the same session', async () => {
+      const sid = 'eeee2222-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      let firstCloseStarted!: () => void;
+      let releaseFirstClose!: () => void;
+      let secondCloseStarted!: () => void;
+      const firstCloseStartedPromise = new Promise<void>((resolve) => {
+        firstCloseStarted = resolve;
+      });
+      const firstCloseReleasedPromise = new Promise<void>((resolve) => {
+        releaseFirstClose = resolve;
+      });
+      const secondCloseStartedPromise = new Promise<void>((resolve) => {
+        secondCloseStarted = resolve;
+      });
+      let closeCount = 0;
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          closeCount++;
+          if (closeCount === 1) {
+            firstCloseStarted();
+            await firstCloseReleasedPromise;
+          } else {
+            secondCloseStarted();
+          }
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const deletePromise = request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] })
+        .then((res) => res);
+      await firstCloseStartedPromise;
+
+      const archivePromise = request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] })
+        .then((res) => res);
+
+      const raceResult = await Promise.race([
+        secondCloseStartedPromise.then(() => 'archive-started'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked'), 25)),
+      ]);
+
+      releaseFirstClose();
+      try {
+        expect(raceResult).toBe('blocked');
+        const deleteRes = await deletePromise;
+        expect(deleteRes.status).toBe(200);
+        expect(deleteRes.body.removed).toEqual([sid]);
+        const archiveRes = await archivePromise;
+        expect(archiveRes.status).toBe(409);
+        expect(archiveRes.body).toMatchObject({
+          code: 'session_archiving',
+          sessionId: sid,
+        });
+      } finally {
+        await Promise.allSettled([deletePromise, archivePromise]);
+      }
     });
 
     it('returns 500 when removeSessions throws unexpectedly', async () => {

@@ -97,12 +97,6 @@ export function registerSessionRoutes(
     return [...new Set(sessionIds as string[])];
   };
 
-  const assertNoArchiveTransition = (sessionIds: string[]): void => {
-    for (const sessionId of sessionIds) {
-      archiveCoordinator.assertNotTransitioning(sessionId);
-    }
-  };
-
   const serializeSessionErrors = (
     errors: Array<{ sessionId: string; error: unknown }>,
   ): Array<{ sessionId: string; error: string }> =>
@@ -823,71 +817,86 @@ export function registerSessionRoutes(
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
     try {
-      assertNoArchiveTransition(uniqueIds);
+      const deleteResponse = await archiveCoordinator.runExclusiveMany(
+        uniqueIds,
+        async () => {
+          try {
+            const closeResults = await Promise.allSettled(
+              uniqueIds.map(async (id) => {
+                // Intentional: no clientId — batch delete bypasses per-tab ownership.
+                await bridge.closeSession(id);
+                return id;
+              }),
+            );
+            const closeErrors: Array<{ sessionId: string; error: string }> = [];
+            const closedIds: string[] = [];
+            for (let i = 0; i < closeResults.length; i++) {
+              const r = closeResults[i];
+              const id = uniqueIds[i];
+              if (r.status === 'fulfilled') {
+                closedIds.push(id);
+              } else {
+                const closeErr = r.reason;
+                if (closeErr instanceof SessionNotFoundError) {
+                  // Session not active in bridge — still attempt to remove its transcript file
+                  closedIds.push(id);
+                } else {
+                  const msg =
+                    closeErr instanceof Error
+                      ? closeErr.message
+                      : String(closeErr);
+                  writeStderrLine(
+                    `qwen serve: closeSession failed for ${safeLogValue(id)}: ${safeLogValue(msg)}`,
+                  );
+                  closeErrors.push({ sessionId: id, error: msg });
+                }
+              }
+            }
+            const result = await new SessionService(
+              boundWorkspace,
+            ).removeSessions(closedIds);
+            for (const e of result.errors) {
+              const msg =
+                e.error instanceof Error ? e.error.message : String(e.error);
+              writeStderrLine(
+                `qwen serve: removeSession failed for ${safeLogValue(e.sessionId)}: ${safeLogValue(msg)}`,
+              );
+            }
+            return {
+              status: 200,
+              body: {
+                removed: result.removed,
+                notFound: result.notFound,
+                errors: [
+                  ...closeErrors,
+                  ...result.errors.map((e) => ({
+                    sessionId: e.sessionId,
+                    error:
+                      e.error instanceof Error
+                        ? e.error.message
+                        : String(e.error),
+                  })),
+                ],
+              },
+            };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            writeStderrLine(
+              `qwen serve: failed to batch delete sessions: ${safeLogValue(message)}`,
+            );
+            return {
+              status: 500,
+              body: {
+                error: 'Failed to delete sessions',
+                code: 'sessions_delete_failed',
+              },
+            };
+          }
+        },
+      );
+      res.status(deleteResponse.status).json(deleteResponse.body);
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/delete' });
-      return;
-    }
-    try {
-      const closeResults = await Promise.allSettled(
-        uniqueIds.map(async (id) => {
-          // Intentional: no clientId — batch delete bypasses per-tab ownership.
-          await bridge.closeSession(id);
-          return id;
-        }),
-      );
-      const closeErrors: Array<{ sessionId: string; error: string }> = [];
-      const closedIds: string[] = [];
-      for (let i = 0; i < closeResults.length; i++) {
-        const r = closeResults[i];
-        const id = uniqueIds[i];
-        if (r.status === 'fulfilled') {
-          closedIds.push(id);
-        } else {
-          const closeErr = r.reason;
-          if (closeErr instanceof SessionNotFoundError) {
-            // Session not active in bridge — still attempt to remove its transcript file
-            closedIds.push(id);
-          } else {
-            const msg =
-              closeErr instanceof Error ? closeErr.message : String(closeErr);
-            writeStderrLine(
-              `qwen serve: closeSession failed for ${safeLogValue(id)}: ${safeLogValue(msg)}`,
-            );
-            closeErrors.push({ sessionId: id, error: msg });
-          }
-        }
-      }
-      const result = await new SessionService(boundWorkspace).removeSessions(
-        closedIds,
-      );
-      for (const e of result.errors) {
-        const msg =
-          e.error instanceof Error ? e.error.message : String(e.error);
-        writeStderrLine(
-          `qwen serve: removeSession failed for ${safeLogValue(e.sessionId)}: ${safeLogValue(msg)}`,
-        );
-      }
-      res.status(200).json({
-        removed: result.removed,
-        notFound: result.notFound,
-        errors: [
-          ...closeErrors,
-          ...result.errors.map((e) => ({
-            sessionId: e.sessionId,
-            error: e.error instanceof Error ? e.error.message : String(e.error),
-          })),
-        ],
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      writeStderrLine(
-        `qwen serve: failed to batch delete sessions: ${safeLogValue(message)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to delete sessions',
-        code: 'sessions_delete_failed',
-      });
     }
   });
 
@@ -949,14 +958,14 @@ export function registerSessionRoutes(
 
     try {
       await archiveCoordinator.runExclusiveMany(uniqueIds, async () => {
-        for (const sessionId of uniqueIds) {
-          try {
-            const result = await service.unarchiveSessions([sessionId]);
-            unarchived.push(...result.unarchived);
-            alreadyActive.push(...result.alreadyActive);
-            notFound.push(...result.notFound);
-            errors.push(...result.errors);
-          } catch (err) {
+        try {
+          const result = await service.unarchiveSessions(uniqueIds);
+          unarchived.push(...result.unarchived);
+          alreadyActive.push(...result.alreadyActive);
+          notFound.push(...result.notFound);
+          errors.push(...result.errors);
+        } catch (err) {
+          for (const sessionId of uniqueIds) {
             errors.push({ sessionId, error: err });
           }
         }

@@ -90,11 +90,7 @@ export async function listWorkspaceSessionsForResponse(
   }
 
   if (archiveState === 'archived') {
-    const sessions = [...bySessionId.values()].sort((a, b) => {
-      const aTime = Date.parse(a.updatedAt ?? a.createdAt);
-      const bTime = Date.parse(b.updatedAt ?? b.createdAt);
-      return bTime - aTime;
-    });
+    const sessions = [...bySessionId.values()];
     const nextCursor =
       persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
     return { sessions, nextCursor };

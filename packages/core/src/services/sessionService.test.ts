@@ -1020,6 +1020,10 @@ describe('SessionService', () => {
   });
 
   describe('archiveSessions', () => {
+    beforeEach(() => {
+      mkdirSyncSpy.mockImplementation(() => undefined);
+    });
+
     const mockActiveSessionOnly = () => {
       vi.mocked(jsonl.readLines).mockImplementation(
         async (filePath: string) => {

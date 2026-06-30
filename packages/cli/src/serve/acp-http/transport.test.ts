@@ -3841,6 +3841,81 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         removeSessionsSpy.mockRestore();
       }
     });
+
+    it('_qwen/sessions/delete serializes archive for the same session', async () => {
+      const sessionId = 'delete-archive-race';
+      let firstCloseStarted!: () => void;
+      let releaseFirstClose!: () => void;
+      let secondCloseStarted!: () => void;
+      const firstCloseStartedPromise = new Promise<void>((resolve) => {
+        firstCloseStarted = resolve;
+      });
+      const firstCloseReleasedPromise = new Promise<void>((resolve) => {
+        releaseFirstClose = resolve;
+      });
+      const secondCloseStartedPromise = new Promise<void>((resolve) => {
+        secondCloseStarted = resolve;
+      });
+      let closeCount = 0;
+      bridge.closeSession = async (sid: string) => {
+        bridge.closedSessions.push(sid);
+        closeCount++;
+        if (closeCount === 1) {
+          firstCloseStarted();
+          await firstCloseReleasedPromise;
+        } else {
+          secondCloseStarted();
+        }
+      };
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+      const deletePost = post(connId, {
+        jsonrpc: '2.0',
+        id: 69,
+        method: '_qwen/sessions/delete',
+        params: { sessionIds: [sessionId] },
+      });
+      await deletePost;
+      await firstCloseStartedPromise;
+
+      const archivePost = post(connId, {
+        jsonrpc: '2.0',
+        id: 70,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      await archivePost;
+      const raceResult = await Promise.race([
+        secondCloseStartedPromise.then(() => 'archive-started'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked'), 25)),
+      ]);
+
+      releaseFirstClose();
+      try {
+        expect(raceResult).toBe('blocked');
+        const frames = [await reader.next(), await reader.next()];
+        expect(frames).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              id: 69,
+              result: expect.objectContaining({ notFound: [sessionId] }),
+            }),
+            expect.objectContaining({
+              id: 70,
+              error: expect.objectContaining({
+                data: expect.objectContaining({
+                  errorKind: 'session_archiving',
+                  sessionId,
+                }),
+              }),
+            }),
+          ]),
+        );
+      } finally {
+        reader.close();
+      }
+    });
   });
 
   describe('auth methods', () => {
