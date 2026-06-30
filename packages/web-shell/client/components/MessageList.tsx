@@ -792,7 +792,9 @@ export function getSessionTimelineRangeForIndexes(
   visibleItemIndexes: readonly number[],
   entryIndexById: ReadonlyMap<string, number>,
   currentItemIndex?: number | null,
-  turnIdByDisplayIndex = getTurnIdByDisplayIndex(visibleItems),
+  turnIdByDisplayIndex: readonly (string | null)[] = getTurnIdByDisplayIndex(
+    visibleItems,
+  ),
 ): SessionTimelineRange | null {
   let startIndex = Number.POSITIVE_INFINITY;
   let endIndex = -1;
