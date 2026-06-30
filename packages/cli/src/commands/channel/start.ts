@@ -84,6 +84,7 @@ function createScheduleController(
     disable: (id) => store.disable(id),
     validateCron: (cron) => {
       parseCron(cron);
+      nextFireTime(cron, new Date());
     },
   };
 }
@@ -338,8 +339,8 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
-        const result = await router.restoreSessions();
         scheduler.start();
+        const result = await router.restoreSessions();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
@@ -525,8 +526,8 @@ async function startAll(proxy?: string): Promise<void> {
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
-        const result = await router.restoreSessions();
         scheduler.start();
+        const result = await router.restoreSessions();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );

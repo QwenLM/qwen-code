@@ -169,7 +169,10 @@ function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
     a.channelName === b.channelName &&
     a.senderId === b.senderId &&
     a.chatId === b.chatId &&
-    a.threadId === b.threadId
+    a.threadId === b.threadId &&
+    (a.isGroup === undefined ||
+      b.isGroup === undefined ||
+      a.isGroup === b.isGroup)
   );
 }
 
@@ -180,7 +183,9 @@ function isSessionTarget(value: unknown): value is SessionTarget {
     typeof target['channelName'] === 'string' &&
     typeof target['senderId'] === 'string' &&
     typeof target['chatId'] === 'string' &&
-    (target['threadId'] === undefined || typeof target['threadId'] === 'string')
+    (target['threadId'] === undefined ||
+      typeof target['threadId'] === 'string') &&
+    (target['isGroup'] === undefined || typeof target['isGroup'] === 'boolean')
   );
 }
 
