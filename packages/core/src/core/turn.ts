@@ -168,7 +168,7 @@ function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
     history: {
       rawLength: chat.getHistoryLength(),
       tail: chat
-        .getHistoryTailShallow(ERROR_REPORT_HISTORY_TAIL_COUNT, true)
+        .getHistoryTailShallow(ERROR_REPORT_HISTORY_TAIL_COUNT)
         .map(summarizeHistoryEntry),
     },
     request: summarizeParts(requestParts),
@@ -548,9 +548,15 @@ export class Turn {
       let contextForReport: Record<string, unknown>;
       try {
         contextForReport = buildApiErrorReportContext(this.chat, req);
-      } catch {
+      } catch (diagError) {
         contextForReport = {
-          history: { error: 'failed to build diagnostic summary' },
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause:
+              diagError instanceof Error
+                ? { message: diagError.message, stack: diagError.stack }
+                : String(diagError),
+          },
           request: summarizeParts(normalizeRequestParts(req)),
         };
       }

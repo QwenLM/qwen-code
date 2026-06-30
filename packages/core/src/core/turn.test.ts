@@ -497,7 +497,7 @@ describe('Turn', () => {
       expect(events[0]?.type).toBe(GeminiEventType.Error);
       expect(mockGetHistory).not.toHaveBeenCalled();
       expect(mockGetHistoryLength).toHaveBeenCalled();
-      expect(mockGetHistoryTailShallow).toHaveBeenCalledWith(8, true);
+      expect(mockGetHistoryTailShallow).toHaveBeenCalledWith(8);
       const reportedContext = vi.mocked(reportError).mock.calls[0]?.[2];
       expect(JSON.stringify(reportedContext)).not.toContain(largeText);
       expect(reportError).toHaveBeenCalledWith(
@@ -557,7 +557,13 @@ describe('Turn', () => {
         error,
         'Error when talking to API',
         {
-          history: { error: 'failed to build diagnostic summary' },
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause: {
+              message: 'history is unavailable',
+              stack: expect.any(String),
+            },
+          },
           request: {
             partCount: 1,
             functionCalls: [],
