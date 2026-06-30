@@ -986,7 +986,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return (
       ci.sessionIds.size === 0 &&
       ci.pendingRestoreIds.size === 0 &&
-      ci.workspaceControlInFlight === 0
+      ci.workspaceControlInFlight === 0 &&
+      inFlightSpawns.size === 0
     );
   }
 

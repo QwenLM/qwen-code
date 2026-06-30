@@ -309,6 +309,23 @@ describe('workspace memory remember routes', () => {
       .expect(200);
   });
 
+  it('does not expose clientless task status to registered clients', async () => {
+    const bridge = buildBridgeStub({ knownIds: ['client-1'] });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'Remember this' })
+      .expect(202);
+    const taskId = post.body.taskId as string;
+
+    await request(app)
+      .get(`/workspace/memory/remember/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(404);
+    await request(app).get(`/workspace/memory/remember/${taskId}`).expect(200);
+  });
+
   it('rejects task polling after the client detaches', async () => {
     const knownIds = new Set(['client-1']);
     const bridge = buildBridgeStub({ knownIds });

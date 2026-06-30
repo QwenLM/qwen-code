@@ -569,6 +569,48 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('keeps the channel alive when availability probes overlap session creation', async () => {
+    const newSessionRelease = deferred<void>();
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          newSessionImpl: async (params) => {
+            await newSessionRelease.promise;
+            return { sessionId: `sess:${params.cwd}` };
+          },
+          extMethodImpl: (method) => {
+            if (
+              method === 'qwen/control/workspace/memory/remember/availability'
+            ) {
+              return { available: true };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const session = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await vi.waitFor(() => {
+      expect(handles[0]?.agent.newSessionCalls).toHaveLength(1);
+    });
+
+    await expect(bridge.isWorkspaceMemoryRememberAvailable()).resolves.toBe(
+      true,
+    );
+    expect(handles[0]?.killed).toBe(false);
+
+    newSessionRelease.resolve();
+    await expect(session).resolves.toMatchObject({ sessionId: SESS_A });
+    expect(handles[0]?.killed).toBe(false);
+
+    await bridge.shutdown();
+  });
+
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({

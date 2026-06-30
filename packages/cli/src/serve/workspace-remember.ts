@@ -214,13 +214,13 @@ class WorkspaceRememberTaskLane {
     requesterClientId?: string,
   ): WorkspaceMemoryRememberTaskSnapshot | undefined {
     const task = this.tasks.get(taskId);
-    if (
-      task?.originatorClientId &&
-      task.originatorClientId !== requesterClientId
-    ) {
+    if (!task) return undefined;
+    if (task.originatorClientId) {
+      if (task.originatorClientId !== requesterClientId) return undefined;
+    } else if (requesterClientId) {
       return undefined;
     }
-    return task ? cloneTask(task) : undefined;
+    return cloneTask(task);
   }
 }
 
