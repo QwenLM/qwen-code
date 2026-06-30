@@ -17,6 +17,13 @@ import {
   writeWorkspaceContextFile,
   type SubagentLevel,
 } from '@qwen-code/qwen-code-core';
+// Import the permission error classes from the same module REST's
+// `sendPermissionVoteError` uses, so `instanceof` matches the class the bridge
+// actually throws (the core re-export is a distinct identity at runtime).
+import {
+  InvalidPermissionOptionError,
+  PermissionForbiddenError,
+} from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -1112,9 +1119,29 @@ export class AcpDispatcher {
             }
             return;
           }
+          // Require a registry hit before voting when the registry is
+          // available. In the scoped `session/permission` route `sessionIdParam`
+          // is always set, so a miss (unknown/stale/already-resolved request)
+          // must NOT fall through to `sessionIdParam` and the bridge — that
+          // reports the bridge's `false` as a thrown 409, whereas
+          // DaemonClient/REST treat a missing request as `404 → false` (not an
+          // exception). Reserve 409 for a present entry the bridge still rejects.
+          if (this.registry && !pendingRef) {
+            writeStderrLine(
+              `qwen serve: /acp session/permission vote dropped: no pending request for requestId ${logSafe(requestId)}`,
+            );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, 'No pending permission request', {
+                  httpStatus: 404,
+                  requestId,
+                }),
+              );
+            }
+            return;
+          }
           // The pending entry's own session is authoritative; fall back to the
-          // client's `sessionId` only when no entry was found (so the
-          // bridge-rejection 409 path below can still report it).
+          // client's `sessionId` only when there is no registry to consult.
           const sessionId = pendingRef?.req.sessionId ?? sessionIdParam;
           if (!sessionId) {
             writeStderrLine(
@@ -1136,12 +1163,56 @@ export class AcpDispatcher {
             );
             return;
           }
-          const accepted = this.bridge.respondToSessionPermission(
-            sessionId,
-            requestId,
-            response,
-            this.sessionCtx(conn, sessionId, loopback),
-          );
+          let accepted: boolean;
+          try {
+            accepted = this.bridge.respondToSessionPermission(
+              sessionId,
+              requestId,
+              response,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+          } catch (err) {
+            // Mirror REST's `sendPermissionVoteError` so ACP SDK callers get the
+            // same shapes for normal permission outcomes instead of a generic
+            // internal error from the outer dispatcher catch: a forged optionId
+            // is a 400 (the requestId is known, the option isn't), a
+            // policy-denied vote is a 403 (well-formed, authenticated, refused).
+            if (err instanceof InvalidPermissionOptionError) {
+              writeStderrLine(
+                `qwen serve: /acp session/permission invalid option (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, err.message, {
+                    httpStatus: 400,
+                    code: 'invalid_option_id',
+                    requestId: err.requestId,
+                    optionId: err.optionId,
+                  }),
+                );
+              }
+              return;
+            }
+            if (err instanceof PermissionForbiddenError) {
+              writeStderrLine(
+                `qwen serve: /acp session/permission forbidden (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(err.message)}`,
+              );
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, err.message, {
+                    httpStatus: 403,
+                    code: 'permission_forbidden',
+                    requestId: err.requestId,
+                    sessionId: err.sessionId,
+                    reason: err.reason,
+                  }),
+                );
+              }
+              return;
+            }
+            // Anything else keeps the outer dispatcher catch's mapping.
+            throw err;
+          }
           if (!accepted) {
             // The bridge mediator had no outstanding request to resolve
             // (already voted/cancelled — e.g. a duplicate or racing vote).

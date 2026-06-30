@@ -16,6 +16,8 @@ import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   InvalidClientIdError,
+  InvalidPermissionOptionError,
+  PermissionForbiddenError,
   PromptQueueFullError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -1837,6 +1839,182 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.code).toBe(-32602);
     expect(frame.error.data?.httpStatus).toBe(404);
     expect(frame.error.message).toContain('No pending permission request');
+  });
+
+  it('session/permission returns 404 (not 409) when requestId misses on an owned session', async () => {
+    // Regression: in the scoped route a sessionId is always supplied, so an
+    // unknown/stale requestId must still resolve to 404 (which DaemonClient/
+    // REST translate to `false`) rather than falling through to the bridge and
+    // surfacing its `false` as a thrown 409.
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 32,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'unknown-req',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      };
+      expect(frame.id).toBe(32);
+      expect(frame.error.data?.httpStatus).toBe(404);
+      expect(frame.error.message).toContain('No pending permission request');
+    } finally {
+      connReader.close();
+    }
+  });
+
+  it('session/permission maps InvalidPermissionOptionError to a 400 invalid_option_id', async () => {
+    bridge.respondToSessionPermission = (() => {
+      throw new InvalidPermissionOptionError('perm-opt', 'forged');
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-opt',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 33,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 34,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-opt',
+          outcome: { outcome: 'selected', optionId: 'forged' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: {
+            httpStatus?: number;
+            code?: string;
+            optionId?: string;
+            requestId?: string;
+          };
+        };
+      };
+      expect(frame.id).toBe(34);
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.data?.httpStatus).toBe(400);
+      expect(frame.error.data?.code).toBe('invalid_option_id');
+      expect(frame.error.data?.optionId).toBe('forged');
+      expect(frame.error.data?.requestId).toBe('perm-opt');
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission maps PermissionForbiddenError to a 403 permission_forbidden', async () => {
+    bridge.respondToSessionPermission = (() => {
+      throw new PermissionForbiddenError(
+        'perm-fbd',
+        'sess-1',
+        'designated_mismatch',
+      );
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-fbd',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 35,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 36,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-fbd',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: {
+            httpStatus?: number;
+            code?: string;
+            reason?: string;
+            sessionId?: string;
+            requestId?: string;
+          };
+        };
+      };
+      expect(frame.id).toBe(36);
+      expect(frame.error.data?.httpStatus).toBe(403);
+      expect(frame.error.data?.code).toBe('permission_forbidden');
+      expect(frame.error.data?.reason).toBe('designated_mismatch');
+      expect(frame.error.data?.sessionId).toBe('sess-1');
+      expect(frame.error.data?.requestId).toBe('perm-fbd');
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
   });
 
   it('session/permission rejects a vote from a connection that does not own the session', async () => {
