@@ -223,8 +223,14 @@ describe('sendMessage', () => {
     );
   });
 
-  it('falls back to plain text when markdown is rejected', async () => {
+  it('retries as active message when markdown passive reply is rejected', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
+    // Set up a passive reply context so msgId is available
+    (
+      ch as unknown as {
+        replyMsgId: Map<string, { msgId: string; timestamp: number }>;
+      }
+    )['replyMsgId'].set('test-chat-id', { msgId: 'msg-001', timestamp: Date.now() });
     mockSendQQMessage
       .mockResolvedValueOnce(mockResponse(false, 400, 'markdown unsupported'))
       .mockResolvedValueOnce(mockResponse(true));
@@ -232,15 +238,15 @@ describe('sendMessage', () => {
     await ch.sendMessage('test-chat-id', '**bold**');
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
-    // First attempt: markdown
+    // First attempt: markdown passive
     expect(mockSendQQMessage).toHaveBeenNthCalledWith(
       1,
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { msg_type: 2, markdown: { content: '**bold**' } },
+      { msg_type: 2, markdown: { content: '**bold**' }, msg_id: 'msg-001', msg_seq: 1 },
     );
-    // Fallback: plain text
+    // Fallback: active message (no msg_id)
     expect(mockSendQQMessage).toHaveBeenNthCalledWith(
       2,
       'https://api.sgroup.qq.com',
@@ -250,14 +256,14 @@ describe('sendMessage', () => {
     );
   });
 
-  it('does not retry on plain-text send failure', async () => {
+  it('does not retry when markdown send fails without passive context', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     mockSendQQMessage.mockResolvedValue(mockResponse(false, 500));
 
     await ch.sendMessage('test-chat-id', 'hello');
 
-    // Two attempts — first markdown fails, then retried as plain text
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    // Only markdown attempt — no passive context so no retry
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
 
   it('returns early when disposed', async () => {
@@ -475,9 +481,9 @@ describe('sendMessage', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
-  // --- Boundary: both markdown and plain text fail ---
+  // --- Boundary: markdown fail without passive context ---
 
-  it('does not crash when both markdown and plain text fallback fail', async () => {
+  it('does not crash when markdown send fails without passive context', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     mockSendQQMessage.mockResolvedValue(
       mockResponse(false, 400, 'bad request'),
@@ -485,8 +491,8 @@ describe('sendMessage', () => {
 
     await ch.sendMessage('test-chat-id', '**bold**');
 
-    // Two attempts: markdown, then plain text. No crash.
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    // Only 1 attempt (no passive context = no retry). No crash.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
 });
 

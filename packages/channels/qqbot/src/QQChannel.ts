@@ -378,49 +378,28 @@ export class QQChannel extends ChannelBase {
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => '');
         process.stderr.write(
-          `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 100)}), retrying as plain text\n`,
+          `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 200)})\n`,
         );
 
-        sentSeq = nextSeq + 1;
-        const plainBody: Record<string, unknown> = {
-          content: text,
-          msg_type: 0,
-        };
+        // Passive reply failed (rate-limited 429, expired 400, etc.) —
+        // roll back msgSeqMap and retry as active message (no msg_id/msg_seq).
         if (msgId) {
-          plainBody['msg_id'] = msgId;
-          plainBody['msg_seq'] = sentSeq;
-        }
-        resp = await sendQQMessage(
-          route.base,
-          route.path,
-          this.accessToken,
-          plainBody,
-        );
-      }
-
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        process.stderr.write(
-          `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${msgId ? sentSeq : '-'}): ${errBody.slice(0, 200)}\n`,
-        );
-
-        // Passive reply failed (rate-limited 429, expired 400, etc.) — retry
-        // as active message without msg_id/msg_seq.
-        if (msgId) {
-          process.stderr.write(
-            `[QQ:${this.name}] Passive reply failed, retrying as active message\n`,
-          );
           this.msgSeqMap.set(msgId, nextSeq - 1);
+          process.stderr.write(
+            `[QQ:${this.name}] Retrying as active message\n`,
+          );
           const activeResp = await sendQQMessage(
             route.base,
             route.path,
             this.accessToken,
             { content: text, msg_type: 0 },
           );
-          if (activeResp.ok) return;
-          // Active also failed — keep the rollback and return.
+          if (activeResp.ok) {
+            if (msgId) this.saveQQState();
+            return;
+          }
           process.stderr.write(
-            `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status})\n`,
+            `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status}: ${(await activeResp.text().catch(() => '')).slice(0, 100)})\n`,
           );
         }
         if (msgId) this.saveQQState();
