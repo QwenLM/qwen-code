@@ -247,6 +247,54 @@ describe('InputPrompt suggestion mouse routing', () => {
     unmount();
   });
 
+  it('routes hover/select to the command-search source while command search is active', async () => {
+    // Ctrl+R (not in shell mode) enters command search. The mouse handlers
+    // must then drive the command-search completion (not the default
+    // completion), and a click must accept + reset it and exit search mode.
+    const searchCompletion = {
+      suggestions: [
+        { label: 'first cmd', value: 'first cmd' },
+        { label: 'second cmd', value: 'second cmd' },
+      ],
+      activeSuggestionIndex: 0,
+      visibleStartIndex: 0,
+      showSuggestions: true,
+      isLoadingSuggestions: false,
+      navigateUp: vi.fn(),
+      navigateDown: vi.fn(),
+      handleAutocomplete: vi.fn(),
+      resetCompletionState: vi.fn(),
+      setActiveSuggestionIndex: vi.fn(),
+    };
+    vi.mocked(useReverseSearchCompletion).mockReturnValue(searchCompletion);
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    // Enter command-search mode (Ctrl+R).
+    await act(async () => {
+      stdin.write('\x12');
+      await Promise.resolve();
+    });
+
+    // Hover routes to the command-search source, not the default completion.
+    act(() => {
+      (captured.props!['onHoverIndex'] as (i: number) => void)(1);
+    });
+    expect(searchCompletion.setActiveSuggestionIndex).toHaveBeenCalledWith(1);
+    expect(
+      mockCommandCompletion.setActiveSuggestionIndex,
+    ).not.toHaveBeenCalled();
+
+    // Clicking accepts via the command-search source, resets it, and exits
+    // search mode (so the UI can't get stuck in search after a click).
+    act(() => {
+      (captured.props!['onSelectIndex'] as (i: number) => void)(1);
+    });
+    expect(searchCompletion.handleAutocomplete).toHaveBeenCalledWith(1);
+    expect(searchCompletion.resetCompletionState).toHaveBeenCalled();
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('clicking an @folder suggestion dismisses the completion so the dropdown stays closed', () => {
     // @-mention mode showing a directory suggestion: accepting a folder appends
     // no trailing space, so the @ pattern would re-match and re-open the
