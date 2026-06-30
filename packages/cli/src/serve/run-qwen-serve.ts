@@ -1084,7 +1084,11 @@ function createDelegatingServeApp(
 }
 
 function isBootstrapServeRoute(req: Request): boolean {
-  return BOOTSTRAP_SERVE_PATHS.has(req.path);
+  const path =
+    req.path.length > 1 && req.path.endsWith('/')
+      ? req.path.slice(0, -1)
+      : req.path;
+  return BOOTSTRAP_SERVE_PATHS.has(path);
 }
 
 function runSynchronousRequestGate(

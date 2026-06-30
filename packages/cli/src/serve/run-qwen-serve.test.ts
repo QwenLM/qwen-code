@@ -1026,6 +1026,66 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('serves trailing-slash bootstrap health without waiting for deferred runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-trailing-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const res = await Promise.race([
+        fetch(`${handle.url}/health/`),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Trailing-slash health timed out')),
+            200,
+          ),
+        ),
+      ]);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: 'ok' });
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.close();
+    }
+  });
+
   it('reports deferred runtime startup failure for the triggering runtime route', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-route-fail-')),
