@@ -157,6 +157,12 @@ export class QQChannel extends ChannelBase {
     }
   > = new Map();
 
+  /** Accumulation buffer for cron/non-prompt textChunk events. */
+  private cronBuffer: Map<
+    string,
+    { buffer: string; timer: ReturnType<typeof setTimeout> | null }
+  > = new Map();
+
   constructor(
     name: string,
     config: ChannelConfig & Record<string, unknown>,
@@ -199,12 +205,37 @@ export class QQChannel extends ChannelBase {
     // normal prompt and we skip.
     this._cronTextHandler = (sessionId: string, text: string) => {
       setImmediate(() => {
-        if (!this.streamState.has(sessionId)) {
-          const target = this.router.getTarget(sessionId);
-          if (target) {
-            this.sendMessage(target.chatId, text).catch(() => {});
-          }
+        if (this.streamState.has(sessionId)) return; // prompt path handles it
+
+        let entry = this.cronBuffer.get(sessionId);
+        if (!entry) {
+          entry = { buffer: '', timer: null };
+          this.cronBuffer.set(sessionId, entry);
         }
+
+        // Cancel previous idle timer
+        if (entry.timer) {
+          clearTimeout(entry.timer);
+          entry.timer = null;
+        }
+
+        // Accumulate
+        entry.buffer += text;
+
+        // Set new idle timer (2 seconds, same as streamState)
+        entry.timer = setTimeout(() => {
+          const toFlush = entry!.buffer;
+          entry!.buffer = '';
+          entry!.timer = null;
+          if (toFlush) {
+            const target = this.router.getTarget(sessionId);
+            if (target) {
+              this.sendMessage(target.chatId, toFlush).catch(() => {});
+            }
+          }
+          this.cronBuffer.delete(sessionId);
+        }, 2000);
+        entry.timer.unref();
       });
     };
     this.bridge.on?.('textChunk', this._cronTextHandler);
@@ -472,6 +503,11 @@ export class QQChannel extends ChannelBase {
       }
     }
     this.streamState.clear();
+    // Clean up cron buffers
+    for (const [, entry] of this.cronBuffer) {
+      if (entry.timer) clearTimeout(entry.timer);
+    }
+    this.cronBuffer.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.ws) {
