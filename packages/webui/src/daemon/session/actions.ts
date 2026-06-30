@@ -279,7 +279,6 @@ export function createDaemonSessionActions({
       }
       const accepted = await session.submitPrompt(
         promptRequest as Parameters<typeof session.submitPrompt>[0],
-        options?.signal,
       );
       if (options?.signal?.aborted) {
         await session
