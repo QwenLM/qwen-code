@@ -995,14 +995,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   function hasNoChannelWork(
     ci: ChannelInfo,
-    opts?: { ignoreCurrentSessionSpawn?: boolean },
+    opts?: {
+      ignoreCurrentSessionSpawn?: boolean;
+      ignoreRestoreId?: string;
+    },
   ): boolean {
     const inFlightSpawnCount =
       ci.sessionSpawnsInFlight -
       (opts?.ignoreCurrentSessionSpawn === true ? 1 : 0);
+    const pendingRestoreCount =
+      ci.pendingRestoreIds.size -
+      (opts?.ignoreRestoreId !== undefined &&
+      ci.pendingRestoreIds.has(opts.ignoreRestoreId)
+        ? 1
+        : 0);
     return (
       ci.sessionIds.size === 0 &&
-      ci.pendingRestoreIds.size === 0 &&
+      pendingRestoreCount === 0 &&
       ci.workspaceControlInFlight === 0 &&
       inFlightSpawnCount === 0
     );
@@ -2466,7 +2475,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw new SessionNotFoundError(req.sessionId);
         }
         ci.emptyReapPending = true;
-        ci.isDying = true;
+        if (hasNoChannelWork(ci, { ignoreRestoreId: req.sessionId })) {
+          ci.isDying = true;
+        }
         throw err;
       }
 

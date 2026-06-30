@@ -1301,6 +1301,49 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('keeps a shared channel usable when restore fails beside a live session', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: () => {
+          throw new Error('restore failed beside live session');
+        },
+        extMethodImpl: () => ({
+          language: 'en',
+          outputLanguage: null,
+          refreshed: false,
+        }),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const live = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      bridge.loadSession({
+        sessionId: 'failed-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toThrow();
+    expect(handles[0]!.killed).toBe(false);
+
+    await expect(
+      bridge.setSessionLanguage(live.sessionId, {
+        language: 'en',
+        syncOutputLanguage: false,
+      }),
+    ).resolves.toMatchObject({
+      language: 'en',
+      outputLanguage: null,
+      refreshed: false,
+    });
+    expect(handles).toHaveLength(1);
+    expect(handles[0]!.agent.extMethodCalls).toHaveLength(1);
+
+    await bridge.shutdown();
+  });
+
   it('does not promote a restored session into the omitted-id attach default', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
