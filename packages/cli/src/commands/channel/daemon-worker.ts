@@ -108,6 +108,9 @@ export function createDaemonSessionFactory({
     const daemonReq = {
       workspaceCwd: req.workspaceCwd,
       ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+      // Channel-level user/thread/single routing stays in SessionRouter; daemon
+      // sessions remain thread-scoped so different channels never share the
+      // daemon's default single session.
       sessionScope: 'thread' as const,
     };
     if (req.sessionId) {
