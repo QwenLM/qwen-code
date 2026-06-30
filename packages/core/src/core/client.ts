@@ -2713,16 +2713,15 @@ export class GeminiClient {
     // the real available input budget (issue #5950).
     const cgConfig = this.config.getContentGeneratorConfig();
     const model = this.config.getModel();
+    const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+    );
     const hasUserMaxTokensOverride =
       (cgConfig?.samplingParams?.max_tokens !== undefined &&
         cgConfig?.samplingParams?.max_tokens !== null) ||
-      !!process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+      parsedEnvMaxTokens !== undefined;
     const reservedOutputTokens: number = hasUserMaxTokensOverride
-      ? (cgConfig?.samplingParams?.max_tokens ??
-        parsePositiveIntegerEnvValue(
-          process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
-        ) ??
-        0)
+      ? (cgConfig?.samplingParams?.max_tokens ?? parsedEnvMaxTokens ?? 0)
       : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'));
 
     const previousSessionStartContext = this.lastSessionStartContext;
