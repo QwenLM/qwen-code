@@ -1038,6 +1038,11 @@ export const useGeminiStream = (
           };
         }
 
+        // Yield to let React render the user message before continuing
+        // with @-command processing and API call. Reduces the visual lag
+        // between input-box clear and the message appearing in history.
+        await Promise.resolve();
+
         // Handle @-commands (which might involve tool calls)
         if (isAtCommand(trimmedQuery)) {
           const atCommandResult = await handleAtCommand({
