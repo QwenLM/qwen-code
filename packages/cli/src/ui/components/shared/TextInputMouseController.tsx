@@ -11,9 +11,8 @@ import { useMouseEvents } from '../../hooks/useMouseEvents.js';
 import { type MouseEvent } from '../../utils/mouse.js';
 import {
   measureElementPosition,
-  measureFrameHeight,
+  layoutRowForEvent,
 } from '../../utils/measure-element-position.js';
-import { frameAnchor, terminalRowToLayoutRow } from '../../utils/list-mouse.js';
 import {
   visualClickToOffset,
   type ClickableBufferState,
@@ -62,8 +61,8 @@ export function TextInputMouseController({
       const rect = measureElementPosition(lines);
       if (rect.height <= 0) return;
 
-      const anchor = frameAnchor(terminalHeight, measureFrameHeight(lines));
-      const clickVisualRow = terminalRowToLayoutRow(event.row, anchor) - rect.y;
+      const clickVisualRow =
+        layoutRowForEvent(lines, event.row, terminalHeight) - rect.y;
       if (clickVisualRow < 0 || clickVisualRow >= visibleLineCount) return;
 
       const clickVisualCol = Math.max(0, event.col - 1 - rect.x);

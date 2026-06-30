@@ -13,7 +13,7 @@ import { useMouseEvents } from '../../hooks/useMouseEvents.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import {
   measureElementPosition,
-  measureFrameHeight,
+  layoutRowForEvent,
 } from '../../utils/measure-element-position.js';
 import { type MouseEvent } from '../../utils/mouse.js';
 
@@ -21,7 +21,7 @@ vi.mock('../../hooks/useMouseEvents.js', () => ({ useMouseEvents: vi.fn() }));
 vi.mock('../../hooks/useTerminalSize.js', () => ({ useTerminalSize: vi.fn() }));
 vi.mock('../../utils/measure-element-position.js', () => ({
   measureElementPosition: vi.fn(),
-  measureFrameHeight: vi.fn(),
+  layoutRowForEvent: vi.fn(),
 }));
 
 const ref = <T,>(current: T): MutableRefObject<T> => ({ current });
@@ -63,7 +63,10 @@ describe('TextInputMouseController', () => {
     vi.clearAllMocks();
     moveToOffset = vi.fn();
     vi.mocked(useTerminalSize).mockReturnValue({ rows: 40, columns: 80 });
-    vi.mocked(measureFrameHeight).mockReturnValue(40);
+    // Frame fills the terminal → anchor 0 → layout row = terminalRow - 1.
+    vi.mocked(layoutRowForEvent).mockImplementation(
+      (_node, terminalRow1Based) => terminalRow1Based - 1,
+    );
     vi.mocked(measureElementPosition).mockReturnValue({
       x: 2,
       y: 5,
@@ -114,7 +117,12 @@ describe('TextInputMouseController', () => {
   it('applies a negative anchor when the frame overflows the screen', () => {
     // Frame 4 rows taller than the terminal → anchor -4 → +4-row correction.
     vi.mocked(useTerminalSize).mockReturnValue({ rows: 8, columns: 80 });
-    vi.mocked(measureFrameHeight).mockReturnValue(12);
+    vi.mocked(layoutRowForEvent).mockImplementation(
+      (_node, terminalRow1Based, terminalHeight) => {
+        const anchor = Math.min(0, terminalHeight - 12); // frame height 12
+        return terminalRow1Based - 1 - anchor;
+      },
+    );
     vi.mocked(measureElementPosition).mockReturnValue({
       x: 2,
       y: 9,

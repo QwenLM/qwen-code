@@ -13,7 +13,7 @@ import { useMouseEvents } from '../../hooks/useMouseEvents.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import {
   measureElementPosition,
-  measureFrameHeight,
+  layoutRowForEvent,
 } from '../../utils/measure-element-position.js';
 import { type MouseEvent } from '../../utils/mouse.js';
 
@@ -21,8 +21,18 @@ vi.mock('../../hooks/useMouseEvents.js', () => ({ useMouseEvents: vi.fn() }));
 vi.mock('../../hooks/useTerminalSize.js', () => ({ useTerminalSize: vi.fn() }));
 vi.mock('../../utils/measure-element-position.js', () => ({
   measureElementPosition: vi.fn(),
-  measureFrameHeight: vi.fn(),
+  layoutRowForEvent: vi.fn(),
 }));
+
+// Stand-in for the real layoutRowForEvent: apply the frame-anchor correction
+// for a given frame height (anchor = min(0, terminalHeight - frameHeight)).
+const mockLayoutRowForEvent = (frameHeight: number) =>
+  vi
+    .mocked(layoutRowForEvent)
+    .mockImplementation((_node, terminalRow1Based, terminalHeight) => {
+      const anchor = Math.min(0, terminalHeight - frameHeight);
+      return terminalRow1Based - 1 - anchor;
+    });
 
 const ref = <T,>(current: T): MutableRefObject<T> => ({ current });
 
@@ -59,7 +69,7 @@ describe('RowMouseController', () => {
     onSelectIndex = vi.fn();
 
     vi.mocked(useTerminalSize).mockReturnValue({ rows: 40, columns: 80 });
-    vi.mocked(measureFrameHeight).mockReturnValue(40);
+    mockLayoutRowForEvent(40); // frame fills the terminal → anchor 0
     vi.mocked(measureElementPosition).mockImplementation((node) => {
       if (node === containerNode) {
         return { x: 0, y: 0, width: 20, height: itemNodes.length };
@@ -121,7 +131,7 @@ describe('RowMouseController', () => {
     // Frame 4 rows taller than the terminal → top 4 rows scrolled off →
     // anchor -4, i.e. a +4-row correction. Items live near the bottom (high y).
     vi.mocked(useTerminalSize).mockReturnValue({ rows: 8, columns: 80 });
-    vi.mocked(measureFrameHeight).mockReturnValue(12);
+    mockLayoutRowForEvent(12); // frame 12 rows, terminal 8 → anchor -4
     vi.mocked(measureElementPosition).mockImplementation((node) => {
       if (node === containerNode) {
         return { x: 0, y: 10, width: 20, height: 3 };

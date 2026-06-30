@@ -10,6 +10,7 @@
  */
 
 import { type DOMElement } from 'ink';
+import { frameAnchor, terminalRowToLayoutRow } from './list-mouse.js';
 
 export interface ElementMetrics {
   /** Horizontal position (0-based column) within the live layout region. */
@@ -82,4 +83,23 @@ export function measureFrameHeight(node: DOMElement): number {
     current = current.parentNode;
   }
   return root.yogaNode?.getComputedHeight() ?? 0;
+}
+
+/**
+ * Map a 1-based terminal mouse row onto the 0-based layout row of `node`'s
+ * frame — i.e. a row directly comparable to a measured element's `y`. Combines
+ * the frame-anchor correction ({@link frameAnchor} over {@link measureFrameHeight})
+ * with {@link terminalRowToLayoutRow}.
+ *
+ * Single-sources the anchor→layout-row mapping shared by RowMouseController and
+ * TextInputMouseController, so the (previously off-by-one) correction can't
+ * drift between the two. Must be called from post-render code.
+ */
+export function layoutRowForEvent(
+  node: DOMElement,
+  terminalRow1Based: number,
+  terminalHeight: number,
+): number {
+  const anchor = frameAnchor(terminalHeight, measureFrameHeight(node));
+  return terminalRowToLayoutRow(terminalRow1Based, anchor);
 }

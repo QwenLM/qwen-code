@@ -11,11 +11,9 @@ import { useMouseEvents } from '../../hooks/useMouseEvents.js';
 import { type MouseEvent } from '../../utils/mouse.js';
 import {
   measureElementPosition,
-  measureFrameHeight,
+  layoutRowForEvent,
 } from '../../utils/measure-element-position.js';
 import {
-  frameAnchor,
-  terminalRowToLayoutRow,
   findItemAtLayoutRow,
   type VisibleItemRect,
 } from '../../utils/list-mouse.js';
@@ -86,8 +84,7 @@ export function RowMouseController({
         return null;
       }
 
-      const anchor = frameAnchor(terminalHeight, measureFrameHeight(container));
-      const layoutRow = terminalRowToLayoutRow(event.row, anchor);
+      const layoutRow = layoutRowForEvent(container, event.row, terminalHeight);
 
       const rects: VisibleItemRect[] = [];
       const nodes = itemRefs.current;
