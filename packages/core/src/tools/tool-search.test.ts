@@ -700,7 +700,7 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).toContain(
       'not available inside subagents',
     );
-    expect(result.error?.message).toContain(ToolNames.ENTER_PLAN_MODE);
+    expect(result.error).toBeUndefined();
     expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
   });
 

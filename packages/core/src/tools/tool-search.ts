@@ -462,7 +462,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const returnDisplay = displayParts.join(', ') || 'No tools loaded';
 
     const result: ToolResult = { llmContent, returnDisplay };
-    if (blockedErrorMessage) {
+    if (blockedErrorMessage && loaded.length === 0) {
       result.error = { message: blockedErrorMessage };
     }
     return result;

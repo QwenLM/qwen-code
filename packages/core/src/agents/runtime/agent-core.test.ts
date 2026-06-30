@@ -307,15 +307,17 @@ describe('AgentCore.prepareTools', () => {
     fnDeclarations: FunctionDeclaration[],
   ): {
     core: AgentCore;
+    debugSpy: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsSpy: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFilteredSpy: ReturnType<typeof vi.fn>;
   } {
+    const debugSpy = vi.fn();
     const getFunctionDeclarationsSpy = vi.fn().mockReturnValue(fnDeclarations);
     const getFunctionDeclarationsFilteredSpy = vi.fn((names: string[]) =>
       fnDeclarations.filter((d) => d.name && names.includes(d.name)),
     );
     const config = {
-      getDebugLogger: vi.fn().mockReturnValue({ debug: vi.fn() }),
+      getDebugLogger: vi.fn().mockReturnValue({ debug: debugSpy }),
       getToolRegistry: vi.fn().mockReturnValue({
         warmAll: vi.fn().mockResolvedValue(undefined),
         getFunctionDeclarations: getFunctionDeclarationsSpy,
@@ -333,6 +335,7 @@ describe('AgentCore.prepareTools', () => {
     );
     return {
       core,
+      debugSpy,
       getFunctionDeclarationsSpy,
       getFunctionDeclarationsFilteredSpy,
     };
@@ -460,7 +463,7 @@ describe('AgentCore.prepareTools', () => {
       name: 'inline_safe',
       description: 'safe inline tool',
     } as FunctionDeclaration;
-    const { core } = buildAgentForTools(
+    const { core, debugSpy } = buildAgentForTools(
       {
         tools: [
           { name: ToolNames.SEND_MESSAGE } as FunctionDeclaration,
@@ -476,6 +479,18 @@ describe('AgentCore.prepareTools', () => {
     const tools = await core.prepareTools();
 
     expect(tools).toEqual([inlineSafe]);
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.SEND_MESSAGE}" from subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.TASK_UPDATE}" from subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.ENTER_PLAN_MODE}" from subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.EXIT_PLAN_MODE}" from subagent tool list`,
+    );
   });
 
   it('keeps teammate coordination tools but excludes plan lifecycle tools', async () => {

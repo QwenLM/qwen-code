@@ -514,9 +514,17 @@ export class AgentCore {
       }
       // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
       toolsList.push(
-        ...onlyInlineDecls.filter(
-          (d) => !(d.name && excludedFromSubagents.has(d.name)),
-        ),
+        ...onlyInlineDecls.filter((d) => {
+          if (d.name && excludedFromSubagents.has(d.name)) {
+            this.runtimeContext
+              .getDebugLogger()
+              ?.debug(
+                `[prepareTools] Filtered inline declaration "${d.name}" from subagent tool list`,
+              );
+            return false;
+          }
+          return true;
+        }),
       );
     } else {
       // Inherit all available tools by default when not specified — see the
