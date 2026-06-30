@@ -17,7 +17,7 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
+import { currentUser, ensureAuthenticated, gh, ghApiAll } from './lib/gh.js';
 import { SUMMARY_MARKER } from './post-suggestions.js';
 
 interface PrMetadata {
@@ -229,6 +229,7 @@ function buildMarkdown(
   }
 
   if (suggestionSummaries.length > 0) {
+    const latest = suggestionSummaries[0];
     parts.push(
       '## Previous suggestion summary (evaluate afresh — do NOT treat as already discussed)',
     );
@@ -237,9 +238,9 @@ function buildMarkdown(
       'The following issue comment is the most recent `/review` suggestion summary. Each row is a Suggestion-level finding that should be re-evaluated against the current code — do not skip them just because they appear here.',
     );
     parts.push('');
-    for (const c of suggestionSummaries) {
-      parts.push(`- by @${c.user?.login ?? '?'}: ${snippet(c.body, 500)}`);
-    }
+    parts.push(
+      `- by @${latest.user?.login ?? '?'}: ${snippet(latest.body, 500)}`,
+    );
     parts.push('');
   }
 
@@ -290,12 +291,22 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   const allIssue = ghApiAll(
     `repos/${owner}/${repo}/issues/${prNumber}/comments`,
   ) as RawComment[];
-  const suggestionSummaries = allIssue.filter((c) =>
-    (c.body ?? '').includes(SUMMARY_MARKER),
-  );
-  const issue = allIssue.filter(
-    (c) => !(c.body ?? '').includes(SUMMARY_MARKER),
-  );
+  // Identify our own suggestion-summary comments (author + marker) to avoid
+  // prompt injection: a third party posting the SUMMARY_MARKER verbatim must
+  // not be promoted into the trusted "Previous suggestion summary" section.
+  const me = currentUser().toLowerCase();
+  const mySummaries = allIssue
+    .filter(
+      (c) =>
+        (c.user?.login ?? '').toLowerCase() === me &&
+        (c.body ?? '').includes(SUMMARY_MARKER),
+    )
+    .sort((a, b) => b.id - a.id);
+  // Keep only the latest summary (highest id). The section header promises
+  // "the most recent" — returning more would be misleading.
+  const suggestionSummaries = mySummaries.length > 0 ? [mySummaries[0]] : [];
+  const summaryIds = new Set(suggestionSummaries.map((c) => c.id));
+  const issue = allIssue.filter((c) => !summaryIds.has(c.id));
   const reviews = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
   ) as RawReview[];
