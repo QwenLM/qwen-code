@@ -489,6 +489,14 @@ describe('getSessionTimelineEntries', () => {
       },
     ]);
   });
+
+  it('truncates timeline text without splitting emoji', () => {
+    const [entry] = getSessionTimelineEntries([
+      { ...makeUserMessage('u1'), content: '😀'.repeat(40) },
+    ]);
+    expect(entry?.label.endsWith('…')).toBe(true);
+    expect(/[\uD800-\uDFFF]/u.test(entry?.label ?? '')).toBe(false);
+  });
 });
 
 describe('getSessionTimelineRangeForIndexes', () => {
@@ -530,6 +538,28 @@ describe('getSessionTimelineRangeForIndexes', () => {
     expect(
       getSessionTimelineRangeForIndexes([], [0], entryIndexById, 0),
     ).toBeNull();
+  });
+
+  it('ignores out-of-bounds rows when mapping the visible range', () => {
+    const messages = [makeUserMessage('u1'), makeAssistantMessage('a1')];
+    const entries = getSessionTimelineEntries(messages);
+    const entryIndexById = new Map(
+      entries.map((entry, index) => [entry.id, index]),
+    );
+    const visibleItems = groupParallelAgents(messages);
+
+    expect(
+      getSessionTimelineRangeForIndexes(
+        visibleItems,
+        [-1, 0, 99],
+        entryIndexById,
+        99,
+      ),
+    ).toEqual({
+      startIndex: 0,
+      endIndex: 0,
+      currentIndex: 0,
+    });
   });
 });
 

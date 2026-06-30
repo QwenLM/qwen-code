@@ -500,9 +500,11 @@ function compactTimelineText(
   maxLength: number,
 ): string {
   const compact = raw?.replace(/\s+/g, ' ').trim() ?? '';
+  if (maxLength <= 0) return '';
   if (!compact) return '';
-  return compact.length > maxLength
-    ? `${compact.slice(0, maxLength - 1)}…`
+  const chars = Array.from(compact);
+  return chars.length > maxLength
+    ? `${chars.slice(0, maxLength - 1).join('')}…`
     : compact;
 }
 
@@ -518,6 +520,8 @@ function timelineLabelForTurn(message: Message): string {
   return compact;
 }
 
+// Collapse and timeline turns start at chat prompts and shell prompts; new-chat
+// auto-follow still uses getLastUserMessageId so shell prompts do not jump.
 function isTurnStartMessage(message: Message): boolean {
   return message.role === 'user' || message.role === 'user_shell';
 }
@@ -1403,6 +1407,12 @@ const SessionTimeline = memo(function SessionTimeline({
               `Turn ${index + 1}: ${entry.label}`,
               entry.detail,
             ];
+            const ariaLabel = [
+              `Turn ${index + 1}: ${entry.label}`,
+              isCurrent ? 'Current turn' : null,
+            ]
+              .filter(Boolean)
+              .join('. ');
             return (
               <li
                 key={entry.id}
@@ -1421,7 +1431,8 @@ const SessionTimeline = memo(function SessionTimeline({
                       : undefined,
                     isCurrent ? styles.sessionTimelineButtonCurrent : undefined,
                   )}
-                  aria-label={titleParts.join('. ')}
+                  aria-current={isCurrent ? 'step' : undefined}
+                  aria-label={ariaLabel}
                   title={titleParts.join(' · ')}
                   onClick={() => onSelect(entry.id)}
                 >
@@ -1588,20 +1599,22 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     const containerRef = useRef<HTMLDivElement>(null);
     const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
-      useState(true);
+      useState(false);
 
-    useEffect(() => {
+    useLayoutEffect(() => {
       const el = containerRef.current;
-      if (!el || typeof ResizeObserver === 'undefined') return;
+      if (!el) return;
 
       const updateVisibility = () => {
         const width = el.getBoundingClientRect().width;
-        if (width > 0) {
-          setIsSessionTimelineVisible(width >= 1160);
-        }
+        const nextVisible = width === 0 || width >= 1160;
+        setIsSessionTimelineVisible((prev) =>
+          prev === nextVisible ? prev : nextVisible,
+        );
       };
 
       updateVisibility();
+      if (typeof ResizeObserver === 'undefined') return;
       const observer = new ResizeObserver(updateVisibility);
       observer.observe(el);
       return () => observer.disconnect();
@@ -1760,10 +1773,31 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     });
     const virtualItems = virtualizer.getVirtualItems();
     const totalVirtualSize = virtualizer.getTotalSize();
+    const sessionTimelineRangeState = useRef<{
+      entryIndexById: ReadonlyMap<string, number>;
+      headerOffset: number;
+      isVisible: boolean;
+      turnIdByDisplayIndex: readonly (string | null)[];
+      visibleItems: readonly DisplayItem[];
+    }>({
+      entryIndexById: new Map(),
+      headerOffset: 0,
+      isVisible: false,
+      turnIdByDisplayIndex: [],
+      visibleItems: [],
+    });
+    sessionTimelineRangeState.current = {
+      entryIndexById: sessionTimelineEntryIndexById,
+      headerOffset,
+      isVisible: isSessionTimelineVisible,
+      turnIdByDisplayIndex: visibleTurnIdByDisplayIndex,
+      visibleItems,
+    };
 
     const updateSessionTimelineRange = useCallback(() => {
       const el = getScrollElement();
-      if (!el || sessionTimelineEntryIndexById.size === 0) {
+      const state = sessionTimelineRangeState.current;
+      if (!el || !state.isVisible || state.entryIndexById.size === 0) {
         setSessionTimelineRange((prev) => (prev === null ? prev : null));
         return;
       }
@@ -1781,8 +1815,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         if (rawIndex === undefined) return;
         const rowIndex = Number(rawIndex);
         if (!Number.isFinite(rowIndex)) return;
-        const visibleItemIndex = rowIndex - headerOffset;
-        if (visibleItemIndex < 0 || visibleItemIndex >= visibleItems.length) {
+        const visibleItemIndex = rowIndex - state.headerOffset;
+        if (
+          visibleItemIndex < 0 ||
+          visibleItemIndex >= state.visibleItems.length
+        ) {
           return;
         }
 
@@ -1801,11 +1838,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       });
 
       const next = getSessionTimelineRangeForIndexes(
-        visibleItems,
+        state.visibleItems,
         visibleItemIndexes,
-        sessionTimelineEntryIndexById,
+        state.entryIndexById,
         currentItemIndex,
-        visibleTurnIdByDisplayIndex,
+        state.turnIdByDisplayIndex,
       );
       setSessionTimelineRange((prev) => {
         if (
@@ -1817,13 +1854,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         }
         return next;
       });
-    }, [
-      getScrollElement,
-      headerOffset,
-      sessionTimelineEntryIndexById,
-      visibleTurnIdByDisplayIndex,
-      visibleItems,
-    ]);
+    }, [getScrollElement]);
 
     const scheduleSessionTimelineRangeUpdate = useCallback(() => {
       if (sessionTimelineFrame.current !== null) {
@@ -1853,6 +1884,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       totalVirtualSize,
       useVirtualScroll,
       virtualItems.length,
+      isSessionTimelineVisible,
     ]);
 
     // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in

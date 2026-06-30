@@ -254,6 +254,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(details[0]?.getAttribute('data-detail')).toContain(
       'thinking · answer · 1 tool call · plan update',
     );
+    const buttons = Array.from(
+      c.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="session-timeline-entry"] button',
+      ),
+    );
+    expect(buttons[0]?.getAttribute('aria-label')).toBe(
+      'Turn 1: q. Current turn',
+    );
+    expect(buttons[0]?.getAttribute('title')).toContain('thinking');
     expect(entries[0]?.getAttribute('data-in-current-range')).toBe('true');
     expect(entries[1]?.getAttribute('data-in-current-range')).toBe('true');
     expect(
@@ -261,6 +270,32 @@ describe('MessageList — turn collapse (DOM)', () => {
     ).toBeNull();
     expect(isCollapsed(c, 'g1')).toBe(true);
     expect(c.querySelector('[data-testid="turn-timeline-row"]')).toBeNull();
+  });
+
+  it('clicks a session timeline entry to jump to its turn', async () => {
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, 'scrollIntoView')
+      .mockImplementation(() => {});
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+    await nextFrame();
+
+    const secondEntryButton = c.querySelector<HTMLButtonElement>(
+      '[data-turn-id="u2"] button',
+    );
+    expect(secondEntryButton).not.toBeNull();
+    act(() => {
+      secondEntryButton?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    scrollIntoView.mockRestore();
   });
 
   it('hides the session timeline when the message list is narrow', async () => {
