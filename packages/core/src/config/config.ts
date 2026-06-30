@@ -3065,7 +3065,12 @@ export class Config {
       } else {
         delete next.effort;
       }
-      cfg.reasoning = next;
+      // Clearing the last key (e.g. setReasoningEffort(undefined) with no
+      // sibling budget_tokens) collapses `reasoning` back to undefined rather
+      // than leaving an empty `{}` — an empty object is truthy, so downstream
+      // `if (cfg.reasoning)` checks would treat reasoning as active and the
+      // pipeline would emit `reasoning: {}` as wire noise.
+      cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
     };
     // The main session and a runtime (sub-agent) content generator may hold
     // distinct config objects; update whichever the request path reads.
@@ -3285,11 +3290,11 @@ export class Config {
       return;
     }
 
-    // Full refresh path
+    // Full refresh path. `refreshAuth` already captures the prior reasoning
+    // effort and re-applies it after rebuilding the content generator, so we
+    // do not re-apply it here (the hot-update path above does its own re-apply
+    // because it never routes through refreshAuth).
     await this.refreshAuth(authType);
-    if (priorReasoningEffort) {
-      this.setReasoningEffort(priorReasoningEffort);
-    }
   }
 
   /**
