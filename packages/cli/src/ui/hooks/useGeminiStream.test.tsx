@@ -5383,6 +5383,166 @@ describe('useGeminiStream', () => {
         );
       });
     });
+
+    describe('inline model override', () => {
+      // Make the active provider expose `inline-model` so the consumer-side
+      // provider-identity validation accepts the override.
+      const allowInlineModel = (modelId = 'inline-model') => {
+        mockConfig.getModel = vi.fn(() => 'session-model');
+        mockConfig.getContentGeneratorConfig = vi.fn(
+          () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+        );
+        mockConfig.getAvailableModelsForAuthType = vi.fn(
+          () => [{ id: modelId, authType: AuthType.QWEN_OAUTH }] as never,
+        );
+      };
+
+      it('does not let a skill tool with modelOverride: undefined clobber an active inline override', async () => {
+        allowInlineModel();
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'do the thing',
+          modelOverride: 'inline-model',
+        });
+
+        let capturedOnComplete:
+          | ((completedTools: TrackedToolCall[]) => Promise<void>)
+          | null = null;
+        mockUseReactToolScheduler.mockImplementation((onComplete) => {
+          capturedOnComplete = onComplete;
+          return [
+            [],
+            mockScheduleToolCalls,
+            mockCancelAllToolCalls,
+            mockMarkToolsAsSubmitted,
+          ];
+        });
+
+        const { result } = renderHook(() =>
+          useGeminiStream(
+            new MockedGeminiClientClass(mockConfig),
+            [],
+            mockAddItem,
+            mockConfig,
+            true,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        );
+
+        // Turn 1: the inline override is set and used for the first call.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model do the thing');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+
+        // A skill tool completes with `modelOverride: undefined` (an
+        // inherit/no-model skill). The undefined-clears write must be skipped
+        // while the inline override is active, so the continuation still runs
+        // on the inline model rather than reverting to the session model.
+        const completedToolCalls: TrackedToolCall[] = [
+          {
+            request: {
+              callId: 'skill-call',
+              name: 'pdf-skill',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-id-skill',
+            },
+            status: 'success',
+            responseSubmittedToGemini: false,
+            response: {
+              callId: 'skill-call',
+              responseParts: [{ text: 'skill loaded' }],
+              errorType: undefined,
+              modelOverride: undefined,
+            },
+            tool: {
+              name: 'pdf-skill',
+              displayName: 'pdf-skill',
+              description: 'd',
+              build: vi.fn(),
+            } as never,
+            invocation: {
+              getDescription: () => 'desc',
+            } as unknown as AnyToolInvocation,
+            startTime: Date.now(),
+            endTime: Date.now(),
+          } as TrackedCompletedToolCall,
+        ];
+
+        await act(async () => {
+          await capturedOnComplete?.(completedToolCalls);
+        });
+
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.ToolResult,
+          modelOverride: 'inline-model',
+        });
+      });
+
+      it('clears the inline override on retry and reverts to the session model', async () => {
+        allowInlineModel();
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'do the thing',
+          modelOverride: 'inline-model',
+        });
+
+        const { result } = renderTestHook();
+
+        // Turn 1: inline override applied.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model do the thing');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+        mockAddItem.mockClear();
+
+        // Retry re-sends the same prompt; the one-shot override is dropped and
+        // the turn reverts to the session model, with an info item explaining
+        // the switch.
+        await act(async () => {
+          await result.current.submitQuery(
+            'do the thing',
+            SendMessageType.Retry,
+          );
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(
+          mockSendMessageStream.mock.calls[0][3].modelOverride,
+        ).toBeUndefined();
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'info',
+            text: expect.stringContaining('session model'),
+          }),
+          expect.any(Number),
+        );
+      });
+    });
   });
 
   describe('Memory Refresh on save_memory', () => {
