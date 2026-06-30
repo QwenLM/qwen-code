@@ -1259,6 +1259,10 @@ export function convertOpenAIChunkToGemini(
     if (hasThoughtPart(contentParts)) {
       requestContext.hasTaggedThinkingThought = true;
       requestContext.pendingReasoningText = undefined;
+      if (requestContext.pendingContentParts?.length) {
+        parts.push(...requestContext.pendingContentParts);
+        requestContext.pendingContentParts = undefined;
+      }
     }
 
     if (
@@ -1289,6 +1293,19 @@ export function convertOpenAIChunkToGemini(
     }
 
     if (
+      requestContext.responseParsingOptions?.taggedThinkingTags &&
+      !requestContext.hasTaggedThinkingThought &&
+      requestContext.pendingReasoningText &&
+      contentParts.length
+    ) {
+      requestContext.pendingContentParts = [
+        ...(requestContext.pendingContentParts ?? []),
+        ...contentParts,
+      ];
+      contentParts = [];
+    }
+
+    if (
       choice.finish_reason &&
       requestContext.responseParsingOptions?.taggedThinkingTags &&
       !requestContext.hasTaggedThinkingThought &&
@@ -1298,6 +1315,10 @@ export function convertOpenAIChunkToGemini(
       requestContext.pendingReasoningText = undefined;
     }
     parts.push(...contentParts);
+    if (choice.finish_reason && requestContext.pendingContentParts?.length) {
+      parts.push(...requestContext.pendingContentParts);
+      requestContext.pendingContentParts = undefined;
+    }
 
     // Handle tool calls using the stream-local parser
     if (choice.delta?.tool_calls) {

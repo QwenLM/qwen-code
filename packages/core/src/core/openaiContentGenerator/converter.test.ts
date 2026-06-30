@@ -4220,12 +4220,55 @@ describe('OpenAIContentConverter', () => {
         context,
       );
 
-      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'final ' },
-      ]);
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
       expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
         { text: 'separate reasoning channel', thought: true },
+        { text: 'final ' },
         { text: 'answer' },
+      ]);
+    });
+
+    it('should flush reasoning-only chunks when tagged streaming content has no thinking tags', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-reasoning-only-no-content-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'step 1' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-reasoning-only-no-content-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
       ]);
     });
 
