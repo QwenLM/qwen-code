@@ -503,6 +503,7 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
+    this.coldStart = true;
   }
 
   /**
@@ -907,8 +908,12 @@ export class QQChannel extends ChannelBase {
               process.stderr.write(
                 `[QQ:${this.name}] FATAL: token refresh exhausted, reconnecting\n`,
               );
+              this.isReconnecting = true;
               this.disconnect();
-              setTimeout(() => this.connect(), 1000);
+              setTimeout(() => {
+                this.isReconnecting = false;
+                this.connect();
+              }, 1000);
               return;
             }
             this.tokenRefreshTimer = setTimeout(() => {
@@ -1513,7 +1518,7 @@ export class QQChannel extends ChannelBase {
 
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content ?? '') : cleanText)}`;
+      : `[atMention=${isAtBot}] ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content?.trim() ?? '') : cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
