@@ -155,6 +155,29 @@ describe('runVisionBridge', () => {
     expect(result.modelEndpoint).toBe('dashscope.aliyuncs.com');
   });
 
+  it('uses the endpoint-qualified selector only for the side query', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'button text' });
+    const configWithEndpoint = {
+      getDefaultVisionBridgeModel: () => ({
+        id: 'openai:qwen3-vl-plus',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    } as unknown as Config;
+
+    const result = await runVisionBridge({
+      config: configWithEndpoint,
+      parts: ['look', image()],
+      signal: signal(),
+    });
+
+    expect(mockSideQuery.mock.calls[0][1].model).toBe(
+      'openai:qwen3-vl-plus\0https://dashscope.aliyuncs.com/compatible-mode/v1',
+    );
+    expect(result.modelId).toBe('openai:qwen3-vl-plus');
+    expect(textOf(result.parts)).toContain('by openai:qwen3-vl-plus');
+    expect(textOf(result.parts)).not.toContain('\0');
+  });
+
   it('does not expose raw invalid endpoint URLs in the egress host', async () => {
     mockSideQuery.mockResolvedValue({ text: 'desc' });
     const configWithBadEndpoint = {

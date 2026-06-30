@@ -153,6 +153,24 @@ function formatUnavailableVisionModelMessage(
   );
 }
 
+function formatAmbiguousVisionModelMessage(
+  modelName: string,
+  matchingModels: AvailableModel[],
+): string {
+  const endpoints = matchingModels
+    .map((model) => model.baseUrl ?? '(default endpoint)')
+    .join(', ');
+  return (
+    t("Vision model '{{modelName}}' matches multiple configured endpoints.", {
+      modelName,
+    }) +
+    '\n' +
+    t('Matching endpoints: {{endpoints}}.', { endpoints }) +
+    '\n' +
+    t('Run /model --vision without an argument and choose the exact endpoint.')
+  );
+}
+
 // Shown when a user pins a model that isn't known to accept images. The pin is
 // still honored, but the bridge will send images to it, so flag it. Reuses the
 // same translated key the model dialog emits (ModelDialog.tsx) so both paths
@@ -493,9 +511,17 @@ export const modelCommand: SlashCommand = {
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
       ).filter((m) => !m.fastOnly && !m.voiceOnly);
-      const matched = availableModels.find(
+      const matchingModels = availableModels.filter(
         (model) => model.id === selector.modelId,
       );
+      if (matchingModels.length > 1) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatAmbiguousVisionModelMessage(modelName, matchingModels),
+        };
+      }
+      const matched = matchingModels[0];
       if (!matched) {
         return {
           type: 'message',
@@ -525,9 +551,12 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      const qualifiedModelName = `${
+        selector.authType ?? matched.authType
+      }:${selector.modelId}`;
       const visionModel = matched.baseUrl
-        ? `${modelName}\0${matched.baseUrl}`
-        : modelName;
+        ? `${qualifiedModelName}\0${matched.baseUrl}`
+        : qualifiedModelName;
       persistSetting(settings, 'visionModel', visionModel);
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(visionModel);
