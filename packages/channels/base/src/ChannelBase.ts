@@ -51,6 +51,10 @@ export interface ChannelBaseOptions {
 
 export interface ChannelScheduleController {
   create(input: ChannelCronJobInput): Promise<ChannelCronJob>;
+  createForTarget?(
+    input: ChannelCronJobInput,
+    maxEnabledJobs: number,
+  ): Promise<ChannelCronJob | undefined>;
   listForTarget(
     channelName: string,
     target: SessionTarget,
@@ -894,18 +898,7 @@ export abstract class ChannelBase {
       );
       return true;
     }
-    const existingJobs = await this.scheduleController.listForTarget(
-      this.name,
-      target,
-    );
-    if (existingJobs.length >= MAX_SCHEDULE_JOBS_PER_TARGET) {
-      await this.sendMessage(
-        envelope.chatId,
-        `Too many scheduled jobs for this chat. Cancel an existing job before adding another.`,
-      );
-      return true;
-    }
-    const job = await this.scheduleController.create({
+    const input: ChannelCronJobInput = {
       channelName: this.name,
       target,
       cwd: this.config.cwd,
@@ -916,7 +909,32 @@ export abstract class ChannelBase {
       createdBy: sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
       ),
-    });
+    };
+    let job: ChannelCronJob | undefined;
+    if (this.scheduleController.createForTarget) {
+      job = await this.scheduleController.createForTarget(
+        input,
+        MAX_SCHEDULE_JOBS_PER_TARGET,
+      );
+    } else {
+      const existingJobs = await this.scheduleController.listForTarget(
+        this.name,
+        target,
+      );
+      if (
+        existingJobs.filter((existingJob) => existingJob.enabled).length <
+        MAX_SCHEDULE_JOBS_PER_TARGET
+      ) {
+        job = await this.scheduleController.create(input);
+      }
+    }
+    if (!job) {
+      await this.sendMessage(
+        envelope.chatId,
+        `Too many scheduled jobs for this chat. Cancel an existing job before adding another.`,
+      );
+      return true;
+    }
 
     await this.sendMessage(
       envelope.chatId,

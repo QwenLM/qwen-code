@@ -68,6 +68,41 @@ describe('ChannelCronStore', () => {
     ).resolves.toEqual([first]);
   });
 
+  it('creates for a target without counting disabled jobs against the cap', async () => {
+    const disabled = await store.create(input);
+    await store.disable(disabled.id);
+
+    const created = await store.createForTarget(input, 1);
+
+    expect(created).toMatchObject({
+      id: 'job-1',
+      enabled: true,
+      prompt: 'post a daily summary',
+    });
+    await expect(
+      store.listForTarget('feishu-main', input.target),
+    ).resolves.toHaveLength(2);
+  });
+
+  it('enforces the enabled target cap inside the serialized write', async () => {
+    let nextId = 0;
+    const cappedStore = new ChannelCronStore({
+      filePath: path.join(tmpDir, 'channels', 'cron.json'),
+      now: () => new Date('2026-06-30T01:02:03.000Z'),
+      idFactory: () => `job-${++nextId}`,
+    });
+
+    const created = await Promise.all([
+      cappedStore.createForTarget(input, 1),
+      cappedStore.createForTarget(input, 1),
+    ]);
+
+    expect(created.filter(Boolean)).toHaveLength(1);
+    await expect(
+      cappedStore.listForTarget('feishu-main', input.target),
+    ).resolves.toHaveLength(1);
+  });
+
   it('disables a job without deleting its last status', async () => {
     const created = await store.create(input);
     await store.update(created.id, {

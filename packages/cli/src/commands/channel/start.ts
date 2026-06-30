@@ -79,12 +79,13 @@ function createScheduleController(
 ): ChannelScheduleController {
   return {
     create: (input) => store.create(input),
+    createForTarget: (input, maxEnabledJobs) =>
+      store.createForTarget(input, maxEnabledJobs),
     listForTarget: (channelName, target) =>
       store.listForTarget(channelName, target),
     disable: (id) => store.disable(id),
     validateCron: (cron) => {
       parseCron(cron);
-      nextFireTime(cron, new Date());
     },
   };
 }

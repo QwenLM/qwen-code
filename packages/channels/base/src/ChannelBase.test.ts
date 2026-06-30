@@ -571,6 +571,7 @@ describe('ChannelBase', () => {
     it('/schedule add rejects a target that already has too many jobs', async () => {
       const existingJobs = Array.from({ length: 10 }, (_, index) => ({
         id: `job-${index}`,
+        enabled: true,
       }));
       const createSchedule = vi.fn();
       const ch = createChannel(
@@ -591,6 +592,40 @@ describe('ChannelBase', () => {
       );
 
       expect(createSchedule).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain('Too many scheduled jobs');
+    });
+
+    it('/schedule add uses the atomic target quota when available', async () => {
+      const createForTarget = vi.fn().mockResolvedValue(undefined);
+      const createSchedule = vi.fn();
+      const listForTarget = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: createSchedule,
+            createForTarget,
+            listForTarget,
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.handleInbound(
+        envelope({ text: '/schedule add "0 9 * * *" post summary' }),
+      );
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channelName: 'test-chan',
+          prompt: 'post summary',
+        }),
+        10,
+      );
+      expect(createSchedule).not.toHaveBeenCalled();
+      expect(listForTarget).not.toHaveBeenCalled();
       expect(ch.sent[0]!.text).toContain('Too many scheduled jobs');
     });
 
