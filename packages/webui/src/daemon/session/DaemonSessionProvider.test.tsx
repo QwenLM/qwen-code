@@ -1004,7 +1004,7 @@ describe('DaemonSessionProvider', () => {
   it('removes an accepted pending prompt when submitPrompt is aborted', async () => {
     const controller = new AbortController();
     const submitPrompt = vi.fn(async (_req: unknown, signal?: AbortSignal) => {
-      expect(signal).toBeUndefined();
+      expect(signal).toBe(controller.signal);
       controller.abort(createAbortError());
       return { promptId: 'pending-1', lastEventId: 10 };
     });
