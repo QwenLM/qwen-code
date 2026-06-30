@@ -2092,6 +2092,31 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('continues the user prompt when channel memory read fails', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockRejectedValue(new Error('EIO')),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('Use repo conventions.\n\nship it');
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining('channel memory read failed'),
+      );
+      writeSpy.mockRestore();
+    });
+
     it('does not read channel memory for unauthorized senders', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),

@@ -1354,34 +1354,33 @@ export abstract class ChannelBase {
         this.instructedSessions.add(sessionId);
       }
       if (shouldPrependSessionContext) {
-        try {
-          const context: string[] = [];
-          const channelMemory = this.isAuthorizedForChannelMemory(envelope)
-            ? (
-                await this.channelMemory?.readChannelMemory(
-                  this.channelMemoryTarget(envelope),
-                )
-              )?.trim()
-            : undefined;
-          if (channelMemory) {
-            context.push(
-              `Channel memory for this chat:\n${sanitizePromptText(channelMemory)}`,
+        const context: string[] = [];
+        let channelMemory: string | undefined;
+        if (this.isAuthorizedForChannelMemory(envelope)) {
+          try {
+            channelMemory = (
+              await this.channelMemory?.readChannelMemory(
+                this.channelMemoryTarget(envelope),
+              )
+            )?.trim();
+          } catch (error) {
+            this.logChannelMemoryError(
+              'read',
+              envelope,
+              this.channelMemoryErrorMessage(error),
             );
           }
-          if (this.config.instructions) {
-            context.push(this.config.instructions);
-          }
-          if (context.length > 0) {
-            promptText = `${context.join('\n\n')}\n\n${promptText}`;
-          }
-        } catch (error) {
-          this.logChannelMemoryError(
-            'read',
-            envelope,
-            this.channelMemoryErrorMessage(error),
+        }
+        if (channelMemory) {
+          context.push(
+            `Channel memory for this chat:\n${sanitizePromptText(channelMemory)}`,
           );
-          this.instructedSessions.delete(sessionId);
-          throw error;
+        }
+        if (this.config.instructions) {
+          context.push(this.config.instructions);
+        }
+        if (context.length > 0) {
+          promptText = `${context.join('\n\n')}\n\n${promptText}`;
         }
       }
       if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
