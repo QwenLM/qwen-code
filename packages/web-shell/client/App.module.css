@@ -91,11 +91,16 @@
     z-index: 50;
     pointer-events: none;
     visibility: hidden;
+    /* Keep the panel visible until the backdrop finishes fading out so they
+       disappear together instead of the panel vanishing a frame early. */
+    transition: visibility 0s linear 200ms;
   }
 
   .mobileDrawerOpen {
     visibility: visible;
     pointer-events: auto;
+    /* Show immediately on open; only the close path needs the delay above. */
+    transition-delay: 0s;
   }
 
   .mobileBackdrop {

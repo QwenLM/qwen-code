@@ -97,6 +97,7 @@ import {
   COPY_MESSAGES,
 } from './utils/copyCommand';
 import { cssUrlVar } from './utils/cssUrlVar';
+import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import type { SkillInfo } from './completions/slashCompletion';
@@ -922,24 +923,34 @@ export function App({
   useEffect(() => {
     if (!mobileDrawerOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        const target = e.target as HTMLElement | null;
-        if (
-          target &&
-          (target.tagName === 'INPUT' ||
-            target.tagName === 'TEXTAREA' ||
-            target.isContentEditable)
-        ) {
-          return;
-        }
-        e.stopPropagation();
-        e.preventDefault();
-        closeMobileDrawer();
+      if (e.key !== 'Escape') return;
+      // A pending tool/permission approval owns Escape (it rejects the call),
+      // so don't let the drawer swallow it while a prompt is visible.
+      if (pendingApprovalRef.current) return;
+      const target = e.target as HTMLElement | null;
+      // Only let an editable element keep Escape for itself when it lives
+      // outside the drawer; the drawer's own search input should still close
+      // the drawer on the first Escape.
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-mobile-drawer]')
+      ) {
+        return;
       }
+      e.stopPropagation();
+      e.preventDefault();
+      closeMobileDrawer();
     };
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const preventScroll = (e: TouchEvent) => e.preventDefault();
+    const preventScroll = (e: TouchEvent) => {
+      // Allow native scrolling inside the drawer (e.g. the session list);
+      // only block touch scrolling on the page behind it.
+      if ((e.target as HTMLElement | null)?.closest('[data-mobile-drawer]')) {
+        return;
+      }
+      e.preventDefault();
+    };
     document.addEventListener('touchmove', preventScroll, { passive: false });
     window.addEventListener('keydown', onKey, true);
     return () => {
@@ -2216,11 +2227,14 @@ export function App({
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
       setSidebarSwitchingSessionId(sessionId);
+      // Close the drawer before awaiting the load so it doesn't linger over the
+      // old transcript while the new session streams in, matching the other
+      // session-switch paths (/resume, ResumeDialog).
+      closeMobileDrawer();
       try {
         await sessionActions.loadSession(sessionId, {
           deferTranscriptReset: true,
         });
-        closeMobileDrawer();
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -3841,6 +3855,7 @@ export function App({
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
               <div
+                data-mobile-drawer=""
                 {...(mobileDrawerOpen
                   ? { role: 'dialog', 'aria-modal': 'true' as const }
                   : {})}
