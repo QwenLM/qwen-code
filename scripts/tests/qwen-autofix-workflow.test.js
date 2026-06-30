@@ -68,11 +68,21 @@ describe('qwen-autofix workflow', () => {
       "ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'",
     );
     expect(workflow).toContain(
+      "SENDER_ASSOC: '${{ github.event.sender.author_association }}'",
+    );
+    expect(workflow).toContain(
+      'sender_is_trusted="$(jq -r --arg assoc "${SENDER_ASSOC}"',
+    );
+    expect(workflow).toContain(
       'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
     );
     expect(workflow).toContain('bug=${issue_is_bug}');
     expect(workflow).toContain('ready=${issue_is_ready}');
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
+    expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
+    expect(workflow).toContain(
+      "qwen-autofix-issue-${{ github.event.issue.number || inputs.issue_number || 'scan' }}",
+    );
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))',
     );
