@@ -51,7 +51,15 @@ export function visualClickToOffset(
   let accumulatedWidth = 0;
   let codePointIndex = 0;
   for (let i = 0; i < chars.length; i++) {
-    const charWidth = Math.max(getCachedStringWidth(chars[i]!), 1);
+    const charWidth = getCachedStringWidth(chars[i]!);
+    if (charWidth <= 0) {
+      // Zero-width code points (combining marks, ZWJ) occupy no terminal cell
+      // and stay attached to the preceding glyph. Advance past them without
+      // consuming a column, so a click lands after the full grapheme rather
+      // than between a base character and its combining mark.
+      codePointIndex = i + 1;
+      continue;
+    }
     if (accumulatedWidth + charWidth > clickVisualCol) {
       // The click falls within this character's cells. For wide glyphs (CJK,
       // emoji) snap to whichever side of the midpoint the click lands on, so

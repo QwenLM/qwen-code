@@ -84,6 +84,23 @@ describe('visualClickToOffset', () => {
     expect(visualClickToOffset(buffer, 0, 3)).toBe(2);
   });
 
+  it('keeps a combining mark attached to its base character', () => {
+    // 'e' + U+0301 (combining acute) renders as a single cell, followed by 'x'.
+    const decomposed = 'e\u0301x';
+    const buffer: ClickableBufferState = {
+      lines: [decomposed],
+      allVisualLines: [decomposed],
+      visualToLogicalMap: [[0, 0]],
+    };
+    // Col 0 → before the base 'e' (offset 0).
+    expect(visualClickToOffset(buffer, 0, 0)).toBe(0);
+    // Col 1 → the visible 'x'. The cursor must land after the full 'é'
+    // grapheme (code-point offset 2), not between 'e' and the accent.
+    expect(visualClickToOffset(buffer, 0, 1)).toBe(2);
+    // Col 2 → past 'x' → end of line (offset 3).
+    expect(visualClickToOffset(buffer, 0, 2)).toBe(3);
+  });
+
   it('clicking past the end of the text lands at the line end', () => {
     const buffer: ClickableBufferState = {
       lines: ['hi'],
