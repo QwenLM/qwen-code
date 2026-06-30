@@ -387,7 +387,6 @@ export class QQChannel extends ChannelBase {
             { content: text, msg_type: 0 },
           );
           if (activeResp.ok) {
-            if (msgId) this.msgSeqMap.set(msgId, nextSeq - 1);
             if (msgId) this.saveQQState();
             return;
           }
@@ -459,6 +458,7 @@ export class QQChannel extends ChannelBase {
 
   disconnect(): void {
     this.disposed = true;
+    this._ready = false;
     this.stopHeartbeat();
     this.stopTokenRefresh();
     if (this.seenCleanupTimer) {
@@ -1094,7 +1094,6 @@ export class QQChannel extends ChannelBase {
             clearTimeout(this.readyTimeout);
             this.readyTimeout = null;
           }
-          this.connectReject = null;
           this.startHeartbeat();
           if (this.coldStart) {
             this.restoreGlobalSessions();
@@ -1115,6 +1114,7 @@ export class QQChannel extends ChannelBase {
                 process.stderr.write(
                   `[QQ:${this.name}] Ready (${count} sessions)\n`,
                 );
+                this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
                 onReady();
@@ -1123,6 +1123,7 @@ export class QQChannel extends ChannelBase {
                 process.stderr.write(
                   `[QQ:${this.name}] restoreSessions failed: ${err instanceof Error ? err.message : String(err)}\n`,
                 );
+                this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
                 onReady();
@@ -1131,6 +1132,7 @@ export class QQChannel extends ChannelBase {
             process.stderr.write(
               `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
             );
+            this.connectReject = null;
             this._ready = true;
             onReady();
           }
@@ -1284,6 +1286,7 @@ export class QQChannel extends ChannelBase {
         }
         gwCalled = true;
         await this.connectGateway();
+        this.isReconnecting = false;
         return; // success
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -1342,6 +1345,27 @@ export class QQChannel extends ChannelBase {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+  }
+
+  /**
+   * Extract bot's own OPENID from mentions. Finds the self-mention,
+   * validates format, writes invalid-format diagnostic to stderr.
+   * Returns the validated id or empty string.
+   */
+  private extractBotOpenId(mentions: QQGroupMessageEvent['mentions']): string {
+    const selfMention = mentions?.find((m) => m.is_you);
+    if (!selfMention?.id) return '';
+    if (!/^[A-F0-9]{32}$/i.test(selfMention.id)) {
+      process.stderr.write(
+        `[QQ:${this.name}] Invalid botOpenId format: ${selfMention.id}\n`,
+      );
+      return '';
+    }
+    this.botOpenId = selfMention.id;
+    if (this.qqConfig.allowMention !== false) {
+      this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+    }
+    return this.botOpenId;
   }
 
   // ── Message Handlers ───────────────────────────────────────────
@@ -1453,20 +1477,9 @@ export class QQChannel extends ChannelBase {
     // itself is the direct target.
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
 
-    // Extract bot's own OPENID from the first @mention that targets us
+    // Extract bot's own OPENID from mentions
     if (isAtBot && !this.botOpenId) {
-      const selfMention = event.mentions?.find((m) => m.is_you);
-      if (selfMention?.id) {
-        if (!/^[A-F0-9]{32}$/i.test(selfMention.id)) {
-          process.stderr.write(`[QQ:${this.name}] Invalid botOpenId format: ${selfMention.id}\n`);
-          this.botOpenId = '';
-        } else {
-          this.botOpenId = selfMention.id;
-          if (this.qqConfig.allowMention !== false) {
-            this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
-          }
-        }
-      }
+      this.extractBotOpenId(event.mentions);
     }
 
     const isSlash = isAtBot && cleanText.startsWith('/');
@@ -1642,20 +1655,9 @@ export class QQChannel extends ChannelBase {
     // 只有 @机器人本人 + 斜杠 才是 slash command
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
 
-    // Extract bot's own OPENID from the first @mention that targets us
+    // Extract bot's own OPENID from mentions
     if (isAtBot && !this.botOpenId) {
-      const selfMention = event.mentions?.find((m) => m.is_you);
-      if (selfMention?.id) {
-        if (!/^[A-F0-9]{32}$/i.test(selfMention.id)) {
-          process.stderr.write(`[QQ:${this.name}] Invalid botOpenId format: ${selfMention.id}\n`);
-          this.botOpenId = '';
-        } else {
-          this.botOpenId = selfMention.id;
-          if (this.qqConfig.allowMention !== false) {
-            this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
-          }
-        }
-      }
+      this.extractBotOpenId(event.mentions);
     }
 
     const isSlash = isAtBot && cleanText.startsWith('/');
