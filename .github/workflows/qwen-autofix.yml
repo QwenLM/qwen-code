@@ -121,9 +121,11 @@ jobs:
               fi
               ;;
           esac
-          # Forcing a specific issue/PR implies running that phase.
-          [[ -n "${FORCED_ISSUE}" ]] && DO_ISSUE=true
-          [[ -n "${FORCED_PR}" ]] && DO_REVIEW=true
+          # Forcing a specific issue/PR implies running that phase only for
+          # explicit manual dispatch. Event payload numbers still flow to the
+          # phase jobs after routing, but must not bypass the label/schedule gates.
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${FORCED_ISSUE}" ]] && DO_ISSUE=true
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${FORCED_PR}" ]] && DO_REVIEW=true
           echo "do_issue=${DO_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "do_review=${DO_REVIEW}" >> "${GITHUB_OUTPUT}"
           echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' schedule='${SCHEDULE:-n/a}' → issue=${DO_ISSUE} review=${DO_REVIEW}"
