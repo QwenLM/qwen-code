@@ -254,6 +254,67 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('cleans up a single channel when pidfile creation races', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteServiceInfo).toHaveBeenCalledWith(['telegram']);
+    expect(mockChannelDisconnect).toHaveBeenCalled();
+    expect(mockBridgeStop).toHaveBeenCalled();
+    expect(mockRouterClearAll).toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('started concurrently'),
+    );
+  });
+
+  it('cleans up all connected channels when pidfile creation races', async () => {
+    const channels = {
+      telegram: { type: 'telegram' },
+      feishu: { type: 'feishu' },
+    };
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteServiceInfo).toHaveBeenCalledWith(['telegram', 'feishu']);
+    expect(mockChannelDisconnect).toHaveBeenCalledTimes(2);
+    expect(mockBridgeStop).toHaveBeenCalled();
+    expect(mockRouterClearAll).toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('started concurrently'),
+    );
+  });
+
   it('starts a standalone AcpBridge before creating the channel', async () => {
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({ merged: { channels } });

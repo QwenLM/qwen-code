@@ -324,7 +324,10 @@ function formatHostForUrl(host: string): string {
   return host;
 }
 
-function formatChannelWorkerDaemonUrl(host: string, port: number): string {
+export function formatChannelWorkerDaemonUrl(
+  host: string,
+  port: number,
+): string {
   const normalized = host.trim().toLowerCase();
   if (
     normalized === '' ||
@@ -430,7 +433,7 @@ type ChannelServicePidfile = {
     servePid?: number;
     workerPid?: number;
   }): void;
-  reserveServeServiceInfo?(opts: {
+  reserveServeServiceInfo(opts: {
     channels: string[];
     servePid?: number;
   }): void;
@@ -449,10 +452,15 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   channelWorkerRuntimePromise ??= Promise.all([
     import('./channel-worker-supervisor.js'),
     import('../commands/channel/pidfile.js'),
-  ]).then(([supervisor, pidfile]) => ({
-    createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
-    channelServicePidfile: pidfile,
-  }));
+  ])
+    .then(([supervisor, pidfile]) => ({
+      createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
+      channelServicePidfile: pidfile,
+    }))
+    .catch((err: unknown) => {
+      channelWorkerRuntimePromise = undefined;
+      throw err;
+    });
   return channelWorkerRuntimePromise;
 }
 
@@ -474,14 +482,7 @@ function writeServeChannelReservation(
   channelServicePidfile: ChannelServicePidfile,
   channels: string[],
 ): void {
-  if (channelServicePidfile.reserveServeServiceInfo) {
-    channelServicePidfile.reserveServeServiceInfo({
-      channels,
-      servePid: process.pid,
-    });
-    return;
-  }
-  channelServicePidfile.writeServeServiceInfo({
+  channelServicePidfile.reserveServeServiceInfo({
     channels,
     servePid: process.pid,
   });
@@ -2433,7 +2434,9 @@ export async function runQwenServe(
         }
       };
       const onUncaughtExceptionMonitor = () => {
-        removeCurrentServePidfile();
+        if (process.listenerCount('uncaughtException') === 0) {
+          removeCurrentServePidfile();
+        }
       };
 
       const handle: RunHandle = {

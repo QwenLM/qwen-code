@@ -29,10 +29,12 @@ describe('createChannelWorkerSupervisor', () => {
 
   it('passes daemon connection details through env without putting token in argv', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', 'serve-token');
+    vi.stubEnv('QWEN_DAEMON_TOKEN', 'stale-daemon-token');
     vi.stubEnv('OPENAI_API_KEY', 'openai-secret');
     vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-secret');
     vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'aws-secret');
     vi.stubEnv('GITHUB_TOKEN', 'github-secret');
+    vi.stubEnv('TELEGRAM_BOT_TOKEN', 'telegram-secret');
     vi.stubEnv('HTTPS_PROXY', 'http://proxy.example.com:8080');
     const child = new FakeChild();
     const spawnWorker = vi.fn(
@@ -80,10 +82,12 @@ describe('createChannelWorkerSupervisor', () => {
     const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
       .env;
     expect(env).not.toHaveProperty('QWEN_SERVER_TOKEN');
-    expect(env).not.toHaveProperty('OPENAI_API_KEY');
-    expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');
-    expect(env).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
-    expect(env).not.toHaveProperty('GITHUB_TOKEN');
+    expect(env).toHaveProperty('QWEN_DAEMON_TOKEN', 'secret-token');
+    expect(env).toHaveProperty('OPENAI_API_KEY', 'openai-secret');
+    expect(env).toHaveProperty('ANTHROPIC_API_KEY', 'anthropic-secret');
+    expect(env).toHaveProperty('AWS_SECRET_ACCESS_KEY', 'aws-secret');
+    expect(env).toHaveProperty('GITHUB_TOKEN', 'github-secret');
+    expect(env).toHaveProperty('TELEGRAM_BOT_TOKEN', 'telegram-secret');
     expect(env).toHaveProperty('HTTPS_PROXY', 'http://proxy.example.com:8080');
     const argv = spawnWorker.mock.calls[0]![1];
     expect(argv).not.toContain('secret-token');
@@ -160,6 +164,8 @@ describe('createChannelWorkerSupervisor', () => {
       enabled: true,
       state: 'failed',
       error: 'Channel worker did not become ready within 1ms.',
+      exitCode: null,
+      signal: 'SIGTERM',
     });
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
@@ -303,6 +309,87 @@ describe('createChannelWorkerSupervisor', () => {
         signal: null,
       }),
     );
+  });
+
+  it('does not notify onExit when stopping a ready worker intentionally', async () => {
+    const child = new FakeChild();
+    const onExit = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onExit,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+    await supervisor.stop();
+
+    expect(onExit).not.toHaveBeenCalled();
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'stopped',
+    });
+  });
+
+  it('notifies onExit once when a ready worker emits error and exit', async () => {
+    const child = new FakeChild();
+    const onExit = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onExit,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+    child.emit('error', new Error('ipc failed'));
+    child.emit('exit', 1, null);
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it('can still stop a ready worker after an error without exit', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onExit: vi.fn(),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+    child.emit('error', new Error('ipc failed'));
+    await supervisor.stop();
+
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'stopped',
+    });
   });
 
   it('kills the worker synchronously on force shutdown', async () => {

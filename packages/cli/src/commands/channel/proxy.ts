@@ -13,7 +13,18 @@ export function resolveProxy(
   cliProxy?: string,
   settingsProxy?: string,
 ): string | undefined {
-  const proxyUrl = normalizeProxyUrl(
+  const proxyUrl = resolveProxyUrl(cliProxy, settingsProxy);
+  if (proxyUrl) {
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+  }
+  return proxyUrl;
+}
+
+export function resolveProxyUrl(
+  cliProxy?: string,
+  settingsProxy?: string,
+): string | undefined {
+  return normalizeProxyUrl(
     cliProxy ||
       settingsProxy ||
       process.env['HTTPS_PROXY'] ||
@@ -21,8 +32,4 @@ export function resolveProxy(
       process.env['HTTP_PROXY'] ||
       process.env['http_proxy'],
   );
-  if (proxyUrl) {
-    setGlobalDispatcher(new ProxyAgent(proxyUrl));
-  }
-  return proxyUrl;
 }

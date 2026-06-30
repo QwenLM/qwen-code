@@ -27,6 +27,29 @@ const MAX_CRASH_RESTARTS = 3;
 const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
 const RESTART_DELAY_MS = 3000;
 
+function isFileExistsError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as NodeJS.ErrnoException).code === 'EEXIST'
+  );
+}
+
+function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
+  try {
+    writeServiceInfo(channels);
+  } catch (err) {
+    cleanup();
+    if (isFileExistsError(err)) {
+      writeStderrLine(
+        'Error: Channel service was started concurrently. Use "qwen channel status" to inspect it.',
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
 /** Check for duplicate instance and abort if one is already running. */
 function checkDuplicateInstance(): void {
   const existing = readServiceInfo();
@@ -104,7 +127,11 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     process.exit(1);
   }
 
-  writeServiceInfo([name]);
+  writeServiceInfoOrExit([name], () => {
+    channel.disconnect();
+    bridge.stop();
+    router.clearAll();
+  });
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
   const attachDisconnectHandler = (b: AcpBridge): void => {
@@ -259,7 +286,20 @@ async function startAll(proxy?: string): Promise<void> {
     process.exit(1);
   }
 
-  writeServiceInfo(parsed.map((p) => p.name));
+  writeServiceInfoOrExit(
+    parsed.map((p) => p.name),
+    () => {
+      for (const channel of channels.values()) {
+        try {
+          channel.disconnect();
+        } catch {
+          // best-effort
+        }
+      }
+      bridge.stop();
+      router.clearAll();
+    },
+  );
   writeStdoutLine(
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,
   );

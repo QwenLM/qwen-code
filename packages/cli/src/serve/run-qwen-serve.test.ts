@@ -13,6 +13,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   createLazyBridgeProxy,
   extractContextFilename,
+  formatChannelWorkerDaemonUrl,
   InvalidPolicyConfigError,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
@@ -133,6 +134,21 @@ describe('extractContextFilename (#4297 fold-in 7 P2-1 helper)', () => {
     expect(extractContextFilename(42)).toBeUndefined();
     expect(extractContextFilename(true)).toBeUndefined();
     expect(extractContextFilename({ fileName: 'AGENTS.md' })).toBeUndefined();
+  });
+});
+
+describe('formatChannelWorkerDaemonUrl', () => {
+  it.each(['', '0.0.0.0', '::', '[::]'])(
+    'uses loopback when the daemon binds wildcard host %j',
+    (host) => {
+      expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+        'http://127.0.0.1:4170',
+      );
+    },
+  );
+
+  it('formats concrete IPv6 hosts for URLs', () => {
+    expect(formatChannelWorkerDaemonUrl('::1', 4170)).toBe('http://[::1]:4170');
   });
 });
 
@@ -1649,7 +1665,7 @@ describe('runQwenServe channel worker supervisor', () => {
     });
   });
 
-  it('removes the channel pidfile reservation before an uncaught exception exits', async () => {
+  it('does not remove the channel pidfile reservation for handled uncaught exceptions', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-crash-')),
     );
@@ -1663,6 +1679,8 @@ describe('runQwenServe channel worker supervisor', () => {
     const existingMonitorListeners = new Set(
       process.rawListeners('uncaughtExceptionMonitor'),
     );
+    const uncaughtExceptionHandler = () => {};
+    process.on('uncaughtException', uncaughtExceptionHandler);
 
     const handle = await runQwenServe(
       {
@@ -1696,8 +1714,11 @@ describe('runQwenServe channel worker supervisor', () => {
         listener(new Error('boom'), 'uncaughtException');
       }
 
-      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+      expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalledWith(
+        process.pid,
+      );
     } finally {
+      process.removeListener('uncaughtException', uncaughtExceptionHandler);
       await handle.close();
     }
   });

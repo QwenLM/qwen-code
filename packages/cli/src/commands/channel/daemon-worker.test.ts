@@ -11,7 +11,7 @@ const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
 const mockLoadSettings = vi.hoisted(() =>
   vi.fn(() => ({ merged: { proxy: 'http://settings-proxy:8080' } })),
 );
-const mockResolveProxy = vi.hoisted(() =>
+const mockResolveProxyUrl = vi.hoisted(() =>
   vi.fn((_cliProxy?: string, settingsProxy?: string) => settingsProxy),
 );
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -77,7 +77,7 @@ vi.mock('../../config/settings.js', () => ({
 }));
 
 vi.mock('./proxy.js', () => ({
-  resolveProxy: mockResolveProxy,
+  resolveProxyUrl: mockResolveProxyUrl,
 }));
 
 vi.mock('./runtime.js', () => ({
@@ -336,7 +336,7 @@ describe('runChannelDaemonWorker', () => {
         router: mockSessionRouter.mock.results[0]!.value,
       }),
     );
-    expect(mockResolveProxy).toHaveBeenCalledWith(
+    expect(mockResolveProxyUrl).toHaveBeenCalledWith(
       undefined,
       'http://settings-proxy:8080',
     );

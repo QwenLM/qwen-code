@@ -23,7 +23,7 @@ import {
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { resolveProxy } from './proxy.js';
+import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
   loadChannelsConfig,
@@ -226,7 +226,7 @@ export async function runChannelDaemonWorker(
 
   await loadChannelsFromExtensions();
   const settings = loadSettings(daemonWorkspace);
-  const proxy = resolveProxy(
+  const proxy = resolveProxyUrl(
     undefined,
     settings.merged.proxy as string | undefined,
   );

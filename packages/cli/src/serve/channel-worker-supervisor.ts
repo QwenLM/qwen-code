@@ -11,49 +11,6 @@ import {
 } from './channel-worker-env.js';
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
-const CHANNEL_WORKER_ENV_ALLOWLIST = [
-  'PATH',
-  'HOME',
-  'USERPROFILE',
-  'USER',
-  'USERNAME',
-  'LOGNAME',
-  'SHELL',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'TERM',
-  'NO_COLOR',
-  'FORCE_COLOR',
-  'CI',
-  'DEV',
-  'NODE_ENV',
-  'NODE_OPTIONS',
-  'NODE_EXTRA_CA_CERTS',
-  'SSL_CERT_FILE',
-  'SSL_CERT_DIR',
-  'SystemRoot',
-  'WINDIR',
-  'ProgramFiles',
-  'XDG_CONFIG_HOME',
-  'APPDATA',
-  'LOCALAPPDATA',
-  'QWEN_HOME',
-  'QWEN_RUNTIME_DIR',
-  'QWEN_CLI_ENTRY',
-  'QWEN_SERVE_DEBUG',
-  'HTTP_PROXY',
-  'HTTPS_PROXY',
-  'NO_PROXY',
-  'ALL_PROXY',
-  'http_proxy',
-  'https_proxy',
-  'no_proxy',
-  'all_proxy',
-];
 
 export type ChannelWorkerState =
   | 'disabled'
@@ -178,13 +135,7 @@ function createWorkerEnv(opts: {
   daemonToken?: string;
   workspace: string;
 }): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const name of CHANNEL_WORKER_ENV_ALLOWLIST) {
-    const value = process.env[name];
-    if (value !== undefined) {
-      env[name] = value;
-    }
-  }
+  const env: NodeJS.ProcessEnv = { ...process.env };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
   env[CHANNEL_DAEMON_WORKER_SENTINEL] = '1';
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
@@ -208,6 +159,8 @@ export function createChannelWorkerSupervisor(
     channels: channelSelectionNames(opts.selection),
   };
   let ready = false;
+  let stopping = false;
+  let exitNotified = false;
 
   const snapshotCopy = (): ChannelWorkerSnapshot => ({
     ...snapshot,
@@ -240,6 +193,8 @@ export function createChannelWorkerSupervisor(
     async start() {
       if (child) return;
       ready = false;
+      stopping = false;
+      exitNotified = false;
       const argv = [
         opts.cliEntryPath,
         'channel',
@@ -302,11 +257,16 @@ export function createChannelWorkerSupervisor(
           code: number | null,
           signal: NodeJS.Signals | null,
         ) {
-          if (settled && !ready) return;
           const state = ready ? 'exited' : 'failed';
           const message = `Channel worker exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'}).`;
-          setExited(state, code, signal, ready ? undefined : message);
-          if (ready) {
+          setExited(
+            state,
+            code,
+            signal,
+            ready ? undefined : (snapshot.error ?? message),
+          );
+          if (ready && !stopping && !exitNotified) {
+            exitNotified = true;
             opts.onExit?.(snapshotCopy());
           }
           if (!settled) {
@@ -315,8 +275,8 @@ export function createChannelWorkerSupervisor(
           child = undefined;
         }
         function settleError(err: Error) {
-          if (settled && !ready) return;
-          const observedExit = ready || child?.pid === undefined;
+          if (settled && !ready && child === undefined) return;
+          const observedExit = child?.pid === undefined;
           if (observedExit) {
             setExited(ready ? 'exited' : 'failed', null, null, err.message);
           } else {
@@ -325,9 +285,6 @@ export function createChannelWorkerSupervisor(
               state: 'failed',
               error: err.message,
             };
-          }
-          if (ready) {
-            opts.onExit?.(snapshotCopy());
           }
           if (!settled) {
             failBeforeReady(err);
@@ -366,6 +323,7 @@ export function createChannelWorkerSupervisor(
         return;
       }
       const exited = waitForExit(child, 5_000);
+      stopping = true;
       child.kill('SIGTERM');
       if (!(await exited)) {
         const killed = waitForExit(child, 2_000);
@@ -381,6 +339,7 @@ export function createChannelWorkerSupervisor(
         }
       }
       child = undefined;
+      stopping = false;
       snapshot = { ...snapshot, state: 'stopped' };
     },
     killAllSync() {
@@ -392,6 +351,7 @@ export function createChannelWorkerSupervisor(
       ) {
         return;
       }
+      stopping = true;
       child.kill('SIGKILL');
       child = undefined;
       snapshot = {
