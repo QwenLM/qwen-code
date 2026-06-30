@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
+import * as https from 'node:https';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import express, {
@@ -719,11 +720,20 @@ function installSameOriginOriginStrip(
       const port = getPort();
       if (port !== cachedStripPort) {
         cachedStripPort = port;
+        // Both schemes: under `--tls-cert/--tls-key` the loopback web
+        // shell is served over https, so its same-origin requests carry
+        // an `https://` Origin. Loopback hosts are trusted as same-origin
+        // regardless of scheme, so listing both is safe even on plain HTTP
+        // (the https entries simply never match without TLS).
         cachedSelfOrigins = new Set([
           `http://127.0.0.1:${port}`,
           `http://localhost:${port}`,
           `http://[::1]:${port}`,
           `http://host.docker.internal:${port}`,
+          `https://127.0.0.1:${port}`,
+          `https://localhost:${port}`,
+          `https://[::1]:${port}`,
+          `https://host.docker.internal:${port}`,
         ]);
       }
       if (cachedSelfOrigins.has(origin)) {
@@ -1124,6 +1134,40 @@ export async function runQwenServe(
         `combination. Use --port for the port, e.g. ` +
         `"--hostname ${host} --port ${port}".`,
     );
+  }
+
+  // TLS is both-or-nothing: a cert without a key (or vice versa) can't
+  // start an HTTPS listener, so fail loud at boot instead of silently
+  // falling back to plain HTTP — the operator asked for TLS and a silent
+  // downgrade would serve the web shell over an insecure transport they
+  // believe is encrypted.
+  let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+  if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
+    throw new Error(
+      `--tls-cert and --tls-key must be provided together (got only ` +
+        `--tls-${opts.tlsCert ? 'cert' : 'key'}).`,
+    );
+  }
+  if (opts.tlsCert && opts.tlsKey) {
+    let cert: Buffer;
+    let key: Buffer;
+    try {
+      cert = fs.readFileSync(opts.tlsCert);
+    } catch (err) {
+      throw new Error(
+        `Failed to read --tls-cert "${opts.tlsCert}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      key = fs.readFileSync(opts.tlsKey);
+    } catch (err) {
+      throw new Error(
+        `Failed to read --tls-key "${opts.tlsKey}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    tlsOptions = { cert, key };
   }
 
   if (!isLoopbackBind(opts.hostname) && !token) {
@@ -1943,7 +1987,12 @@ export async function runQwenServe(
   }
 
   return await new Promise<RunHandle>((resolve, reject) => {
-    const server = app.listen(opts.port, listenHostname, () => {
+    // When TLS is configured, wrap the Express app in an HTTPS listener
+    // (`https.Server extends http.Server`, so everything downstream —
+    // `server.maxConnections`, `server.address()`, `attachServer(server)`,
+    // graceful close — is unchanged). Otherwise `app.listen()` keeps the
+    // existing plain-HTTP path bit-for-bit.
+    const onListening = () => {
       startup.listenerReadyAt = new Date().toISOString();
       startup.processToListenMs = Math.round(process.uptime() * 1000);
       startup.runQwenServeToListenMs = Math.round(
@@ -1979,7 +2028,8 @@ export async function runQwenServe(
       // else: leave unset (Node's default = unlimited at this layer).
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
-      const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      const scheme = tlsOptions ? 'https' : 'http';
+      const url = `${scheme}://${formatHostForUrl(opts.hostname)}:${actualPort}`;
       writeStdoutLine(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
@@ -2426,7 +2476,12 @@ export async function runQwenServe(
           },
         );
       }
-    });
+    };
+    const server: Server = tlsOptions
+      ? https
+          .createServer(tlsOptions, app)
+          .listen(opts.port, listenHostname, onListening)
+      : app.listen(opts.port, listenHostname, onListening);
     server.once('error', reject);
   });
 }

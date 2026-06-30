@@ -100,6 +100,8 @@ interface ServeArgs {
   workspace?: string;
   'require-auth': boolean;
   'enable-session-shell': boolean;
+  'tls-cert'?: string;
+  'tls-key'?: string;
   web: boolean;
   open: boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
@@ -194,6 +196,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+      })
+      .option('tls-cert', {
+        type: 'string',
+        description:
+          'Path to a PEM certificate file. Serve over HTTPS instead of HTTP. ' +
+          'Required for secure-context browser APIs (voice input/getUserMedia, ' +
+          'WebRTC) when accessed over a LAN IP. Must be used together with ' +
+          '--tls-key. Generate a local cert with mkcert.',
+      })
+      .option('tls-key', {
+        type: 'string',
+        description:
+          'Path to a PEM private key file. Must be used together with --tls-cert.',
       })
       .option('experimental-lsp', {
         type: 'boolean',
@@ -506,6 +521,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
+        ...(argv['tls-cert'] !== undefined
+          ? { tlsCert: argv['tls-cert'] }
+          : {}),
+        ...(argv['tls-key'] !== undefined ? { tlsKey: argv['tls-key'] } : {}),
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,

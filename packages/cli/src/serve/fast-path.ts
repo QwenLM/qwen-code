@@ -55,6 +55,8 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
   ['hostname', 'hostname'],
   ['token', 'token'],
   ['workspace', 'workspace'],
+  ['tls-cert', 'tlsCert'],
+  ['tls-key', 'tlsKey'],
 ]);
 
 const BOOLEAN_OPTION_BY_FLAG = new Map<
