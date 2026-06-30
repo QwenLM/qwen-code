@@ -3529,6 +3529,75 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('skips an accepted queued prompt when its caller aborts before it starts', async () => {
+      const events: BridgeEvent[] = [];
+      let resolveFirst: (() => void) | undefined;
+      const firstDone = new Promise<void>((r) => {
+        resolveFirst = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          if ((req.prompt[0] as { text?: string }).text === 'blocker') {
+            await firstDone;
+          }
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const ev of bridge.subscribeEvents(session.sessionId)) {
+          events.push(ev);
+        }
+      })();
+
+      const p1 = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'blocker' }],
+      });
+      const abortQueued = new AbortController();
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'aborted queued' }],
+        },
+        abortQueued.signal,
+      );
+      const p3 = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'next prompt' }],
+      });
+
+      await vi.waitFor(() => {
+        const pending = bridge.getPendingPrompts(session.sessionId);
+        expect(pending).toHaveLength(3);
+        expect(pending[1]?.state).toBe('queued');
+      });
+      abortQueued.abort();
+
+      resolveFirst!();
+      await p1;
+      await expect(p2).rejects.toBeDefined();
+      await p3;
+
+      const startedTexts = events
+        .filter((e) => e.type === 'pending_prompt_started')
+        .map((e) => (e as BridgeEvent & { data: { text: string } }).data.text);
+      expect(startedTexts).toContain('next prompt');
+      expect(startedTexts).not.toContain('aborted queued');
+      expect(handle.agent.promptCalls.map((req) => req.prompt[0])).toEqual([
+        { type: 'text', text: 'blocker' },
+        { type: 'text', text: 'next prompt' },
+      ]);
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
+
+      sub.catch(() => {});
+      await bridge.shutdown();
+    });
+
     it('removePendingPrompt aborts a running prompt and triggers cancel', async () => {
       const events: BridgeEvent[] = [];
       let rejectPrompt: ((err: Error) => void) | undefined;

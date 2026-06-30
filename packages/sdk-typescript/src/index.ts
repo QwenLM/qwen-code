@@ -70,6 +70,15 @@ export {
   type DaemonErrorKind,
   type DaemonClientEvictedData,
   type DaemonClientEvictedEvent,
+  type DaemonPendingPromptAddedData,
+  type DaemonPendingPromptAddedEvent,
+  type DaemonPendingPromptStartedData,
+  type DaemonPendingPromptStartedEvent,
+  type DaemonPendingPromptCompletedData,
+  type DaemonPendingPromptCompletedEvent,
+  type DaemonPendingPromptEvent,
+  type DaemonPendingPromptSummary,
+  type DaemonPendingPromptsResult,
   // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   type DaemonStateResyncRequiredData,
