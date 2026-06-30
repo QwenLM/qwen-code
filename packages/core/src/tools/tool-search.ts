@@ -435,11 +435,12 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Not found: ${missing.join(', ')}`;
     }
+    const blockedMessages = blocked.map((name) =>
+      getSubagentPlanToolUnavailableMessage(name),
+    );
     if (blocked.length > 0) {
       const header = llmContent ? '\n\n' : '';
-      llmContent += `${header}Unavailable: ${blocked
-        .map((name) => getSubagentPlanToolUnavailableMessage(name))
-        .join('\n')}`;
+      llmContent += `${header}Unavailable: ${blockedMessages.join('\n')}`;
     }
     if (truncated.length > 0) {
       // Surface the dropped names so the model knows it must re-issue
@@ -458,7 +459,11 @@ class ToolSearchInvocation extends BaseToolInvocation<
       displayParts.push(`${truncated.length} truncated`);
     const returnDisplay = displayParts.join(', ') || 'No tools loaded';
 
-    return { llmContent, returnDisplay };
+    const result: ToolResult = { llmContent, returnDisplay };
+    if (blockedMessages.length > 0) {
+      result.error = { message: blockedMessages.join('\n') };
+    }
+    return result;
   }
 }
 

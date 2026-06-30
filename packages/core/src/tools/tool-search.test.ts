@@ -659,6 +659,8 @@ describe('ToolSearchTool', () => {
         'not available inside subagents',
       );
       expect(String(result.llmContent)).toContain('return your plan');
+      expect(result.error?.message).toContain('not available inside subagents');
+      expect(result.error?.message).toContain('return your plan');
       expect(String(result.llmContent)).not.toContain(`"name":"${toolName}"`);
       expect(registry.isDeferredToolRevealed(toolName)).toBe(false);
       expect(setToolsSpy).not.toHaveBeenCalled();

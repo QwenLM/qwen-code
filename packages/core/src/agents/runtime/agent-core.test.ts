@@ -545,6 +545,7 @@ describe('AgentCore.prepareTools', () => {
         ?.response as { error?: string } | undefined;
       expect(response?.error).toContain('not available inside subagents');
       expect(response?.error).toContain('return your plan');
+      expect(response?.error).not.toContain('not found');
     },
   );
 });

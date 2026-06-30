@@ -123,6 +123,8 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
+      // Avoid showing an approval UI for a subagent-only rejection; execute()
+      // still returns before saving the plan or changing approval mode.
       return 'allow';
     }
 

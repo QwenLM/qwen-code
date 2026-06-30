@@ -46,6 +46,7 @@ import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
+import { runWithAgentContext } from './agent-context.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -412,6 +413,7 @@ async function runSingleDispatch(
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
   ctx.set('task_prompt', prompt);
+  const workflowAgentId = `workflow-agent-${randomBytes(4).toString('hex')}`;
 
   if (
     opts.agentType === undefined &&
@@ -453,7 +455,9 @@ async function runSingleDispatch(
     // is valid inside the throw path because AgentHeadless's own
     // outer `finally` finalizes stats before propagating the error.
     try {
-      await subagent.execute(ctx, attemptSignal);
+      await runWithAgentContext(workflowAgentId, () =>
+        subagent.execute(ctx, attemptSignal),
+      );
     } finally {
       reportTokens(subagent, opts, onTokens);
     }
@@ -471,7 +475,15 @@ async function runSingleDispatch(
     return toModelVisibleSubagentResult(subagent.getFinalText(), mode);
   }
 
-  return runOverridePath(config, ctx, opts, attemptSignal, onTokens, emitter);
+  return runOverridePath(
+    config,
+    ctx,
+    opts,
+    attemptSignal,
+    workflowAgentId,
+    onTokens,
+    emitter,
+  );
 }
 
 /**
@@ -541,6 +553,7 @@ async function runOverridePath(
   ctx: ContextState,
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
+  workflowAgentId: string,
   /**
    * P5: forwarded from createProductionDispatch. The override path
    * builds its own AgentHeadless and runs subagent.execute(); the
@@ -758,7 +771,9 @@ async function runOverridePath(
       // AgentHeadless's own outer `finally` finalizes stats before
       // propagating.
       try {
-        await subagent.execute(ctx, dispatchSignal);
+        await runWithAgentContext(workflowAgentId, () =>
+          subagent.execute(ctx, dispatchSignal),
+        );
       } finally {
         reportTokens(subagent, opts, onTokens);
       }

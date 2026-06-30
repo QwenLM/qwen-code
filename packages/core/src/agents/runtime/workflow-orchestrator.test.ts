@@ -40,6 +40,7 @@ const {
     promptConfigSystemPrompt?: string;
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
+    agentId?: string | null;
   }>,
   nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
@@ -133,6 +134,7 @@ vi.mock('./agent-headless.js', () => ({
         ctx: { get: (k: string) => unknown },
         signal?: AbortSignal,
       ) => {
+        const { getCurrentAgentId } = await import('./agent-context.js');
         created.push({
           name,
           prompt: ctx.get('task_prompt') as string,
@@ -140,6 +142,7 @@ vi.mock('./agent-headless.js', () => ({
           promptConfigSystemPrompt: promptConfig.systemPrompt,
           runConfig,
           toolConfig,
+          agentId: getCurrentAgentId(),
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -1093,6 +1096,7 @@ describe('createProductionDispatch', () => {
     expect(created.length).toBe(1);
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
+    expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{8}$/);
   });
 
   it('strips internal tags from fast-path final text', async () => {
@@ -1775,6 +1779,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeContextSame: boolean;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
+    executeAgentId?: string | null;
   };
 
   function fakeConfigWithMgr(opts: {
@@ -1861,6 +1866,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                 _ctx: unknown,
                 signal?: AbortSignal,
               ): Promise<void> => {
+                const { getCurrentAgentId } = await import(
+                  './agent-context.js'
+                );
+                call.executeAgentId = getCurrentAgentId();
                 if (outcome.runWithEmitter && options?.eventEmitter) {
                   outcome.runWithEmitter(
                     options.eventEmitter as {
@@ -1929,10 +1938,14 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const dispatch = createProductionDispatch(config);
-    const result = await dispatch('find foo', { agentType: 'Explore' });
+    const result = await dispatch('find foo', {
+      agentType: 'Explore',
+      label: 'explore-1',
+    });
     expect(result).toBe('explore-output');
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
+    expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{8}$/);
     // Workflow floor [SendMessage, EnterPlanMode, ExitPlanMode] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
       expect.arrayContaining([

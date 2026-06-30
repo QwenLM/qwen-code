@@ -2104,6 +2104,8 @@ export class GeminiClient {
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
           systemReminders.push(
+            // SDK clients do not receive the interactive exit-plan flow, so
+            // they need plan-only guidance even outside subagent contexts.
             getPlanModeSystemReminder(
               isSubagentLikeExecutionContext() || this.config.getSdkMode(),
             ),
