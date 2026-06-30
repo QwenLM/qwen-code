@@ -222,6 +222,19 @@ describe('ReadFileTool', () => {
       expect(permission).toBe('allow');
     });
 
+    it('should return allow for paths within the user extensions directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(
+          Storage.getUserExtensionsDir(),
+          'my-ext',
+          'index.js',
+        ),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
     it('should return ask for paths directly under the OS temp directory', async () => {
       const params: ReadFileToolParams = {
         file_path: path.join(os.tmpdir(), 'pr-review-context.md'),

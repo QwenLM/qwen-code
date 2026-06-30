@@ -4,11 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    createDebugLogger: vi.fn(() => mockDebugLogger),
+  };
+});
+
+vi.mock('node:fs/promises', { spy: true });
+
 import type { FileSystemService } from '@qwen-code/qwen-code-core';
 import { AcpFileSystemService } from './filesystem.js';
 import type { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { promises as fs } from 'node:fs';
+import { realpath as fsRealpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -57,6 +75,12 @@ const createFallback = (): FileSystemService => ({
 });
 
 describe('AcpFileSystemService', () => {
+  beforeEach(() => {
+    mockDebugLogger.debug.mockClear();
+    mockDebugLogger.warn.mockClear();
+    vi.mocked(fsRealpath).mockClear();
+  });
+
   describe('readTextFile', () => {
     it('reads through ACP and returns response', async () => {
       const mockResponse = {
@@ -226,6 +250,34 @@ describe('AcpFileSystemService', () => {
 
       expect(err).toBeInstanceOf(Error);
       expect(Object.prototype.hasOwnProperty.call(err, '0')).toBe(false);
+    });
+
+    it('includes cause details from plain object ACP errors', async () => {
+      const otherError = {
+        code: INTERNAL_ERROR_CODE,
+        message: 'fetch failed',
+        cause: { code: 'ECONNREFUSED' },
+      };
+      const client = {
+        readTextFile: vi.fn().mockRejectedValue(otherError),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-2b-cause',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      const err = await svc
+        .readTextFile({ path: '/some/file.txt' })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect(err).toMatchObject({
+        cause: otherError,
+        message: 'fetch failed (cause: ECONNREFUSED)',
+      });
     });
 
     it('falls back to local reads for allowed local roots when ACP rejects them as outside the workspace', async () => {
@@ -595,6 +647,88 @@ describe('AcpFileSystemService', () => {
         });
         expect(Object.prototype.hasOwnProperty.call(err, 'code')).toBe(false);
         expect(fallback.readTextFile).not.toHaveBeenCalled();
+      });
+    });
+
+    it('logs when a local read fallback is eligible but skipped', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const localRoot = path.join(tempRoot, 'allowed');
+        const outsideRoot = path.join(tempRoot, 'outside');
+        const filePath = path.join(outsideRoot, 'outside-local-root.md');
+        await fs.mkdir(localRoot, { recursive: true });
+        await fs.mkdir(outsideRoot, { recursive: true });
+        await fs.writeFile(filePath, 'outside local root', 'utf8');
+
+        const pathOutsideWorkspaceError =
+          createLocalReadFallbackError(filePath);
+        const client = {
+          readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+        } as unknown as AgentSideConnection;
+
+        const svc = new AcpFileSystemService(
+          client,
+          'session-2e-skipped-log',
+          { readTextFile: true, writeTextFile: true },
+          createFallback(),
+          { localReadRoots: [localRoot] },
+        );
+
+        await svc.readTextFile({ path: filePath }).catch(() => undefined);
+
+        expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+          'Local read fallback skipped - no matching root',
+          {
+            path: filePath,
+            errorKind: 'path_outside_workspace',
+          },
+        );
+      });
+    });
+
+    it('resolves configured local read roots only once across fallback reads', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const localRoot = path.join(tempRoot, 'skills');
+        const firstFilePath = path.join(localRoot, 'first.md');
+        const secondFilePath = path.join(localRoot, 'second.md');
+        await fs.mkdir(localRoot, { recursive: true });
+        await fs.writeFile(firstFilePath, 'first', 'utf8');
+        await fs.writeFile(secondFilePath, 'second', 'utf8');
+
+        const client = {
+          readTextFile: vi
+            .fn()
+            .mockRejectedValueOnce(createLocalReadFallbackError(firstFilePath))
+            .mockRejectedValueOnce(
+              createLocalReadFallbackError(secondFilePath),
+            ),
+        } as unknown as AgentSideConnection;
+        const fallback = createFallback();
+        (fallback.readTextFile as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce({
+            content: 'first',
+            _meta: { bom: false, encoding: 'utf-8' },
+          })
+          .mockResolvedValueOnce({
+            content: 'second',
+            _meta: { bom: false, encoding: 'utf-8' },
+          });
+
+        const svc = new AcpFileSystemService(
+          client,
+          'session-2e-root-cache',
+          { readTextFile: true, writeTextFile: true },
+          fallback,
+          { localReadRoots: [localRoot] },
+        );
+
+        await svc.readTextFile({ path: firstFilePath });
+        await svc.readTextFile({ path: secondFilePath });
+
+        const resolvedLocalRoot = path.resolve(localRoot);
+        const localRootRealpathCalls = vi
+          .mocked(fsRealpath)
+          .mock.calls.filter(([value]) => value === resolvedLocalRoot);
+        expect(localRootRealpathCalls).toHaveLength(1);
       });
     });
 
