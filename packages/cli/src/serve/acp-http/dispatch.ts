@@ -1132,7 +1132,10 @@ export class AcpDispatcher {
             );
             if (id !== undefined) {
               conn.sendConn(
-                error(id, RPC.INVALID_PARAMS, '`requestId` is required'),
+                error(id, RPC.INVALID_PARAMS, '`requestId` is required', {
+                  httpStatus: 400,
+                  requestId,
+                }),
               );
             }
             return;

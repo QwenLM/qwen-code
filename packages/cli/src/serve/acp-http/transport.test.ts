@@ -1965,10 +1965,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     const [frame] = (await got) as Array<{
       id: number;
-      error: { code: number; message: string };
+      error: { code: number; message: string; data?: { httpStatus?: number } };
     }>;
     expect(frame.error.code).toBe(-32602);
     expect(frame.error.message).toContain('`requestId` is required');
+    expect(frame.error.data?.httpStatus).toBe(400);
   });
 
   it.each([
@@ -2838,6 +2839,54 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Client answers with a malformed result (no outcome) → bridge throws →
     // fallback must still cancel so the mediator is released.
     await post(connId, { jsonrpc: '2.0', id: reqFrame.id, result: {} });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(votes).toContainEqual({ outcome: { outcome: 'cancelled' } });
+  });
+
+  it('cross-connection malformed permission result still releases the bridge (cancel fallback)', async () => {
+    const votes: Array<{ outcome?: { outcome?: string } }> = [];
+    bridge.respondToSessionPermission = ((
+      _s: string,
+      _r: string,
+      resp: unknown,
+    ) => {
+      const r = resp as { outcome?: { outcome?: string } };
+      if (!r?.outcome?.outcome) throw new Error('invalid permission response');
+      votes.push(r);
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-xc',
+          sessionId: 'sess-1',
+          toolCall: {},
+          options: [{ optionId: 'allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      return { stopReason: 'end_turn' };
+    };
+    const streamConnId = await initialize();
+    await newSession(streamConnId);
+    const voterConnId = await initialize();
+    await newSession(voterConnId, 100); // co-owns sess-1
+    const sessStream = await openStream(streamConnId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(streamConnId, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
+    });
+    const [reqFrame] = (await got) as Array<{ id: string }>;
+    // Connection B (a co-owner) answers connection A's request via the legacy
+    // path with a malformed result. parsePermissionResponse — added for this
+    // path so co-owners can't bypass the whitelist — throws, and the cancel
+    // fallback must still release the mediator.
+    await post(voterConnId, { jsonrpc: '2.0', id: reqFrame.id, result: {} });
     await new Promise((r) => setTimeout(r, 50));
     expect(votes).toContainEqual({ outcome: { outcome: 'cancelled' } });
   });
