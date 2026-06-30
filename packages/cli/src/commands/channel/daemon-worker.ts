@@ -433,6 +433,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       });
 
       let shuttingDown = false;
+      let exitCode = 0;
       let finish!: () => void;
       const finished = new Promise<void>((resolve) => {
         finish = resolve;
@@ -440,25 +441,23 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       const shutdown = async (reason: NodeJS.Signals | 'disconnect') => {
         if (shuttingDown) {
           process.exit(1);
-          finish();
-          return;
-        }
-        shuttingDown = true;
-        try {
-          await handle.close();
-          process.exit(0);
-        } catch (err) {
-          const safeReason = sanitizeLogText(reason, 128);
-          const safeMessage = sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            512,
-          );
-          writeStderrLine(
-            `[Channel] daemon worker failed to shut down after ${safeReason}: ${safeMessage}`,
-          );
-          process.exit(1);
-        } finally {
-          finish();
+        } else {
+          shuttingDown = true;
+          try {
+            await handle.close();
+          } catch (err) {
+            exitCode = 1;
+            const safeReason = sanitizeLogText(reason, 128);
+            const safeMessage = sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              512,
+            );
+            writeStderrLine(
+              `[Channel] daemon worker failed to shut down after ${safeReason}: ${safeMessage}`,
+            );
+          } finally {
+            finish();
+          }
         }
       };
       const onDisconnect = () => {
@@ -471,6 +470,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('disconnect', onDisconnect);
+      process.exit(exitCode);
     } catch (err) {
       const safeMessage = sanitizeLogText(
         err instanceof Error ? err.message : String(err),

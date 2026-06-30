@@ -167,12 +167,18 @@ export async function parseConfiguredChannels(
 ): Promise<ParsedChannel[]> {
   const parsed: ParsedChannel[] = [];
   for (const name of selectedNames) {
+    const rawConfig = channelsConfig[name];
+    if (!rawConfig || typeof rawConfig !== 'object') {
+      throw new Error(
+        `Error in channel "${name}": channel is not configured. Add a "${name}" entry under "channels" in settings.json.`,
+      );
+    }
     try {
       parsed.push({
         name,
         config: await parseChannelConfig(
           name,
-          channelsConfig[name] as Record<string, unknown>,
+          rawConfig as Record<string, unknown>,
           opts.defaultCwd,
         ),
       });
