@@ -77,6 +77,8 @@ export class QQChannel extends ChannelBase {
   private accessToken: string = '';
   private tokenExpiresAt: number = 0;
   private tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Stored toolCall listener for cleanup in disconnect(). */
+  private _toolCallListener: ((event: ToolCallEvent) => void) | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatInterval: number = 45000;
   private seq: number = 0;
@@ -180,23 +182,20 @@ export class QQChannel extends ChannelBase {
       stateDir,
       `${safeName}-sessions-backup.json`,
     );
+    const toolCallListener = (event: ToolCallEvent) => {
+      const target = this.router.getTarget(event.sessionId);
+      if (target) {
+        this.onToolCall(target.chatId, event);
+      }
+    };
+    this._toolCallListener = toolCallListener;
     if (this.bridge?.on) {
-      this.bridge.on('toolCall', (event: ToolCallEvent) => {
-        const target = this.router.getTarget(event.sessionId);
-        if (target) {
-          this.onToolCall(target.chatId, event);
-        }
-      });
+      this.bridge.on('toolCall', toolCallListener);
     } else {
       try {
         (this.bridge as unknown as EventEmitter).addListener?.(
           'toolCall',
-          (event: ToolCallEvent) => {
-            const target = this.router.getTarget(event.sessionId);
-            if (target) {
-              this.onToolCall(target.chatId, event);
-            }
-          },
+          toolCallListener,
         );
       } catch (e: unknown) {
         process.stderr.write(
@@ -211,7 +210,7 @@ export class QQChannel extends ChannelBase {
   async connect(): Promise<void> {
     this.disposed = false;
     if (!this.config.instructions) {
-      this.config.instructions = [
+      const parts: string[] = [
         '## QQ Bot Channel',
         '',
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
@@ -242,7 +241,22 @@ export class QQChannel extends ChannelBase {
         '- 一条消息 @多人时，只有明确指派给你才接',
         '- 不确认时先沉默',
         '- 完成对话后立刻回归静默',
-      ].join('\n');
+      ];
+      // Only inject @mention format instructions when the operator has
+      // opted in (default: enabled). When disabled, the model receives
+      // no <@OPENID> tags and has no way to @mention, so the instructions
+      // are unnecessary and would confuse the model.
+      if (this.qqConfig.allowMention !== false) {
+        parts.push(
+          '',
+          '## @提及格式',
+          '',
+          '消息内容中的 <@OPENID> 标签代表群成员的 QQ 标识。',
+          '你可以在回复中使用 <@OPENID> 格式来 @提及特定的群成员。',
+          '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
+        );
+      }
+      this.config.instructions = parts.join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
       if (this.disposed) return;
@@ -424,6 +438,10 @@ export class QQChannel extends ChannelBase {
     this.streamState.clear();
     this.flushQQState();
     this.backupGlobalSessions();
+    if (this._toolCallListener) {
+      this.bridge?.off?.('toolCall', this._toolCallListener);
+      this._toolCallListener = null;
+    }
     if (this.ws) {
       this.ws.close(1000);
       this.ws = null;
@@ -854,6 +872,7 @@ export class QQChannel extends ChannelBase {
           retry();
         });
       }, delay);
+      this.tokenRefreshTimer.unref?.();
     }
   }
 
@@ -1549,13 +1568,12 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    // Strip <@OPENID> tags for empty check and slash detection, but keep
-    // the raw content (with tags) in the text passed to the LLM — the model
-    // needs the <@OPENID> syntax to correctly @mention other group members
-    // in its replies.
+    // When allowMention is enabled (default), preserve raw <@OPENID> tags so
+    // the model can @mention group members. When disabled, strip tags before
+    // the content reaches the LLM to prevent prompt-injection-based @mentions.
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] [${safeName}]: ${sanitizePromptText(content)}`;
+      : `[atMention=${isAtBot}] [${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
 
     // Only track replyMsgId for at-mention messages — non-@messages should
     // not clobber a preceding @mention's replyMsgId, or the bot's response

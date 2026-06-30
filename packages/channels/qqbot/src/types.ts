@@ -65,6 +65,12 @@ export interface QQChannelConfig {
   groupAllPolicy?: 'log' | 'keyword' | 'all';
   /** Case-insensitive keyword triggers. Only used when groupAllPolicy='keyword'. */
   keywordTriggers?: string[];
+  /**
+   * When true (default), raw `<@OPENID>` tags are preserved in group messages
+   * sent to the LLM, allowing the model to @mention group members.
+   * When false, `<@OPENID>` tags are stripped before reaching the LLM.
+   */
+  allowMention?: boolean;
 }
 
 /** Robot added to a group. */

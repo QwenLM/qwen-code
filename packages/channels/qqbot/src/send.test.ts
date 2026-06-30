@@ -489,3 +489,99 @@ describe('sendMessage', () => {
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
   });
 });
+
+// Security: verify real sanitizers from channel-base strip dangerous characters.
+// These use vi.importActual to bypass the module-level mock and exercise
+// the real implementations — guarding against regression if the mock ever
+// drifts from the real sanitizers.
+
+describe('sanitizeSenderName (real)', () => {
+  it('strips ANSI escape sequences', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeSenderName('\x1B[31mred\x1B[0m');
+    expect(result).not.toContain('\x1B');
+  });
+
+  it('strips bidi override characters (LRE/RLE)', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeSenderName('\u202Aevil\u202C');
+    expect(result).not.toContain('\u202A');
+    expect(result).not.toContain('\u202E');
+  });
+
+  it('strips NEL control character (U+0085)', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    // NEL = Next Line (Unicode line break), should not pass through
+    const result = actual.sanitizeSenderName('before\u0085after');
+    expect(result).not.toContain('\u0085');
+  });
+
+  it('strips embedded newlines (\\n and \\r)', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeSenderName('line1\nline2\rline3');
+    expect(result).not.toContain('\n');
+    expect(result).not.toContain('\r');
+  });
+
+  it('passes through safe ASCII names unchanged', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeSenderName('NormalUser-123');
+    expect(result).toBe('NormalUser-123');
+  });
+});
+
+describe('sanitizeLogText (real)', () => {
+  it('strips ANSI escape sequences', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeLogText('\x1B[31merror\x1B[0m');
+    expect(result).not.toContain('\x1B');
+  });
+
+  it('strips bidi override characters', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeLogText('\u202Eflipped\u202C');
+    expect(result).not.toContain('\u202E');
+    expect(result).not.toContain('\u202A');
+  });
+
+  it('strips NEL control character (U+0085)', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeLogText('log\u0085injection');
+    expect(result).not.toContain('\u0085');
+  });
+
+  it('escapes embedded newlines instead of passing them raw', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeLogText('line1\nline2');
+    // Real newlines in log text should be escaped, not passed through raw
+    expect(result).not.toContain('\n');
+    // The escape character \\n may appear as the literal string "\n"
+    expect(result).toContain('\\n');
+  });
+
+  it('passes through safe text unchanged', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const result = actual.sanitizeLogText('Normal log message');
+    expect(result).toBe('Normal log message');
+  });
+});
