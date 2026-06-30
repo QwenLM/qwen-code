@@ -116,7 +116,7 @@ jobs:
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     # Not on push: the merge queue already tested the merged tree, so a
     # post-merge re-run on `main` would be redundant.
-    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    if: "${{ !cancelled() && github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 60
     permissions:
@@ -366,7 +366,7 @@ jobs:
   test_windows:
     name: 'Test (windows-latest, Node 22.x)'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
+    if: "${{ !cancelled() && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') }}"
     runs-on: 'windows-2022'
     permissions:
       contents: 'read'
