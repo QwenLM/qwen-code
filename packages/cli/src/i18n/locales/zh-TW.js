@@ -1232,6 +1232,8 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，--vision 可設置視覺橋接模型，[model-id] 可立即切換）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately).':
+    '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換）',
   "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
     "⚠ '{{model}}' 不是已知的圖像能力模型；視覺橋接處理圖片時可能會失敗。",
   'Set a lighter model for prompt suggestions and speculative execution':
@@ -1240,6 +1242,10 @@ export default {
   'Set the model for voice transcription': '設定語音轉寫模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '設定用於為純文字主模型轉寫圖像的圖像能力模型',
+  'Persist the model selection to the project settings (workspace scope)':
+    '將模型選擇持久化到專案設定（工作區）',
+  'Persist the model selection to the user settings (global scope)':
+    '將模型選擇持久化到使用者設定（全域）',
   'Select Fast Model': '選擇快速模型',
   'Select Vision Model': '選擇視覺模型',
   'Select Voice Model': '選擇語音模型',
@@ -1433,6 +1439,10 @@ export default {
   'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
     '無效的 QWEN_DEFAULT_AUTH_TYPE 值："{{value}}"。有效值為：{{validValues}}',
   'Select Model': '選擇模型',
+  'Select Model (this project)': '選擇模型（當前專案）',
+  'Select Model (global)': '選擇模型（全域）',
+  'Model: {{model}} (project)': '模型：{{model}}（專案）',
+  'Model: {{model}} (global)': '模型：{{model}}（全域）',
   'API Key': 'API Key',
   '(default)': '(默認)',
   '(not set)': '(未設置)',
