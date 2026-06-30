@@ -793,17 +793,18 @@ export function ModelDialog({
       width="100%"
     >
       <Text bold>
-        {persistScope === 'workspace'
-          ? t('Select Model (this project)')
-          : persistScope === 'user'
-            ? t('Select Model (global)')
-            : isVoiceModelMode
-              ? t('Select Voice Model')
-              : isVisionModelMode
-                ? t('Select Vision Model')
-                : isFastModelMode
-                  ? t('Select Fast Model')
-                  : t('Select Model')}
+        {(isVoiceModelMode
+          ? t('Select Voice Model')
+          : isVisionModelMode
+            ? t('Select Vision Model')
+            : isFastModelMode
+              ? t('Select Fast Model')
+              : t('Select Model')) +
+          (persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '')}
       </Text>
 
       {!hasModels ? (

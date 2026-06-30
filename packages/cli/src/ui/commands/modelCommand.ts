@@ -47,12 +47,12 @@ function parseScopeFlags(args: string): {
   let scopeOverride: SettingScope | undefined;
   let remaining = args;
 
-  if (remaining.startsWith('--project')) {
+  if (/(?:^|\s)--project(?:\s|$)/.test(remaining)) {
     scopeOverride = SettingScope.Workspace;
-    remaining = remaining.replace('--project', '').trim();
-  } else if (remaining.startsWith('--global')) {
+    remaining = remaining.replace(/(?:^|\s)--project(?:\s|$)/, ' ').trim();
+  } else if (/(?:^|\s)--global(?:\s|$)/.test(remaining)) {
     scopeOverride = SettingScope.User;
-    remaining = remaining.replace('--global', '').trim();
+    remaining = remaining.replace(/(?:^|\s)--global(?:\s|$)/, ' ').trim();
   }
 
   return { scopeOverride, remaining };
@@ -63,6 +63,17 @@ function resolveScope(
   scopeOverride: SettingScope | undefined,
 ): SettingScope {
   return scopeOverride ?? getPersistScopeForModelSelection(settings);
+}
+
+function persistScopeSpread(
+  scopeOverride: SettingScope | undefined,
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
+): { persistScope: 'workspace' } | { persistScope: 'user' } | {} {
+  if (scopeOverride === SettingScope.Workspace)
+    return { persistScope: 'workspace' as const };
+  if (scopeOverride === SettingScope.User)
+    return { persistScope: 'user' as const };
+  return {};
 }
 
 function persistSetting(
@@ -292,21 +303,17 @@ export const modelCommand: SlashCommand = {
       const trimmed = partialArg.trim();
       if (trimmed) {
         let mode: 'main' | 'fast' | 'voice' | 'vision' = 'main';
-        let modelPrefix = trimmed;
-        if (trimmed.startsWith('--fast ')) {
-          mode = 'fast';
-          modelPrefix = trimmed.slice('--fast '.length);
-        } else if (trimmed.startsWith('--voice ')) {
-          mode = 'voice';
-          modelPrefix = trimmed.slice('--voice '.length);
-        } else if (trimmed.startsWith('--vision ')) {
-          mode = 'vision';
-          modelPrefix = trimmed.slice('--vision '.length);
-        } else if (trimmed.startsWith('--project ')) {
-          modelPrefix = trimmed.slice('--project '.length);
-        } else if (trimmed.startsWith('--global ')) {
-          modelPrefix = trimmed.slice('--global '.length);
-        }
+        // Strip all known flags to isolate the model prefix for completion
+        const modelPrefix = trimmed
+          .replace(/(?:^|\s)--fast(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--voice(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--vision(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
+          .trim();
+        if (/(?:^|\s)--fast(?:\s|$)/.test(trimmed)) mode = 'fast';
+        else if (/(?:^|\s)--voice(?:\s|$)/.test(trimmed)) mode = 'voice';
+        else if (/(?:^|\s)--vision(?:\s|$)/.test(trimmed)) mode = 'vision';
         return getAvailableModelIds(context, mode).filter((id) =>
           id.startsWith(modelPrefix),
         );
@@ -334,6 +341,12 @@ export const modelCommand: SlashCommand = {
     // Parse --project / --global scope flags first, then process the rest
     const rawArgs = context.invocation?.args?.trim() || actionArgs.trim();
     const { scopeOverride, remaining: args } = parseScopeFlags(rawArgs);
+    const scopeSuffix =
+      scopeOverride === SettingScope.Workspace
+        ? ' (project)'
+        : scopeOverride === SettingScope.User
+          ? ' (global)'
+          : '';
     const isVoiceModelCommand =
       args === '--voice' || args.startsWith('--voice ');
     if (isVoiceModelCommand) {
@@ -355,6 +368,7 @@ export const modelCommand: SlashCommand = {
         return {
           type: 'dialog',
           dialog: 'voice-model',
+          ...persistScopeSpread(scopeOverride),
         };
       }
 
@@ -402,7 +416,7 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Voice Model') + ': ' + modelName,
+        content: t('Voice Model') + ': ' + modelName + scopeSuffix,
       };
     }
 
@@ -423,6 +437,7 @@ export const modelCommand: SlashCommand = {
         return {
           type: 'dialog',
           dialog: 'fast-model',
+          ...persistScopeSpread(scopeOverride),
         };
       }
       // Set fast model
@@ -486,7 +501,7 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Fast Model') + ': ' + modelName,
+        content: t('Fast Model') + ': ' + modelName + scopeSuffix,
       };
     }
 
@@ -513,6 +528,7 @@ export const modelCommand: SlashCommand = {
         return {
           type: 'dialog',
           dialog: 'vision-model',
+          ...persistScopeSpread(scopeOverride),
         };
       }
       if (!settings) {
@@ -586,7 +602,8 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Vision Model') + ': ' + modelName + visionWarning,
+        content:
+          t('Vision Model') + ': ' + modelName + scopeSuffix + visionWarning,
       };
     }
 
@@ -670,11 +687,7 @@ export const modelCommand: SlashCommand = {
     return {
       type: 'dialog',
       dialog: 'model',
-      ...(scopeOverride === SettingScope.Workspace
-        ? { persistScope: 'workspace' as const }
-        : scopeOverride === SettingScope.User
-          ? { persistScope: 'user' as const }
-          : {}),
+      ...persistScopeSpread(scopeOverride),
     };
   },
 };

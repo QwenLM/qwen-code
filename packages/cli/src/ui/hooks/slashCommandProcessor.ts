@@ -827,13 +827,22 @@ export const useSlashCommandProcessor = (
                       });
                       return { type: 'handled' };
                     case 'fast-model':
-                      actions.openModelDialog({ fastModelMode: true });
+                      actions.openModelDialog({
+                        fastModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'voice-model':
-                      actions.openModelDialog({ voiceModelMode: true });
+                      actions.openModelDialog({
+                        voiceModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'vision-model':
-                      actions.openModelDialog({ visionModelMode: true });
+                      actions.openModelDialog({
+                        visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();

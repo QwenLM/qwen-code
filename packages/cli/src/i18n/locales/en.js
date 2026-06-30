@@ -1688,6 +1688,8 @@ export default {
   'Select Model': 'Select Model',
   'Select Model (this project)': 'Select Model (this project)',
   'Select Model (global)': 'Select Model (global)',
+  ' (this project)': ' (this project)',
+  ' (global)': ' (global)',
   'Model: {{model}} (project)': 'Model: {{model}} (project)',
   'Model: {{model}} (global)': 'Model: {{model}} (global)',
   'API Key': 'API Key',
