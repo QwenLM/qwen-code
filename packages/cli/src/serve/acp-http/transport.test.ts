@@ -2473,11 +2473,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       const [frame] = (await voterGot) as Array<{
         id: number;
-        error: { code: number; message: string };
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
       }>;
       expect(frame.id).toBe(29);
       expect(frame.error.code).toBe(-32602);
       expect(frame.error.message).toContain('not owned by this connection');
+      expect(frame.error.data?.httpStatus).toBe(403);
     } finally {
       ownerReader.close();
     }

@@ -1208,10 +1208,26 @@ export class AcpDispatcher {
             }
             return;
           }
-          if (!this.requireOwned(conn, sessionId, id)) {
+          // Inline ownership check (not the shared `requireOwned`) so the
+          // rejection carries the same `{ httpStatus }` envelope as every other
+          // error path in this handler — SDK callers classify permission-vote
+          // failures by `error.data.httpStatus`, and this is the likeliest
+          // cross-connection failure (right session header, no `session/new` on
+          // this connection).
+          if (!conn.ownsSession(sessionId)) {
             writeStderrLine(
               `qwen serve: /acp session/permission vote rejected: session ${logSafe(sessionId)} not owned by this connection (requestId ${logSafe(requestId)})`,
             );
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'Session not owned by this connection',
+                  { httpStatus: 403, sessionId, requestId },
+                ),
+              );
+            }
             return;
           }
           let accepted: boolean;
