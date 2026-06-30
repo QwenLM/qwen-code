@@ -1,5 +1,6 @@
 import { fork } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { channelSelectionNames } from './channel-selection.js';
 import type { ServeChannelSelection } from './types.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
@@ -116,12 +117,10 @@ export interface CreateChannelWorkerSupervisorOptions {
 }
 
 function selectionChannelArgs(selection: ServeChannelSelection): string[] {
-  const names = selection.mode === 'all' ? ['all'] : selection.names;
-  return names.flatMap((name) => ['--channel', name]);
-}
-
-function configuredChannels(selection: ServeChannelSelection): string[] {
-  return selection.mode === 'all' ? ['all'] : [...selection.names];
+  return channelSelectionNames(selection).flatMap((name) => [
+    '--channel',
+    name,
+  ]);
 }
 
 function defaultSpawnWorker(
@@ -206,7 +205,7 @@ export function createChannelWorkerSupervisor(
   let snapshot: ChannelWorkerSnapshot = {
     enabled: true,
     state: 'disabled',
-    channels: configuredChannels(opts.selection),
+    channels: channelSelectionNames(opts.selection),
   };
   let ready = false;
 
@@ -240,6 +239,7 @@ export function createChannelWorkerSupervisor(
   return {
     async start() {
       if (child) return;
+      ready = false;
       const argv = [
         opts.cliEntryPath,
         'channel',
@@ -254,7 +254,7 @@ export function createChannelWorkerSupervisor(
       snapshot = {
         enabled: true,
         state: 'starting',
-        channels: configuredChannels(opts.selection),
+        channels: channelSelectionNames(opts.selection),
         startedAt: new Date().toISOString(),
       };
       child = spawnWorker(process.execPath, argv, {
@@ -312,10 +312,12 @@ export function createChannelWorkerSupervisor(
           if (!settled) {
             failBeforeReady(new Error(message));
           }
+          child = undefined;
         }
         function settleError(err: Error) {
           if (settled && !ready) return;
-          if (ready || child?.pid === undefined) {
+          const observedExit = ready || child?.pid === undefined;
+          if (observedExit) {
             setExited(ready ? 'exited' : 'failed', null, null, err.message);
           } else {
             snapshot = {
@@ -329,6 +331,9 @@ export function createChannelWorkerSupervisor(
           }
           if (!settled) {
             failBeforeReady(err);
+          }
+          if (observedExit) {
+            child = undefined;
           }
         }
         startupTimer = setTimeout(() => {
@@ -356,6 +361,7 @@ export function createChannelWorkerSupervisor(
         (snapshot.state === 'failed' && hasObservedExit(snapshot)) ||
         snapshot.state === 'stopped'
       ) {
+        child = undefined;
         snapshot = { ...snapshot, state: 'stopped' };
         return;
       }
@@ -374,6 +380,7 @@ export function createChannelWorkerSupervisor(
           return;
         }
       }
+      child = undefined;
       snapshot = { ...snapshot, state: 'stopped' };
     },
     killAllSync() {
@@ -386,6 +393,7 @@ export function createChannelWorkerSupervisor(
         return;
       }
       child.kill('SIGKILL');
+      child = undefined;
       snapshot = {
         ...snapshot,
         state: 'stopped',

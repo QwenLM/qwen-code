@@ -81,6 +81,7 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
+import { channelSelectionNames } from './channel-selection.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
@@ -467,13 +468,6 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
   };
-}
-
-function channelSelectionPidfileNames(
-  selection: ServeOptions['channelSelection'],
-): string[] {
-  if (!selection) return [];
-  return selection.mode === 'all' ? ['all'] : [...selection.names];
 }
 
 function writeServeChannelReservation(
@@ -1237,9 +1231,7 @@ export async function runQwenServe(
     if (!channelServicePidfile) {
       throw new Error('Channel service pidfile runtime is not available.');
     }
-    const channelPidfileNames = channelSelectionPidfileNames(
-      opts.channelSelection,
-    );
+    const channelPidfileNames = channelSelectionNames(opts.channelSelection);
     const existingChannelService = channelServicePidfile.readServiceInfo();
     if (existingChannelService) {
       const owner =
@@ -2439,6 +2431,9 @@ export async function runQwenServe(
           process.exit(1);
         }
       };
+      const onUncaughtExceptionMonitor = () => {
+        removeCurrentServePidfile();
+      };
 
       const handle: RunHandle = {
         server,
@@ -2495,6 +2490,10 @@ export async function runQwenServe(
               settled = true;
               process.removeListener('SIGINT', onSignal);
               process.removeListener('SIGTERM', onSignal);
+              process.removeListener(
+                'uncaughtExceptionMonitor',
+                onUncaughtExceptionMonitor,
+              );
               void (
                 coreRuntimePromise
                   ? coreRuntimePromise.then((core) => core.shutdownTelemetry())
@@ -2652,6 +2651,7 @@ export async function runQwenServe(
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // Swap the boot-error listener for a runtime-error one
       // before resolving. `server.once('error', reject)` at the

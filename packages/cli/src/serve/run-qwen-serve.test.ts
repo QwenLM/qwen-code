@@ -1638,6 +1638,59 @@ describe('runQwenServe channel worker supervisor', () => {
       workerPid: 1234,
     });
   });
+
+  it('removes the channel pidfile reservation before an uncaught exception exits', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-crash-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const existingMonitorListeners = new Set(
+      process.rawListeners('uncaughtExceptionMonitor'),
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+        channels: ['telegram'],
+        servePid: process.pid,
+      });
+      const monitorListeners = process.rawListeners(
+        'uncaughtExceptionMonitor',
+      ) as Array<(error: Error, origin: 'uncaughtException') => void>;
+      const newMonitorListeners = monitorListeners.filter(
+        (listener) => !existingMonitorListeners.has(listener),
+      );
+      expect(newMonitorListeners).toHaveLength(1);
+      for (const listener of newMonitorListeners) {
+        listener(new Error('boom'), 'uncaughtException');
+      }
+
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+    } finally {
+      await handle.close();
+    }
+  });
 });
 
 describe('runQwenServe startup observability', () => {

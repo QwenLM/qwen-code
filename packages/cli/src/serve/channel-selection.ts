@@ -28,3 +28,9 @@ export function normalizeServeChannelSelection(
 
   return { mode: 'names', names };
 }
+
+export function channelSelectionNames(
+  selection: ServeChannelSelection,
+): string[] {
+  return selection.mode === 'all' ? ['all'] : [...selection.names];
+}

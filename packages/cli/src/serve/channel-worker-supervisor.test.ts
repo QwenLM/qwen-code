@@ -234,6 +234,46 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('can start a new worker after a stopped worker exits', async () => {
+    const firstChild = new FakeChild();
+    const secondChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker,
+    });
+
+    const firstStart = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+    });
+    await firstStart;
+    await supervisor.stop();
+
+    const secondStart = supervisor.start();
+    secondChild.emit('message', {
+      type: 'ready',
+      pid: 22222,
+      channels: ['telegram'],
+    });
+    await secondStart;
+
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'running',
+      pid: 22222,
+    });
+  });
+
   it('notifies when a ready worker exits unexpectedly', async () => {
     const child = new FakeChild();
     const onExit = vi.fn();
