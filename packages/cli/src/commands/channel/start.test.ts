@@ -39,6 +39,24 @@ const mockRouterRemoveSessionId = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
+const mockChannelCronStoreCreate = vi.hoisted(() => vi.fn());
+const mockChannelCronStoreListForTarget = vi.hoisted(() => vi.fn());
+const mockChannelCronStoreDisable = vi.hoisted(() => vi.fn());
+const mockChannelCronStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    create: mockChannelCronStoreCreate,
+    listForTarget: mockChannelCronStoreListForTarget,
+    disable: mockChannelCronStoreDisable,
+  })),
+);
+const mockChannelCronSchedulerStart = vi.hoisted(() => vi.fn());
+const mockChannelCronSchedulerStop = vi.hoisted(() => vi.fn());
+const mockChannelCronScheduler = vi.hoisted(() =>
+  vi.fn(() => ({
+    start: mockChannelCronSchedulerStart,
+    stop: mockChannelCronSchedulerStop,
+  })),
+);
 const mockSessionRouter = vi.hoisted(() =>
   vi.fn(() => ({
     clearAll: mockRouterClearAll,
@@ -86,6 +104,8 @@ vi.mock('./channel-registry.js', () => ({
 
 vi.mock('@qwen-code/channel-base', () => ({
   AcpBridge: mockAcpBridge,
+  ChannelCronScheduler: mockChannelCronScheduler,
+  ChannelCronStore: mockChannelCronStore,
   SessionRouter: mockSessionRouter,
 }));
 
@@ -135,6 +155,9 @@ beforeEach(() => {
   mockReadServiceInfo.mockReturnValue(null);
   mockRouterGetTarget.mockReturnValue(undefined);
   mockRouterRestoreSessions.mockResolvedValue({ failed: 0, restored: 0 });
+  mockChannelCronStoreCreate.mockResolvedValue({ id: 'job-1' });
+  mockChannelCronStoreListForTarget.mockResolvedValue([]);
+  mockChannelCronStoreDisable.mockResolvedValue(true);
   delete process.env['HTTPS_PROXY'];
   delete process.env['https_proxy'];
   delete process.env['HTTP_PROXY'];
@@ -217,7 +240,15 @@ describe('startCommand.handler', () => {
       'telegram',
       mockParsedChannelConfig,
       expect.any(Object),
-      expect.objectContaining({ proxy: settingsProxy }),
+      expect.objectContaining({
+        proxy: settingsProxy,
+        scheduleController: {
+          create: expect.any(Function),
+          listForTarget: expect.any(Function),
+          disable: expect.any(Function),
+          validateCron: expect.any(Function),
+        },
+      }),
     );
   });
 

@@ -113,6 +113,12 @@ describe('TelegramChannel', () => {
     vi.useRealTimers();
   });
 
+  it('supports proactive scheduled messages', () => {
+    const channel = createChannel();
+
+    expect(channel.supportsProactiveSend()).toBe(true);
+  });
+
   it('clears active typing intervals on disconnect', () => {
     const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
     const channel = createChannel();

@@ -2,14 +2,26 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { CommandModule } from 'yargs';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
-import { normalizeProxyUrl, Storage } from '@qwen-code/qwen-code-core';
+import {
+  nextFireTime,
+  normalizeProxyUrl,
+  parseCron,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
+import {
+  AcpBridge,
+  ChannelCronScheduler,
+  ChannelCronStore,
+  SessionRouter,
+} from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelBaseOptions,
   ChannelPlugin,
+  ChannelScheduleController,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import { getPlugin, registerPlugin } from './channel-registry.js';
@@ -56,6 +68,24 @@ export function resolveProxy(
 
 function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
+}
+
+function channelCronPath(): string {
+  return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
+}
+
+function createScheduleController(
+  store: ChannelCronStore,
+): ChannelScheduleController {
+  return {
+    create: (input) => store.create(input),
+    listForTarget: (channelName, target) =>
+      store.listForTarget(channelName, target),
+    disable: (id) => store.disable(id),
+    validateCron: (cron) => {
+      parseCron(cron);
+    },
+  };
 }
 
 function loadChannelsConfig(): Record<string, unknown> {
@@ -142,7 +172,7 @@ async function createChannel(
   name: string,
   config: Awaited<ReturnType<typeof parseChannelConfig>>,
   bridge: ChannelAgentBridge,
-  options?: { router?: SessionRouter; proxy?: string },
+  options?: ChannelBaseOptions,
 ): Promise<ChannelBase> {
   const channelPlugin = await getPlugin(config.type);
   if (!channelPlugin) {
@@ -239,10 +269,21 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     config.sessionScope,
     sessionsPath(),
   );
+  const cronStore = new ChannelCronStore({ filePath: channelCronPath() });
+  const scheduleController = createScheduleController(cronStore);
   const channels: Map<string, ChannelBase> = new Map();
 
-  const channel = await createChannel(name, config, bridge, { router, proxy });
+  const channel = await createChannel(name, config, bridge, {
+    router,
+    proxy,
+    scheduleController,
+  });
   channels.set(name, channel);
+  const scheduler = new ChannelCronScheduler({
+    store: cronStore,
+    channels,
+    nextFireTime,
+  });
   registerToolCallDispatch(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
@@ -255,6 +296,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     bridge.stop();
     process.exit(1);
   }
+  scheduler.start();
 
   writeServiceInfo([name]);
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
@@ -274,6 +316,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         writeStderrLine(
           `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
         );
+        scheduler.stop();
         channel.disconnect();
         router.clearAll();
         removeServiceInfo();
@@ -283,6 +326,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
       writeStderrLine(
         `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
       );
+      scheduler.stop();
       await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
       try {
@@ -295,6 +339,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         attachDisconnectHandler(bridge);
 
         const result = await router.restoreSessions();
+        scheduler.start();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
@@ -310,6 +355,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   const shutdown = () => {
     shuttingDown = true;
     writeStdoutLine('\n[Channel] Shutting down...');
+    scheduler.stop();
     channel.disconnect();
     bridge.stop();
     router.clearAll();
@@ -379,6 +425,8 @@ async function startAll(proxy?: string): Promise<void> {
   await bridge.start();
 
   const router = new SessionRouter(bridge, defaultCwd, 'user', sessionsPath());
+  const cronStore = new ChannelCronStore({ filePath: channelCronPath() });
+  const scheduleController = createScheduleController(cronStore);
   // Register per-channel scope overrides so each channel uses its own sessionScope
   for (const { name, config } of parsed) {
     router.setChannelScope(name, config.sessionScope);
@@ -392,9 +440,18 @@ async function startAll(proxy?: string): Promise<void> {
   for (const { name, config } of parsed) {
     channels.set(
       name,
-      await createChannel(name, config, bridge, { router, proxy }),
+      await createChannel(name, config, bridge, {
+        router,
+        proxy,
+        scheduleController,
+      }),
     );
   }
+  const scheduler = new ChannelCronScheduler({
+    store: cronStore,
+    channels,
+    nextFireTime,
+  });
   registerToolCallDispatch(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
@@ -417,6 +474,7 @@ async function startAll(proxy?: string): Promise<void> {
     bridge.stop();
     process.exit(1);
   }
+  scheduler.start();
 
   writeServiceInfo(parsed.map((p) => p.name));
   writeStdoutLine(
@@ -437,6 +495,7 @@ async function startAll(proxy?: string): Promise<void> {
         writeStderrLine(
           `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
         );
+        scheduler.stop();
         for (const channel of channels.values()) {
           try {
             channel.disconnect();
@@ -452,6 +511,7 @@ async function startAll(proxy?: string): Promise<void> {
       writeStderrLine(
         `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
       );
+      scheduler.stop();
       await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
       try {
@@ -466,6 +526,7 @@ async function startAll(proxy?: string): Promise<void> {
         attachDisconnectHandler(bridge);
 
         const result = await router.restoreSessions();
+        scheduler.start();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
@@ -481,6 +542,7 @@ async function startAll(proxy?: string): Promise<void> {
   const shutdown = () => {
     shuttingDown = true;
     writeStdoutLine('\n[Channel] Shutting down...');
+    scheduler.stop();
     for (const [name, channel] of channels) {
       try {
         channel.disconnect();
