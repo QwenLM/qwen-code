@@ -467,7 +467,7 @@ async function runSingleDispatch(
         `Workflow subagent did not complete (terminate mode: ${mode}).`,
       );
     }
-    return toModelVisibleSubagentResult(subagent.getFinalText());
+    return toModelVisibleSubagentResult(subagent.getFinalText(), mode);
   }
 
   return runOverridePath(config, ctx, opts, attemptSignal, onTokens, emitter);
@@ -836,6 +836,7 @@ async function runOverridePath(
       }
       let finalText: WorkflowAgentResult = toModelVisibleSubagentResult(
         subagent.getFinalText(),
+        mode,
       );
       // P5 R1: token reporting moved up to the single site after
       // `subagent.execute()` returns — see the `reportTokens(...)` call

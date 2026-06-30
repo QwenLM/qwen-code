@@ -3046,8 +3046,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             returnDisplay: this.currentDisplay!,
           };
         }
+        const visibleFinalText =
+          finalText || '(subagent produced no model-visible output)';
         return {
-          llmContent: [{ text: finalText + wtSuffix }],
+          llmContent: [{ text: visibleFinalText + wtSuffix }],
           returnDisplay: this.currentDisplay!,
         };
       } finally {

@@ -33,6 +33,14 @@ describe('toModelVisibleSubagentResult', () => {
       '<summary>part1</summary> middle <summary>part2</summary>',
       'part1 middle part2',
     ],
+    [
+      '<analysis>scratch</analysis><summary>Fix: replace <analysis> tag in src/app.tsx line 42</summary>',
+      'Fix: replace <analysis> tag in src/app.tsx line 42',
+    ],
+    [
+      '<summary>visible <analysis>hidden scratch</analysis></summary>',
+      'visible',
+    ],
     ['literal </analysis> marker', 'literal </analysis> marker'],
   ])('returns model-visible text for %j', (input, expected) => {
     expect(toModelVisibleSubagentResult(input)).toBe(expected);
