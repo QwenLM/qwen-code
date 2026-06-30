@@ -1,0 +1,118 @@
+name: 'PR Force-Push Reminder'
+
+on:
+  pull_request_target:
+    types:
+      - 'synchronize'
+
+permissions:
+  contents: 'read'
+  pull-requests: 'write'
+
+# One in-flight check per PR; a newer push supersedes the previous one so we
+# never post the reminder twice for a rapid burst of force-pushes.
+concurrency:
+  group: 'pr-force-push-reminder-${{ github.event.pull_request.number }}'
+  cancel-in-progress: true
+
+jobs:
+  remind-on-force-push:
+    name: 'Remind on force-push'
+    timeout-minutes: 5
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Detect force-push and post reminder'
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'  # v9.0.0
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const pr = context.payload.pull_request;
+            const before = context.payload.before;
+            const after = context.payload.after;
+
+            // A `synchronize` event should always carry both SHAs; bail out if
+            // either is missing or `before` is the all-zero (no parent) SHA.
+            if (!before || !after || /^0+$/.test(before)) {
+              console.log('No usable before/after SHA; nothing to do.');
+              return;
+            }
+
+            // Skip automation-driven updates (e.g. integration/autofix bots).
+            // Only humans rebasing/force-pushing should get the reminder.
+            if (context.payload.sender?.type === 'Bot') {
+              console.log(`Push made by bot "${context.payload.sender.login}"; skipping.`);
+              return;
+            }
+
+            // Compare the old tip (`before`) with the new tip (`after`):
+            //   ahead     -> new commits added on top of the old tip (normal push)
+            //   identical -> no change
+            //   behind    -> reset to an older commit (force-push)
+            //   diverged  -> history rewritten, e.g. rebase/amend (force-push)
+            let status;
+            try {
+              const cmp = await github.rest.repos.compareCommitsWithBasehead({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                basehead: `${before}...${after}`,
+              });
+              status = cmp.data.status;
+            } catch (err) {
+              // The compare can 404 if the old tip is no longer reachable.
+              // Stay conservative and skip rather than risk a false accusation.
+              const reason = err.status || err.message;
+              console.log(`Could not compare ${before}...${after}: ${reason}. Skipping.`);
+              return;
+            }
+
+            console.log(`Compare ${before.slice(0, 7)}...${after.slice(0, 7)} => ${status}`);
+            if (status === 'ahead' || status === 'identical') {
+              console.log('Fast-forward push (not a force-push); nothing to do.');
+              return;
+            }
+
+            // Force-push confirmed. Post the reminder at most once per PR; the
+            // hidden marker lets us detect a reminder we already left.
+            const MARKER = '<!-- pr-force-push-reminder -->';
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            if (comments.some((c) => c.body && c.body.includes(MARKER))) {
+              console.log('Reminder already posted on this PR; skipping.');
+              return;
+            }
+
+            const english =
+              'Please do not rebase or force-push to an active PR as it invalidates ' +
+              'existing review comments. Note for future reference, the bots always ' +
+              'squash all changes into a single commit automatically as part of the ' +
+              'integration.';
+            const chinese =
+              '请勿对活跃的 PR 执行 rebase 或 force-push，因为这会使已有的评审评论失效。' +
+              '另外，供日后参考：作为集成流程的一部分，机器人始终会自动将所有改动' +
+              '压缩（squash）为单个提交。';
+            const body = [
+              MARKER,
+              '',
+              english,
+              '',
+              '<details>',
+              '<summary>中文</summary>',
+              '',
+              chinese,
+              '',
+              '</details>',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body,
+            });
+            console.log(`Posted force-push reminder on PR #${pr.number}.`);
