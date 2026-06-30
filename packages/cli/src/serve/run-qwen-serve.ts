@@ -12,6 +12,7 @@ import express, {
   type Application,
   type NextFunction,
   type Request,
+  type RequestHandler,
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
@@ -812,6 +813,15 @@ export async function waitForRuntimeStartingForShutdown(
   });
 }
 
+const BOOTSTRAP_HEALTH_PATH = '/health';
+const BOOTSTRAP_CAPABILITIES_PATH = '/capabilities';
+const BOOTSTRAP_DAEMON_STATUS_PATH = '/daemon/status';
+const BOOTSTRAP_SERVE_PATHS = new Set([
+  BOOTSTRAP_HEALTH_PATH,
+  BOOTSTRAP_CAPABILITIES_PATH,
+  BOOTSTRAP_DAEMON_STATUS_PATH,
+]);
+
 function createBootstrapServeApp(input: {
   opts: ServeOptions;
   getPort: () => number;
@@ -864,16 +874,16 @@ function createBootstrapServeApp(input: {
   const loopback = isLoopbackBind(opts.hostname);
   const exposeHealthPreAuth = loopback && !opts.requireAuth;
   if (exposeHealthPreAuth) {
-    app.get('/health', healthHandler);
+    app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
   }
 
   app.use(bearerAuth(opts.token));
 
   if (!exposeHealthPreAuth) {
-    app.get('/health', healthHandler);
+    app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
   }
 
-  app.get('/capabilities', (_req: Request, res: Response): void => {
+  app.get(BOOTSTRAP_CAPABILITIES_PATH, (_req: Request, res: Response): void => {
     res.status(200).json(
       createBootstrapCapabilities({
         opts,
@@ -885,7 +895,7 @@ function createBootstrapServeApp(input: {
     );
   });
 
-  app.get('/daemon/status', (req: Request, res: Response): void => {
+  app.get(BOOTSTRAP_DAEMON_STATUS_PATH, (req: Request, res: Response): void => {
     const detail = parseDaemonStatusDetail(req.query['detail']);
     if (!detail.ok || !detail.detail) {
       res.status(400).json({
@@ -1028,6 +1038,7 @@ function createDelegatingServeApp(
     waitForDeferredRuntimeRoutes?: boolean;
     startRuntime?: () => void;
     runtimeReady?: Promise<void>;
+    authenticateDeferredRuntimeRequest?: RequestHandler;
   } = {},
 ): Application {
   const app = express();
@@ -1041,6 +1052,17 @@ function createDelegatingServeApp(
         options.startRuntime &&
         options.runtimeReady
       ) {
+        if (
+          options.authenticateDeferredRuntimeRequest &&
+          !runSynchronousRequestGate(
+            options.authenticateDeferredRuntimeRequest,
+            req,
+            res,
+            next,
+          )
+        ) {
+          return;
+        }
         options.startRuntime();
         try {
           await options.runtimeReady;
@@ -1062,14 +1084,24 @@ function createDelegatingServeApp(
 }
 
 function isBootstrapServeRoute(req: Request): boolean {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    return false;
-  }
-  return (
-    req.path === '/health' ||
-    req.path === '/capabilities' ||
-    req.path === '/daemon/status'
-  );
+  return BOOTSTRAP_SERVE_PATHS.has(req.path);
+}
+
+function runSynchronousRequestGate(
+  handler: RequestHandler,
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): boolean {
+  let passed = false;
+  handler(req, res, (err?: unknown) => {
+    if (err) {
+      next(err);
+      return;
+    }
+    passed = true;
+  });
+  return passed;
 }
 
 /**
@@ -1954,6 +1986,7 @@ export async function runQwenServe(
       waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
       startRuntime: () => startRuntimeForRequest?.(),
       runtimeReady,
+      authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
