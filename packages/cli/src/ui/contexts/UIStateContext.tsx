@@ -69,6 +69,7 @@ export interface UIState {
   isFastModelMode: boolean;
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
+  isCompactionModelMode: boolean;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;

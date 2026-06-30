@@ -2102,6 +2102,7 @@ export async function loadCliConfig(
         : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
     visionModel: settings.visionModel || undefined,
+    compactionModel: settings.compactionModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks:
       bareMode || safeMode

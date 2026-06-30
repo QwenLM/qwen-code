@@ -126,6 +126,8 @@ export interface AvailableModel {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the vision model selector */
+  visionOnly?: boolean;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;

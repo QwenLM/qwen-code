@@ -122,6 +122,7 @@ export interface SlashCommandProcessorActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    compactionModelMode?: boolean;
   }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
@@ -831,6 +832,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'vision-model':
                       actions.openModelDialog({ visionModelMode: true });
+                      return { type: 'handled' };
+                    case 'compaction-model':
+                      actions.openModelDialog({ compactionModelMode: true });
                       return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();

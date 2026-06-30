@@ -53,6 +53,7 @@ describe('ChatCompressionService', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getHookSystem: mockGetHookSystem,
       getModel: () => 'test-model',
+      getFastModel: vi.fn(),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
@@ -838,7 +839,10 @@ describe('ChatCompressionService', () => {
     expect(serialized).toContain('[image: image/png]');
   });
 
-  it('forwards model, maxAttempts, and thinkingConfig to runSideQuery', async () => {
+  it('passes getFastModel to runSideQuery for compression', async () => {
+    // Compression passes config.getFastModel?.() to runSideQuery so it uses
+    // the fast model (e.g., Qwen/Qwen3-Alpha) instead of the expensive main
+    // model, reducing cost. See https://github.com/QwenLM/qwen-code/issues/5956
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -848,6 +852,7 @@ describe('ChatCompressionService', () => {
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
     vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model-v1');
 
     const mockGenerateText = vi.fn().mockResolvedValue({
       text: 'Summary',
@@ -874,9 +879,10 @@ describe('ChatCompressionService', () => {
     // inconsistent) and the output is hard-capped by COMPACT_MAX_OUTPUT_TOKENS
     // so subsequent threshold math has a predictable reserve. maxAttempts=1
     // keeps the call best-effort (next turn re-triggers on failure).
+    // Model is set to getFastModel?.() to use the fast model for cost efficiency.
     expect(mockGenerateText).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: mockModel,
+        model: 'fast-model-v1',
         maxAttempts: 1,
         config: expect.objectContaining({
           thinkingConfig: { includeThoughts: false },
