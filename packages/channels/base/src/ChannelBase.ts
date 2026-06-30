@@ -323,6 +323,9 @@ export abstract class ChannelBase {
           job.id,
           options.timeoutMs,
         );
+        if (promptState.cancelRequested && !promptState.cancelled) {
+          promptState.cancelled = await promptState.cancelRequested;
+        }
         if (!promptState.cancelled && response) {
           await this.pushProactive(job.target, response);
         }
@@ -1056,7 +1059,7 @@ export abstract class ChannelBase {
       senderId: envelope.senderId,
       chatId: envelope.chatId,
       threadId: envelope.threadId,
-      isGroup: envelope.isGroup,
+      isGroup: envelope.isGroup === true,
     };
   }
 

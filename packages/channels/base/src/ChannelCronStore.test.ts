@@ -69,6 +69,17 @@ describe('ChannelCronStore', () => {
     ).resolves.toEqual([first]);
   });
 
+  it('does not match targets with different group context', async () => {
+    await store.create(input);
+
+    await expect(
+      store.listForTarget('feishu-main', {
+        ...input.target,
+        isGroup: true,
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it('creates for a target without counting disabled jobs against the cap', async () => {
     const disabled = await store.create(input);
     await store.disable(disabled.id);

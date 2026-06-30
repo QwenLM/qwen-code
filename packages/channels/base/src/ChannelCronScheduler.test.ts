@@ -254,6 +254,66 @@ describe('ChannelCronScheduler', () => {
     });
   });
 
+  it('does not block later ticks behind a hung job', async () => {
+    const laterJob = {
+      ...baseJob,
+      id: 'job-2',
+      createdAt: '2026-06-30T01:06:00.000Z',
+    };
+    jobs = [{ ...baseJob }];
+    runScheduledPrompt.mockImplementation((job: ChannelCronJob) => {
+      if (job.id === 'job-1') return new Promise(() => undefined);
+      return Promise.resolve();
+    });
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    void scheduler.tick();
+    await vi.waitFor(() => {
+      expect(runScheduledPrompt).toHaveBeenCalledWith(baseJob, {
+        timeoutMs: 300_000,
+      });
+    });
+    jobs = [jobs[0]!, laterJob];
+    void scheduler.tick();
+
+    await vi.waitFor(() => {
+      expect(runScheduledPrompt).toHaveBeenCalledWith(laterJob, {
+        timeoutMs: 300_000,
+      });
+    });
+  });
+
+  it('logs success persistence failures without recording a job failure', async () => {
+    store.update = vi.fn(async () => {
+      throw new Error('disk full');
+    });
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => {
+        return true;
+      });
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    expect(store.update).toHaveBeenCalledTimes(1);
+    expect(store.disable).not.toHaveBeenCalled();
+    expect(writeSpy).toHaveBeenCalledWith(
+      expect.stringContaining('succeeded but status persist failed'),
+    );
+    writeSpy.mockRestore();
+  });
+
   it('rechecks that a job is still enabled before firing', async () => {
     store.list = vi
       .fn()

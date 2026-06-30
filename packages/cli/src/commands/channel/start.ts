@@ -342,8 +342,8 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
-        scheduler.start();
         const result = await router.restoreSessions();
+        scheduler.start();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
@@ -529,8 +529,8 @@ async function startAll(proxy?: string): Promise<void> {
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
-        scheduler.start();
         const result = await router.restoreSessions();
+        scheduler.start();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
