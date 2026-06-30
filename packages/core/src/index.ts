@@ -257,6 +257,7 @@ export {
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
+export * from './utils/safe-mode.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -450,6 +451,7 @@ export * from './utils/ripgrepUtils.js';
 export {
   detectRuntime,
   getOrCreateSharedDispatcher,
+  isTlsVerificationDisabled,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';
