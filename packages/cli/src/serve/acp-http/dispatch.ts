@@ -3171,7 +3171,20 @@ export class AcpDispatcher {
     if (!pendingRef) return;
     const pendingConn = pendingRef.conn;
     const pending = pendingRef.req;
-    if (pendingConn !== conn && !conn.ownsSession(pending.sessionId)) return;
+    if (pendingConn !== conn && !conn.ownsSession(pending.sessionId)) {
+      // Mirror the `session/permission` handler: never drop a cross-connection
+      // vote silently. The POST already returned 202, so without a log line the
+      // operator has no grep-friendly signal to correlate against a permission
+      // prompt that stays blocked until teardown's `abandonPendingForSession`.
+      writeStderrLine(
+        `qwen serve: /acp permission vote dropped: responding connection ${logSafe(
+          conn.connectionId.slice(0, 8),
+        )} does not own session ${logSafe(pending.sessionId)} (requestId ${logSafe(
+          pending.bridgeRequestId,
+        )})`,
+      );
+      return;
+    }
     // NOTE: do NOT delete the pending entry yet. Keep it until either the
     // bridge vote OR the cancel fallback runs — if both somehow fail, the
     // entry survives so a later session/connection teardown

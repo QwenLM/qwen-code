@@ -1746,6 +1746,83 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('session/permission returns 404 when no pending request matches the requestId', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 27,
+      method: 'session/permission',
+      params: {
+        requestId: 'does-not-exist',
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string; data?: { httpStatus?: number } };
+    }>;
+    expect(frame.id).toBe(27);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.data?.httpStatus).toBe(404);
+    expect(frame.error.message).toContain('No pending permission request');
+  });
+
+  it('session/permission rejects a vote from a connection that does not own the session', async () => {
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-unowned-method',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const ownerConnId = await initialize();
+    await newSession(ownerConnId);
+    const voterConnId = await initialize();
+    const ownerSess = await openStream(ownerConnId, 'sess-1');
+    const ownerReader = frameReader(ownerSess);
+    const voterStream = await openStream(voterConnId);
+    const voterGot = takeFrames(voterStream, 1);
+    try {
+      await post(ownerConnId, {
+        jsonrpc: '2.0',
+        id: 28,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      // Wait for the request_permission frame so the pending entry is
+      // registered on the owner connection before the unowned vote arrives.
+      await ownerReader.next();
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: 29,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-unowned-method',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const [frame] = (await voterGot) as Array<{
+        id: number;
+        error: { code: number; message: string };
+      }>;
+      expect(frame.id).toBe(29);
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.message).toContain('not owned by this connection');
+    } finally {
+      ownerReader.close();
+    }
+  });
+
   it('standard session/set_config_option (model) routes to the bridge', async () => {
     const connId = await initialize();
     await newSession(connId);
