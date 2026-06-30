@@ -45,7 +45,7 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   });
 
@@ -301,6 +301,39 @@ describe('modelCommand', () => {
       messageType: 'error',
       content: expect.stringContaining('different provider'),
     });
+  });
+
+  it('rejects an inline prompt in ACP mode (no per-turn override pipeline)', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: {
+        raw: '/model qwen-max explain this',
+        name: 'model',
+        args: 'qwen-max explain this',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'qwen-max explain this',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
   });
 
   it('should not persist the model when direct model validation fails', async () => {

@@ -213,10 +213,10 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, [model-id] [prompt] to run a one-off prompt on another model).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   },
-  argumentHint: '[--fast|--voice|--vision] [<model-id>] [<prompt>]',
+  argumentHint: '[--fast|--voice|--vision] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -594,6 +594,20 @@ export const modelCommand: SlashCommand = {
       }
 
       if (inlinePrompt) {
+        // ACP hosts send the prompt on the session model via a separate
+        // pipeline that doesn't thread a per-turn override, so the inline form
+        // would silently run on the default model. Reject it there rather than
+        // mislead; the two-step `/model <id>` flow still works in ACP.
+        if (context.executionMode === 'acp') {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
+              { model: modelName },
+            ),
+          };
+        }
         // The per-turn override only changes the model id sent to the active
         // provider; it cannot rebuild credentials/endpoint, so a model that
         // resolves to a different auth type can't be run inline. Point the user

@@ -501,6 +501,10 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // True when the current turn's model override came from an explicit inline
+  // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
+  // explicit choice mid-turn, so this takes precedence until the next user turn.
+  const inlineModelOverrideActiveRef = useRef<boolean>(false);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
   // Scoped to a top-level submit and cleared below before a new user prompt.
   // Repeated duplicate provider ids within that submit are terminal/drop-only.
@@ -996,6 +1000,7 @@ export const useGeminiStream = (
               // then clears on the next user turn.
               if (slashCommandResult.modelOverride) {
                 modelOverrideRef.current = slashCommandResult.modelOverride;
+                inlineModelOverrideActiveRef.current = true;
               }
 
               return {
@@ -2175,6 +2180,7 @@ export const useGeminiStream = (
         // so the same skill-selected model is used again.
         if (submitType !== SendMessageType.Retry) {
           modelOverrideRef.current = undefined;
+          inlineModelOverrideActiveRef.current = false;
         }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -2752,8 +2758,14 @@ export const useGeminiStream = (
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
       // prior override, while non-skill tools (field absent) leave it intact.
+      // An explicit inline `/model <id> <prompt>` override wins for the whole
+      // turn, so skip skill-tool writes (including the undefined-clears case)
+      // while it is active.
       for (const toolCall of geminiTools) {
-        if ('modelOverride' in toolCall.response) {
+        if (
+          !inlineModelOverrideActiveRef.current &&
+          'modelOverride' in toolCall.response
+        ) {
           modelOverrideRef.current = toolCall.response.modelOverride;
         }
       }
