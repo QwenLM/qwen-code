@@ -169,7 +169,11 @@ export class QQChannel extends ChannelBase {
       options?.router ??
       new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
 
-    super(name, config, bridge, { ...options, router });
+    super(name, config, bridge, {
+      ...options,
+      router,
+      registerBridgeEvents: options?.registerBridgeEvents ?? true,
+    });
     this.qqConfig = config as unknown as QQChannelConfig;
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
@@ -1498,7 +1502,9 @@ export class QQChannel extends ChannelBase {
       return;
     }
     const chatId = event.group_openid;
+    const isNewGroup = !this.chatTypeMap.has(chatId);
     this.chatTypeMap.set(chatId, 'group');
+    if (isNewGroup) this.saveQQState();
 
     // Deduplicate early — before any side effects beyond chatTypeMap.set
     // to avoid unnecessary state mutations on replayed messages.
