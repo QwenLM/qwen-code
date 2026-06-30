@@ -31,7 +31,7 @@ on:
         default: 'auto'
         type: 'choice'
         options:
-          - 'auto' # review always; issue at 00/12 UTC
+          - 'auto' # review always; issue on schedule or ready-for-agent label
           - 'issue' # locate + fix one bug only
           - 'review' # address review on open PRs only
           - 'both' # issue and review
@@ -379,8 +379,9 @@ jobs:
             You are a senior engineer triaging bug reports for autonomous
             fixing. The repository is checked out in the current directory.
             Candidate issues are in /tmp/autofix/candidates.json.
-            `autofixTier: 0` means the issue was forced via workflow_dispatch;
-            treat it as highest priority. `autofixTier: 1` means a maintainer
+            `autofixTier: 0` means a specific issue was selected by manual
+            dispatch or an issue label event; treat it as highest priority.
+            `autofixTier: 1` means a maintainer
             marked the issue ready-for-agent; `autofixTier: 2` means it is a
             recent unattended bug. Do not pick a tier-2 issue over a comparably
             actionable tier-1 issue; only do so when the tier-2 issue has
