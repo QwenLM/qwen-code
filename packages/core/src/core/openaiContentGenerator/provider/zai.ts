@@ -7,6 +7,9 @@
 import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('ZAI');
 
 /**
  * Hostname check for Z.ai / Zhipu GLM endpoints. GLM's OpenAI-compatible
@@ -56,14 +59,44 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
   static isZaiProvider = isZaiProvider;
   static isZaiHostname = isZaiHostname;
 
+  // Latch so the skipped-flatten warning fires once per provider lifetime.
+  private nonZaiHostnameFlattenWarned = false;
+
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
-    return isZaiHostname(this.contentGeneratorConfig)
-      ? flattenReasoningEffort(baseRequest)
-      : baseRequest;
+    if (isZaiHostname(this.contentGeneratorConfig)) {
+      return flattenReasoningEffort(baseRequest);
+    }
+    // A `glm-*` model on a non-z.ai/non-bigmodel.cn hostname (e.g. a
+    // self-hosted GLM) still routes through this provider via the model-name
+    // fallback in `isZaiProvider`, but the GLM-specific `reasoning_effort`
+    // reshape stays hostname-gated so we don't push GLM's flat field at an
+    // arbitrary OpenAI-compatible backend that may not understand it. Warn once
+    // when this leaves a nested `reasoning: { effort }` unflattened so the gap
+    // is discoverable in debug logs rather than silent.
+    const reasoning = (baseRequest as unknown as Record<string, unknown>)[
+      'reasoning'
+    ] as { effort?: unknown } | undefined;
+    if (
+      reasoning?.effort &&
+      !(baseRequest as unknown as Record<string, unknown>)[
+        'reasoning_effort'
+      ] &&
+      !this.nonZaiHostnameFlattenWarned
+    ) {
+      debugLogger.warn(
+        `GLM model '${
+          this.contentGeneratorConfig.model ?? 'unknown'
+        }' on a non-Z.ai hostname; leaving nested reasoning.effort='${String(
+          reasoning.effort,
+        )}' unflattened (reasoning_effort reshape is hostname-gated).`,
+      );
+      this.nonZaiHostnameFlattenWarned = true;
+    }
+    return baseRequest;
   }
 }
 
