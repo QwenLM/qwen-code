@@ -71,6 +71,25 @@ describe('channel memory', () => {
     expect(relativeSegments).toContain('team..bot');
   });
 
+  it.each(['.', '..'])(
+    'uses underscore for exact %s channel segment',
+    (channelName) => {
+      const filePath = getChannelMemoryFilePath({
+        channelName,
+        chatId: 'chat-1',
+      });
+      const relativePath = path.relative(qwenHome, filePath);
+      const relativeSegments = relativePath.split(path.sep);
+
+      expect(filePath.startsWith(qwenHome + path.sep)).toBe(true);
+      expect(relativeSegments).not.toContain('.');
+      expect(relativeSegments).not.toContain('..');
+      expect(relativeSegments[0]).toBe('channels');
+      expect(relativeSegments[1]).toBe('memory');
+      expect(relativeSegments[2]).toBe('_');
+    },
+  );
+
   it('uses different paths for different thread ids', () => {
     const target: ChannelMemoryTarget = {
       channelName: 'prod',
