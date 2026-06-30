@@ -44,6 +44,7 @@ import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
+import { toModelVisibleSubagentResult } from '../subagent-result.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -466,7 +467,7 @@ async function runSingleDispatch(
         `Workflow subagent did not complete (terminate mode: ${mode}).`,
       );
     }
-    return subagent.getFinalText();
+    return toModelVisibleSubagentResult(subagent.getFinalText());
   }
 
   return runOverridePath(config, ctx, opts, attemptSignal, onTokens, emitter);
@@ -833,7 +834,9 @@ async function runOverridePath(
           `Workflow subagent did not complete (terminate mode: ${mode}).`,
         );
       }
-      let finalText: WorkflowAgentResult = subagent.getFinalText();
+      let finalText: WorkflowAgentResult = toModelVisibleSubagentResult(
+        subagent.getFinalText(),
+      );
       // P5 R1: token reporting moved up to the single site after
       // `subagent.execute()` returns — see the `reportTokens(...)` call
       // above the schema/non-schema branching.

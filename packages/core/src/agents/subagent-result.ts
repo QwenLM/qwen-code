@@ -7,12 +7,13 @@
 /** Keeps subagent scratchpad tags out of the parent model context. */
 export function toModelVisibleSubagentResult(text: string): string {
   const withoutAnalysis = text
-    .replace(/<analysis\b[^>]*>[\s\S]*?(?:<\/analysis>|$)/gi, '')
-    .replace(/<\/analysis>/gi, '');
-  // Only unwrap summaries that cover the whole payload.
-  const summaryMatch = withoutAnalysis.match(
-    /^\s*<summary\b[^>]*>\s*([\s\S]*?)\s*<\/summary>\s*$/i,
-  );
+    .replace(/<analysis\b[^>]*>[\s\S]*?<\/analysis>/gi, '')
+    .replace(/<analysis\b[^>]*>[\s\S]*?(?=<summary\b[^>]*>|$)/gi, '');
+  const trimmed = withoutAnalysis.trim();
+  const summaryOpen = trimmed.match(/^<summary\b[^>]*>/i);
+  if (summaryOpen && trimmed.toLowerCase().endsWith('</summary>')) {
+    return trimmed.slice(summaryOpen[0].length, -'</summary>'.length).trim();
+  }
 
-  return (summaryMatch?.[1] ?? withoutAnalysis).trim();
+  return trimmed.replace(/<\/?summary\b[^>]*>/gi, '').trim();
 }

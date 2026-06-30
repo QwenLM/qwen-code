@@ -48,6 +48,7 @@ import {
   type RunConfig,
   type ToolConfig,
 } from '../agents/index.js';
+import { toModelVisibleSubagentResult } from '../agents/subagent-result.js';
 import {
   buildModelIdContext,
   resolveModelId,
@@ -532,7 +533,8 @@ export async function runForkedAgent(
     });
 
     const terminateReason = headless.getTerminateMode();
-    const finalText = headless.getFinalText() || undefined;
+    const finalText =
+      toModelVisibleSubagentResult(headless.getFinalText()) || undefined;
     const touched = [...filesTouched];
 
     if (terminateReason === AgentTerminateMode.CANCELLED) {
