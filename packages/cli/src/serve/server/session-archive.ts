@@ -151,6 +151,8 @@ export async function unarchiveDaemonSessions(params: {
       notFound.push(...result.notFound);
       errors.push(...result.errors);
     } catch (err) {
+      // The service reports normal per-session failures in `result.errors`.
+      // Reaching this catch means the batch could not produce a result at all.
       for (const sessionId of sessionIds) {
         errors.push({ sessionId, error: err });
       }
