@@ -163,11 +163,16 @@ export class AcpWsTransport implements DaemonTransport {
 
     // For notifications, send and return 204 immediately.
     if (mapping.notification) {
-      const params = mapping.extractParams(segments, body, httpMethod);
+      const params = mapping.extractParams(
+        segments,
+        body,
+        httpMethod,
+        parsedUrl.searchParams,
+      );
       const notifMeta = extractHeaderMeta(init.headers);
       if (notifMeta) {
-        params._meta = {
-          ...(isRecord(params._meta) ? params._meta : {}),
+        params['_meta'] = {
+          ...(isRecord(params['_meta']) ? params['_meta'] : {}),
           ...notifMeta,
         };
       }
@@ -176,15 +181,20 @@ export class AcpWsTransport implements DaemonTransport {
     }
 
     // Normal request-response.
-    const params = mapping.extractParams(segments, body, httpMethod);
+    const params = mapping.extractParams(
+      segments,
+      body,
+      httpMethod,
+      parsedUrl.searchParams,
+    );
 
     // Forward per-request headers as JSON-RPC _meta so the server can
     // see X-Qwen-Client-Id and similar metadata that HTTP transports
     // carry natively.
     const headerMeta = extractHeaderMeta(init.headers);
     if (headerMeta) {
-      params._meta = {
-        ...(isRecord(params._meta) ? params._meta : {}),
+      params['_meta'] = {
+        ...(isRecord(params['_meta']) ? params['_meta'] : {}),
         ...headerMeta,
       };
     }
