@@ -10,6 +10,9 @@ const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockSanitizeLogText = vi.hoisted(() =>
+  vi.fn((value: unknown) => String(value).replace(/[\r\n]/g, ' ')),
+);
 
 const mockBridgeStart = vi.hoisted(() => vi.fn());
 const mockBridgeStop = vi.hoisted(() => vi.fn());
@@ -75,6 +78,7 @@ vi.mock('./runtime.js', () => ({
 
 vi.mock('@qwen-code/channel-base', () => ({
   DaemonChannelBridge: mockDaemonChannelBridge,
+  sanitizeLogText: mockSanitizeLogText,
   SessionRouter: mockSessionRouter,
 }));
 
@@ -212,8 +216,11 @@ describe('createDaemonChannelBridgeFacade', () => {
   });
 
   it('exposes shellCommand when the daemon advertises shell support', () => {
+    let availableCommands = [{ name: 'initial', description: 'Initial' }];
     const bridge = {
-      availableCommands: [],
+      get availableCommands() {
+        return availableCommands;
+      },
       on: mockBridgeOn,
       off: mockBridgeOff,
       newSession: mockBridgeNewSession,
@@ -228,6 +235,10 @@ describe('createDaemonChannelBridgeFacade', () => {
     });
 
     expect(facade.shellCommand).toBeTypeOf('function');
+    availableCommands = [{ name: 'updated', description: 'Updated' }];
+    expect(facade.availableCommands).toEqual([
+      { name: 'updated', description: 'Updated' },
+    ]);
   });
 
   it('preserves session-scoped available commands when present', () => {
@@ -305,6 +316,9 @@ describe('runChannelDaemonWorker', () => {
 
     await handle.close();
     expect(mockBridgeStop).toHaveBeenCalled();
+    expect(mockBridgeStop.mock.invocationCallOrder[0]!).toBeLessThan(
+      mockRouterClearAll.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('selects all configured channels in one shared router', async () => {
@@ -419,6 +433,7 @@ describe('runChannelDaemonWorker', () => {
     ).rejects.toThrow('No channels connected.');
 
     expect(disconnect).toHaveBeenCalled();
+    expect(mockSanitizeLogText).toHaveBeenCalledWith('connect boom', 512);
     expect(mockBridgeStop).toHaveBeenCalled();
   });
 

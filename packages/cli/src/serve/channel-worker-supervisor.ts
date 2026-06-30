@@ -10,6 +10,16 @@ import {
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
+const CHANNEL_WORKER_ENV_DENYLIST = [
+  QWEN_SERVER_TOKEN_ENV,
+  QWEN_DAEMON_TOKEN_ENV,
+  'ANTHROPIC_API_KEY',
+  'DASHSCOPE_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'OPENAI_API_KEY',
+  'QWEN_API_KEY',
+];
 
 export type ChannelWorkerState =
   | 'disabled'
@@ -126,6 +136,10 @@ function waitForExit(
   });
 }
 
+function hasObservedExit(snapshot: ChannelWorkerSnapshot): boolean {
+  return snapshot.exitCode !== undefined || snapshot.signal !== undefined;
+}
+
 export function createChannelWorkerSupervisor(
   opts: CreateChannelWorkerSupervisorOptions,
 ): ChannelWorkerSupervisor {
@@ -169,8 +183,9 @@ export function createChannelWorkerSupervisor(
         [QWEN_DAEMON_URL_ENV]: opts.daemonUrl,
         [QWEN_DAEMON_WORKSPACE_ENV]: opts.workspace,
       };
-      delete env[QWEN_SERVER_TOKEN_ENV];
-      delete env[QWEN_DAEMON_TOKEN_ENV];
+      for (const name of CHANNEL_WORKER_ENV_DENYLIST) {
+        delete env[name];
+      }
       if (opts.daemonToken) {
         env[QWEN_DAEMON_TOKEN_ENV] = opts.daemonToken;
       }
@@ -263,7 +278,7 @@ export function createChannelWorkerSupervisor(
       if (
         !child ||
         snapshot.state === 'exited' ||
-        snapshot.state === 'failed' ||
+        (snapshot.state === 'failed' && hasObservedExit(snapshot)) ||
         snapshot.state === 'stopped'
       ) {
         snapshot = { ...snapshot, state: 'stopped' };
@@ -282,7 +297,7 @@ export function createChannelWorkerSupervisor(
       if (
         !child ||
         snapshot.state === 'exited' ||
-        snapshot.state === 'failed' ||
+        (snapshot.state === 'failed' && hasObservedExit(snapshot)) ||
         snapshot.state === 'stopped'
       ) {
         return;

@@ -22,6 +22,8 @@ describe('createChannelWorkerSupervisor', () => {
 
   it('passes daemon connection details through env without putting token in argv', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', 'serve-token');
+    vi.stubEnv('OPENAI_API_KEY', 'openai-secret');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-secret');
     const child = new FakeChild();
     const spawnWorker = vi.fn(
       (_execPath: string, _argv: string[], _options: unknown) => child,
@@ -68,6 +70,8 @@ describe('createChannelWorkerSupervisor', () => {
     const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
       .env;
     expect(env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(env).not.toHaveProperty('OPENAI_API_KEY');
+    expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');
     const argv = spawnWorker.mock.calls[0]![1];
     expect(argv).not.toContain('secret-token');
     expect(supervisor.snapshot()).toMatchObject({
@@ -163,6 +167,29 @@ describe('createChannelWorkerSupervisor', () => {
     await supervisor.stop();
 
     expect(child.kill).not.toHaveBeenCalled();
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'stopped',
+    });
+  });
+
+  it('still signals a worker that errors before an exit is observed', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('error', new Error('spawn error'));
+    await expect(started).rejects.toThrow('spawn error');
+
+    await supervisor.stop();
+
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
       state: 'stopped',

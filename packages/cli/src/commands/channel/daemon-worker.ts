@@ -1,6 +1,10 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
-import { DaemonChannelBridge, SessionRouter } from '@qwen-code/channel-base';
+import {
+  DaemonChannelBridge,
+  sanitizeLogText,
+  SessionRouter,
+} from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelBase,
@@ -142,14 +146,11 @@ export function createDaemonChannelBridgeFacade(
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
   }
 
-  if (!opts.exposeShellCommand || !bridge.shellCommand) {
-    return facade;
+  if (opts.exposeShellCommand && bridge.shellCommand) {
+    facade.shellCommand = bridge.shellCommand.bind(bridge);
   }
 
-  return {
-    ...facade,
-    shellCommand: bridge.shellCommand.bind(bridge),
-  };
+  return facade;
 }
 
 async function loadDaemonSdk(): Promise<DaemonSdkLike> {
@@ -282,8 +283,13 @@ export async function runChannelDaemonWorker(
         connected.push(name);
         writeStdoutLine(`[Channel] "${name}" connected.`);
       } catch (err) {
+        const safeName = sanitizeLogText(name, 128);
+        const safeMessage = sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          512,
+        );
         writeStderrLine(
-          `[Channel] Failed to connect "${name}": ${err instanceof Error ? err.message : String(err)}`,
+          `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
         try {
           channel.disconnect();
@@ -303,8 +309,8 @@ export async function runChannelDaemonWorker(
       channels: connected,
       async close() {
         disconnectAll();
-        router.clearAll();
         bridge.stop();
+        router.clearAll();
       },
     };
   } catch (err) {
@@ -375,8 +381,8 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           process.exit(1);
         }
       };
-      process.once('SIGINT', shutdown);
-      process.once('SIGTERM', shutdown);
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
       process.once('disconnect', () => {
         void shutdown('disconnect');
       });

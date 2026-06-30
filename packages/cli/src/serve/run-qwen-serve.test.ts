@@ -1446,6 +1446,7 @@ describe('runQwenServe channel worker supervisor', () => {
       ),
     ).rejects.toThrow('worker failed before ready');
 
+    expect(worker.stop).toHaveBeenCalled();
     expect(bridge.shutdown).toHaveBeenCalled();
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });

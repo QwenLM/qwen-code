@@ -2241,6 +2241,14 @@ export async function runQwenServe(
           }
         }
       };
+      const stopChannelWorkerAfterFailedStartup = async (): Promise<void> => {
+        await channelWorker.stop().catch((stopErr) => {
+          daemonLog.error(
+            'channel worker stop after runtime startup error failed',
+            stopErr instanceof Error ? stopErr : null,
+          );
+        });
+      };
       const failRuntimeStartup = async (
         err: unknown,
         bridgeForCleanup?: AcpSessionBridge,
@@ -2263,9 +2271,31 @@ export async function runQwenServe(
         }
         writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
         daemonLog.error('runtime startup failed', error);
-        markRuntimeFailed(error);
+        await stopChannelWorkerAfterFailedStartup();
         removeCurrentServePidfile();
         await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
+        markRuntimeFailed(error);
+      };
+      const armRuntimeStartupTimer = (): void => {
+        if (runtimeStartupTimeoutMs <= 0 || runtimeStartupTimer) return;
+        runtimeStartupTimer = setTimeout(() => {
+          void failRuntimeStartup(
+            new Error(
+              `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
+            ),
+          );
+        }, runtimeStartupTimeoutMs);
+        runtimeStartupTimer.unref();
+      };
+      const completeRuntimeStartup = async (): Promise<void> => {
+        if (runtimeStartupSettled) return;
+        if (opts.channelSelection) {
+          await channelWorker.start();
+          writeChannelWorkerPidfile();
+        }
+        runtimeStartupSettled = true;
+        clearRuntimeStartupTimer();
+        markRuntimeReady();
       };
       const startBridgePreheat = (bridge: AcpSessionBridge): void => {
         startup.preheat.status = 'running';
@@ -2292,6 +2322,7 @@ export async function runQwenServe(
       };
       const startRuntime = (): void => {
         if (runtimeStarting) return;
+        armRuntimeStartupTimer();
         runtimeStarting = buildRuntime()
           .then(async (runtime) => {
             if (runtimeStartupSettled) {
@@ -2315,25 +2346,9 @@ export async function runQwenServe(
             if (shouldPreheat) {
               startBridgePreheat(runtime.bridge);
             }
-            if (opts.channelSelection) {
-              await channelWorker.start();
-              writeChannelWorkerPidfile();
-            }
-            runtimeStartupSettled = true;
-            clearRuntimeStartupTimer();
-            markRuntimeReady();
+            await completeRuntimeStartup();
           })
           .catch((err) => failRuntimeStartup(err));
-        if (runtimeStartupTimeoutMs > 0) {
-          runtimeStartupTimer = setTimeout(() => {
-            void failRuntimeStartup(
-              new Error(
-                `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
-              ),
-            );
-          }, runtimeStartupTimeoutMs);
-          runtimeStartupTimer.unref();
-        }
       };
 
       // Forward declaration so handle.close can detach the listener after
@@ -2610,15 +2625,10 @@ export async function runQwenServe(
           startBridgePreheat(bridgeRef);
         }
         if (opts.channelSelection && !runtimeStartupSettled) {
-          runtimeStarting = channelWorker
-            .start()
-            .then(() => {
-              writeChannelWorkerPidfile();
-              runtimeStartupSettled = true;
-              clearRuntimeStartupTimer();
-              markRuntimeReady();
-            })
-            .catch((err) => failRuntimeStartup(err, bridgeRef));
+          armRuntimeStartupTimer();
+          runtimeStarting = completeRuntimeStartup().catch((err) =>
+            failRuntimeStartup(err, bridgeRef),
+          );
         }
       } else {
         startRuntime();

@@ -162,7 +162,8 @@ export class SessionRouter {
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     // If chatId is provided, do an exact scoped lookup; otherwise scan for any
     // sender-owned session on this channel. Single scope has no sender-owned
-    // no-chat lookup, preserving the old prefix-scan behavior.
+    // no-chat lookup, so callers must pass chatId for an exact single-session
+    // check.
     if (chatId) {
       return this.toSession.has(
         this.routingKey(channelName, senderId, chatId, threadId),
