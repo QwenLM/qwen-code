@@ -176,7 +176,7 @@ describe('parseChannelConfig', () => {
       type: 'bare',
       cwd: '~',
     });
-    expect(result.cwd).toBe(os.homedir());
+    expect(result.cwd).toBe(path.normalize(os.homedir()));
   });
 
   it('resolves relative cwd against process.cwd', async () => {
