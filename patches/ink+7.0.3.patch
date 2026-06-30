@@ -1,3 +1,51 @@
+diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
+index ef659f3..14d0aba 100644
+--- a/node_modules/ink/build/ink.js
++++ b/node_modules/ink/build/ink.js
+@@ -145,6 +145,7 @@ export default class Ink {
+     lastOutputToRender;
+     lastOutputHeight;
+     lastTerminalWidth;
++    lastTerminalHeight;
+     container;
+     rootNode;
+     // This variable is used only in debug mode to store full static output
+@@ -227,6 +228,7 @@ export default class Ink {
+         this.lastOutputToRender = '';
+         this.lastOutputHeight = 0;
+         this.lastTerminalWidth = getWindowSize(this.options.stdout).columns;
++        this.lastTerminalHeight = getWindowSize(this.options.stdout).rows;
+         // This variable is used only in debug mode to store full static output
+         // so that it's rerendered every time, not just new static parts, like in non-debug mode
+         this.fullStaticOutput = '';
+@@ -260,7 +262,18 @@ export default class Ink {
+         void this.exitPromise.catch(noop);
+     }
+     resized = () => {
+-        const currentWidth = getWindowSize(this.options.stdout).columns;
++        const { columns: currentWidth, rows: currentHeight } = getWindowSize(this.options.stdout);
++        // A resize event whose dimensions are unchanged carries no layout work.
++        // Terminal multiplexers (tmux/cmux/screen) routinely re-send SIGWINCH
++        // with identical dimensions when a pane regains focus; re-rendering here
++        // pushes renderInteractiveFrame down its overflow path, which writes
++        // `clearTerminal + fullStaticOutput + output` and re-streams the ENTIRE
++        // scrollback — visibly scrolling the transcript from top to bottom every
++        // time you switch back to the tab. Nothing changed, so do nothing.
++        if (currentWidth === this.lastTerminalWidth &&
++            currentHeight === this.lastTerminalHeight) {
++            return;
++        }
+         if (currentWidth < this.lastTerminalWidth) {
+             // We clear the screen when decreasing terminal width to prevent duplicate overlapping re-renders.
+             this.log.clear();
+@@ -270,6 +283,7 @@ export default class Ink {
+         this.calculateLayout();
+         this.onRender();
+         this.lastTerminalWidth = currentWidth;
++        this.lastTerminalHeight = currentHeight;
+     };
+     resolveExitPromise = () => { };
+     rejectExitPromise = () => { };
 diff --git a/node_modules/ink/package.json b/node_modules/ink/package.json
 --- a/node_modules/ink/package.json
 +++ b/node_modules/ink/package.json
