@@ -1813,6 +1813,54 @@ describe('ChannelBase', () => {
       expect(secondPrompt).not.toContain('Channel memory for this chat');
     });
 
+    it('claims first-session context before a slow memory read resolves', async () => {
+      let reads = 0;
+      let resolveMemory: (value: string) => void = () => {};
+      const slowMemory = new Promise<string>((resolve) => {
+        resolveMemory = resolve;
+      });
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockImplementation(() => {
+          reads += 1;
+          return reads === 1 ? slowMemory : 'fast memory';
+        }),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      const first = ch.handleInbound(
+        envelope({ text: 'first', senderId: 'alice' }),
+      );
+      await vi.waitFor(() =>
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1),
+      );
+
+      const second = ch.handleInbound(
+        envelope({ text: 'second', senderId: 'alice' }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+
+      resolveMemory('slow memory');
+      await Promise.all([first, second]);
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(firstPrompt).toContain(
+        'Channel memory for this chat:\nslow memory',
+      );
+      expect(firstPrompt).toContain('first');
+      expect(secondPrompt).not.toContain('Channel memory for this chat');
+      expect(secondPrompt).toContain('second');
+      expect(reads).toBe(1);
+    });
+
     it('/remember-channel invalidates current session context after append', async () => {
       let memory = 'old memory';
       let reads = 0;

@@ -1094,23 +1094,8 @@ export abstract class ChannelBase {
       }
     }
 
-    // Prepend channel context on first message of a session
-    if (!this.instructedSessions.has(sessionId)) {
-      const context: string[] = [];
-      const channelMemory = (
-        await this.channelMemory?.readChannelMemory(
-          this.channelMemoryTarget(envelope),
-        )
-      )?.trim();
-      if (channelMemory) {
-        context.push(`Channel memory for this chat:\n${channelMemory}`);
-      }
-      if (this.config.instructions) {
-        context.push(this.config.instructions);
-      }
-      if (context.length > 0) {
-        promptText = `${context.join('\n\n')}\n\n${promptText}`;
-      }
+    const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
+    if (shouldPrependSessionContext) {
       this.instructedSessions.add(sessionId);
     }
 
@@ -1261,6 +1246,23 @@ export abstract class ChannelBase {
           `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${loggedText})\n`,
         );
         return;
+      }
+      if (shouldPrependSessionContext) {
+        const context: string[] = [];
+        const channelMemory = (
+          await this.channelMemory?.readChannelMemory(
+            this.channelMemoryTarget(envelope),
+          )
+        )?.trim();
+        if (channelMemory) {
+          context.push(`Channel memory for this chat:\n${channelMemory}`);
+        }
+        if (this.config.instructions) {
+          context.push(this.config.instructions);
+        }
+        if (context.length > 0) {
+          promptText = `${context.join('\n\n')}\n\n${promptText}`;
+        }
       }
       // Register this prompt as active
       let doneResolve: () => void = () => {};
