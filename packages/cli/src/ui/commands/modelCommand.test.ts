@@ -303,6 +303,93 @@ describe('modelCommand', () => {
     });
   });
 
+  it('rejects an inline prompt whose model belongs to a same-auth-type provider with a different endpoint/credentials', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model shared-id hello',
+        name: 'model',
+        args: 'shared-id hello',
+      },
+      services: {
+        config: {
+          // Active provider: one OpenAI-compatible endpoint/credential.
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'shared-id',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://provider-a.example/v1',
+            apiKeyEnvKey: 'PROVIDER_A_KEY',
+          }),
+          switchModel,
+          // Same id + auth type, but a different provider's endpoint/credential.
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'shared-id',
+              label: 'Shared',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://provider-b.example/v1',
+              envKey: 'PROVIDER_B_KEY',
+            },
+          ]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, 'shared-id hello');
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('different provider'),
+    });
+  });
+
+  it('runs an inline prompt when the model matches the active provider endpoint/credentials', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model shared-id hello there',
+        name: 'model',
+        args: 'shared-id hello there',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'other',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://provider-a.example/v1',
+            apiKeyEnvKey: 'PROVIDER_A_KEY',
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'shared-id',
+              label: 'Shared',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://provider-a.example/v1',
+              envKey: 'PROVIDER_A_KEY',
+            },
+          ]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'shared-id hello there',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'hello there',
+      modelOverride: 'shared-id',
+    });
+  });
+
   it('rejects an inline prompt in ACP mode (no per-turn override pipeline)', async () => {
     const switchModel = vi.fn();
     mockContext = createMockCommandContext({

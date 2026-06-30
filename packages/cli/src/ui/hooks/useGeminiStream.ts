@@ -795,7 +795,7 @@ export const useGeminiStream = (
     // Log API cancellation
     const prompt_id = config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
-      config.getModel(),
+      modelOverrideRef.current ?? config.getModel(),
       prompt_id,
       config.getContentGeneratorConfig()?.authType,
       loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
@@ -1534,10 +1534,11 @@ export const useGeminiStream = (
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const activeModel = modelOverrideRef.current ?? config.getModel();
       const reasonClause =
         eventValue?.triggerReason === 'image_overflow'
-          ? `accumulated enough tool screenshots to trigger compaction for ${config.getModel()}`
-          : `approached the input token limit for ${config.getModel()}`;
+          ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
+          : `approached the input token limit for ${activeModel}`;
       return addItem(
         {
           type: 'info',
@@ -2181,10 +2182,10 @@ export const useGeminiStream = (
         // explicit inline `/model <id> <prompt>` override: that is a one-off
         // for the original prompt, so a retry reverts to the session model and
         // lets skill-tool overrides apply again.
-        if (submitType !== SendMessageType.Retry) {
-          modelOverrideRef.current = undefined;
-          inlineModelOverrideActiveRef.current = false;
-        } else if (inlineModelOverrideActiveRef.current) {
+        if (
+          submitType !== SendMessageType.Retry ||
+          inlineModelOverrideActiveRef.current
+        ) {
           modelOverrideRef.current = undefined;
           inlineModelOverrideActiveRef.current = false;
         }

@@ -568,13 +568,6 @@ export const modelCommand: SlashCommand = {
     const inlinePrompt =
       firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
     if (modelName) {
-      if (!settings) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t('Settings service not available.'),
-        };
-      }
       const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
       const availableModels = config
@@ -608,11 +601,28 @@ export const modelCommand: SlashCommand = {
             ),
           };
         }
-        // The per-turn override only changes the model id sent to the active
-        // provider; it cannot rebuild credentials/endpoint, so a model that
-        // resolves to a different auth type can't be run inline. Point the user
-        // at the two-step `/model <id>` flow, which does switch providers.
-        if (parsed.authType && parsed.authType !== authType) {
+        // The per-turn override reuses the active provider's endpoint and
+        // credentials and only swaps the model id; it cannot rebuild
+        // baseUrl/envKey for a different provider. So the target must resolve to
+        // the SAME provider identity, not merely the same auth type — otherwise
+        // a same-id model owned by a different (e.g. OpenAI-compatible) provider
+        // would be sent to the active endpoint/account. Reject a different auth
+        // type outright, then within the active auth type require the provider
+        // identity available here (baseUrl + envKey) to match the active content
+        // generator. Mismatches are pointed at the two-step `/model <id>` flow,
+        // which does switch providers.
+        const sameAuthType = targetAuthType === authType;
+        const activeBaseUrl = contentGeneratorConfig.baseUrl;
+        const activeEnvKey = contentGeneratorConfig.apiKeyEnvKey;
+        const target = sameAuthType
+          ? availableModels.find(
+              (m) =>
+                m.id === parsed.modelId &&
+                (m.baseUrl ?? undefined) === (activeBaseUrl ?? undefined) &&
+                (m.envKey ?? undefined) === (activeEnvKey ?? undefined),
+            )
+          : undefined;
+        if (!target) {
           return {
             type: 'message',
             messageType: 'error',
@@ -629,6 +639,13 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
+      }
       const effectiveModelName = await switchMainModel(
         config,
         settings,
