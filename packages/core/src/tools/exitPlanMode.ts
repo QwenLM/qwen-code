@@ -210,6 +210,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       return {
         llmContent: message,
         returnDisplay: message,
+        error: { message },
       };
     }
 

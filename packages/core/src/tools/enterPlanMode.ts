@@ -75,6 +75,7 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
       return {
         llmContent: message,
         returnDisplay: message,
+        error: { message },
       };
     }
 

@@ -170,6 +170,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(result.llmContent).toContain('not available inside subagents');
       expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(approvalMode).toBe(ApprovalMode.DEFAULT);
     });
@@ -190,6 +191,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(result.llmContent).toContain('not available inside subagents');
       expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
     });

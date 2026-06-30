@@ -387,6 +387,7 @@ describe('ExitPlanModeTool', () => {
 
       expect(result.llmContent).toContain('not available inside subagents');
       expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
       expect(mockConfig.savePlan).not.toHaveBeenCalled();
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
@@ -409,6 +410,7 @@ describe('ExitPlanModeTool', () => {
 
       expect(result.llmContent).toContain('not available inside subagents');
       expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
       expect(mockConfig.savePlan).not.toHaveBeenCalled();
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
