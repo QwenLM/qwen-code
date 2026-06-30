@@ -186,8 +186,14 @@ export async function* parseSseStream(
 /**
  * Walk `buf` and pull off every complete frame (either `\n\n` or
  * `\r\n\r\n` separator). Returns the frames + the unconsumed tail.
+ *
+ * Exported so other SSE readers (e.g. the ACP transport's raw JSON-RPC frame
+ * parser) reuse this CRLF-aware boundary scan instead of reimplementing it.
  */
-function consumeFrames(buf: string): { frames: string[]; tail: string } {
+export function consumeFrames(buf: string): {
+  frames: string[];
+  tail: string;
+} {
   const frames: string[] = [];
   let cursor = 0;
   // BX9_a + BeFHR + BeFId: scan for `\n\n` first; on hit, look for
