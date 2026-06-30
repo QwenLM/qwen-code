@@ -3,6 +3,7 @@ import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 function createMockBridge(): ChannelAgentBridge {
@@ -39,6 +40,20 @@ function createChannel(
   const config = createConfig(configOverrides);
   const bridge = createMockBridge();
   return new FeishuChannel('test', config, bridge);
+}
+
+class TestableFeishuChannel extends FeishuChannel {
+  pushScheduled(target: SessionTarget, text: string): Promise<void> {
+    return this.pushProactive(target, text);
+  }
+}
+
+function createTestableChannel(
+  configOverrides?: Partial<ChannelConfig>,
+): TestableFeishuChannel {
+  const config = createConfig(configOverrides);
+  const bridge = createMockBridge();
+  return new TestableFeishuChannel('test', config, bridge);
 }
 
 // Access private methods for unit testing
@@ -789,6 +804,59 @@ describe('FeishuChannel', () => {
 
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('Cannot send: no access token'),
+      );
+      stderrSpy.mockRestore();
+    });
+
+    it('rejects proactive sends when token is unavailable', async () => {
+      const channel = createTestableChannel();
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await expect(
+        channel.pushScheduled(
+          {
+            channelName: 'test',
+            senderId: 'ou_user',
+            chatId: 'oc_chat_id',
+          },
+          'hello',
+        ),
+      ).rejects.toThrow('Feishu sendMessage failed: no access token');
+
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot send: no access token'),
+      );
+      stderrSpy.mockRestore();
+    });
+
+    it('rejects proactive sends when Feishu returns an error', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('server down', { status: 500 }),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await expect(
+        channel.pushScheduled(
+          {
+            channelName: 'test',
+            senderId: 'ou_user',
+            chatId: 'oc_chat_id',
+          },
+          'hello',
+        ),
+      ).rejects.toThrow('Feishu sendMessage failed: HTTP 500');
+
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('sendMessage failed: HTTP 500'),
       );
       stderrSpy.mockRestore();
     });
