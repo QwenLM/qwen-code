@@ -60,6 +60,7 @@ import {
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
+  matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -5596,23 +5597,34 @@ class QwenAgent implements Agent {
 
         if (action === 'enable') {
           const settings = loadSettings(this.config.getTargetDir());
+          let settingsChanged = false;
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded || [];
-            if (currentExcluded.includes(serverName)) {
-              settings.setValue(
-                scope,
-                'mcp.excluded',
-                currentExcluded.filter((name: string) => name !== serverName),
-              );
+            const filtered = currentExcluded.filter(
+              (pattern: string) => pattern !== serverName,
+            );
+            if (filtered.length !== currentExcluded.length) {
+              settings.setValue(scope, 'mcp.excluded', filtered);
+              settingsChanged = true;
             }
           }
           const currentExcluded = this.config.getExcludedMcpServers() || [];
-          this.config.setExcludedMcpServers(
-            currentExcluded.filter((name: string) => name !== serverName),
+          const runtimeFiltered = currentExcluded.filter(
+            (pattern: string) => pattern !== serverName,
           );
+          let runtimeChanged = false;
+          if (runtimeFiltered.length !== currentExcluded.length) {
+            this.config.setExcludedMcpServers(runtimeFiltered);
+            runtimeChanged = true;
+          }
           await toolRegistry.discoverToolsForServer(serverName);
-          return { serverName, action, ok: true, changed: true };
+          return {
+            serverName,
+            action,
+            ok: true,
+            changed: settingsChanged || runtimeChanged,
+          };
         }
 
         if (action === 'disable') {
@@ -5635,18 +5647,27 @@ class QwenAgent implements Agent {
           }
           const scopeSettings = settings.forScope(targetScope).settings;
           const currentExcluded = scopeSettings.mcp?.excluded || [];
-          if (!currentExcluded.includes(serverName)) {
+          let settingsChanged = false;
+          if (!matchesAnyServerPattern(serverName, currentExcluded)) {
             settings.setValue(targetScope, 'mcp.excluded', [
               ...currentExcluded,
               serverName,
             ]);
+            settingsChanged = true;
           }
           const runtimeExcluded = this.config.getExcludedMcpServers() || [];
-          if (!runtimeExcluded.includes(serverName)) {
+          let runtimeChanged = false;
+          if (!matchesAnyServerPattern(serverName, runtimeExcluded)) {
             this.config.setExcludedMcpServers([...runtimeExcluded, serverName]);
+            runtimeChanged = true;
           }
           await toolRegistry.disableMcpServer(serverName);
-          return { serverName, action, ok: true, changed: true };
+          return {
+            serverName,
+            action,
+            ok: true,
+            changed: settingsChanged || runtimeChanged,
+          };
         }
 
         if (action === 'clear-auth') {

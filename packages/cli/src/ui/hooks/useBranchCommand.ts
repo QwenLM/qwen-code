@@ -157,9 +157,12 @@ export function useBranchCommand(
         const rawItems = buildResumedHistoryItems(resumed, config);
         const collapseOnResume =
           options.settings.merged.ui?.history?.collapseOnResume ?? false;
+        const collapsePreviewCount =
+          options.settings.merged.ui?.history?.collapsePreviewCount ?? 0;
         const uiHistoryItems = applyCollapsePolicyAndSummary(
           rawItems,
           collapseOnResume,
+          collapsePreviewCount,
         );
         startNewSession(newSessionId);
         historyManager.clearItems();
@@ -276,6 +279,7 @@ export function useBranchCommand(
       setSessionName,
       remount,
       options.settings.merged.ui?.history?.collapseOnResume,
+      options.settings.merged.ui?.history?.collapsePreviewCount,
     ],
   );
 
