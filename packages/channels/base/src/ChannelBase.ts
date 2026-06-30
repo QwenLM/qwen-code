@@ -207,13 +207,17 @@ export abstract class ChannelBase {
     return false;
   }
 
+  protected supportsProactiveTarget(target: SessionTarget): boolean {
+    return target.threadId === undefined;
+  }
+
   protected async pushProactive(
     target: SessionTarget,
     text: string,
   ): Promise<void> {
     if (target.threadId) {
-      process.stderr.write(
-        `[${this.name}] scheduled job target includes threadId but this adapter does not override pushProactive; sending to chat ${sanitizeLogText(target.chatId, 64)}\n`,
+      throw new Error(
+        'Channel does not support proactive scheduled messages for threaded targets.',
       );
     }
     await this.sendMessage(target.chatId, text);
@@ -238,6 +242,11 @@ export abstract class ChannelBase {
     if (job.channelName !== this.name) {
       throw new Error(
         `Scheduled job ${job.id} belongs to ${job.channelName}, not ${this.name}.`,
+      );
+    }
+    if (!this.supportsProactiveTarget(job.target)) {
+      throw new Error(
+        'Channel does not support proactive scheduled messages for this chat target.',
       );
     }
     if (!this.isStoredScheduleTargetAuthorized(job.target, job.createdBy)) {
@@ -815,6 +824,13 @@ export abstract class ChannelBase {
     }
 
     const target = this.scheduleTargetFromEnvelope(envelope);
+    if (!this.supportsProactiveTarget(target)) {
+      await this.sendMessage(
+        envelope.chatId,
+        'This channel does not support proactive scheduled messages for this chat target.',
+      );
+      return true;
+    }
     const prompt = sanitizePromptText(parsed.prompt.trim());
     if (Array.from(prompt).length > MAX_SCHEDULE_PROMPT_CHARS) {
       await this.sendMessage(

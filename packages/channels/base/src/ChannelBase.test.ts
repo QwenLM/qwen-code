@@ -641,6 +641,34 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('/schedule add rejects threaded targets unless the adapter supports them', async () => {
+      const createSchedule = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: createSchedule,
+            listForTarget: vi.fn(),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.handleInbound(
+        envelope({
+          text: '/schedule add "0 9 * * *" post summary',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(createSchedule).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain(
+        'does not support proactive scheduled messages for this chat target',
+      );
+    });
+
     it('/status shows active session', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ text: 'hi' }));
@@ -4742,6 +4770,37 @@ describe('ChannelBase', () => {
       ).rejects.toThrow('no longer authorized');
 
       expect(disable).toHaveBeenCalledWith('job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('rejects stored threaded jobs unless the adapter supports the target', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runScheduledPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            threadId: 'thread-1',
+            isGroup: true,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'User 1',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+        }),
+      ).rejects.toThrow(
+        'does not support proactive scheduled messages for this chat target',
+      );
+
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
