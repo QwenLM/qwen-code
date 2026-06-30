@@ -2689,6 +2689,29 @@ describe('AgentTool', () => {
       expect(display.status).toBe('background');
     });
 
+    it('stores sanitized background results in the registry', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch</analysis><summary>visible</summary>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        'visible',
+        expect.any(Object),
+      );
+    });
+
     it('routes owned monitor notifications into a background agent external input queue', async () => {
       const params: AgentParams = {
         description: 'Start monitor',

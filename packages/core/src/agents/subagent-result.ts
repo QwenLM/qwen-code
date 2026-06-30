@@ -8,6 +8,7 @@ import { AgentTerminateMode } from './runtime/agent-types.js';
 
 function stripVisibleTags(text: string): string {
   return text
+    .replace(/<analysis\b[^>]*\/>/gi, ' ')
     .replace(/<analysis\b[^>]*>[\s\S]*?<\/analysis>/gi, ' ')
     .replace(/<\/?summary\b[^>]*>/gi, ' ')
     .replace(/ {2,}/g, ' ');
