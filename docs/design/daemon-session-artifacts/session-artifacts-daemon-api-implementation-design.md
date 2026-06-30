@@ -440,6 +440,13 @@ export interface ToolArtifact {
 }
 ```
 
+`ToolArtifactKind` / `ToolArtifactStorage` 的字面量集合必须只有一个实现来源，避免 core、acp-bridge、SDK 三处手工漂移。推荐做法：
+
+- 在 core 中定义 `TOOL_ARTIFACT_KINDS` / `TOOL_ARTIFACT_STORAGES` const tuple，并导出 `ToolArtifactKind` / `ToolArtifactStorage`。
+- acp-bridge 复用 core 类型，并把 daemon public 类型声明为同一组值的协议投影。
+- SDK 不手写第二份 union；通过 acp-bridge 导出的协议类型或构建期生成的 `.d.ts` re-export `DaemonSessionArtifactKind` / `DaemonSessionArtifactStorage`。
+- 测试加一条 kind/storage round-trip，保证 core 输入、bridge store、SDK 输出接受同一组值。
+
 并扩展：
 
 ```ts
@@ -688,6 +695,8 @@ return {
 }
 ```
 
+注意：`qwen/notify/session/artifact-event` 只是 batch-level artifacts 的传输 envelope，不应形成第二套 store/validation/dedupe 管道。BridgeClient 必须把 `_meta.artifacts` 与 `artifact-event.artifacts` 都转换为同一个 `SessionArtifactInput[]`，调用同一个 `ingestArtifacts()` / `SessionArtifactStore.upsertMany()`，复用同一套 validation、normalization、enrichment、eviction 和 `artifact_changed` 发布逻辑。
+
 ### 6.5 Client / Extension 直接插入
 
 对不想让模型调用工具的场景，提供：
@@ -823,7 +832,9 @@ getSessionArtifacts(sessionId: string): SessionArtifactsEnvelope;
 BridgeClient：
 
 - 从 `session_update/tool_call_update._meta.artifacts` 提取 artifacts。
-- upsert store。
+- 从 `qwen/notify/session/artifact-event` 提取 batch-level artifacts。
+- 两种输入都转换为同一个 `SessionArtifactInput[]`。
+- 统一调用 `ingestArtifacts()` / `SessionArtifactStore.upsertMany()`，不要为 batch artifacts 建第二套 validation 或 dedupe。
 - 发布 `artifact_changed`。
 - 如果 store 因上限裁剪 artifact，发布对应 `removed` event。
 
@@ -840,7 +851,9 @@ GET 行为：
 
 - session 不存在：现有 404。
 - 无 artifacts：返回空数组。
-- workspace / managed artifact 在每次 GET 时 best-effort stat。
+- workspace / managed artifact 维护内部 status cache，例如 `lastStatAt`、`lastKnownSizeBytes`、`lastKnownStatus`。
+- upsert 时做一次 best-effort stat。
+- GET 默认使用 cache；仅当 `lastStatAt` 过期时按 TTL 刷新，例如 5-30 秒，并限制并发 stat 数量。
 - stat 失败：返回 `status: 'missing'`，不从 store 中删除。
 - stat 成功：如果此前是 `missing`，返回时恢复 `status: 'available'`。
 - URL artifact 不探测，始终返回 `status: 'available'`。
@@ -1111,6 +1124,7 @@ cd packages/acp-bridge && npx vitest run src/bridgeClient.test.ts
 - 有 artifacts 时返回 envelope。
 - 未知 session 返回现有错误。
 - workspace artifact GET 时 best-effort stat，缺失文件返回 `status: 'missing'`，文件恢复后返回 `status: 'available'`。
+- GET 使用 status cache / TTL，避免每次热读对所有 artifacts 做同步 stat。
 
 命令：
 
