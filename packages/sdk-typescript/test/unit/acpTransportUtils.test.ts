@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { jsonRpcErrorToHttpStatusWithData } from '../../src/daemon/acpTransportUtils.js';
 
 describe('jsonRpcErrorToHttpStatusWithData', () => {
-  it.each(['session_archived', 'session_archiving'])(
+  it.each(['session_archived', 'session_conflict', 'session_archiving'])(
     'maps %s to HTTP 409',
     (errorKind) => {
       expect(

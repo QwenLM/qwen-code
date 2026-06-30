@@ -9,6 +9,7 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   SessionArchivedError,
   SessionArchivingError,
+  SessionConflictError,
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -62,8 +63,11 @@ export async function assertSessionLoadable(
   sessionId: string,
 ): Promise<void> {
   const location = await sessionService.getSessionLocation(sessionId);
-  if (location === 'archived' || location === 'conflict') {
+  if (location === 'archived') {
     throw new SessionArchivedError(sessionId);
+  }
+  if (location === 'conflict') {
+    throw new SessionConflictError(sessionId);
   }
 }
 

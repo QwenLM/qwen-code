@@ -1740,6 +1740,33 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it('session/load rejects active/archive conflicts', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440321';
+      await writeStoredSession(sessionId);
+      await writeStoredSession(sessionId, 'archived');
+
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 212,
+        method: 'session/load',
+        params: { sessionId },
+      });
+
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; data?: { errorKind?: string } };
+      }>;
+      expect(frame.id).toBe(212);
+      expect(frame.error.code).toBe(-32603);
+      expect(frame.error.data?.errorKind).toBe('session_conflict');
+    });
+  });
+
   it('session/load holds archive gate while restore is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440124';

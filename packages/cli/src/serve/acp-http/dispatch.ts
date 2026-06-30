@@ -393,6 +393,15 @@ function toRpcError(err: unknown): {
           sessionId: (err as { sessionId?: unknown }).sessionId,
         },
       };
+    case 'SessionConflictError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_conflict',
+          sessionId: (err as { sessionId?: unknown }).sessionId,
+        },
+      };
     case 'SessionArchivingError':
       return {
         code: RPC.INTERNAL_ERROR,

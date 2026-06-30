@@ -74,6 +74,19 @@ export class SessionArchivedError extends Error {
   }
 }
 
+export class SessionConflictError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session "${sessionId}" exists in both active and archived directories. ` +
+        `Delete the session or manually clean up the duplicate files before loading.`,
+    );
+    this.name = 'SessionConflictError';
+    this.sessionId = sessionId;
+  }
+}
+
 export class SessionArchivingError extends Error {
   readonly sessionId: string;
 

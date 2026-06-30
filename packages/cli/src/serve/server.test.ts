@@ -9630,6 +9630,28 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
+    it('rejects load for active/archive conflicts with session_conflict', async () => {
+      const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeef';
+      await writeSession(sid);
+      await writeSession(sid, 'archived');
+      const bridge = fakeBridge();
+      const app = createArchiveApp(bridge);
+
+      const loadRes = await request(app)
+        .post(`/session/${sid}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: wsDir });
+      expect(loadRes.status).toBe(409);
+      expect(loadRes.body).toMatchObject({
+        code: 'session_conflict',
+        sessionId: sid,
+      });
+      expect(loadRes.body.error).toContain(
+        'exists in both active and archived directories',
+      );
+      expect(bridge.loadCalls).toHaveLength(0);
+    });
+
     it('returns session_archiving for prompt while archive is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
       await writeSession(sid);
@@ -9664,6 +9686,7 @@ describe('createServeApp', () => {
         code: 'session_archiving',
         sessionId: sid,
       });
+      expect(promptRes.headers['retry-after']).toBe('5');
       expect(bridge.promptCalls).toHaveLength(0);
 
       releaseClose();

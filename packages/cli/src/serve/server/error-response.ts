@@ -30,6 +30,7 @@ import {
   SessionArchivedError,
   SessionArchivingError,
   SessionBusyError,
+  SessionConflictError,
   SessionLimitExceededError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
@@ -247,6 +248,14 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'session_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_conflict',
       sessionId: err.sessionId,
     });
     return;

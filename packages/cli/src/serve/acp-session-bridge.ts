@@ -85,6 +85,7 @@ export {
   SessionNotFoundError,
   RestoreInProgressError,
   SessionArchivedError,
+  SessionConflictError,
   SessionArchivingError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
