@@ -868,20 +868,23 @@ export class AcpDispatcher {
             return;
           }
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
-          await assertSessionLoadable(new SessionService(cwd), sessionId);
-          const restored =
-            method === 'session/load'
-              ? await this.bridge.loadSession({
-                  sessionId,
-                  workspaceCwd: cwd,
-                  clientId: conn.clientId,
-                })
-              : await this.bridge.resumeSession({
-                  sessionId,
-                  workspaceCwd: cwd,
-                  clientId: conn.clientId,
-                });
+          const restored = await this.archiveCoordinator.runExclusiveMany(
+            [sessionId],
+            async () => {
+              await assertSessionLoadable(new SessionService(cwd), sessionId);
+              return method === 'session/load'
+                ? await this.bridge.loadSession({
+                    sessionId,
+                    workspaceCwd: cwd,
+                    clientId: conn.clientId,
+                  })
+                : await this.bridge.resumeSession({
+                    sessionId,
+                    workspaceCwd: cwd,
+                    clientId: conn.clientId,
+                  });
+            },
+          );
           // Teardown raced the restore — EITHER the whole connection was
           // destroyed (`conn.destroyed`) OR a `session/close` for this id
           // started DURING the await (`closingSessions`); in the latter the
@@ -1005,34 +1008,38 @@ export class AcpDispatcher {
         case 'session/close': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          this.archiveCoordinator.assertNotTransitioning(sessionId);
-          // Close the ownership gate SYNCHRONOUSLY (before the await) so two
-          // concurrent `session/close`s don't both pass `requireOwned` —
-          // the second would otherwise send a misleading error and trigger a
-          // redundant bridge close.
-          conn.ownedSessions.delete(sessionId);
-          // Mark closing so a concurrent session/load|resume of the SAME id
-          // can't grant fresh ownership + create a new binding that this
-          // close's `finally` teardown would then destroy (TOCTOU).
-          conn.closingSessions.add(sessionId);
-          try {
-            await this.bridge.closeSession(
-              sessionId,
-              this.sessionCtx(conn, sessionId, loopback),
-            );
-          } finally {
-            // Local teardown must run even if the bridge close throws —
-            // otherwise the SSE stream, abort controller, buffered frames and
-            // pending permissions leak until idle TTL.
-            try {
-              conn.closeSessionStream(sessionId);
-            } catch (teardownErr) {
-              writeStderrLine(
-                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
-              );
-            }
-            conn.closingSessions.delete(sessionId);
-          }
+          await this.archiveCoordinator.runExclusiveMany(
+            [sessionId],
+            async () => {
+              // Close the ownership gate SYNCHRONOUSLY (before the await) so two
+              // concurrent `session/close`s don't both pass `requireOwned` —
+              // the second would otherwise send a misleading error and trigger a
+              // redundant bridge close.
+              conn.ownedSessions.delete(sessionId);
+              // Mark closing so a concurrent session/load|resume of the SAME id
+              // can't grant fresh ownership + create a new binding that this
+              // close's `finally` teardown would then destroy (TOCTOU).
+              conn.closingSessions.add(sessionId);
+              try {
+                await this.bridge.closeSession(
+                  sessionId,
+                  this.sessionCtx(conn, sessionId, loopback),
+                );
+              } finally {
+                // Local teardown must run even if the bridge close throws —
+                // otherwise the SSE stream, abort controller, buffered frames and
+                // pending permissions leak until idle TTL.
+                try {
+                  conn.closeSessionStream(sessionId);
+                } catch (teardownErr) {
+                  writeStderrLine(
+                    `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
+                  );
+                }
+                conn.closingSessions.delete(sessionId);
+              }
+            },
+          );
           this.replyConn(conn, id, {});
           return;
         }

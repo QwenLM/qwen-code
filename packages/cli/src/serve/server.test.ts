@@ -9529,6 +9529,26 @@ describe('createServeApp', () => {
       ).rejects.toThrow();
     });
 
+    it('does not close a live session when no active JSONL exists', async () => {
+      const sid = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const bridge = fakeBridge();
+      const app = createArchiveApp(bridge);
+
+      const res = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        archived: [],
+        alreadyArchived: [],
+        notFound: [sid],
+        errors: [],
+      });
+      expect(bridge.closeCalls).toHaveLength(0);
+    });
+
     it('unarchives by moving JSONL back into active chats', async () => {
       const sid = '33333333-bbbb-cccc-dddd-eeeeeeeeeeee';
       await writeSession(sid, 'archived');
@@ -9650,6 +9670,113 @@ describe('createServeApp', () => {
       const archiveRes = await archivePromise;
       expect(archiveRes.status).toBe(200);
       expect(archiveRes.body.archived).toEqual([sid]);
+    });
+
+    it('returns session_archiving for archive while load is in flight', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const bridge = fakeBridge({
+        loadImpl: async (req) => {
+          loadStarted();
+          await loadReleasedPromise;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: req.clientId ?? 'client-load',
+            state: {},
+            hasActivePrompt: false,
+          };
+        },
+      });
+      const app = createArchiveApp(bridge);
+
+      const loadPromise = request(app)
+        .post(`/session/${sid}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: wsDir })
+        .then((res) => res);
+      await loadStartedPromise;
+
+      const archiveRes = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(archiveRes.status).toBe(409);
+      expect(archiveRes.body).toMatchObject({
+        code: 'session_archiving',
+        sessionId: sid,
+      });
+
+      releaseLoad();
+      const loadRes = await loadPromise;
+      expect(loadRes.status).toBe(200);
+      expect(loadRes.body.sessionId).toBe(sid);
+      expect(bridge.closeCalls).toHaveLength(0);
+    });
+
+    it('returns session_archiving for archive while single close is in flight', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      let secondCloseStarted!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const secondCloseStartedPromise = new Promise<void>((resolve) => {
+        secondCloseStarted = resolve;
+      });
+      let closeCount = 0;
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          closeCount++;
+          if (closeCount === 1) {
+            closeStarted();
+            await closeReleasedPromise;
+          } else {
+            secondCloseStarted();
+          }
+        },
+      });
+      const app = createArchiveApp(bridge);
+
+      const closePromise = request(app)
+        .delete(`/session/${sid}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((res) => res);
+      await closeStartedPromise;
+
+      const archiveRes = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      const raceResult = await Promise.race([
+        secondCloseStartedPromise.then(() => 'second-close-started'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked'), 25)),
+      ]);
+      expect(archiveRes.status).toBe(409);
+      expect(archiveRes.body).toMatchObject({
+        code: 'session_archiving',
+        sessionId: sid,
+      });
+      expect(raceResult).toBe('blocked');
+
+      releaseClose();
+      const closeRes = await closePromise;
+      expect(closeRes.status).toBe(204);
+      expect(bridge.closeCalls).toHaveLength(1);
     });
 
     it('returns session_archiving for overlapping archive batches', async () => {

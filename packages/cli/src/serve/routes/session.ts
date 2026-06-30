@@ -221,20 +221,23 @@ export function registerSessionRoutes(
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
-        archiveCoordinator.assertNotTransitioning(sessionId);
-        await assertSessionLoadable(new SessionService(cwd), sessionId);
-        const session =
-          action === 'load'
-            ? await bridge.loadSession({
-                sessionId,
-                workspaceCwd: cwd,
-                ...(clientId !== undefined ? { clientId } : {}),
-              })
-            : await bridge.resumeSession({
-                sessionId,
-                workspaceCwd: cwd,
-                ...(clientId !== undefined ? { clientId } : {}),
-              });
+        const session = await archiveCoordinator.runExclusiveMany(
+          [sessionId],
+          async () => {
+            await assertSessionLoadable(new SessionService(cwd), sessionId);
+            return action === 'load'
+              ? await bridge.loadSession({
+                  sessionId,
+                  workspaceCwd: cwd,
+                  ...(clientId !== undefined ? { clientId } : {}),
+                })
+              : await bridge.resumeSession({
+                  sessionId,
+                  workspaceCwd: cwd,
+                  ...(clientId !== undefined ? { clientId } : {}),
+                });
+          },
+        );
         if (daemonLog) {
           daemonLog.info(
             `session ${action}${session.attached ? ' (attached)' : ''}`,
@@ -800,10 +803,11 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
-      archiveCoordinator.assertNotTransitioning(sessionId);
-      await bridge.closeSession(
-        sessionId,
-        clientId !== undefined ? { clientId } : undefined,
+      await archiveCoordinator.runExclusiveMany([sessionId], async () =>
+        bridge.closeSession(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        ),
       );
       res.status(204).end();
     } catch (err) {

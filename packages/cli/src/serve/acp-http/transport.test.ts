@@ -783,6 +783,51 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await new Promise((r) => setTimeout(r, 30)); // let handle() register ownership
   }
 
+  async function withRuntimeDir<T>(
+    fn: (runtimeDir: string) => Promise<T>,
+  ): Promise<T> {
+    const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-acp-archive-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    try {
+      return await fn(runtimeDir);
+    } finally {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
+  }
+
+  async function writeStoredSession(
+    sessionId: string,
+    state: 'active' | 'archived' = 'active',
+  ): Promise<void> {
+    const chatsDir = path.join(
+      new Storage('/ws').getProjectDir(),
+      'chats',
+      ...(state === 'archived' ? ['archive'] : []),
+    );
+    await fs.mkdir(chatsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user-1`,
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-06-30T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd: '/ws',
+      })}\n`,
+      'utf8',
+    );
+  }
+
   it('initialize → 200 + Acp-Connection-Id; unknown conn → 404', async () => {
     await initialize();
     const bad = await post('nope', {
@@ -1694,6 +1739,140 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       }
     },
   );
+
+  it('session/load holds archive gate while restore is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440124';
+      await writeStoredSession(sessionId);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      bridge.loadSession = async (req) => {
+        loadStarted();
+        await loadReleasedPromise;
+        return {
+          sessionId: req.sessionId,
+          workspaceCwd: '/ws',
+          attached: true,
+          clientId: 'client-load',
+          state: { replayed: true },
+        };
+      };
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 212,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      await loadStartedPromise;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 213,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 213,
+        error: {
+          code: -32603,
+          data: { errorKind: 'session_archiving', sessionId },
+        },
+      });
+
+      releaseLoad();
+      expect(await reader.next()).toMatchObject({
+        id: 212,
+        result: { replayed: true },
+      });
+      reader.close();
+    });
+  });
+
+  it('session/close holds archive gate while close is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440125';
+      await writeStoredSession(sessionId);
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 214,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      expect(await reader.next()).toMatchObject({ id: 214 });
+
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      let secondCloseStarted!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const secondCloseStartedPromise = new Promise<void>((resolve) => {
+        secondCloseStarted = resolve;
+      });
+      let closeCount = 0;
+      bridge.closeSession = async (sid: string) => {
+        bridge.closedSessions.push(sid);
+        closeCount++;
+        if (closeCount === 1) {
+          closeStarted();
+          await closeReleasedPromise;
+        } else {
+          secondCloseStarted();
+        }
+      };
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 215,
+        method: 'session/close',
+        params: { sessionId },
+      });
+      await closeStartedPromise;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 216,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      const archiveFrame = await reader.next();
+      const raceResult = await Promise.race([
+        secondCloseStartedPromise.then(() => 'second-close-started'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked'), 25)),
+      ]);
+      expect(archiveFrame).toMatchObject({
+        id: 216,
+        error: {
+          code: -32603,
+          data: { errorKind: 'session_archiving', sessionId },
+        },
+      });
+      expect(raceResult).toBe('blocked');
+
+      releaseClose();
+      expect(await reader.next()).toMatchObject({
+        id: 215,
+        result: {},
+      });
+      reader.close();
+    });
+  });
 
   it('session/close reaches the bridge + replies on the conn stream', async () => {
     const connId = await initialize();
@@ -3013,22 +3192,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     releaseClose();
   });
 
-  it('session/load while close races DURING loadSession → post-await reject + rollback', async () => {
-    // Distinct from the pre-await guard above: here the pre-await
-    // `closingSessions` check passes, then a `session/close` for the same id
-    // starts WHILE `loadSession` is awaiting. The post-await re-check
-    // (dispatch.ts) must detect `closeRaced`, roll back the just-restored
-    // attach (detachClient, since loadAttached=true), and reply INTERNAL_ERROR.
+  it('session/close while load is in-flight → close rejected by archive gate', async () => {
+    // The archive coordinator now covers the whole load/restore await, so a
+    // same-id close that starts during load is rejected before it can mark the
+    // session closing or tear down the just-restored binding.
     let releaseLoad: () => void = () => {};
-    let releaseClose: () => void = () => {};
     const connId = await initialize();
     await newSession(connId); // own sess-1 so session/close passes requireOwned
     // Arm the gates only AFTER ownership is established — otherwise newSession's
     // own spawnOrAttach would block on bridge.gate and never grant ownership.
     bridge.gate = new Promise<void>((r) => (releaseLoad = r));
-    bridge.closeGate = new Promise<void>((r) => (releaseClose = r));
     const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 2); // buffered session/new reply + load reject
+    const got = takeFrames(connStream, 3); // session/new + close reject + load success
     await new Promise((r) => setTimeout(r, 50));
     // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
     void post(connId, {
@@ -3046,18 +3221,19 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       params: { sessionId: 'sess-1' },
     });
     await new Promise((r) => setTimeout(r, 20));
-    releaseLoad(); // loadSession resolves → post-await sees closeRaced
+    releaseLoad(); // loadSession resolves after close has been rejected.
     const frames = (await got) as Array<{
       id: number;
-      error?: { code: number; message: string };
+      result?: { replayed?: boolean };
+      error?: { code: number; message: string; data?: { errorKind?: string } };
     }>;
+    const closeReply = frames.find((f) => f.id === 341);
+    expect(closeReply?.error?.code).toBe(-32603);
+    expect(closeReply?.error?.data?.errorKind).toBe('session_archiving');
     const loadReply = frames.find((f) => f.id === 340);
-    expect(loadReply?.error?.code).toBe(-32603);
-    expect(loadReply?.error?.message).toContain('closed during load');
-    // attached:true → rollback is a detach, NOT a kill.
-    expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(true);
+    expect(loadReply?.result?.replayed).toBe(true);
+    expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
     expect(bridge.killed).not.toContain('sess-1');
-    releaseClose();
   });
 
   it('double-failure permission vote → pending retained + retried on teardown', async () => {

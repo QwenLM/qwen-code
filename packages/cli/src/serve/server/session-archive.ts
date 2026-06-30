@@ -140,11 +140,32 @@ export async function archiveDaemonSessions(params: {
   const errors: Array<{ sessionId: string; error: unknown }> = [];
 
   await coordinator.runExclusiveMany(sessionIds, async () => {
+    const activeIds: string[] = [];
+    for (const sessionId of sessionIds) {
+      try {
+        const location = await service.getSessionLocation(sessionId);
+        if (location === undefined) {
+          notFound.push(sessionId);
+        } else if (location === 'archived') {
+          alreadyArchived.push(sessionId);
+        } else if (location === 'conflict') {
+          errors.push({
+            sessionId,
+            error: new Error(`Session archive conflict: ${sessionId}`),
+          });
+        } else {
+          activeIds.push(sessionId);
+        }
+      } catch (err) {
+        errors.push({ sessionId, error: err });
+      }
+    }
+
     // Close+flush before moving JSONL: live writers keep the active path.
     // If the later move fails, the active JSONL remains and a retry treats
     // SessionNotFound as the recoverable "already closed" state.
     const closeResults = await Promise.allSettled(
-      sessionIds.map(async (sessionId) => {
+      activeIds.map(async (sessionId) => {
         try {
           await bridge.closeSession(sessionId, undefined, {
             requireAgentClose: true,
@@ -158,7 +179,7 @@ export async function archiveDaemonSessions(params: {
     );
     const archiveIds: string[] = [];
     for (let i = 0; i < closeResults.length; i++) {
-      const sessionId = sessionIds[i]!;
+      const sessionId = activeIds[i]!;
       const result = closeResults[i]!;
       if (result.status === 'fulfilled') {
         archiveIds.push(sessionId);
