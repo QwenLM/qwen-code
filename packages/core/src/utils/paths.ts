@@ -79,6 +79,34 @@ export function tildeifyPath(filePath: string): string {
 }
 
 /**
+ * Expands tilde (~) to the full home directory path.
+ * Supports both POSIX-style ~/ and Windows-style ~\ home-relative paths.
+ * @param p - The path to expand.
+ * @returns The expanded path.
+ */
+export function expandTilde(p: string): string {
+  if (!p) {
+    return '';
+  }
+  if (p === '~') {
+    return os.homedir();
+  }
+  if (p === '~/' || p === '~\\') {
+    return os.homedir() + path.sep;
+  }
+  if (p.startsWith('~/') || p.startsWith('~\\')) {
+    return path.join(
+      os.homedir(),
+      ...p
+        .substring(2)
+        .split(/[/\\]+/)
+        .filter(Boolean),
+    );
+  }
+  return p;
+}
+
+/**
  * Expands tilde (~) and Windows-style %userprofile% to the full home directory path.
  * @param p - The path to expand.
  * @returns The expanded path.
@@ -87,13 +115,18 @@ export function expandHomeDir(p: string): string {
   if (!p) {
     return '';
   }
-  let expandedPath = p;
   if (p.toLowerCase().startsWith('%userprofile%')) {
-    expandedPath = os.homedir() + p.substring('%userprofile%'.length);
-  } else if (p === '~' || p.startsWith('~/')) {
-    expandedPath = os.homedir() + p.substring(1);
+    return path.normalize(
+      path.join(
+        os.homedir(),
+        ...p
+          .substring('%userprofile%'.length)
+          .split(/[/\\]+/)
+          .filter(Boolean),
+      ),
+    );
   }
-  return path.normalize(expandedPath);
+  return path.normalize(expandTilde(p));
 }
 
 /**
@@ -325,16 +358,12 @@ export function resolvePath(
   baseDir: string | undefined = process.cwd(),
   relativePath: string,
 ): string {
-  const homeDir = os.homedir();
+  const expandedPath = expandTilde(relativePath);
 
-  if (relativePath === '~') {
-    return homeDir;
-  } else if (relativePath.startsWith('~/') || relativePath.startsWith('~\\')) {
-    return path.join(homeDir, relativePath.slice(2));
-  } else if (path.isAbsolute(relativePath)) {
-    return relativePath;
+  if (path.isAbsolute(expandedPath)) {
+    return expandedPath;
   } else {
-    return path.resolve(baseDir, relativePath);
+    return path.resolve(baseDir, expandedPath);
   }
 }
 

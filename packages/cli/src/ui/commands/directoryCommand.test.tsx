@@ -5,12 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { directoryCommand, getDirPathCompletions } from './directoryCommand.js';
 import {
-  directoryCommand,
   expandHomeDir,
-  getDirPathCompletions,
-} from './directoryCommand.js';
-import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
+  type Config,
+  type WorkspaceContext,
+} from '@qwen-code/qwen-code-core';
 import type { CommandContext, SlashCommandActionReturn } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
@@ -187,6 +187,17 @@ describe('directoryCommand', () => {
           `Successfully added directories:\n- ${newPath}`,
         ),
       });
+    });
+
+    it('should expand Windows-style home-relative paths before adding directories', async () => {
+      const homeProject = path.join(os.homedir(), 'new-project');
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, '~\\new-project');
+
+      expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(
+        homeProject,
+      );
     });
 
     it('should persist added directories to workspace settings', async () => {

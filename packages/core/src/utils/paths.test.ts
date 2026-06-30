@@ -25,6 +25,7 @@ import {
   isSubpath,
   shortenPath,
   tildeifyPath,
+  expandTilde,
   expandHomeDir,
   getProjectHash,
   _resetValidatePathCacheForTest,
@@ -422,7 +423,7 @@ describe('resolvePath', () => {
   it('expands Windows-style tilde-prefixed paths to home directory', () => {
     const homeDir = os.homedir();
     const result = resolvePath('/some/base', '~\\documents\\file.txt');
-    expect(result).toBe(path.join(homeDir, 'documents\\file.txt'));
+    expect(result).toBe(path.join(homeDir, 'documents', 'file.txt'));
   });
 
   it('uses baseDir when provided for relative paths', () => {
@@ -929,6 +930,35 @@ describe('getProjectHash', () => {
   });
 });
 
+describe('expandTilde', () => {
+  const homeDir = os.homedir();
+
+  it('should return empty string for empty input', () => {
+    expect(expandTilde('')).toBe('');
+  });
+
+  it('should expand ~ to home directory', () => {
+    expect(expandTilde('~')).toBe(homeDir);
+  });
+
+  it('should expand ~/path to home directory path', () => {
+    expect(expandTilde('~/documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should expand Windows-style ~\\path to home directory path', () => {
+    expect(expandTilde('~\\documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should preserve trailing separators for home directory paths', () => {
+    expect(expandTilde('~/')).toBe(homeDir + path.sep);
+    expect(expandTilde('~\\')).toBe(homeDir + path.sep);
+  });
+
+  it('should not expand ~path (no slash)', () => {
+    expect(expandTilde('~documents')).toBe('~documents');
+  });
+});
+
 describe('expandHomeDir', () => {
   const homeDir = os.homedir();
 
@@ -942,6 +972,10 @@ describe('expandHomeDir', () => {
 
   it('should expand ~/path to home directory path', () => {
     expect(expandHomeDir('~/documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should expand Windows-style ~\\path to home directory path', () => {
+    expect(expandHomeDir('~\\documents')).toBe(path.join(homeDir, 'documents'));
   });
 
   it('should not expand ~path (no slash)', () => {

@@ -16,22 +16,10 @@ import * as path from 'node:path';
 import {
   loadServerHierarchicalMemory,
   ConditionalRulesRegistry,
+  expandHomeDir,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
-
-export function expandHomeDir(p: string): string {
-  if (!p) {
-    return '';
-  }
-  let expandedPath = p;
-  if (p.toLowerCase().startsWith('%userprofile%')) {
-    expandedPath = os.homedir() + p.substring('%userprofile%'.length);
-  } else if (p === '~' || p.startsWith('~/')) {
-    expandedPath = os.homedir() + p.substring(1);
-  }
-  return path.normalize(expandedPath);
-}
 
 function findExistingWorkspaceDirectory(
   directory: string,
