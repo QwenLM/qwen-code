@@ -52,6 +52,7 @@ import {
 import { qrCodeLogin } from './login.js';
 import {
   fetchAccessToken,
+  fetchBotInfo,
   fetchGatewayUrl,
   getApiBase,
   sendQQMessage,
@@ -1058,23 +1059,12 @@ export class QQChannel extends ChannelBase {
             ((msg['d'] as Record<string, unknown> | undefined)?.[
               'session_id'
             ] as string) || '';
-          // Extract bot's own OPENID from READY payload
-          const readyUser = (msg['d'] as Record<string, unknown> | undefined)?.[
-            'user'
-          ] as { id?: string } | undefined;
-          if (readyUser?.id) {
-            this.botOpenId = readyUser.id;
-          }
           this.tryResume = true;
           if (this.readyTimeout) {
             clearTimeout(this.readyTimeout);
             this.readyTimeout = null;
           }
           this.connectReject = null;
-          // Propagate bot OPENID to the model's system instructions
-          if (this.botOpenId && this.qqConfig.allowMention !== false) {
-            this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
-          }
           this.startHeartbeat();
           if (this.coldStart) {
             this.restoreGlobalSessions();
@@ -1097,6 +1087,20 @@ export class QQChannel extends ChannelBase {
                 );
                 this.coldStart = false;
                 onReady();
+                // Fetch bot's own OPENID via @me endpoint (async, fire-and-forget)
+                fetchBotInfo(
+                  getApiBase(Boolean(this.qqConfig.sandbox)),
+                  this.accessToken!,
+                )
+                  .then((info) => {
+                    if (info?.id) {
+                      this.botOpenId = info.id;
+                      if (this.qqConfig.allowMention !== false) {
+                        this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+                      }
+                    }
+                  })
+                  .catch(() => {});
               })
               .catch((err: unknown) => {
                 process.stderr.write(
@@ -1104,12 +1108,40 @@ export class QQChannel extends ChannelBase {
                 );
                 this.coldStart = false;
                 onReady();
+                // Fetch bot's own OPENID via @me endpoint (async, fire-and-forget)
+                fetchBotInfo(
+                  getApiBase(Boolean(this.qqConfig.sandbox)),
+                  this.accessToken!,
+                )
+                  .then((info) => {
+                    if (info?.id) {
+                      this.botOpenId = info.id;
+                      if (this.qqConfig.allowMention !== false) {
+                        this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+                      }
+                    }
+                  })
+                  .catch(() => {});
               });
           } else {
             process.stderr.write(
               `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
             );
             onReady();
+            // Fetch bot's own OPENID via @me endpoint (async, fire-and-forget)
+            fetchBotInfo(
+              getApiBase(Boolean(this.qqConfig.sandbox)),
+              this.accessToken!,
+            )
+              .then((info) => {
+                if (info?.id) {
+                  this.botOpenId = info.id;
+                  if (this.qqConfig.allowMention !== false) {
+                    this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+                  }
+                }
+              })
+              .catch(() => {});
           }
         } else if (t === 'C2C_MESSAGE_CREATE') {
           this.handleC2C(msg['d'] as unknown as QQMessageEvent);
