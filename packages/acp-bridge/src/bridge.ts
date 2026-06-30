@@ -2465,14 +2465,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (isAcpSessionResourceNotFound(err, req.sessionId)) {
           throw new SessionNotFoundError(req.sessionId);
         }
-        if (hasNoChannelWork(ci)) {
-          ci.isDying = true;
-          await ci.channel.kill().catch(() => {
-            /* best-effort — channel.exited handler still runs */
-          });
-        } else {
-          ci.emptyReapPending = true;
-        }
+        ci.emptyReapPending = true;
         throw err;
       }
 
