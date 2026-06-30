@@ -26,34 +26,40 @@ import type { Config } from '../../config/config.js';
 // FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
-const { created, nextTerminateMode, nextOutputTokens, nextExecuteThrow } =
-  vi.hoisted(() => ({
-    created: [] as Array<{
-      name: string;
-      prompt: string;
-      signal?: AbortSignal;
-      promptConfigSystemPrompt?: string;
-      runConfig?: { max_turns?: number; max_time_minutes?: number };
-      toolConfig?: { tools?: string[]; disallowedTools?: string[] };
-    }>,
-    // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
-    // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
-    // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
-    nextTerminateMode: { value: 'GOAL' as string },
-    // R1 (#1 + #3): the production dispatch reads
-    // `subagent.getExecutionSummary().outputTokens` to feed budget. Tests
-    // set `nextOutputTokens.value` so the onTokens callback can be
-    // observed without standing up real telemetry.
-    nextOutputTokens: { value: 0 as number },
-    // R3 (wenshao #6): real `AgentHeadless.execute()` re-throws on
-    // reasoning-loop failure — its catch arm sets `terminateMode=ERROR`
-    // and then throws. Tests set `nextExecuteThrow.value` to a non-null
-    // error so the mock execute() re-throws the same way; R1's tests
-    // had execute() RETURN with ERROR mode, which is the rare
-    // `createChat` early-return path, NOT the production reasoning-
-    // loop throw path.
-    nextExecuteThrow: { value: null as Error | null },
-  }));
+const {
+  created,
+  nextFinalText,
+  nextTerminateMode,
+  nextOutputTokens,
+  nextExecuteThrow,
+} = vi.hoisted(() => ({
+  created: [] as Array<{
+    name: string;
+    prompt: string;
+    signal?: AbortSignal;
+    promptConfigSystemPrompt?: string;
+    runConfig?: { max_turns?: number; max_time_minutes?: number };
+    toolConfig?: { tools?: string[]; disallowedTools?: string[] };
+  }>,
+  nextFinalText: { value: undefined as string | undefined },
+  // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
+  // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
+  // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
+  nextTerminateMode: { value: 'GOAL' as string },
+  // R1 (#1 + #3): the production dispatch reads
+  // `subagent.getExecutionSummary().outputTokens` to feed budget. Tests
+  // set `nextOutputTokens.value` so the onTokens callback can be
+  // observed without standing up real telemetry.
+  nextOutputTokens: { value: 0 as number },
+  // R3 (wenshao #6): real `AgentHeadless.execute()` re-throws on
+  // reasoning-loop failure — its catch arm sets `terminateMode=ERROR`
+  // and then throws. Tests set `nextExecuteThrow.value` to a non-null
+  // error so the mock execute() re-throws the same way; R1's tests
+  // had execute() RETURN with ERROR mode, which is the rare
+  // `createChat` early-return path, NOT the production reasoning-
+  // loop throw path.
+  nextExecuteThrow: { value: null as Error | null },
+}));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
 // agent({isolation:'worktree'}) need to drive GitWorktreeService's
@@ -152,6 +158,7 @@ vi.mock('./agent-headless.js', () => ({
         }
       },
       getFinalText: () =>
+        nextFinalText.value ??
         `headless-said:${created[created.length - 1]!.prompt}`,
       getTerminateMode: () => nextTerminateMode.value,
       // R1 (#1 + #3): expose `getExecutionSummary` so the production
@@ -1075,6 +1082,7 @@ describe('createProductionDispatch', () => {
   // terminate mode back to 'goal' (success).
   beforeEach(() => {
     created.length = 0;
+    nextFinalText.value = undefined;
     nextTerminateMode.value = 'GOAL';
   });
 
@@ -1085,6 +1093,16 @@ describe('createProductionDispatch', () => {
     expect(created.length).toBe(1);
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
+  });
+
+  it('strips internal tags from fast-path final text', async () => {
+    nextFinalText.value =
+      '<analysis>scratch</analysis><summary>clean result</summary>';
+    const dispatch = createProductionDispatch(fakeConfig());
+
+    await expect(dispatch('hello', { label: 'h1' })).resolves.toBe(
+      'clean result',
+    );
   });
 
   // FIX-C4 (TST-2-C2): the previous test only asserted no-crash. This one
@@ -1741,9 +1759,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // by one test does not bleed into the next (mockImplementation is
   // persistent; the per-test overrides below rely on a clean baseline).
   beforeEach(async () => {
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     worktreeStubs.instances.length = 0;
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
@@ -1918,6 +1935,27 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     // Workflow floor [SendMessage, ExitPlanMode] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
       expect.arrayContaining(['send_message', 'exit_plan_mode']),
+    );
+  });
+
+  it('strips internal tags from override-path final text', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Explore',
+        description: 'fast read-only',
+        systemPrompt: 'You are Explore.',
+        level: 'builtin',
+      }),
+      onCreate: async () => ({
+        finalText:
+          '<analysis>scratch</analysis><summary>clean result</summary>',
+        terminateMode: 'GOAL',
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+
+    await expect(dispatch('find foo', { agentType: 'Explore' })).resolves.toBe(
+      'clean result',
     );
   });
 
@@ -2439,16 +2477,18 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     // newline + nul + del — all control codes < 0x20 or == 0x7f.
     const evil = 'Explore\n\rEvil\x00\x7f';
-    await expect(dispatch('hi', { agentType: evil })).rejects.toThrow();
     // The thrown message must NOT contain raw newlines / NULs.
+    let error: unknown;
     try {
       await dispatch('hi', { agentType: evil });
     } catch (err) {
-      const msg = (err as Error).message;
-      // eslint-disable-next-line no-control-regex
-      expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
-      expect(msg).toContain('not found');
+      error = err;
     }
+    expect(error).toBeInstanceOf(Error);
+    const msg = (error as Error).message;
+    // eslint-disable-next-line no-control-regex
+    expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
+    expect(msg).toContain('not found');
   });
 
   // R2 self-review (test-5): dispose() MUST still run even when
@@ -2496,9 +2536,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
 
   it("isolation:'worktree' refuses when git is not available", async () => {
     worktreeStubs.instances.length = 0; // reset
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2519,9 +2558,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' refuses when cwd is not a git repository", async () => {
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2539,9 +2577,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' refuses when parent working tree is dirty", async () => {
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2559,9 +2596,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' surfaces createUserWorktree failure", async () => {
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2589,9 +2625,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // suffix and was previously untested.
 
   it("isolation:'worktree' cleanup: removeUserWorktree failure preserves path+branch", async () => {
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2621,9 +2656,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' cleanup: branchPreserved race yields branch-only suffix", async () => {
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2646,9 +2680,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' cleanup: thrown removeUserWorktree preserves path+branch", async () => {
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2740,9 +2773,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // the worktree on disk.
   it("isolation:'worktree' + schema setup throws → worktree is still cleaned up", async () => {
     const removeCalls: string[] = [];
-    const { GitWorktreeService } = await import(
-      '../../services/gitWorktreeService.js'
-    );
+    const { GitWorktreeService } =
+      await import('../../services/gitWorktreeService.js');
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
       // Track removeUserWorktree calls — the fallback finally must call it.

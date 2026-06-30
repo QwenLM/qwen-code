@@ -88,6 +88,7 @@ import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../../hooks/stopHookCap.js';
+import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
 import { ApprovalMode, Config } from '../../config/config.js';
 import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
@@ -1332,8 +1333,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
-          | string
-          | Content,
+          string | Content,
         initialMessages,
       };
       toolConfig = {
@@ -1643,11 +1643,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       // Get the results
       const subagentRawText = subagent.getFinalText();
+      const terminateMode = subagent.getTerminateMode();
       const finalText = appendStopHookBlockingCapWarning(
-        subagentRawText,
+        toModelVisibleSubagentResult(subagentRawText, terminateMode),
         stopHookWarning,
       );
-      const terminateMode = subagent.getTerminateMode();
       const success = terminateMode === AgentTerminateMode.GOAL;
       const executionSummary = subagent.getExecutionSummary();
 
@@ -2280,7 +2280,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // already requires confirmation — this only flips deny → surface.)
         const shouldBubble = Boolean(
           subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
-            this.config.isInteractive(),
+          this.config.isInteractive(),
         );
         // Use Object.create so the resolved approval mode override (e.g.
         // subagent-level `approvalMode: auto-edit`) is preserved.
@@ -2581,9 +2581,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const wtSuffix = formatWorktreeSuffix(
               await cleanupWorktreeIsolation(),
             );
+            const modelVisibleText = toModelVisibleSubagentResult(
+              subagentRawText,
+              terminateMode,
+            );
             const finalText =
               appendStopHookBlockingCapWarning(
-                subagentRawText,
+                terminateMode === AgentTerminateMode.GOAL
+                  ? modelVisibleText ||
+                      '(subagent produced no model-visible output)'
+                  : modelVisibleText,
                 stopHookWarning,
               ) + wtSuffix;
             const completionStats = getCompletionStats();
@@ -3014,11 +3021,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         });
 
         const stopHookWarning = await runFramed();
+        const terminateMode = subagent.getTerminateMode();
         const finalText = appendStopHookBlockingCapWarning(
-          subagent.getFinalText(),
+          toModelVisibleSubagentResult(subagent.getFinalText(), terminateMode),
           stopHookWarning,
         );
-        const terminateMode = subagent.getTerminateMode();
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {
@@ -3046,8 +3053,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             returnDisplay: this.currentDisplay!,
           };
         }
+        const visibleFinalText =
+          finalText || '(subagent produced no model-visible output)';
         return {
-          llmContent: [{ text: finalText + wtSuffix }],
+          llmContent: [{ text: visibleFinalText + wtSuffix }],
           returnDisplay: this.currentDisplay!,
         };
       } finally {
