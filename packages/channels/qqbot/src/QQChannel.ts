@@ -235,6 +235,7 @@ export class QQChannel extends ChannelBase {
           '## @提及格式',
           '',
           '消息内容中的 <@OPENID> 标签代表群成员的 QQ 标识。',
+          '当其他群成员 @你（机器人）时，消息内容中会出现 <@你的BotOPENID> 标签，这代表该消息是 @给你的。',
           '你可以在回复中使用 <@OPENID> 格式来 @提及特定的群成员。',
           '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
         );
@@ -1402,6 +1403,8 @@ export class QQChannel extends ChannelBase {
       event.author.member_openid ||
       'QQ User';
     const safeName = sanitizeSenderName(senderName);
+    const senderOpenId =
+      event.author.member_openid || event.author.user_openid || '';
     const cleanText = (event.content || '')
       .replace(/<@[^>]{1,64}>/g, '')
       .trim();
@@ -1439,7 +1442,7 @@ export class QQChannel extends ChannelBase {
 
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] ${botTag}[${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content ?? '') : cleanText)}`;
+      : `[atMention=${isAtBot}] ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content ?? '') : cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1579,6 +1582,8 @@ export class QQChannel extends ChannelBase {
       event.author.member_openid ||
       'QQ User';
     const safeName = sanitizeSenderName(senderName);
+    const senderOpenId =
+      event.author.member_openid || event.author.user_openid || '';
 
     // 只有 @机器人本人 + 斜杠 才是 slash command
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
@@ -1596,7 +1601,7 @@ export class QQChannel extends ChannelBase {
     // the content reaches the LLM to prevent prompt-injection-based @mentions.
     const text = isSlash
       ? cleanText
-      : `[atMention=${isAtBot}] ${botTag}[${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
+      : `[atMention=${isAtBot}] ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
 
     // Only track replyMsgId for at-mention messages — non-@messages should
     // not clobber a preceding @mention's replyMsgId, or the bot's response
