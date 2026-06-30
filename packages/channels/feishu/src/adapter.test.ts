@@ -43,7 +43,7 @@ function createChannel(
 }
 
 class TestableFeishuChannel extends FeishuChannel {
-  pushScheduled(target: SessionTarget, text: string): Promise<void> {
+  pushLoop(target: SessionTarget, text: string): Promise<void> {
     return this.pushProactive(target, text);
   }
 }
@@ -75,7 +75,7 @@ describe('FeishuChannel', () => {
       );
     });
 
-    it('supports proactive scheduled messages', () => {
+    it('supports proactive loop messages', () => {
       const channel = createChannel();
 
       expect(channel.supportsProactiveSend()).toBe(true);
@@ -815,7 +815,7 @@ describe('FeishuChannel', () => {
         .mockImplementation(() => true);
 
       await expect(
-        channel.pushScheduled(
+        channel.pushLoop(
           {
             channelName: 'test',
             senderId: 'ou_user',
@@ -845,7 +845,7 @@ describe('FeishuChannel', () => {
         .mockImplementation(() => true);
 
       await expect(
-        channel.pushScheduled(
+        channel.pushLoop(
           {
             channelName: 'test',
             senderId: 'ou_user',
@@ -859,6 +859,38 @@ describe('FeishuChannel', () => {
         expect.stringContaining('sendMessage failed: HTTP 500'),
       );
       stderrSpy.mockRestore();
+    });
+
+    it('sends proactive loop output to direct chats', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('{}', { status: 200 }),
+      );
+
+      await channel.pushLoop(
+        {
+          channelName: 'test',
+          senderId: 'ou_user',
+          chatId: 'oc_chat_id',
+        },
+        'loop result',
+      );
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/im/v1/messages?receive_id_type=chat_id'),
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            Authorization: 'Bearer tenant-token',
+          }),
+          body: expect.stringContaining('"receive_id":"oc_chat_id"'),
+        }),
+      );
+      fetchSpy.mockRestore();
     });
   });
 

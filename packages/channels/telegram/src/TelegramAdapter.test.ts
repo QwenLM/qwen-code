@@ -124,7 +124,7 @@ describe('TelegramChannel', () => {
     vi.useRealTimers();
   });
 
-  it('supports proactive scheduled messages', () => {
+  it('supports proactive loop messages', () => {
     const channel = createChannel();
 
     expect(channel.supportsProactiveSend()).toBe(true);

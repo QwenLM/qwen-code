@@ -5,9 +5,9 @@ import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type {
-  ChannelCronJob,
-  ChannelCronJobInput,
-} from './ChannelCronStore.js';
+  ChannelLoop,
+  ChannelLoopInput,
+} from './ChannelLoopStore.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -457,8 +457,8 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Channel: test-chan');
     });
 
-    it('/schedule add stores a job for the current channel target', async () => {
-      const created: ChannelCronJob = {
+    it('/loop add stores a job for the current channel target', async () => {
+      const created: ChannelLoop = {
         id: 'job-1',
         channelName: 'test-chan',
         target: {
@@ -476,14 +476,14 @@ describe('ChannelBase', () => {
         consecutiveFailures: 0,
         runCount: 0,
       };
-      const createSchedule = vi.fn(
-        async (_input: ChannelCronJobInput) => created,
+      const createLoop = vi.fn(
+        async (_input: ChannelLoopInput) => created,
       );
       const ch = createChannel(
         {},
         {
-          scheduleController: {
-            create: createSchedule,
+          loopController: {
+            create: createLoop,
             listForTarget: vi.fn().mockResolvedValue([]),
             disable: vi.fn(),
             validateCron: vi.fn(),
@@ -493,10 +493,10 @@ describe('ChannelBase', () => {
       ch.proactiveSupported = true;
 
       await ch.handleInbound(
-        envelope({ text: '/schedule add "0 9 * * *" post summary' }),
+        envelope({ text: '/loop add "0 9 * * *" post summary' }),
       );
 
-      expect(createSchedule).toHaveBeenCalledWith({
+      expect(createLoop).toHaveBeenCalledWith({
         channelName: 'test-chan',
         target: {
           channelName: 'test-chan',
@@ -512,11 +512,36 @@ describe('ChannelBase', () => {
         recurring: true,
         createdBy: 'User 1',
       });
-      expect(ch.sent[0]!.text).toContain('Scheduled job job-1');
+      expect(ch.sent[0]!.text).toContain('Loop job-1');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('/schedule commands require shared-session authorization', async () => {
+    it('/schedule is not a local command', async () => {
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/schedule list' }));
+
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        's-1',
+        '/schedule list',
+        {},
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'agent response' },
+      ]);
+    });
+
+    it('/loop commands require shared-session authorization', async () => {
       const listForTarget = vi.fn().mockResolvedValue([]);
       const ch = createChannel(
         {
@@ -524,7 +549,7 @@ describe('ChannelBase', () => {
           allowedUsers: ['owner'],
         },
         {
-          scheduleController: {
+          loopController: {
             create: vi.fn(),
             listForTarget,
             disable: vi.fn(),
@@ -534,20 +559,20 @@ describe('ChannelBase', () => {
       );
 
       await ch.handleInbound(
-        envelope({ senderId: 'stranger', text: '/schedule list' }),
+        envelope({ senderId: 'stranger', text: '/loop list' }),
       );
 
       expect(listForTarget).not.toHaveBeenCalled();
       expect(ch.sent[0]!.text).toContain('Only authorized members');
     });
 
-    it('/schedule cancel only disables jobs owned by the caller target', async () => {
+    it('/loop cancel only disables jobs owned by the caller target', async () => {
       const listForTarget = vi.fn().mockResolvedValue([]);
       const disable = vi.fn().mockResolvedValue(true);
       const ch = createChannel(
         {},
         {
-          scheduleController: {
+          loopController: {
             create: vi.fn(),
             listForTarget,
             disable,
@@ -556,7 +581,7 @@ describe('ChannelBase', () => {
         },
       );
 
-      await ch.handleInbound(envelope({ text: '/schedule cancel job-1' }));
+      await ch.handleInbound(envelope({ text: '/loop cancel job-1' }));
 
       expect(listForTarget).toHaveBeenCalledWith('test-chan', {
         channelName: 'test-chan',
@@ -566,20 +591,83 @@ describe('ChannelBase', () => {
         isGroup: false,
       });
       expect(disable).not.toHaveBeenCalled();
-      expect(ch.sent[0]!.text).toBe('No scheduled job job-1.');
+      expect(ch.sent[0]!.text).toBe('No loop job-1.');
     });
 
-    it('/schedule add rejects a target that already has too many jobs', async () => {
+    it('/loop cancel disables a visible loop', async () => {
+      const loop: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn().mockResolvedValue([loop]),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/loop cancel job-1' }));
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(ch.sent[0]!.text).toBe('Cancelled loop job-1.');
+    });
+
+    it('/loop inspect and cancel require an id', async () => {
+      const listForTarget = vi.fn().mockResolvedValue([]);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget,
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/loop inspect' }));
+      await ch.handleInbound(envelope({ text: '/loop cancel' }));
+
+      expect(listForTarget).not.toHaveBeenCalled();
+      expect(ch.sent.map((message) => message.text)).toEqual([
+        'Usage: /loop inspect <id>',
+        'Usage: /loop cancel <id>',
+      ]);
+    });
+
+    it('/loop add rejects a target that already has too many jobs', async () => {
       const existingJobs = Array.from({ length: 10 }, (_, index) => ({
         id: `job-${index}`,
         enabled: true,
       }));
-      const createSchedule = vi.fn();
+      const createLoop = vi.fn();
       const ch = createChannel(
         {},
         {
-          scheduleController: {
-            create: createSchedule,
+          loopController: {
+            create: createLoop,
             listForTarget: vi.fn().mockResolvedValue(existingJobs),
             disable: vi.fn(),
             validateCron: vi.fn(),
@@ -589,22 +677,22 @@ describe('ChannelBase', () => {
       ch.proactiveSupported = true;
 
       await ch.handleInbound(
-        envelope({ text: '/schedule add "0 9 * * *" post summary' }),
+        envelope({ text: '/loop add "0 9 * * *" post summary' }),
       );
 
-      expect(createSchedule).not.toHaveBeenCalled();
-      expect(ch.sent[0]!.text).toContain('Too many scheduled jobs');
+      expect(createLoop).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain('Too many loops');
     });
 
-    it('/schedule add uses the atomic target quota when available', async () => {
+    it('/loop add uses the atomic target quota when available', async () => {
       const createForTarget = vi.fn().mockResolvedValue(undefined);
-      const createSchedule = vi.fn();
+      const createLoop = vi.fn();
       const listForTarget = vi.fn();
       const ch = createChannel(
         {},
         {
-          scheduleController: {
-            create: createSchedule,
+          loopController: {
+            create: createLoop,
             createForTarget,
             listForTarget,
             disable: vi.fn(),
@@ -615,7 +703,7 @@ describe('ChannelBase', () => {
       ch.proactiveSupported = true;
 
       await ch.handleInbound(
-        envelope({ text: '/schedule add "0 9 * * *" post summary' }),
+        envelope({ text: '/loop add "0 9 * * *" post summary' }),
       );
 
       expect(createForTarget).toHaveBeenCalledWith(
@@ -625,18 +713,18 @@ describe('ChannelBase', () => {
         }),
         10,
       );
-      expect(createSchedule).not.toHaveBeenCalled();
+      expect(createLoop).not.toHaveBeenCalled();
       expect(listForTarget).not.toHaveBeenCalled();
-      expect(ch.sent[0]!.text).toContain('Too many scheduled jobs');
+      expect(ch.sent[0]!.text).toContain('Too many loops');
     });
 
-    it('/schedule add rejects oversized prompts before persisting', async () => {
-      const createSchedule = vi.fn();
+    it('/loop add rejects oversized prompts before persisting', async () => {
+      const createLoop = vi.fn();
       const ch = createChannel(
         {},
         {
-          scheduleController: {
-            create: createSchedule,
+          loopController: {
+            create: createLoop,
             listForTarget: vi.fn().mockResolvedValue([]),
             disable: vi.fn(),
             validateCron: vi.fn(),
@@ -646,20 +734,20 @@ describe('ChannelBase', () => {
       ch.proactiveSupported = true;
 
       await ch.handleInbound(
-        envelope({ text: `/schedule add "0 9 * * *" ${'x'.repeat(4001)}` }),
+        envelope({ text: `/loop add "0 9 * * *" ${'x'.repeat(4001)}` }),
       );
 
-      expect(createSchedule).not.toHaveBeenCalled();
-      expect(ch.sent[0]!.text).toContain('Scheduled prompt is too long');
+      expect(createLoop).not.toHaveBeenCalled();
+      expect(ch.sent[0]!.text).toContain('Loop prompt is too long');
     });
 
-    it('/schedule add rejects adapters that cannot cold send', async () => {
-      const createSchedule = vi.fn();
+    it('/loop add rejects adapters that cannot cold send', async () => {
+      const createLoop = vi.fn();
       const ch = createChannel(
         {},
         {
-          scheduleController: {
-            create: createSchedule,
+          loopController: {
+            create: createLoop,
             listForTarget: vi.fn(),
             disable: vi.fn(),
             validateCron: vi.fn(),
@@ -668,22 +756,22 @@ describe('ChannelBase', () => {
       );
 
       await ch.handleInbound(
-        envelope({ text: '/schedule add "0 9 * * *" post summary' }),
+        envelope({ text: '/loop add "0 9 * * *" post summary' }),
       );
 
-      expect(createSchedule).not.toHaveBeenCalled();
+      expect(createLoop).not.toHaveBeenCalled();
       expect(ch.sent[0]!.text).toContain(
-        'does not support proactive scheduled messages',
+        'does not support proactive loop messages',
       );
     });
 
-    it('/schedule add rejects threaded targets unless the adapter supports them', async () => {
-      const createSchedule = vi.fn();
+    it('/loop add rejects threaded targets unless the adapter supports them', async () => {
+      const createLoop = vi.fn();
       const ch = createChannel(
         {},
         {
-          scheduleController: {
-            create: createSchedule,
+          loopController: {
+            create: createLoop,
             listForTarget: vi.fn(),
             disable: vi.fn(),
             validateCron: vi.fn(),
@@ -694,18 +782,18 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(
         envelope({
-          text: '/schedule add "0 9 * * *" post summary',
+          text: '/loop add "0 9 * * *" post summary',
           threadId: 'thread-1',
         }),
       );
 
-      expect(createSchedule).not.toHaveBeenCalled();
+      expect(createLoop).not.toHaveBeenCalled();
       expect(ch.sent[0]!.text).toContain(
-        'does not support proactive scheduled messages for this chat target',
+        'does not support proactive loop messages for this chat target',
       );
     });
 
-    it('/schedule list shows lifecycle state for jobs in the current target', async () => {
+    it('/loop list shows lifecycle state for jobs in the current target', async () => {
       const listForTarget = vi.fn(async () => [
         {
           id: 'job-1',
@@ -733,7 +821,7 @@ describe('ChannelBase', () => {
       const ch = createChannel(
         {},
         {
-          scheduleController: {
+          loopController: {
             create: vi.fn(),
             listForTarget,
             disable: vi.fn(),
@@ -743,7 +831,7 @@ describe('ChannelBase', () => {
         },
       );
 
-      await ch.handleInbound(envelope({ text: '/schedule list' }));
+      await ch.handleInbound(envelope({ text: '/loop list' }));
 
       expect(listForTarget).toHaveBeenCalledWith('test-chan', {
         channelName: 'test-chan',
@@ -759,11 +847,11 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('daily summary');
     });
 
-    it('/schedule list shows invalid cron when next fire formatting fails', async () => {
+    it('/loop list shows invalid cron when next fire formatting fails', async () => {
       const ch = createChannel(
         {},
         {
-          scheduleController: {
+          loopController: {
             create: vi.fn(),
             listForTarget: vi.fn(async () => [
               {
@@ -794,16 +882,16 @@ describe('ChannelBase', () => {
         },
       );
 
-      await ch.handleInbound(envelope({ text: '/schedule list' }));
+      await ch.handleInbound(envelope({ text: '/loop list' }));
 
       expect(ch.sent[0]!.text).toContain('next=invalid cron');
     });
 
-    it('/schedule inspect shows lifecycle details for a current-target job', async () => {
+    it('/loop inspect shows lifecycle details for a current-target job', async () => {
       const ch = createChannel(
         {},
         {
-          scheduleController: {
+          loopController: {
             create: vi.fn(),
             listForTarget: vi.fn(async () => [
               {
@@ -836,9 +924,9 @@ describe('ChannelBase', () => {
         },
       );
 
-      await ch.handleInbound(envelope({ text: '/schedule inspect job-1' }));
+      await ch.handleInbound(envelope({ text: '/loop inspect job-1' }));
 
-      expect(ch.sent[0]!.text).toContain('Scheduled job job-1');
+      expect(ch.sent[0]!.text).toContain('Loop job-1');
       expect(ch.sent[0]!.text).toContain('Status: enabled, last=ok');
       expect(ch.sent[0]!.text).toContain('Next: 2026-07-01T09:00:00.000Z');
       expect(ch.sent[0]!.text).toContain('Runs: 2');
@@ -4843,8 +4931,8 @@ describe('ChannelBase', () => {
     });
   });
 
-  describe('scheduled prompts', () => {
-    it('runs a scheduled prompt as a follow-up and pushes the result proactively', async () => {
+  describe('loop prompts', () => {
+    it('runs a loop prompt as a follow-up and pushes the result proactively', async () => {
       let resolveFirstPrompt: (value: string) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>)
         .mockImplementationOnce(
@@ -4853,7 +4941,7 @@ describe('ChannelBase', () => {
               resolveFirstPrompt = resolve;
             }),
         )
-        .mockResolvedValueOnce('scheduled response');
+        .mockResolvedValueOnce('loop response');
       const ch = createChannel({
         sessionScope: 'thread',
         groupPolicy: 'open',
@@ -4872,7 +4960,7 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenCalledTimes(1);
       });
 
-      const scheduled = ch.runScheduledPrompt({
+      const loopRun = ch.runLoopPrompt({
         id: 'job-1',
         channelName: 'test-chan',
         target: {
@@ -4896,20 +4984,20 @@ describe('ChannelBase', () => {
 
       resolveFirstPrompt('first response');
       await inbound;
-      await expect(scheduled).resolves.toBe('scheduled response');
+      await expect(loopRun).resolves.toBe('loop response');
 
       expect(bridge.prompt).toHaveBeenCalledTimes(2);
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
-        '[Scheduled task "daily summary" set by Alice]\n\npost summary',
+        '[Loop "daily summary" created by Alice]\n\npost summary',
         {},
       );
       expect(ch.proactive).toEqual([
-        { chatId: 'group-1', text: 'scheduled response' },
+        { chatId: 'group-1', text: 'loop response' },
       ]);
     });
 
-    it('starts the scheduled timeout after the queued turn begins', async () => {
+    it('starts the loop timeout after the queued turn begins', async () => {
       let resolveFirstPrompt: (value: string) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>)
         .mockImplementationOnce(
@@ -4939,7 +5027,7 @@ describe('ChannelBase', () => {
           expect(bridge.prompt).toHaveBeenCalledTimes(1);
         });
 
-        const scheduled = ch.runScheduledPrompt(
+        const loopRun = ch.runLoopPrompt(
           {
             id: 'job-1',
             channelName: 'test-chan',
@@ -4962,7 +5050,7 @@ describe('ChannelBase', () => {
           { timeoutMs: 1000 },
         );
         let settled = false;
-        void scheduled.catch(() => {
+        void loopRun.catch(() => {
           settled = true;
         });
 
@@ -4978,7 +5066,7 @@ describe('ChannelBase', () => {
         });
 
         await vi.advanceTimersByTimeAsync(1000);
-        await expect(scheduled).rejects.toThrow('scheduled job timed out');
+        await expect(loopRun).rejects.toThrow('loop timed out');
         expect(bridge.cancelSession).toHaveBeenCalledWith(expect.any(String));
         expect(ch.proactive).toEqual([]);
       } finally {
@@ -4986,7 +5074,113 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('evicts the bridge session after a scheduled timeout', async () => {
+    it('times out a loop even when cancelSession never resolves', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>(() => undefined),
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<void>(() => undefined),
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      vi.useFakeTimers();
+      try {
+        const loopRun = ch.runLoopPrompt(
+          {
+            id: 'job-1',
+            channelName: 'test-chan',
+            target: {
+              channelName: 'test-chan',
+              senderId: 'alice',
+              chatId: 'chat1',
+              isGroup: false,
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            label: 'daily summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Alice',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+            runCount: 0,
+          },
+          { timeoutMs: 1000 },
+        );
+        const loopResult = loopRun.catch((error: unknown) => error);
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        await vi.advanceTimersByTimeAsync(1000);
+
+        await expect(loopResult).resolves.toMatchObject({
+          message: 'loop timed out',
+        });
+        expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(
+          (
+            ch as unknown as {
+              activePrompts: Map<string, unknown>;
+            }
+          ).activePrompts.has('s-1'),
+        ).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fails a queued loop when the session was cleared before it ran', async () => {
+      let resolveFirstPrompt: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveFirstPrompt = resolve;
+          }),
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      const inbound = ch.handleInbound(envelope({ text: 'first task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await Promise.resolve();
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      (
+        ch as unknown as { sessionGenerations: Map<string, number> }
+      ).sessionGenerations.set('s-1', 1);
+
+      resolveFirstPrompt('first response');
+      await inbound;
+
+      await expect(loopRun).rejects.toThrow(
+        'loop dropped because session was cleared before it ran',
+      );
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      expect(ch.proactive).toEqual([]);
+    });
+
+    it('evicts the bridge session after a loop timeout', async () => {
       let rejectLatePrompt: (error: Error) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>)
         .mockImplementationOnce(
@@ -5001,7 +5195,7 @@ describe('ChannelBase', () => {
 
       vi.useFakeTimers();
       try {
-        const scheduled = ch.runScheduledPrompt(
+        const loopRun = ch.runLoopPrompt(
           {
             id: 'job-1',
             channelName: 'test-chan',
@@ -5023,17 +5217,17 @@ describe('ChannelBase', () => {
           },
           { timeoutMs: 1000 },
         );
-        const scheduledResult = scheduled.catch((error: unknown) => error);
+        const loopResult = loopRun.catch((error: unknown) => error);
         await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
 
         await vi.advanceTimersByTimeAsync(1000);
-        await expect(scheduledResult).resolves.toMatchObject({
-          message: 'scheduled job timed out',
+        await expect(loopResult).resolves.toMatchObject({
+          message: 'loop timed out',
         });
         rejectLatePrompt(new Error('late bridge failure'));
         await Promise.resolve();
 
-        await ch.runScheduledPrompt({
+        await ch.runLoopPrompt({
           id: 'job-2',
           channelName: 'test-chan',
           target: {
@@ -5056,7 +5250,7 @@ describe('ChannelBase', () => {
         expect(bridge.newSession).toHaveBeenCalledTimes(2);
         expect(bridge.prompt).toHaveBeenLastCalledWith(
           's-2',
-          '[Scheduled task "daily summary" set by Alice]\n\npost again',
+          '[Loop "daily summary" created by Alice]\n\npost again',
           {},
         );
         expect(ch.proactive).toEqual([
@@ -5067,19 +5261,19 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('does not push a scheduled response after the session is cancelled', async () => {
-      let resolveScheduledPrompt: (value: string) => void = () => {};
+    it('does not push a loop response after the session is cancelled', async () => {
+      let resolveLoopPrompt: (value: string) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
         () =>
           new Promise<string>((resolve) => {
-            resolveScheduledPrompt = resolve;
+            resolveLoopPrompt = resolve;
           }),
       );
       const ch = createChannel();
       ch.enableCancelCommand();
       ch.proactiveSupported = true;
 
-      const scheduled = ch.runScheduledPrompt({
+      const loopRun = ch.runLoopPrompt({
         id: 'job-1',
         channelName: 'test-chan',
         target: {
@@ -5103,8 +5297,8 @@ describe('ChannelBase', () => {
       });
 
       await ch.handleInbound(envelope({ text: '/cancel', senderId: 'alice' }));
-      resolveScheduledPrompt('late scheduled response');
-      await scheduled;
+      resolveLoopPrompt('late loop response');
+      await loopRun;
 
       expect(ch.proactive).toEqual([]);
     });
@@ -5117,7 +5311,7 @@ describe('ChannelBase', () => {
           allowedUsers: ['alice'],
         },
         {
-          scheduleController: {
+          loopController: {
             create: vi.fn(),
             listForTarget: vi.fn(),
             disable,
@@ -5128,7 +5322,7 @@ describe('ChannelBase', () => {
       ch.proactiveSupported = true;
 
       await expect(
-        ch.runScheduledPrompt({
+        ch.runLoopPrompt({
           id: 'job-1',
           channelName: 'test-chan',
           target: {
@@ -5159,7 +5353,7 @@ describe('ChannelBase', () => {
       ch.proactiveSupported = true;
 
       await expect(
-        ch.runScheduledPrompt({
+        ch.runLoopPrompt({
           id: 'job-1',
           channelName: 'test-chan',
           target: {
@@ -5180,26 +5374,26 @@ describe('ChannelBase', () => {
           runCount: 0,
         }),
       ).rejects.toThrow(
-        'does not support proactive scheduled messages for this chat target',
+        'does not support proactive loop messages for this chat target',
       );
 
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('drains collected messages after a scheduled prompt completes', async () => {
-      let resolveScheduled: (value: string) => void = () => {};
+    it('drains collected messages after a loop prompt completes', async () => {
+      let resolveLoop: (value: string) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>)
         .mockImplementationOnce(
           () =>
             new Promise<string>((resolve) => {
-              resolveScheduled = resolve;
+              resolveLoop = resolve;
             }),
         )
         .mockResolvedValueOnce('follow-up response');
       const ch = createChannel({ dispatchMode: 'collect' });
       ch.proactiveSupported = true;
 
-      const scheduled = ch.runScheduledPrompt({
+      const loopRun = ch.runLoopPrompt({
         id: 'job-1',
         channelName: 'test-chan',
         target: {
@@ -5223,16 +5417,16 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenCalledTimes(1);
       });
 
-      await ch.handleInbound(envelope({ text: 'while scheduled runs' }));
-      resolveScheduled('scheduled response');
-      await scheduled;
+      await ch.handleInbound(envelope({ text: 'while loop runs' }));
+      resolveLoop('loop response');
+      await loopRun;
 
       await vi.waitFor(() => {
         expect(bridge.prompt).toHaveBeenCalledTimes(2);
       });
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
-        'while scheduled runs',
+        'while loop runs',
         expect.any(Object),
       );
     });

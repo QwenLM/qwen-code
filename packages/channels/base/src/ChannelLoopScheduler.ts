@@ -1,48 +1,49 @@
 import type {
-  ChannelCronJob,
-  ChannelCronJobPatch,
-  ChannelCronStore,
-} from './ChannelCronStore.js';
+  ChannelLoop,
+  ChannelLoopPatch,
+  ChannelLoopStore,
+} from './ChannelLoopStore.js';
 
 const MAX_RESULT_PREVIEW_LENGTH = 500;
 
-export interface ChannelRoutineRunner {
-  runScheduledPrompt(
-    job: ChannelCronJob,
+export interface ChannelLoopRunner {
+  runLoopPrompt(
+    job: ChannelLoop,
     options?: { timeoutMs?: number },
   ): Promise<string | undefined>;
 }
 
-export interface ChannelCronSchedulerOptions {
-  store: Pick<ChannelCronStore, 'list' | 'update' | 'disable'>;
-  channels: ReadonlyMap<string, ChannelRoutineRunner>;
+export interface ChannelLoopSchedulerOptions {
+  store: Pick<ChannelLoopStore, 'list' | 'update' | 'disable'>;
+  channels: ReadonlyMap<string, ChannelLoopRunner>;
   nextFireTime: (cron: string, after: Date) => Date;
   now?: () => Date;
   maxConsecutiveFailures?: number;
   intervalMs?: number;
-  jobTimeoutMs?: number;
+  loopTimeoutMs?: number;
 }
 
-export class ChannelCronScheduler {
-  private readonly store: Pick<ChannelCronStore, 'list' | 'update' | 'disable'>;
-  private readonly channels: ReadonlyMap<string, ChannelRoutineRunner>;
+export class ChannelLoopScheduler {
+  private readonly store: Pick<ChannelLoopStore, 'list' | 'update' | 'disable'>;
+  private readonly channels: ReadonlyMap<string, ChannelLoopRunner>;
   private readonly nextFireTime: (cron: string, after: Date) => Date;
   private readonly now: () => Date;
   private readonly maxConsecutiveFailures: number;
   private readonly intervalMs: number;
-  private readonly jobTimeoutMs: number;
+  private readonly loopTimeoutMs: number;
   private timer: ReturnType<typeof setInterval> | undefined;
   private runningTick: Promise<void> | undefined;
   private readonly inFlightJobs = new Map<string, symbol>();
+  private generation = 0;
 
-  constructor(options: ChannelCronSchedulerOptions) {
+  constructor(options: ChannelLoopSchedulerOptions) {
     this.store = options.store;
     this.channels = options.channels;
     this.nextFireTime = options.nextFireTime;
     this.now = options.now ?? (() => new Date());
     this.maxConsecutiveFailures = options.maxConsecutiveFailures ?? 5;
     this.intervalMs = options.intervalMs ?? 60_000;
-    this.jobTimeoutMs = options.jobTimeoutMs ?? 5 * 60_000;
+    this.loopTimeoutMs = options.loopTimeoutMs ?? 5 * 60_000;
   }
 
   start(): void {
@@ -64,6 +65,7 @@ export class ChannelCronScheduler {
     }
     this.timer = undefined;
     this.runningTick = undefined;
+    this.generation++;
     this.inFlightJobs.clear();
   }
 
@@ -93,26 +95,27 @@ export class ChannelCronScheduler {
     }
   }
 
-  private isDue(job: ChannelCronJob, now: Date): boolean {
+  private isDue(job: ChannelLoop, now: Date): boolean {
     try {
       const after = new Date(job.lastFiredAt ?? job.createdAt);
       return this.nextFireTime(job.cron, after).getTime() <= now.getTime();
     } catch (err) {
       process.stderr.write(
-        `[scheduler] invalid cron for job ${job.id}: ${err}\n`,
+        `[scheduler] invalid cron for loop ${job.id}: ${err}\n`,
       );
       return false;
     }
   }
 
-  private async fireOnce(job: ChannelCronJob, now: Date): Promise<void> {
+  private async fireOnce(job: ChannelLoop, now: Date): Promise<void> {
     const token = Symbol(job.id);
+    const generation = this.generation;
     this.inFlightJobs.set(job.id, token);
     try {
-      await this.fire(job, now);
+      await this.fire(job, now, generation);
     } catch (err) {
       process.stderr.write(
-        `[scheduler] unhandled error for job ${job.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+        `[scheduler] unhandled error for loop ${job.id}: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     } finally {
       if (this.inFlightJobs.get(job.id) === token) {
@@ -121,7 +124,11 @@ export class ChannelCronScheduler {
     }
   }
 
-  private async fire(job: ChannelCronJob, now: Date): Promise<void> {
+  private async fire(
+    job: ChannelLoop,
+    now: Date,
+    generation: number,
+  ): Promise<void> {
     const channel = this.channels.get(job.channelName);
     if (!channel) {
       return;
@@ -134,10 +141,11 @@ export class ChannelCronScheduler {
       await this.store.update(latestJob.id, {
         runningSince: now.toISOString(),
       });
-      resultPreview = await channel.runScheduledPrompt(latestJob, {
-        timeoutMs: this.jobTimeoutMs,
+      resultPreview = await channel.runLoopPrompt(latestJob, {
+        timeoutMs: this.loopTimeoutMs,
       });
     } catch (err) {
+      if (this.generation !== generation) return;
       await this.recordFailure(
         latestJob,
         now,
@@ -145,8 +153,9 @@ export class ChannelCronScheduler {
       );
       return;
     }
+    if (this.generation !== generation) return;
 
-    const patch: ChannelCronJobPatch = {
+    const patch: ChannelLoopPatch = {
       lastFiredAt: now.toISOString(),
       lastFinishedAt: this.now().toISOString(),
       lastResultPreview: truncateResultPreview(resultPreview),
@@ -163,32 +172,36 @@ export class ChannelCronScheduler {
       await this.store.update(latestJob.id, patch);
     } catch (err) {
       process.stderr.write(
-        `[scheduler] job ${latestJob.id} succeeded but status persist failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        `[scheduler] loop ${latestJob.id} succeeded but status persist failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
   }
 
-  private async findJob(id: string): Promise<ChannelCronJob | undefined> {
+  private async findJob(id: string): Promise<ChannelLoop | undefined> {
     const jobs = await this.store.list();
     return jobs.find((job) => job.id === id);
   }
 
   private async recordFailure(
-    job: ChannelCronJob,
+    job: ChannelLoop,
     now: Date,
     message: string,
   ): Promise<void> {
     const consecutiveFailures = job.consecutiveFailures + 1;
-    await this.store.update(job.id, {
+    const patch: ChannelLoopPatch = {
       lastFiredAt: now.toISOString(),
-      lastFinishedAt: now.toISOString(),
+      lastFinishedAt: this.now().toISOString(),
       lastStatus: 'error',
       lastError: truncateError(message),
       lastResultPreview: undefined,
       consecutiveFailures,
       runningSince: undefined,
       runCount: job.runCount + 1,
-    });
+    };
+    if (!job.recurring) {
+      patch.enabled = false;
+    }
+    await this.store.update(job.id, patch);
     if (consecutiveFailures >= this.maxConsecutiveFailures) {
       await this.store.disable(job.id);
     }

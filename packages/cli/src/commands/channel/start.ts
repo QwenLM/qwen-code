@@ -12,8 +12,8 @@ import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   AcpBridge,
-  ChannelCronScheduler,
-  ChannelCronStore,
+  ChannelLoopScheduler,
+  ChannelLoopStore,
   SessionRouter,
 } from '@qwen-code/channel-base';
 import type {
@@ -21,7 +21,7 @@ import type {
   ChannelBase,
   ChannelBaseOptions,
   ChannelPlugin,
-  ChannelScheduleController,
+  ChannelLoopController,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import { getPlugin, registerPlugin } from './channel-registry.js';
@@ -70,17 +70,17 @@ function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
 }
 
-function channelCronPath(): string {
+function channelLoopPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
 }
 
-function createScheduleController(
-  store: ChannelCronStore,
-): ChannelScheduleController {
+function createLoopController(
+  store: ChannelLoopStore,
+): ChannelLoopController {
   return {
     create: (input) => store.create(input),
-    createForTarget: (input, maxEnabledJobs) =>
-      store.createForTarget(input, maxEnabledJobs),
+    createForTarget: (input, maxEnabledLoops) =>
+      store.createForTarget(input, maxEnabledLoops),
     listForTarget: (channelName, target) =>
       store.listForTarget(channelName, target),
     disable: (id) => store.disable(id),
@@ -274,18 +274,18 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     config.sessionScope,
     sessionsPath(),
   );
-  const cronStore = new ChannelCronStore({ filePath: channelCronPath() });
-  const scheduleController = createScheduleController(cronStore);
+  const loopStore = new ChannelLoopStore({ filePath: channelLoopPath() });
+  const loopController = createLoopController(loopStore);
   const channels: Map<string, ChannelBase> = new Map();
 
   const channel = await createChannel(name, config, bridge, {
     router,
     proxy,
-    scheduleController,
+    loopController,
   });
   channels.set(name, channel);
-  const scheduler = new ChannelCronScheduler({
-    store: cronStore,
+  const scheduler = new ChannelLoopScheduler({
+    store: loopStore,
     channels,
     nextFireTime,
   });
@@ -352,6 +352,10 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         writeStderrLine(
           `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
         );
+        channel.disconnect();
+        router.clearAll();
+        removeServiceInfo();
+        process.exit(1);
       }
     });
   };
@@ -430,8 +434,8 @@ async function startAll(proxy?: string): Promise<void> {
   await bridge.start();
 
   const router = new SessionRouter(bridge, defaultCwd, 'user', sessionsPath());
-  const cronStore = new ChannelCronStore({ filePath: channelCronPath() });
-  const scheduleController = createScheduleController(cronStore);
+  const loopStore = new ChannelLoopStore({ filePath: channelLoopPath() });
+  const loopController = createLoopController(loopStore);
   // Register per-channel scope overrides so each channel uses its own sessionScope
   for (const { name, config } of parsed) {
     router.setChannelScope(name, config.sessionScope);
@@ -448,7 +452,7 @@ async function startAll(proxy?: string): Promise<void> {
       await createChannel(name, config, bridge, {
         router,
         proxy,
-        scheduleController,
+        loopController,
       }),
     );
   }
@@ -476,8 +480,8 @@ async function startAll(proxy?: string): Promise<void> {
     bridge.stop();
     process.exit(1);
   }
-  const scheduler = new ChannelCronScheduler({
-    store: cronStore,
+  const scheduler = new ChannelLoopScheduler({
+    store: loopStore,
     channels: connectedChannels,
     nextFireTime,
   });
@@ -541,6 +545,16 @@ async function startAll(proxy?: string): Promise<void> {
         writeStderrLine(
           `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
         );
+        for (const channel of channels.values()) {
+          try {
+            channel.disconnect();
+          } catch {
+            // best-effort
+          }
+        }
+        router.clearAll();
+        removeServiceInfo();
+        process.exit(1);
       }
     });
   };

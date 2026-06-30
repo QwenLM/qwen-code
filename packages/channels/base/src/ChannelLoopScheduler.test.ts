@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChannelCronScheduler } from './ChannelCronScheduler.js';
-import type { ChannelCronJob, ChannelCronStore } from './ChannelCronStore.js';
+import { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
+import type { ChannelLoop, ChannelLoopStore } from './ChannelLoopStore.js';
 
-describe('ChannelCronScheduler', () => {
-  let jobs: ChannelCronJob[];
-  let store: Pick<ChannelCronStore, 'list' | 'update' | 'disable'>;
-  let runScheduledPrompt: ReturnType<typeof vi.fn>;
+describe('ChannelLoopScheduler', () => {
+  let jobs: ChannelLoop[];
+  let store: Pick<ChannelLoopStore, 'list' | 'update' | 'disable'>;
+  let runLoopPrompt: ReturnType<typeof vi.fn>;
   let nowMs: number;
 
-  const baseJob: ChannelCronJob = {
+  const baseJob: ChannelLoop = {
     id: 'job-1',
     channelName: 'feishu-main',
     target: {
@@ -44,20 +44,48 @@ describe('ChannelCronScheduler', () => {
         return true;
       }),
     };
-    runScheduledPrompt = vi.fn(async () => 'done summary');
+    runLoopPrompt = vi.fn(async () => 'done summary');
+  });
+
+  it('starts immediately, ticks on the interval, and stops scheduling', async () => {
+    jobs = [];
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs + 60_000),
+      intervalMs: 1_000,
+    });
+
+    vi.useFakeTimers();
+    try {
+      scheduler.start();
+      await Promise.resolve();
+      expect(store.list).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(store.list).toHaveBeenCalledTimes(2);
+
+      scheduler.stop();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(store.list).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      scheduler.stop();
+    }
   });
 
   it('fires an overdue enabled job through its channel and records success', async () => {
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date('2026-06-30T01:01:00.000Z'),
     });
 
     await scheduler.tick();
 
-    expect(runScheduledPrompt).toHaveBeenCalledWith(baseJob, {
+    expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, {
       timeoutMs: 300_000,
     });
     expect(store.update).toHaveBeenCalledWith('job-1', {
@@ -73,10 +101,10 @@ describe('ChannelCronScheduler', () => {
   });
 
   it('truncates long result previews before storing success', async () => {
-    runScheduledPrompt.mockResolvedValue('x'.repeat(600));
-    const scheduler = new ChannelCronScheduler({
+    runLoopPrompt.mockResolvedValue('x'.repeat(600));
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date('2026-06-30T01:01:00.000Z'),
     });
@@ -96,9 +124,9 @@ describe('ChannelCronScheduler', () => {
       if (after.getTime() < nowMs) return new Date(nowMs - 60_000);
       return new Date(nowMs + 60_000);
     });
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime,
     });
@@ -106,14 +134,14 @@ describe('ChannelCronScheduler', () => {
     await scheduler.tick();
     await scheduler.tick();
 
-    expect(runScheduledPrompt).toHaveBeenCalledTimes(1);
+    expect(runLoopPrompt).toHaveBeenCalledTimes(1);
   });
 
   it('disables a one-shot job after it fires', async () => {
     jobs = [{ ...baseJob, recurring: false }];
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
     });
@@ -134,55 +162,74 @@ describe('ChannelCronScheduler', () => {
     expect(store.disable).not.toHaveBeenCalled();
   });
 
-  it('clears abandoned in-flight state when stopped', async () => {
-    runScheduledPrompt.mockImplementation(() => new Promise(() => undefined));
-    const scheduler = new ChannelCronScheduler({
+  it('does not let stopped in-flight loops write stale lifecycle state', async () => {
+    let finishFirst!: (value: string) => void;
+    runLoopPrompt.mockImplementation(() => new Promise(() => undefined));
+    runLoopPrompt
+      .mockImplementationOnce(
+        () => new Promise<string>((resolve) => void (finishFirst = resolve)),
+      )
+      .mockResolvedValueOnce('second result');
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
     });
 
     void scheduler.tick();
-    await vi.waitFor(() => expect(runScheduledPrompt).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(runLoopPrompt).toHaveBeenCalledOnce());
 
     scheduler.stop();
     void scheduler.tick();
 
-    await vi.waitFor(() => expect(runScheduledPrompt).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(runLoopPrompt).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(store.update).toHaveBeenCalledWith(
+        'job-1',
+        expect.objectContaining({ lastResultPreview: 'second result' }),
+      ),
+    );
+    finishFirst('stale result');
+    await Promise.resolve();
+
+    expect(store.update).not.toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({ lastResultPreview: 'stale result' }),
+    );
   });
 
   it('passes the timeout budget to the channel runner', async () => {
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
-      jobTimeoutMs: 1234,
+      loopTimeoutMs: 1234,
     });
 
     await scheduler.tick();
 
-    expect(runScheduledPrompt).toHaveBeenCalledWith(baseJob, {
+    expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, {
       timeoutMs: 1234,
     });
   });
 
-  it('marks a job as running before awaiting the channel routine', async () => {
+  it('marks a loop as running before awaiting the channel loop', async () => {
     let finish!: (value: string) => void;
-    runScheduledPrompt.mockImplementation(
+    runLoopPrompt.mockImplementation(
       () => new Promise((resolve) => void (finish = resolve)),
     );
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
     });
 
     const tick = scheduler.tick();
 
-    await vi.waitFor(() => expect(runScheduledPrompt).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(runLoopPrompt).toHaveBeenCalledOnce());
     expect(store.update).toHaveBeenNthCalledWith(1, 'job-1', {
       runningSince: '2026-06-30T01:05:30.000Z',
     });
@@ -193,10 +240,10 @@ describe('ChannelCronScheduler', () => {
 
   it('records failures and disables a job after repeated errors', async () => {
     jobs = [{ ...baseJob, consecutiveFailures: 4 }];
-    runScheduledPrompt.mockRejectedValue(new Error('cannot cold send'));
-    const scheduler = new ChannelCronScheduler({
+    runLoopPrompt.mockRejectedValue(new Error('cannot cold send'));
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
       maxConsecutiveFailures: 5,
@@ -209,6 +256,7 @@ describe('ChannelCronScheduler', () => {
       lastFinishedAt: '2026-06-30T01:05:30.000Z',
       lastStatus: 'error',
       lastError: 'cannot cold send',
+      lastResultPreview: undefined,
       consecutiveFailures: 5,
       runningSince: undefined,
       runCount: 1,
@@ -216,18 +264,59 @@ describe('ChannelCronScheduler', () => {
     expect(store.disable).toHaveBeenCalledWith('job-1');
   });
 
-  it('skips jobs for channels owned by another process', async () => {
-    jobs = [{ ...baseJob, channelName: 'other-channel' }];
-    const scheduler = new ChannelCronScheduler({
+  it('disables one-shot loops after a failed attempt', async () => {
+    jobs = [{ ...baseJob, recurring: false }];
+    runLoopPrompt.mockRejectedValue(new Error('cannot cold send'));
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
     });
 
     await scheduler.tick();
 
-    expect(runScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.update).toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({ lastStatus: 'error', enabled: false }),
+    );
+  });
+
+  it('records failure finish time when the loop fails', async () => {
+    runLoopPrompt.mockRejectedValue(new Error('cannot cold send'));
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: vi
+        .fn()
+        .mockReturnValueOnce(new Date(nowMs))
+        .mockReturnValue(new Date(nowMs + 15_000)),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    expect(store.update).toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({
+        lastFiredAt: '2026-06-30T01:05:30.000Z',
+        lastFinishedAt: '2026-06-30T01:05:45.000Z',
+      }),
+    );
+  });
+
+  it('skips jobs for channels owned by another process', async () => {
+    jobs = [{ ...baseJob, channelName: 'other-channel' }];
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    await scheduler.tick();
+
+    expect(runLoopPrompt).not.toHaveBeenCalled();
     expect(store.update).not.toHaveBeenCalled();
     expect(store.disable).not.toHaveBeenCalled();
   });
@@ -235,20 +324,20 @@ describe('ChannelCronScheduler', () => {
   it('continues firing other due jobs when one job is still running', async () => {
     const secondJob = { ...baseJob, id: 'job-2' };
     jobs = [{ ...baseJob }, secondJob];
-    runScheduledPrompt.mockImplementation((job: ChannelCronJob) => {
+    runLoopPrompt.mockImplementation((job: ChannelLoop) => {
       if (job.id === 'job-1') return new Promise(() => undefined);
       return Promise.resolve();
     });
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
     });
 
     void scheduler.tick();
     await vi.waitFor(() => {
-      expect(runScheduledPrompt).toHaveBeenCalledWith(secondJob, {
+      expect(runLoopPrompt).toHaveBeenCalledWith(secondJob, {
         timeoutMs: 300_000,
       });
     });
@@ -261,20 +350,20 @@ describe('ChannelCronScheduler', () => {
       createdAt: '2026-06-30T01:06:00.000Z',
     };
     jobs = [{ ...baseJob }];
-    runScheduledPrompt.mockImplementation((job: ChannelCronJob) => {
+    runLoopPrompt.mockImplementation((job: ChannelLoop) => {
       if (job.id === 'job-1') return new Promise(() => undefined);
       return Promise.resolve();
     });
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
     });
 
     void scheduler.tick();
     await vi.waitFor(() => {
-      expect(runScheduledPrompt).toHaveBeenCalledWith(baseJob, {
+      expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, {
         timeoutMs: 300_000,
       });
     });
@@ -282,31 +371,34 @@ describe('ChannelCronScheduler', () => {
     void scheduler.tick();
 
     await vi.waitFor(() => {
-      expect(runScheduledPrompt).toHaveBeenCalledWith(laterJob, {
+      expect(runLoopPrompt).toHaveBeenCalledWith(laterJob, {
         timeoutMs: 300_000,
       });
     });
   });
 
   it('logs success persistence failures without recording a job failure', async () => {
-    store.update = vi.fn(async () => {
-      throw new Error('disk full');
+    store.update = vi.fn(async (_id, patch) => {
+      if (patch.lastStatus === 'ok') {
+        throw new Error('disk full');
+      }
+      return true;
     });
     const writeSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => {
         return true;
       });
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
     });
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledTimes(1);
+    expect(store.update).toHaveBeenCalledTimes(2);
     expect(store.disable).not.toHaveBeenCalled();
     expect(writeSpy).toHaveBeenCalledWith(
       expect.stringContaining('succeeded but status persist failed'),
@@ -319,16 +411,16 @@ describe('ChannelCronScheduler', () => {
       .fn()
       .mockResolvedValueOnce([{ ...baseJob }])
       .mockResolvedValueOnce([{ ...baseJob, enabled: false }]);
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime: () => new Date(nowMs - 60_000),
     });
 
     await scheduler.tick();
 
-    expect(runScheduledPrompt).not.toHaveBeenCalled();
+    expect(runLoopPrompt).not.toHaveBeenCalled();
   });
 
   it('ignores a malformed cron job and still fires later due jobs', async () => {
@@ -339,16 +431,16 @@ describe('ChannelCronScheduler', () => {
       return new Date(nowMs - 60_000);
     });
     jobs[1] = { ...secondJob, cron: '*/5 * * * *' };
-    const scheduler = new ChannelCronScheduler({
+    const scheduler = new ChannelLoopScheduler({
       store,
-      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
       now: () => new Date(nowMs),
       nextFireTime,
     });
 
     await scheduler.tick();
 
-    expect(runScheduledPrompt).toHaveBeenCalledWith(
+    expect(runLoopPrompt).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'job-2' }),
       { timeoutMs: 300_000 },
     );

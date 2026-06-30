@@ -3,9 +3,9 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { SessionTarget } from './types.js';
 
-export type ChannelCronJobStatus = 'ok' | 'error';
+export type ChannelLoopStatus = 'ok' | 'error';
 
-export interface ChannelCronJob {
+export interface ChannelLoop {
   id: string;
   channelName: string;
   target: SessionTarget;
@@ -20,15 +20,15 @@ export interface ChannelCronJob {
   lastFiredAt?: string;
   lastFinishedAt?: string;
   lastResultPreview?: string;
-  lastStatus?: ChannelCronJobStatus;
+  lastStatus?: ChannelLoopStatus;
   lastError?: string;
   consecutiveFailures: number;
   runningSince?: string;
   runCount: number;
 }
 
-export type ChannelCronJobInput = Omit<
-  ChannelCronJob,
+export type ChannelLoopInput = Omit<
+  ChannelLoop,
   | 'id'
   | 'enabled'
   | 'createdAt'
@@ -42,9 +42,9 @@ export type ChannelCronJobInput = Omit<
   | 'runCount'
 >;
 
-export type ChannelCronJobPatch = Partial<
+export type ChannelLoopPatch = Partial<
   Pick<
-    ChannelCronJob,
+    ChannelLoop,
     | 'enabled'
     | 'lastFiredAt'
     | 'lastFinishedAt'
@@ -57,33 +57,32 @@ export type ChannelCronJobPatch = Partial<
   >
 >;
 
-export interface ChannelCronStoreOptions {
+export interface ChannelLoopStoreOptions {
   filePath: string;
   now?: () => Date;
   idFactory?: () => string;
 }
 
-export class ChannelCronStore {
+export class ChannelLoopStore {
   private readonly filePath: string;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
   private pendingUpdate: Promise<void> = Promise.resolve();
 
-  constructor(options: ChannelCronStoreOptions) {
+  constructor(options: ChannelLoopStoreOptions) {
     this.filePath = options.filePath;
     this.now = options.now ?? (() => new Date());
-    this.idFactory =
-      options.idFactory ?? (() => crypto.randomUUID().slice(0, 8));
+    this.idFactory = options.idFactory ?? (() => crypto.randomUUID());
   }
 
-  async list(): Promise<ChannelCronJob[]> {
+  async list(): Promise<ChannelLoop[]> {
     return this.readJobs();
   }
 
   async listForTarget(
     channelName: string,
     target: SessionTarget,
-  ): Promise<ChannelCronJob[]> {
+  ): Promise<ChannelLoop[]> {
     const jobs = await this.readJobs();
     return jobs.filter(
       (job) =>
@@ -91,24 +90,21 @@ export class ChannelCronStore {
     );
   }
 
-  async create(input: ChannelCronJobInput): Promise<ChannelCronJob> {
-    const job: ChannelCronJob = {
-      ...input,
-      id: this.idFactory(),
-      enabled: true,
-      createdAt: this.now().toISOString(),
-      consecutiveFailures: 0,
-      runCount: 0,
-    };
-    await this.updateJobs((jobs) => [...jobs, job]);
+  async create(input: ChannelLoopInput): Promise<ChannelLoop> {
+    let job: ChannelLoop | undefined;
+    await this.updateJobs((jobs) => {
+      job = this.buildLoop(input, jobs);
+      return [...jobs, job];
+    });
+    if (!job) throw new Error('Failed to create channel loop.');
     return job;
   }
 
   async createForTarget(
-    input: ChannelCronJobInput,
-    maxEnabledJobs: number,
-  ): Promise<ChannelCronJob | undefined> {
-    let created: ChannelCronJob | undefined;
+    input: ChannelLoopInput,
+    maxEnabledLoops: number,
+  ): Promise<ChannelLoop | undefined> {
+    let created: ChannelLoop | undefined;
     await this.updateJobs((jobs) => {
       const enabledForTarget = jobs.filter(
         (job) =>
@@ -116,24 +112,17 @@ export class ChannelCronStore {
           job.channelName === input.channelName &&
           sameTarget(job.target, input.target),
       ).length;
-      if (enabledForTarget >= maxEnabledJobs) {
+      if (enabledForTarget >= maxEnabledLoops) {
         return jobs;
       }
-      const job: ChannelCronJob = {
-        ...input,
-        id: this.idFactory(),
-        enabled: true,
-        createdAt: this.now().toISOString(),
-        consecutiveFailures: 0,
-        runCount: 0,
-      };
+      const job = this.buildLoop(input, jobs);
       created = job;
       return [...jobs, job];
     });
     return created;
   }
 
-  async update(id: string, patch: ChannelCronJobPatch): Promise<boolean> {
+  async update(id: string, patch: ChannelLoopPatch): Promise<boolean> {
     let found = false;
     await this.updateJobs((jobs) =>
       jobs.map((job) => {
@@ -149,8 +138,30 @@ export class ChannelCronStore {
     return this.update(id, { enabled: false });
   }
 
+  private buildLoop(
+    input: ChannelLoopInput,
+    existingLoops: ChannelLoop[],
+  ): ChannelLoop {
+    const existingIds = new Set(existingLoops.map((loop) => loop.id));
+    const baseId = this.idFactory();
+    let id = baseId;
+    let suffix = 1;
+    while (existingIds.has(id)) {
+      id = `${baseId}-${suffix++}`;
+    }
+    return {
+      ...input,
+      id,
+      target: normalizeTarget(input.target),
+      enabled: true,
+      createdAt: this.now().toISOString(),
+      consecutiveFailures: 0,
+      runCount: 0,
+    };
+  }
+
   private async updateJobs(
-    mutate: (jobs: ChannelCronJob[]) => ChannelCronJob[],
+    mutate: (jobs: ChannelLoop[]) => ChannelLoop[],
   ): Promise<void> {
     const nextUpdate = this.pendingUpdate.then(async () => {
       const jobs = await this.readJobs();
@@ -160,7 +171,7 @@ export class ChannelCronStore {
     await nextUpdate;
   }
 
-  private async readJobs(): Promise<ChannelCronJob[]> {
+  private async readJobs(): Promise<ChannelLoop[]> {
     let raw: string;
     try {
       raw = await fs.readFile(this.filePath, 'utf8');
@@ -184,21 +195,27 @@ export class ChannelCronStore {
       );
     }
     for (const [index, value] of parsed.entries()) {
-      if (!isChannelCronJob(value)) {
+      if (!isChannelLoop(value)) {
         throw new Error(
-          `Invalid channel cron job at index ${index} in ${this.filePath}.`,
+          `Invalid channel loop at index ${index} in ${this.filePath}.`,
         );
       }
     }
     return parsed.map(normalizeJob);
   }
 
-  private async writeJobs(jobs: ChannelCronJob[]): Promise<void> {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+  private async writeJobs(jobs: ChannelLoop[]): Promise<void> {
+    const dir = path.dirname(this.filePath);
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    await fs.chmod(dir, 0o700).catch(() => {});
     const tmpPath = `${this.filePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
     try {
-      await fs.writeFile(tmpPath, JSON.stringify(jobs, null, 2), 'utf8');
+      await fs.writeFile(tmpPath, JSON.stringify(jobs, null, 2), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
       await fs.rename(tmpPath, this.filePath);
+      await fs.chmod(this.filePath, 0o600).catch(() => {});
     } catch (err) {
       await fs.rm(tmpPath, { force: true }).catch(() => {});
       throw err;
@@ -207,14 +224,23 @@ export class ChannelCronStore {
 }
 
 function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
-  const sameGroupChat = a.isGroup === true && b.isGroup === true;
+  const aIsGroup = a.isGroup === true;
+  const bIsGroup = b.isGroup === true;
+  const sameGroupChat = aIsGroup && bIsGroup;
   return (
     a.channelName === b.channelName &&
     (sameGroupChat || a.senderId === b.senderId) &&
     a.chatId === b.chatId &&
     a.threadId === b.threadId &&
-    a.isGroup === b.isGroup
+    aIsGroup === bIsGroup
   );
+}
+
+function normalizeTarget(target: SessionTarget): SessionTarget {
+  return {
+    ...target,
+    isGroup: target.isGroup === true,
+  };
 }
 
 function isSessionTarget(value: unknown): value is SessionTarget {
@@ -230,7 +256,7 @@ function isSessionTarget(value: unknown): value is SessionTarget {
   );
 }
 
-function isChannelCronJob(value: unknown): value is ChannelCronJob {
+function isChannelLoop(value: unknown): value is ChannelLoop {
   if (typeof value !== 'object' || value === null) return false;
   const job = value as Record<string, unknown>;
   return (
@@ -262,9 +288,10 @@ function isChannelCronJob(value: unknown): value is ChannelCronJob {
   );
 }
 
-function normalizeJob(job: ChannelCronJob): ChannelCronJob {
+function normalizeJob(job: ChannelLoop): ChannelLoop {
   return {
     ...job,
+    target: normalizeTarget(job.target),
     runCount: job.runCount ?? 0,
   };
 }

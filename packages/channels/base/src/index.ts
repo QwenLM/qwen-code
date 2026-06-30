@@ -23,21 +23,21 @@ export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
 export type {
   ChannelBaseOptions,
-  ChannelScheduleController,
+  ChannelLoopController,
 } from './ChannelBase.js';
-export { ChannelCronScheduler } from './ChannelCronScheduler.js';
+export { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
 export type {
-  ChannelCronSchedulerOptions,
-  ChannelRoutineRunner,
-} from './ChannelCronScheduler.js';
-export { ChannelCronStore } from './ChannelCronStore.js';
+  ChannelLoopSchedulerOptions,
+  ChannelLoopRunner,
+} from './ChannelLoopScheduler.js';
+export { ChannelLoopStore } from './ChannelLoopStore.js';
 export type {
-  ChannelCronJob,
-  ChannelCronJobInput,
-  ChannelCronJobPatch,
-  ChannelCronJobStatus,
-  ChannelCronStoreOptions,
-} from './ChannelCronStore.js';
+  ChannelLoop,
+  ChannelLoopInput,
+  ChannelLoopPatch,
+  ChannelLoopStatus,
+  ChannelLoopStoreOptions,
+} from './ChannelLoopStore.js';
 export { PairingStore } from './PairingStore.js';
 export type { PairingRequest } from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';

@@ -24,9 +24,9 @@ import type {
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import type {
-  ChannelCronJob,
-  ChannelCronJobInput,
-} from './ChannelCronStore.js';
+  ChannelLoop,
+  ChannelLoopInput,
+} from './ChannelLoopStore.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -46,25 +46,25 @@ export interface ChannelBaseOptions {
    * events directly.
    */
   registerBridgeEvents?: boolean;
-  scheduleController?: ChannelScheduleController;
+  loopController?: ChannelLoopController;
 }
 
-export interface ChannelScheduleController {
-  create(input: ChannelCronJobInput): Promise<ChannelCronJob>;
+export interface ChannelLoopController {
+  create(input: ChannelLoopInput): Promise<ChannelLoop>;
   createForTarget?(
-    input: ChannelCronJobInput,
-    maxEnabledJobs: number,
-  ): Promise<ChannelCronJob | undefined>;
+    input: ChannelLoopInput,
+    maxEnabledLoops: number,
+  ): Promise<ChannelLoop | undefined>;
   listForTarget(
     channelName: string,
     target: SessionTarget,
-  ): Promise<ChannelCronJob[]>;
+  ): Promise<ChannelLoop[]>;
   disable(id: string): Promise<boolean>;
   validateCron(cron: string): void;
-  nextFireTime?(job: ChannelCronJob): Date;
+  nextFireTime?(job: ChannelLoop): Date;
 }
 
-export interface ChannelScheduledPromptOptions {
+export interface ChannelLoopPromptOptions {
   timeoutMs?: number;
 }
 
@@ -104,9 +104,9 @@ const PARSE_COMMAND_RE = new RegExp(
 );
 /** isSlashCommand: the first whitespace-delimited token alone must be a pure command token. */
 const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
-const SCHEDULE_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
-const MAX_SCHEDULE_JOBS_PER_TARGET = 10;
-const MAX_SCHEDULE_PROMPT_CHARS = 4000;
+const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
+const MAX_LOOP_JOBS_PER_TARGET = 10;
+const MAX_LOOP_PROMPT_CHARS = 4000;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -121,10 +121,10 @@ interface AgentCommandsProvider {
   availableCommands?: AvailableCommand[];
 }
 
-function parseScheduleAddArgs(
+function parseLoopAddArgs(
   args: string,
 ): { cron: string; prompt: string } | null {
-  const match = args.trim().match(SCHEDULE_ADD_RE);
+  const match = args.trim().match(LOOP_ADD_RE);
   if (!match) return null;
   const cron = match[1].trim();
   const prompt = match[2].trim();
@@ -140,7 +140,7 @@ export abstract class ChannelBase {
   protected name: string;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
-  private readonly scheduleController?: ChannelScheduleController;
+  private readonly loopController?: ChannelLoopController;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
@@ -182,7 +182,7 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
-    this.scheduleController = options?.scheduleController;
+    this.loopController = options?.loopController;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
 
@@ -226,7 +226,7 @@ export abstract class ChannelBase {
   ): Promise<void> {
     if (target.threadId) {
       throw new Error(
-        'Channel does not support proactive scheduled messages for threaded targets.',
+        'Channel does not support proactive loop messages for threaded targets.',
       );
     }
     await this.sendMessage(target.chatId, text);
@@ -244,27 +244,27 @@ export abstract class ChannelBase {
     }
   }
 
-  async runScheduledPrompt(
-    job: ChannelCronJob,
-    options: ChannelScheduledPromptOptions = {},
+  async runLoopPrompt(
+    job: ChannelLoop,
+    options: ChannelLoopPromptOptions = {},
   ): Promise<string | undefined> {
     if (!this.supportsProactiveSend()) {
-      throw new Error('Channel does not support proactive scheduled messages.');
+      throw new Error('Channel does not support proactive loop messages.');
     }
     if (job.channelName !== this.name) {
       throw new Error(
-        `Scheduled job ${job.id} belongs to ${job.channelName}, not ${this.name}.`,
+        `Loop ${job.id} belongs to ${job.channelName}, not ${this.name}.`,
       );
     }
     if (!this.supportsProactiveTarget(job.target)) {
       throw new Error(
-        'Channel does not support proactive scheduled messages for this chat target.',
+        'Channel does not support proactive loop messages for this chat target.',
       );
     }
-    if (!this.isStoredScheduleTargetAuthorized(job.target, job.createdBy)) {
-      await this.scheduleController?.disable(job.id);
+    if (!this.isStoredLoopTargetAuthorized(job.target, job.createdBy)) {
+      await this.loopController?.disable(job.id);
       throw new Error(
-        `Scheduled job ${job.id} target is no longer authorized.`,
+        `Loop ${job.id} target is no longer authorized.`,
       );
     }
 
@@ -277,7 +277,7 @@ export abstract class ChannelBase {
     );
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
-    let promptText = `[Scheduled task "${label}" set by ${createdBy}]\n\n${sanitizePromptText(job.prompt)}`;
+    let promptText = `[Loop "${label}" created by ${createdBy}]\n\n${sanitizePromptText(job.prompt)}`;
     if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
       promptText = `${this.config.instructions}\n\n${promptText}`;
       this.instructedSessions.add(sessionId);
@@ -288,9 +288,9 @@ export abstract class ChannelBase {
     const current = prev.then(async (): Promise<string | undefined> => {
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         process.stderr.write(
-          `[${this.name}] dropped scheduled job ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
+          `[${this.name}] dropped loop ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
         );
-        return undefined;
+        throw new Error('loop dropped because session was cleared before it ran');
       }
 
       let doneResolve: () => void = () => {};
@@ -315,7 +315,7 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
 
       try {
-        const response = await this.runScheduledBridgePrompt(
+        const response = await this.runLoopBridgePrompt(
           promptBridge,
           sessionId,
           promptText,
@@ -338,7 +338,7 @@ export abstract class ChannelBase {
             this.onPromptEnd(job.target.chatId, sessionId);
           } catch (err) {
             process.stderr.write(
-              `[${this.name}] onPromptEnd threw in scheduled job ${job.id} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+              `[${this.name}] onPromptEnd threw in loop ${job.id} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
             );
           }
         }
@@ -363,7 +363,7 @@ export abstract class ChannelBase {
           };
           this.handleInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
-              `[${this.name}] dropped ${lost} buffered message(s) after scheduled job ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
+              `[${this.name}] dropped ${lost} buffered message(s) after loop ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
                 err instanceof Error ? err.message : String(err)
               }\n`,
             );
@@ -378,7 +378,7 @@ export abstract class ChannelBase {
     return current;
   }
 
-  private async runScheduledBridgePrompt(
+  private async runLoopBridgePrompt(
     promptBridge: ChannelAgentBridge,
     sessionId: string,
     promptText: string,
@@ -398,18 +398,18 @@ export abstract class ChannelBase {
         prompt,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            reject(new Error('scheduled job timed out'));
+            reject(new Error('loop timed out'));
           }, timeoutMs);
           timer.unref?.();
         }),
       ]);
     } catch (err) {
-      if (err instanceof Error && err.message === 'scheduled job timed out') {
+      if (err instanceof Error && err.message === 'loop timed out') {
         promptState.cancelled = true;
         this.onSessionDied(sessionId);
-        await promptBridge.cancelSession(sessionId).catch((cancelErr) => {
+        promptBridge.cancelSession(sessionId).catch((cancelErr) => {
           process.stderr.write(
-            `[${this.name}] cancelSession failed for timed out scheduled job ${jobId} in session ${sessionId}: ${
+            `[${this.name}] cancelSession failed for timed out loop ${jobId} in session ${sessionId}: ${
               cancelErr instanceof Error ? cancelErr.message : cancelErr
             }\n`,
           );
@@ -816,26 +816,26 @@ export abstract class ChannelBase {
       return true;
     });
 
-    this.registerCommand('schedule', async (envelope, args) =>
-      this.handleScheduleCommand(envelope, args),
+    this.registerCommand('loop', async (envelope, args) =>
+      this.handleLoopCommand(envelope, args),
     );
   }
 
-  private async handleScheduleCommand(
+  private async handleLoopCommand(
     envelope: Envelope,
     args: string,
   ): Promise<boolean> {
-    if (!this.scheduleController) {
+    if (!this.loopController) {
       await this.sendMessage(
         envelope.chatId,
-        'Scheduled tasks are not available.',
+        'Loops are not available.',
       );
       return true;
     }
     if (!this.isAuthorizedForSharedSession(envelope)) {
       await this.sendMessage(
         envelope.chatId,
-        'Only authorized members can use scheduled tasks in this shared session.',
+        'Only authorized members can use loops in this shared session.',
       );
       return true;
     }
@@ -843,46 +843,46 @@ export abstract class ChannelBase {
     const [subcommand = '', ...rest] = args.trim().split(/\s+/u);
     switch (subcommand.toLowerCase()) {
       case 'add':
-        return this.handleScheduleAdd(envelope, rest.join(' '));
+        return this.handleLoopAdd(envelope, rest.join(' '));
       case 'list':
-        return this.handleScheduleList(envelope);
+        return this.handleLoopList(envelope);
       case 'inspect':
-        return this.handleScheduleInspect(envelope, rest[0]);
+        return this.handleLoopInspect(envelope, rest[0]);
       case 'cancel':
-        return this.handleScheduleCancel(envelope, rest[0]);
+        return this.handleLoopCancel(envelope, rest[0]);
       default:
         await this.sendMessage(
           envelope.chatId,
-          'Usage: /schedule add "<cron>" <prompt> | /schedule list | /schedule inspect <id> | /schedule cancel <id>',
+          'Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>',
         );
         return true;
     }
   }
 
-  private async handleScheduleAdd(
+  private async handleLoopAdd(
     envelope: Envelope,
     args: string,
   ): Promise<boolean> {
-    if (!this.scheduleController) return true;
+    if (!this.loopController) return true;
     if (!this.supportsProactiveSend()) {
       await this.sendMessage(
         envelope.chatId,
-        'This channel does not support proactive scheduled messages.',
+        'This channel does not support proactive loop messages.',
       );
       return true;
     }
 
-    const parsed = parseScheduleAddArgs(args);
+    const parsed = parseLoopAddArgs(args);
     if (!parsed) {
       await this.sendMessage(
         envelope.chatId,
-        'Usage: /schedule add "<cron>" <prompt>',
+        'Usage: /loop add "<cron>" <prompt>',
       );
       return true;
     }
 
     try {
-      this.scheduleController.validateCron(parsed.cron);
+      this.loopController.validateCron(parsed.cron);
     } catch (err) {
       await this.sendMessage(
         envelope.chatId,
@@ -891,23 +891,23 @@ export abstract class ChannelBase {
       return true;
     }
 
-    const target = this.scheduleTargetFromEnvelope(envelope);
+    const target = this.loopTargetFromEnvelope(envelope);
     if (!this.supportsProactiveTarget(target)) {
       await this.sendMessage(
         envelope.chatId,
-        'This channel does not support proactive scheduled messages for this chat target.',
+        'This channel does not support proactive loop messages for this chat target.',
       );
       return true;
     }
     const prompt = sanitizePromptText(parsed.prompt.trim());
-    if (Array.from(prompt).length > MAX_SCHEDULE_PROMPT_CHARS) {
+    if (Array.from(prompt).length > MAX_LOOP_PROMPT_CHARS) {
       await this.sendMessage(
         envelope.chatId,
-        `Scheduled prompt is too long; keep it under ${MAX_SCHEDULE_PROMPT_CHARS} characters.`,
+        `Loop prompt is too long; keep it under ${MAX_LOOP_PROMPT_CHARS} characters.`,
       );
       return true;
     }
-    const input: ChannelCronJobInput = {
+    const input: ChannelLoopInput = {
       channelName: this.name,
       target,
       cwd: this.config.cwd,
@@ -919,78 +919,78 @@ export abstract class ChannelBase {
         envelope.senderName || envelope.senderId || 'unknown',
       ),
     };
-    let job: ChannelCronJob | undefined;
-    if (this.scheduleController.createForTarget) {
-      job = await this.scheduleController.createForTarget(
+    let job: ChannelLoop | undefined;
+    if (this.loopController.createForTarget) {
+      job = await this.loopController.createForTarget(
         input,
-        MAX_SCHEDULE_JOBS_PER_TARGET,
+        MAX_LOOP_JOBS_PER_TARGET,
       );
     } else {
-      const existingJobs = await this.scheduleController.listForTarget(
+      const existingJobs = await this.loopController.listForTarget(
         this.name,
         target,
       );
       if (
         existingJobs.filter((existingJob) => existingJob.enabled).length <
-        MAX_SCHEDULE_JOBS_PER_TARGET
+        MAX_LOOP_JOBS_PER_TARGET
       ) {
-        job = await this.scheduleController.create(input);
+        job = await this.loopController.create(input);
       }
     }
     if (!job) {
       await this.sendMessage(
         envelope.chatId,
-        `Too many scheduled jobs for this chat. Cancel an existing job before adding another.`,
+        `Too many loops for this chat. Cancel an existing loop before adding another.`,
       );
       return true;
     }
 
     await this.sendMessage(
       envelope.chatId,
-      `Scheduled job ${job.id}: ${job.cron}`,
+      `Loop ${job.id}: ${job.cron}`,
     );
     return true;
   }
 
-  private async handleScheduleList(envelope: Envelope): Promise<boolean> {
-    if (!this.scheduleController) return true;
-    const jobs = await this.scheduleController.listForTarget(
+  private async handleLoopList(envelope: Envelope): Promise<boolean> {
+    if (!this.loopController) return true;
+    const jobs = await this.loopController.listForTarget(
       this.name,
-      this.scheduleTargetFromEnvelope(envelope),
+      this.loopTargetFromEnvelope(envelope),
     );
     if (jobs.length === 0) {
-      await this.sendMessage(envelope.chatId, 'No scheduled jobs.');
+      await this.sendMessage(envelope.chatId, 'No loops.');
       return true;
     }
     await this.sendMessage(
       envelope.chatId,
-      jobs.map((job) => this.formatScheduleListLine(job)).join('\n'),
+      jobs.map((job) => this.formatLoopListLine(job)).join('\n'),
     );
     return true;
   }
 
-  private async handleScheduleInspect(
+  private async handleLoopInspect(
     envelope: Envelope,
     id: string | undefined,
   ): Promise<boolean> {
-    if (!this.scheduleController) return true;
+    if (!this.loopController) return true;
     if (!id) {
-      await this.sendMessage(envelope.chatId, 'Usage: /schedule inspect <id>');
+      await this.sendMessage(envelope.chatId, 'Usage: /loop inspect <id>');
       return true;
     }
-    const jobs = await this.scheduleController.listForTarget(
+    const jobs = await this.loopController.listForTarget(
       this.name,
-      this.scheduleTargetFromEnvelope(envelope),
+      this.loopTargetFromEnvelope(envelope),
     );
     const job = jobs.find((candidate) => candidate.id === id);
     if (!job) {
-      await this.sendMessage(envelope.chatId, `No scheduled job ${id}.`);
+      await this.sendMessage(envelope.chatId, `No loop ${id}.`);
       return true;
     }
 
     const lines = [
-      `Scheduled job ${job.id}`,
-      `Status: ${job.enabled ? 'enabled' : 'disabled'}, last=${this.lastScheduleStatus(job)}`,
+      `Loop ${job.id}`,
+      `Status: ${job.enabled ? 'enabled' : 'disabled'}, last=${this.lastLoopStatus(job)}`,
       `Cron: ${job.cron}`,
       `Next: ${this.formatNextFireTime(job)}`,
       `Runs: ${job.runCount}`,
@@ -1011,12 +1011,12 @@ export abstract class ChannelBase {
     return true;
   }
 
-  private formatScheduleListLine(job: ChannelCronJob): string {
+  private formatLoopListLine(job: ChannelLoop): string {
     const fields = [
       job.id,
       job.cron,
       job.enabled ? 'enabled' : 'disabled',
-      `last=${this.lastScheduleStatus(job)}`,
+      `last=${this.lastLoopStatus(job)}`,
       `next=${this.formatNextFireTime(job)}`,
       `runs=${job.runCount}`,
     ];
@@ -1024,44 +1024,44 @@ export abstract class ChannelBase {
     return fields.join(' ');
   }
 
-  private lastScheduleStatus(job: ChannelCronJob): string {
+  private lastLoopStatus(job: ChannelLoop): string {
     if (job.runningSince) return 'running';
     return job.lastStatus ?? 'never';
   }
 
-  private formatNextFireTime(job: ChannelCronJob): string {
+  private formatNextFireTime(job: ChannelLoop): string {
     try {
       return (
-        this.scheduleController?.nextFireTime?.(job).toISOString() ?? 'n/a'
+        this.loopController?.nextFireTime?.(job).toISOString() ?? 'n/a'
       );
     } catch {
       return 'invalid cron';
     }
   }
 
-  private async handleScheduleCancel(
+  private async handleLoopCancel(
     envelope: Envelope,
     id: string | undefined,
   ): Promise<boolean> {
-    if (!this.scheduleController) return true;
+    if (!this.loopController) return true;
     if (!id) {
-      await this.sendMessage(envelope.chatId, 'Usage: /schedule cancel <id>');
+      await this.sendMessage(envelope.chatId, 'Usage: /loop cancel <id>');
       return true;
     }
-    const jobs = await this.scheduleController.listForTarget(
+    const jobs = await this.loopController.listForTarget(
       this.name,
-      this.scheduleTargetFromEnvelope(envelope),
+      this.loopTargetFromEnvelope(envelope),
     );
     const match = jobs.find((job) => job.id === id);
-    const disabled = match ? await this.scheduleController.disable(id) : false;
+    const disabled = match ? await this.loopController.disable(id) : false;
     await this.sendMessage(
       envelope.chatId,
-      disabled ? `Cancelled scheduled job ${id}.` : `No scheduled job ${id}.`,
+      disabled ? `Cancelled loop ${id}.` : `No loop ${id}.`,
     );
     return true;
   }
 
-  private scheduleTargetFromEnvelope(envelope: Envelope): SessionTarget {
+  private loopTargetFromEnvelope(envelope: Envelope): SessionTarget {
     return {
       channelName: this.name,
       senderId: envelope.senderId,
@@ -1071,7 +1071,7 @@ export abstract class ChannelBase {
     };
   }
 
-  private isStoredScheduleTargetAuthorized(
+  private isStoredLoopTargetAuthorized(
     target: SessionTarget,
     senderName: string,
   ): boolean {

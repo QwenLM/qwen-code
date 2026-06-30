@@ -2,14 +2,14 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ChannelCronStore } from './ChannelCronStore.js';
-import type { ChannelCronJobInput } from './ChannelCronStore.js';
+import { ChannelLoopStore } from './ChannelLoopStore.js';
+import type { ChannelLoopInput } from './ChannelLoopStore.js';
 
-describe('ChannelCronStore', () => {
+describe('ChannelLoopStore', () => {
   let tmpDir: string;
-  let store: ChannelCronStore;
+  let store: ChannelLoopStore;
 
-  const input: ChannelCronJobInput = {
+  const input: ChannelLoopInput = {
     channelName: 'feishu-main',
     target: {
       channelName: 'feishu-main',
@@ -26,9 +26,9 @@ describe('ChannelCronStore', () => {
   };
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'channel-cron-store-'));
-    store = new ChannelCronStore({
-      filePath: path.join(tmpDir, 'channels', 'cron.json'),
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'channel-loop-store-'));
+    store = new ChannelLoopStore({
+      filePath: path.join(tmpDir, 'channels', 'loops.json'),
       now: () => new Date('2026-06-30T01:02:03.000Z'),
       idFactory: () => 'job-1',
     });
@@ -38,11 +38,12 @@ describe('ChannelCronStore', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('creates and persists a channel cron job with default status fields', async () => {
+  it('creates and persists a channel loop with default status fields', async () => {
     const created = await store.create(input);
 
     expect(created).toEqual({
       ...input,
+      target: { ...input.target, isGroup: false },
       id: 'job-1',
       enabled: true,
       createdAt: '2026-06-30T01:02:03.000Z',
@@ -50,8 +51,8 @@ describe('ChannelCronStore', () => {
       runCount: 0,
     });
 
-    const reloaded = new ChannelCronStore({
-      filePath: path.join(tmpDir, 'channels', 'cron.json'),
+    const reloaded = new ChannelLoopStore({
+      filePath: path.join(tmpDir, 'channels', 'loops.json'),
     });
     await expect(reloaded.list()).resolves.toEqual([created]);
   });
@@ -102,7 +103,7 @@ describe('ChannelCronStore', () => {
     const created = await store.createForTarget(input, 1);
 
     expect(created).toMatchObject({
-      id: 'job-1',
+      id: 'job-1-1',
       enabled: true,
       prompt: 'post a daily summary',
     });
@@ -113,8 +114,8 @@ describe('ChannelCronStore', () => {
 
   it('enforces the enabled target cap inside the serialized write', async () => {
     let nextId = 0;
-    const cappedStore = new ChannelCronStore({
-      filePath: path.join(tmpDir, 'channels', 'cron.json'),
+    const cappedStore = new ChannelLoopStore({
+      filePath: path.join(tmpDir, 'channels', 'loops.json'),
       now: () => new Date('2026-06-30T01:02:03.000Z'),
       idFactory: () => `job-${++nextId}`,
     });
@@ -128,6 +129,56 @@ describe('ChannelCronStore', () => {
     await expect(
       cappedStore.listForTarget('feishu-main', input.target),
     ).resolves.toHaveLength(1);
+  });
+
+  it('matches legacy DM targets that omit isGroup', async () => {
+    await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, 'channels', 'loops.json'),
+      JSON.stringify([
+        {
+          ...input,
+          id: 'old-job',
+          target: {
+            channelName: 'feishu-main',
+            senderId: 'alice',
+            chatId: 'chat-1',
+            threadId: 'thread-1',
+          },
+          enabled: true,
+          createdAt: '2026-06-30T01:02:03.000Z',
+          consecutiveFailures: 0,
+        },
+      ]),
+      'utf8',
+    );
+
+    await expect(
+      store.listForTarget('feishu-main', {
+        ...input.target,
+        isGroup: false,
+      }),
+    ).resolves.toMatchObject([{ id: 'old-job' }]);
+  });
+
+  it('keeps generated ids unique when the id factory collides', async () => {
+    const first = await store.create(input);
+    const second = await store.create(input);
+
+    expect(first.id).toBe('job-1');
+    expect(second.id).toBe('job-1-1');
+  });
+
+  it('writes loop files with private permissions', async () => {
+    await store.create(input);
+
+    const channelsDir = path.join(tmpDir, 'channels');
+    const filePath = path.join(channelsDir, 'loops.json');
+    const dirMode = (await fs.stat(channelsDir)).mode & 0o777;
+    const fileMode = (await fs.stat(filePath)).mode & 0o777;
+
+    expect(dirMode).toBe(0o700);
+    expect(fileMode).toBe(0o600);
   });
 
   it('disables a job without deleting its last status', async () => {
@@ -152,17 +203,39 @@ describe('ChannelCronStore', () => {
     ]);
   });
 
-  it('refuses to treat corrupt JSON as an empty schedule', async () => {
+  it('refuses to treat corrupt JSON as an empty loop', async () => {
     await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
-    await fs.writeFile(path.join(tmpDir, 'channels', 'cron.json'), '{', 'utf8');
+    await fs.writeFile(path.join(tmpDir, 'channels', 'loops.json'), '{', 'utf8');
 
     await expect(store.list()).rejects.toThrow(/Malformed JSON/);
+  });
+
+  it('refuses to treat non-array JSON as an empty loop', async () => {
+    await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, 'channels', 'loops.json'),
+      '{}',
+      'utf8',
+    );
+
+    await expect(store.list()).rejects.toThrow(/Expected a JSON array/);
+  });
+
+  it('refuses to load invalid loop entries', async () => {
+    await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, 'channels', 'loops.json'),
+      JSON.stringify([{}]),
+      'utf8',
+    );
+
+    await expect(store.list()).rejects.toThrow(/Invalid channel loop/);
   });
 
   it('loads jobs created before lifecycle fields existed', async () => {
     await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
     await fs.writeFile(
-      path.join(tmpDir, 'channels', 'cron.json'),
+      path.join(tmpDir, 'channels', 'loops.json'),
       JSON.stringify([
         {
           ...input,
@@ -182,6 +255,7 @@ describe('ChannelCronStore', () => {
         enabled: true,
         createdAt: '2026-06-30T01:02:03.000Z',
         consecutiveFailures: 0,
+        target: { ...input.target, isGroup: false },
         runCount: 0,
       },
     ]);

@@ -40,22 +40,24 @@ const mockRouterRemoveSessionId = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
-const mockChannelCronStoreCreate = vi.hoisted(() => vi.fn());
-const mockChannelCronStoreListForTarget = vi.hoisted(() => vi.fn());
-const mockChannelCronStoreDisable = vi.hoisted(() => vi.fn());
-const mockChannelCronStore = vi.hoisted(() =>
+const mockChannelLoopStoreCreate = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreCreateForTarget = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreListForTarget = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreDisable = vi.hoisted(() => vi.fn());
+const mockChannelLoopStore = vi.hoisted(() =>
   vi.fn(() => ({
-    create: mockChannelCronStoreCreate,
-    listForTarget: mockChannelCronStoreListForTarget,
-    disable: mockChannelCronStoreDisable,
+    create: mockChannelLoopStoreCreate,
+    createForTarget: mockChannelLoopStoreCreateForTarget,
+    listForTarget: mockChannelLoopStoreListForTarget,
+    disable: mockChannelLoopStoreDisable,
   })),
 );
-const mockChannelCronSchedulerStart = vi.hoisted(() => vi.fn());
-const mockChannelCronSchedulerStop = vi.hoisted(() => vi.fn());
-const mockChannelCronScheduler = vi.hoisted(() =>
-  vi.fn(() => ({
-    start: mockChannelCronSchedulerStart,
-    stop: mockChannelCronSchedulerStop,
+const mockChannelLoopSchedulerStart = vi.hoisted(() => vi.fn());
+const mockChannelLoopSchedulerStop = vi.hoisted(() => vi.fn());
+const mockChannelLoopScheduler = vi.hoisted(() =>
+  vi.fn((_options?: unknown) => ({
+    start: mockChannelLoopSchedulerStart,
+    stop: mockChannelLoopSchedulerStop,
   })),
 );
 const mockSessionRouter = vi.hoisted(() =>
@@ -105,8 +107,8 @@ vi.mock('./channel-registry.js', () => ({
 
 vi.mock('@qwen-code/channel-base', () => ({
   AcpBridge: mockAcpBridge,
-  ChannelCronScheduler: mockChannelCronScheduler,
-  ChannelCronStore: mockChannelCronStore,
+  ChannelLoopScheduler: mockChannelLoopScheduler,
+  ChannelLoopStore: mockChannelLoopStore,
   SessionRouter: mockSessionRouter,
 }));
 
@@ -156,9 +158,10 @@ beforeEach(() => {
   mockReadServiceInfo.mockReturnValue(null);
   mockRouterGetTarget.mockReturnValue(undefined);
   mockRouterRestoreSessions.mockResolvedValue({ failed: 0, restored: 0 });
-  mockChannelCronStoreCreate.mockResolvedValue({ id: 'job-1' });
-  mockChannelCronStoreListForTarget.mockResolvedValue([]);
-  mockChannelCronStoreDisable.mockResolvedValue(true);
+  mockChannelLoopStoreCreate.mockResolvedValue({ id: 'job-1' });
+  mockChannelLoopStoreCreateForTarget.mockResolvedValue({ id: 'job-1' });
+  mockChannelLoopStoreListForTarget.mockResolvedValue([]);
+  mockChannelLoopStoreDisable.mockResolvedValue(true);
   delete process.env['HTTPS_PROXY'];
   delete process.env['https_proxy'];
   delete process.env['HTTP_PROXY'];
@@ -243,7 +246,7 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         proxy: settingsProxy,
-        scheduleController: expect.objectContaining({
+        loopController: expect.objectContaining({
           create: expect.any(Function),
           createForTarget: expect.any(Function),
           listForTarget: expect.any(Function),
@@ -253,6 +256,27 @@ describe('startCommand.handler', () => {
         }),
       }),
     );
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    const input = {
+      channelName: 'telegram',
+      target: {
+        channelName: 'telegram',
+        senderId: 'alice',
+        chatId: 'chat-1',
+        isGroup: false,
+      },
+      cwd: '/tmp/qwen-channel-test',
+      cron: '0 9 * * *',
+      prompt: 'post summary',
+      recurring: true,
+      createdBy: 'Alice',
+    };
+    expect(options?.loopController?.createForTarget).toBeDefined();
+    await options!.loopController!.createForTarget!(input, 3);
+    expect(mockChannelLoopStoreCreateForTarget).toHaveBeenCalledWith(input, 3);
   });
 
   it('rejects cron expressions that cannot fire', async () => {
@@ -274,7 +298,7 @@ describe('startCommand.handler', () => {
       | ChannelBaseOptions
       | undefined;
     expect(() =>
-      options?.scheduleController?.validateCron('0 0 31 2 *'),
+      options?.loopController?.validateCron('0 0 31 2 *'),
     ).toThrow();
   });
 
@@ -498,20 +522,25 @@ describe('startCommand.handler', () => {
       cwd: `/tmp/${name}`,
       model: 'shared-model',
     }));
+    mockChannelLoopSchedulerStart.mockImplementationOnce(() => {
+      throw new Error('stop after scheduler setup');
+    });
     const processOnSpy = vi
       .spyOn(process, 'on')
       .mockImplementation(() => process);
 
     try {
-      await invokeStartHandler({});
+      await expect(invokeStartHandler({})).rejects.toThrow(
+        'stop after scheduler setup',
+      );
     } finally {
       processOnSpy.mockRestore();
     }
 
-    const schedulerOptions = mockChannelCronScheduler.mock.calls[0]?.[0] as
+    const schedulerOptions = mockChannelLoopScheduler.mock.calls[0]?.[0] as
       | { channels: Map<string, unknown> }
       | undefined;
     expect([...schedulerOptions!.channels.keys()]).toEqual(['second']);
-    expect(mockChannelCronSchedulerStart).toHaveBeenCalledOnce();
+    expect(mockChannelLoopSchedulerStart).toHaveBeenCalledOnce();
   });
 });
