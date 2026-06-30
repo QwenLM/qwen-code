@@ -41,8 +41,10 @@ const debugLogger = createDebugLogger('BASE_LLM_CLIENT');
 function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
   const idx = model.indexOf('\0');
   if (idx < 0) return { model };
+  const modelPart = model.slice(0, idx);
+  if (!modelPart) return { model };
   return {
-    model: model.slice(0, idx),
+    model: modelPart,
     baseUrl: model.slice(idx + 1) || undefined,
   };
 }

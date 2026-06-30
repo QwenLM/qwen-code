@@ -691,6 +691,53 @@ describe('modelCommand', () => {
     });
   });
 
+  it('suggests an auth-qualified selector for cross-provider vision ambiguity', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision qwen-vl-max',
+        name: 'model',
+        args: '--vision qwen-vl-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-vl-max',
+              label: 'OpenAI endpoint',
+              authType: AuthType.USE_OPENAI,
+            },
+            {
+              id: 'qwen-vl-max',
+              label: 'Anthropic endpoint',
+              authType: AuthType.USE_ANTHROPIC,
+            },
+          ]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision qwen-vl-max',
+    );
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setVisionModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('openai:qwen-vl-max'),
+    });
+  });
+
   it('should set authType-qualified vision model selectors', async () => {
     const setValue = vi.fn();
     const setVisionModel = vi.fn();

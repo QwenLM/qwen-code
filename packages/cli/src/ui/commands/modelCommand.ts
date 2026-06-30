@@ -160,6 +160,24 @@ function formatAmbiguousVisionModelMessage(
   const endpoints = matchingModels
     .map((model) => model.baseUrl ?? '(default endpoint)')
     .join(', ');
+  const qualifiedSelectors = Array.from(
+    new Set(
+      matchingModels
+        .map((model) =>
+          model.authType ? `${model.authType}:${model.id}` : undefined,
+        )
+        .filter((selector): selector is string => selector !== undefined),
+    ),
+  );
+  const scriptedHint =
+    qualifiedSelectors.length > 1
+      ? `\n${t(
+          'For scripts, pass an auth-qualified selector such as {{selector}}.',
+          {
+            selector: qualifiedSelectors[0],
+          },
+        )}`
+      : '';
   return (
     t("Vision model '{{modelName}}' matches multiple configured endpoints.", {
       modelName,
@@ -167,7 +185,10 @@ function formatAmbiguousVisionModelMessage(
     '\n' +
     t('Matching endpoints: {{endpoints}}.', { endpoints }) +
     '\n' +
-    t('Run /model --vision without an argument and choose the exact endpoint.')
+    t(
+      'Run /model --vision without an argument and choose the exact endpoint.',
+    ) +
+    scriptedHint
   );
 }
 

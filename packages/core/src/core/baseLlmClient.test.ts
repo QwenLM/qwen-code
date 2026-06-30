@@ -914,6 +914,36 @@ describe('BaseLlmClient', () => {
       );
     });
 
+    it('threads baseUrl through bare model registry lookups', async () => {
+      const selectedBaseUrl = 'https://token-plan.example.com/v1';
+      getResolvedModel.mockImplementation(
+        (authType: string, model: string, baseUrl?: string) => {
+          if (
+            authType === AuthType.USE_ANTHROPIC &&
+            model === 'qwen3.7-plus' &&
+            baseUrl === selectedBaseUrl
+          ) {
+            return {
+              id: 'qwen3.7-plus',
+              authType: AuthType.USE_ANTHROPIC,
+              envKey: 'TOKEN_PLAN_KEY',
+              baseUrl: selectedBaseUrl,
+            };
+          }
+          return undefined;
+        },
+      );
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+      await c.resolveForModel(`qwen3.7-plus\0${selectedBaseUrl}`);
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.QWEN_OAUTH,
+        'qwen3.7-plus',
+        selectedBaseUrl,
+      );
+    });
+
     it('does not reuse the main generator when the requested baseUrl differs', async () => {
       const mainBaseUrl = 'https://main.example.com/v1';
       const selectedBaseUrl = 'https://token-plan.example.com/v1';

@@ -744,6 +744,26 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('falls back to auto-select on a visionModel with no selector before the baseUrl delimiter', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: '\0https://example.com/v1',
+      });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
     it('drops a pin that points at the current primary model and auto-selects a same-provider VL model instead', () => {
       // Pinning the primary itself is a dead pin: the bridge exists to work
       // around the text-only primary, so routing back at it would defeat the
@@ -3350,8 +3370,7 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
-      | LoadServerHierarchicalMemoryOptions
-      | undefined;
+      LoadServerHierarchicalMemoryOptions | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     await options?.onInstructionsLoaded?.({
@@ -5695,9 +5714,8 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } = await import(
-        '../agents/runtime/agent-context.js'
-      );
+      const { runWithRuntimeContentGenerator } =
+        await import('../agents/runtime/agent-context.js');
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -5744,9 +5762,8 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } = await import(
-        '../agents/runtime/agent-context.js'
-      );
+      const { runWithRuntimeContentGenerator } =
+        await import('../agents/runtime/agent-context.js');
       const config = new Config(baseParams);
       setInstanceFields(
         config,
