@@ -1352,11 +1352,13 @@ export abstract class ChannelBase {
       if (shouldPrependSessionContext) {
         try {
           const context: string[] = [];
-          const channelMemory = (
-            await this.channelMemory?.readChannelMemory(
-              this.channelMemoryTarget(envelope),
-            )
-          )?.trim();
+          const channelMemory = this.isAuthorizedForChannelMemory(envelope)
+            ? (
+                await this.channelMemory?.readChannelMemory(
+                  this.channelMemoryTarget(envelope),
+                )
+              )?.trim()
+            : undefined;
           if (channelMemory) {
             context.push(
               `Channel memory for this chat:\n${sanitizePromptText(channelMemory)}`,

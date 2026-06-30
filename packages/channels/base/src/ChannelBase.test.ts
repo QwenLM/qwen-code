@@ -2067,6 +2067,25 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('does not read channel memory for unauthorized senders', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: 'ship it', senderId: 'bob' }));
+
+      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('Use repo conventions.\n\nship it');
+    });
+
     it('sanitizes channel memory before injecting it into the prompt', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('safe\u202Ehidden'),

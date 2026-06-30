@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import { Storage } from '../config/storage.js';
 
 export interface ChannelMemoryTarget {
@@ -23,6 +24,17 @@ export interface ChannelMemoryWriteResult {
 export const CHANNEL_MEMORY_FILE_NAME = 'CHANNEL.md';
 export const MAX_CHANNEL_MEMORY_BYTES = 1024 * 1024;
 const pendingAppends = new Map<string, Promise<void>>();
+const LOCK_OPTIONS: lockfile.LockOptions = {
+  realpath: false,
+  retries: {
+    retries: 10,
+    minTimeout: 5,
+    maxTimeout: 100,
+    factor: 2,
+    randomize: true,
+  },
+  stale: 5000,
+};
 
 function isMissingFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
@@ -93,6 +105,9 @@ export async function readChannelMemory(
     throw error;
   }
   if (size > MAX_CHANNEL_MEMORY_BYTES) {
+    process.stderr.write(
+      `[channel-memory] ${filePath} is ${size} bytes, exceeding ${MAX_CHANNEL_MEMORY_BYTES}; treating as empty\n`,
+    );
     return '';
   }
   return fs.readFile(filePath, 'utf8');
@@ -111,15 +126,22 @@ export async function appendChannelMemory(
   return serializeAppend(filePath, async () => {
     const appendBytes = Buffer.byteLength(`${entry}\n`, 'utf8');
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    const handle = await fs.open(filePath, 'a+');
+    const initialHandle = await fs.open(filePath, 'a+');
+    await initialHandle.close();
+    const release = await lockfile.lock(filePath, LOCK_OPTIONS);
     try {
-      const existingSize = (await handle.stat()).size;
-      if (existingSize + appendBytes > MAX_CHANNEL_MEMORY_BYTES) {
-        throw new Error('Channel memory exceeds maximum size');
+      const handle = await fs.open(filePath, 'a+');
+      try {
+        const existingSize = (await handle.stat()).size;
+        if (existingSize + appendBytes > MAX_CHANNEL_MEMORY_BYTES) {
+          throw new Error('Channel memory exceeds maximum size');
+        }
+        await handle.appendFile(`${entry}\n`, 'utf8');
+      } finally {
+        await handle.close();
       }
-      await handle.appendFile(`${entry}\n`, 'utf8');
     } finally {
-      await handle.close();
+      await release();
     }
     return { changed: true, filePath };
   });
