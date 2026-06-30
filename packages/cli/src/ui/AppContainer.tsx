@@ -2703,12 +2703,23 @@ export const AppContainer = (props: AppContainerProps) => {
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
+  // `staticExtraHeight` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
+  // *inline* streaming/pending message may grow before it commits to <Static>;
+  // they do NOT reserve blank rows under the composer. In legacy mode completed
+  // history lives in <Static> (terminal scrollback) and the composer flows to
+  // the very bottom of the output. VP mode owns the whole viewport in the React
+  // tree, so to match that bottom spacing the composer must reach the bottom
+  // too — reserve nothing. (controlsHeight is measured one frame late, so a
+  // composer that grows can briefly overshoot by a row before the re-measure
+  // corrects, the same way legacy mode lets the terminal scroll on growth.)
+  const mainContentHeightReservation = useTerminalBuffer
+    ? 0
+    : staticExtraHeight + MAIN_CONTENT_HEIGHT_RESERVATION;
   const availableTerminalHeight = Math.max(
     0,
     terminalHeight -
       controlsHeight -
-      staticExtraHeight -
-      MAIN_CONTENT_HEIGHT_RESERVATION -
+      mainContentHeightReservation -
       tabBarHeight,
   );
 

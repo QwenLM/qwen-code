@@ -102,3 +102,17 @@
 .retryButton:hover {
   color: var(--foreground, #fff);
 }
+
+/* Right-aligned, subtle marker for a user-cancelled (ESC) stream — reads as a
+   user-side action and keeps the same divider treatment as a turn status row. */
+.cancelled {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+  padding-bottom: 10px;
+  margin-bottom: 5px;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+}
