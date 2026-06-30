@@ -27,9 +27,9 @@ const pendingAppends = new Map<string, Promise<void>>();
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
   retries: {
-    retries: 10,
-    minTimeout: 5,
-    maxTimeout: 100,
+    retries: 12,
+    minTimeout: 50,
+    maxTimeout: 1000,
     factor: 2,
     randomize: true,
   },
@@ -38,6 +38,14 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
 
 function isMissingFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+async function releaseLock(release: () => Promise<void>): Promise<void> {
+  try {
+    await release();
+  } catch {
+    // The write/delete already completed; stale-lock cleanup is non-fatal.
+  }
 }
 
 function safeChannelName(channelName: string): string {
@@ -139,6 +147,7 @@ export async function appendChannelMemory(
   return serializeAppend(filePath, async () => {
     const appendBytes = Buffer.byteLength(`${entry}\n`, 'utf8');
     await fs.mkdir(path.dirname(filePath), { recursive: true });
+    // proper-lockfile requires the target file to exist before locking it.
     const initialHandle = await fs.open(filePath, 'a+');
     await initialHandle.close();
     const release = await lockfile.lock(filePath, LOCK_OPTIONS);
@@ -154,7 +163,7 @@ export async function appendChannelMemory(
         await handle.close();
       }
     } finally {
-      await release();
+      await releaseLock(release);
     }
     return { changed: true, filePath };
   });
@@ -165,6 +174,15 @@ export async function clearChannelMemory(
 ): Promise<ChannelMemoryWriteResult> {
   const filePath = getChannelMemoryFilePath(target);
   return serializeAppend(filePath, async () => {
+    try {
+      await fs.access(filePath);
+    } catch (error) {
+      if (isMissingFile(error)) {
+        return { changed: false, filePath };
+      }
+      throw error;
+    }
+
     let release: () => Promise<void>;
     try {
       release = await lockfile.lock(filePath, LOCK_OPTIONS);
@@ -183,7 +201,7 @@ export async function clearChannelMemory(
       }
       throw error;
     } finally {
-      await release();
+      await releaseLock(release);
     }
   });
 }

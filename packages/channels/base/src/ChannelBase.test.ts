@@ -312,6 +312,22 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('/channel-memory sanitizes stored memory before showing it', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('safe\u202Ehidden\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/channel-memory', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'safe hidden' }]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('/channel-memory reports read failures', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockRejectedValue(new Error('disk full')),
@@ -368,6 +384,43 @@ describe('ChannelBase', () => {
       expect(channelMemory.clearChannelMemory).toHaveBeenCalledTimes(1);
       expect(ch.sent).toEqual([
         { chatId: 'chat1', text: 'Channel memory cleared.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/forget-channel accepts mixed-case confirmation', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/forget-channel Confirm', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.clearChannelMemory).toHaveBeenCalledTimes(1);
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory cleared.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/forget-channel reports when no memory was saved', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: false }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
+      );
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'No channel memory saved.' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });

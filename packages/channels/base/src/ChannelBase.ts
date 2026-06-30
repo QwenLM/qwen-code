@@ -568,7 +568,7 @@ export abstract class ChannelBase {
       }
       await this.sendMessage(
         envelope.chatId,
-        text === '' ? 'No channel memory saved.' : text,
+        text === '' ? 'No channel memory saved.' : sanitizePromptText(text),
       );
       return true;
     });
