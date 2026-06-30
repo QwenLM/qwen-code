@@ -31,6 +31,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   LoopTickResult,
+  ToolArtifact,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -5028,6 +5029,12 @@ export class Session implements SessionContext {
               const contextPart = { text: postHookResult.additionalContext };
               responseParts.push(contextPart);
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUse',
+              toolName,
+              toolCallId: callId,
+              artifacts: postHookResult.artifacts,
+            });
           } else if (
             hooksEnabledForTool &&
             messageBusForTool &&
@@ -5053,6 +5060,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Handle TodoWriteTool: extract todos and send plan update
@@ -5085,6 +5098,13 @@ export class Session implements SessionContext {
               resultDisplay: toolResult.returnDisplay,
               error,
               success: succeeded,
+              artifacts: succeeded ? toolResult.artifacts : undefined,
+              trustedPublisher:
+                succeeded &&
+                toolName === ToolNames.ARTIFACT &&
+                toolResult.artifacts?.some(
+                  (artifact) => artifact.storage === 'published',
+                ),
             });
           }
 
@@ -5160,6 +5180,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Use ToolCallEmitter for error handling
@@ -5529,6 +5555,35 @@ export class Session implements SessionContext {
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
+    }
+  }
+
+  private async emitHookArtifactsNotification(args: {
+    hookEventName: 'PostToolUse' | 'PostToolUseFailure' | 'PostToolBatch';
+    toolName?: string;
+    toolCallId?: string;
+    artifacts?: ToolArtifact[];
+  }): Promise<void> {
+    if (!args.artifacts || args.artifacts.length === 0) {
+      return;
+    }
+
+    try {
+      await this.client.extNotification('qwen/notify/session/artifact-event', {
+        v: 1,
+        sessionId: this.sessionId,
+        source: 'hook',
+        hookEventName: args.hookEventName,
+        toolName: args.toolName,
+        toolCallId: args.toolCallId,
+        artifacts: args.artifacts,
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `Hook artifact notification dropped for ${args.toolName ?? 'unknown tool'}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 

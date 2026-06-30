@@ -47,6 +47,10 @@
       "types": "./dist/bridgeTypes.d.ts",
       "import": "./dist/bridgeTypes.js"
     },
+    "./sessionArtifacts": {
+      "types": "./dist/sessionArtifacts.d.ts",
+      "import": "./dist/sessionArtifacts.js"
+    },
     "./daemonEventTypes": {
       "types": "./dist/daemonEventTypes.d.ts",
       "import": "./dist/daemonEventTypes.js"

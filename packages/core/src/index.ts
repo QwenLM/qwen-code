@@ -171,6 +171,10 @@ export type {
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
 export type {
+  RecordArtifactTool,
+  RecordArtifactParams,
+} from './tools/record-artifact.js';
+export type {
   ArtifactPublisher,
   PublishArtifactInput,
   PublishedArtifact,

@@ -142,6 +142,7 @@ export class HookAggregator {
     const merged: HookOutput = {};
     const reasons: string[] = [];
     const additionalContexts: string[] = [];
+    const artifacts: unknown[] = [];
     let hasBlock = false;
     let hasContinueFalse = false;
     let stopReason: string | undefined;
@@ -172,7 +173,9 @@ export class HookAggregator {
       // Collect other hookSpecificOutput fields (later values win)
       if (output.hookSpecificOutput) {
         for (const [key, value] of Object.entries(output.hookSpecificOutput)) {
-          if (key !== 'additionalContext') {
+          if (key === 'artifacts' && Array.isArray(value)) {
+            artifacts.push(...value);
+          } else if (key !== 'additionalContext' && key !== 'artifacts') {
             otherHookSpecificFields[key] = value;
           }
         }
@@ -216,6 +219,9 @@ export class HookAggregator {
     };
     if (additionalContexts.length > 0) {
       hookSpecificOutput['additionalContext'] = additionalContexts.join('\n');
+    }
+    if (artifacts.length > 0) {
+      hookSpecificOutput['artifacts'] = artifacts;
     }
 
     if (Object.keys(hookSpecificOutput).length > 0) {

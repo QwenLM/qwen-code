@@ -21,6 +21,7 @@ import {
   type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { ToolArtifact } from '../tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
 
 const debugLogger = createDebugLogger('TOOL_HOOKS');
@@ -65,6 +66,8 @@ export interface PostToolUseHookResult {
   stopReason?: string;
   /** Additional context to append to tool response */
   additionalContext?: string;
+  /** Structured artifacts returned by post-tool hooks. */
+  artifacts?: ToolArtifact[];
   /** See PreToolUseHookResult.hookError. */
   hookError?: string;
 }
@@ -75,6 +78,8 @@ export interface PostToolUseHookResult {
 export interface PostToolUseFailureHookResult {
   /** Additional context about the failure */
   additionalContext?: string;
+  /** Structured artifacts returned by failure hooks. */
+  artifacts?: ToolArtifact[];
   /** See PreToolUseHookResult.hookError. */
   hookError?: string;
 }
@@ -89,6 +94,8 @@ export interface PostToolBatchHookResult {
   stopReason?: string;
   /** Additional context to append once for the whole batch */
   additionalContext?: string;
+  /** Structured artifacts returned by batch hooks. */
+  artifacts?: ToolArtifact[];
   /** See PreToolUseHookResult.hookError. */
   hookError?: string;
 }
@@ -293,6 +300,7 @@ export async function firePostToolUseHook(
     return {
       shouldStop: false,
       additionalContext,
+      artifacts: postToolOutput.getArtifacts(),
     };
   } catch (error) {
     // Hook errors should not affect tool result
@@ -375,6 +383,7 @@ export async function firePostToolUseFailureHook(
 
     return {
       additionalContext,
+      artifacts: failureOutput.getArtifacts(),
     };
   } catch (error) {
     // Hook errors should not affect error handling
@@ -437,6 +446,7 @@ export async function firePostToolBatchHook(
       shouldStop,
       stopReason: shouldStop ? batchOutput.getEffectiveReason() : undefined,
       additionalContext: batchOutput.getAdditionalContext(),
+      artifacts: batchOutput.getArtifacts(),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

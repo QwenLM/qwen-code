@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import type { ChildProcess } from 'child_process';
+import type { ToolArtifact } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -288,6 +289,14 @@ export interface HookOutput {
   hookSpecificOutput?: Record<string, unknown>;
 }
 
+function isToolArtifactLike(value: unknown): value is ToolArtifact {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { title?: unknown }).title === 'string'
+  );
+}
+
 export const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
 
 export function sanitizeUserPromptExpansionAdditionalContext(
@@ -396,6 +405,14 @@ export class DefaultHookOutput implements HookOutput {
       return context.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
     return undefined;
+  }
+
+  getArtifacts(): ToolArtifact[] {
+    const artifacts = this.hookSpecificOutput?.['artifacts'];
+    if (!Array.isArray(artifacts)) {
+      return [];
+    }
+    return artifacts.filter(isToolArtifactLike);
   }
 
   /**
@@ -728,6 +745,7 @@ export interface PostToolUseOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostToolUse';
     additionalContext?: string;
+    artifacts?: ToolArtifact[];
   };
 }
 
@@ -753,6 +771,7 @@ export interface PostToolUseFailureOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostToolUseFailure';
     additionalContext?: string;
+    artifacts?: ToolArtifact[];
   };
 }
 
@@ -788,6 +807,7 @@ export interface PostToolBatchOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostToolBatch';
     additionalContext?: string;
+    artifacts?: ToolArtifact[];
   };
 }
 

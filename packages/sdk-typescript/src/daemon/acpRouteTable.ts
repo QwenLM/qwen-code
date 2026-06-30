@@ -243,6 +243,39 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       }),
     },
   },
+  // GET /session/:id/artifacts → _qwen/session/artifacts
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/artifacts$/,
+    mapping: {
+      method: '_qwen/session/artifacts',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // POST /session/:id/artifacts → _qwen/session/artifacts/add
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/artifacts$/,
+    mapping: {
+      method: '_qwen/session/artifacts/add',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+  // DELETE /session/:id/artifacts/:artifactId → _qwen/session/artifacts/remove
+  {
+    httpMethod: 'DELETE',
+    pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/session/artifacts/remove',
+      extractParams: (segs) => ({
+        sessionId: segs[0],
+        artifactId: segs[1],
+      }),
+    },
+  },
   // POST /session/:id/recap → _qwen/session/recap
   {
     httpMethod: 'POST',

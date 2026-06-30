@@ -179,6 +179,43 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('emits structured artifacts and the trusted publisher marker', async () => {
+      await emitter.emitResult({
+        toolName: ToolNames.ARTIFACT,
+        callId: 'call-artifact',
+        success: true,
+        message: createMockMessage('Published'),
+        artifacts: [
+          {
+            kind: 'html',
+            storage: 'published',
+            title: 'Dashboard',
+            url: 'file:///tmp/dashboard.html',
+            managedId: 'managed-1',
+          },
+        ],
+        trustedPublisher: true,
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-artifact',
+          status: 'completed',
+          _meta: expect.objectContaining({
+            toolName: ToolNames.ARTIFACT,
+            artifactsTrustedPublisher: true,
+            artifacts: [
+              expect.objectContaining({
+                title: 'Dashboard',
+                storage: 'published',
+              }),
+            ],
+          }),
+        }),
+      );
+    });
+
     it('should emit tool_call_update with failed status on failure', async () => {
       await emitter.emitResult({
         toolName: 'test_tool',

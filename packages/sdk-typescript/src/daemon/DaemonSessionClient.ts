@@ -30,6 +30,9 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactsEnvelope,
   DaemonSessionState,
   DaemonSession,
   DaemonSessionStatsStatus,
@@ -405,6 +408,30 @@ export class DaemonSessionClient {
    */
   async heartbeat(): Promise<HeartbeatResult> {
     return await this.client.heartbeat(this.sessionId, this.clientId);
+  }
+
+  async artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+    return await this.client.listSessionArtifacts(this.sessionId);
+  }
+
+  async addArtifact(
+    artifact: DaemonSessionArtifactInput,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.client.addSessionArtifact(
+      this.sessionId,
+      artifact,
+      this.clientId,
+    );
+  }
+
+  async removeArtifact(
+    artifactId: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.client.removeSessionArtifact(
+      this.sessionId,
+      artifactId,
+      this.clientId,
+    );
   }
 
   async setModel(modelId: string): Promise<SetModelResult> {

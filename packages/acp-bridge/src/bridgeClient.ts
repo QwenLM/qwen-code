@@ -40,6 +40,11 @@ import type {
 } from './permission.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { writeStderrLine } from './internal/stderrLine.js';
+import type {
+  SessionArtifactChange,
+  SessionArtifactInput,
+  SessionArtifactStore,
+} from './sessionArtifacts.js';
 
 /**
  * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.
@@ -68,6 +73,35 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
     err.name === 'FsError' &&
     typeof (err as { kind?: unknown }).kind === 'string'
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function extractSessionUpdateArtifacts(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+): SessionArtifactInput[] {
+  const rawArtifacts = updateMeta?.['artifacts'];
+  if (!Array.isArray(rawArtifacts)) {
+    return [];
+  }
+  const update = params.update as { toolCallId?: unknown };
+  const toolCallId =
+    typeof update.toolCallId === 'string' ? update.toolCallId : undefined;
+  const toolName =
+    typeof updateMeta?.['toolName'] === 'string'
+      ? updateMeta['toolName']
+      : undefined;
+  const trustedPublisher = updateMeta?.['artifactsTrustedPublisher'] === true;
+  return rawArtifacts.filter(isRecord).map((artifact) => ({
+    ...(artifact as unknown as SessionArtifactInput),
+    source: 'tool' as const,
+    toolCallId,
+    toolName,
+    trustedPublisher,
+  }));
 }
 
 /**
@@ -207,6 +241,7 @@ function sliceLineRange(
 export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
+  artifacts: SessionArtifactStore;
   pendingPermissionIds: Set<string>;
   /**
    * Mid-turn user messages queued by the browser, drained here when the ACP
@@ -477,6 +512,14 @@ export class BridgeClient implements Client {
       ...originator,
       ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
+
+    if (entry) {
+      const artifacts = extractSessionUpdateArtifacts(params, updateMeta);
+      if (artifacts.length > 0) {
+        const result = await entry.artifacts.upsertMany(artifacts);
+        this.publishArtifactChanges(entry, result.changes);
+      }
+    }
   }
 
   /**
@@ -658,11 +701,12 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * Handle child->bridge ACP `extNotification` calls. Six methods are
-   * recognized — `qwen/notify/session/model-update`,
+   * Handle child->bridge ACP `extNotification` calls. Recognized methods are
+   * `qwen/notify/session/model-update`,
    * `qwen/notify/session/mode-update`,
    * `qwen/notify/session/title-update` (auto/in-process session titles),
    * `qwen/notify/session/prompt-suggestion` (followup assist),
+   * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently
@@ -741,6 +785,10 @@ export class BridgeClient implements Client {
       this.publishExtNotification(sessionId, 'terminal_sequence', rest);
       return;
     }
+    if (method === 'qwen/notify/session/artifact-event') {
+      await this.handleArtifactEvent(params);
+      return;
+    }
     if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const sessionId = params['sessionId'];
     if (typeof sessionId !== 'string') return;
@@ -763,6 +811,56 @@ export class BridgeClient implements Client {
     void _sid;
     void _kind;
     this.publishExtNotification(sessionId, type, rest);
+  }
+
+  private async handleArtifactEvent(
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    const sessionId = params['sessionId'];
+    const rawArtifacts = params['artifacts'];
+    if (typeof sessionId !== 'string' || !Array.isArray(rawArtifacts)) {
+      writeStderrLine(
+        `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=artifact_event action=dropped reason=malformed`,
+      );
+      return;
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return;
+    const hookEventName =
+      typeof params['hookEventName'] === 'string'
+        ? params['hookEventName']
+        : undefined;
+    const toolName =
+      typeof params['toolName'] === 'string' ? params['toolName'] : undefined;
+    const toolCallId =
+      typeof params['toolCallId'] === 'string'
+        ? params['toolCallId']
+        : undefined;
+    const artifacts = rawArtifacts.filter(isRecord).map((artifact) => ({
+      ...(artifact as unknown as SessionArtifactInput),
+      source: 'hook' as const,
+      hookEventName,
+      toolName,
+      toolCallId,
+      trustedPublisher: false,
+    }));
+    const result = await entry.artifacts.upsertMany(artifacts);
+    this.publishArtifactChanges(entry, result.changes);
+  }
+
+  private publishArtifactChanges(
+    entry: BridgeClientSessionEntry,
+    changes: SessionArtifactChange[],
+  ): void {
+    for (const change of changes) {
+      entry.events.publish({
+        type: 'artifact_changed',
+        data: { sessionId: entry.sessionId, change },
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
+      });
+    }
   }
 
   private publishExtNotification(

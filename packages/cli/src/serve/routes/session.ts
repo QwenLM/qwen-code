@@ -19,6 +19,7 @@ import {
   canonicalizeWorkspace,
   InvalidClientIdError,
   PromptQueueFullError,
+  SessionArtifactValidationError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -52,6 +53,24 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+}
+
+function sendArtifactValidationError(
+  res: Response,
+  err: unknown,
+): boolean {
+  if (!(err instanceof SessionArtifactValidationError)) {
+    return false;
+  }
+  res.status(400).json({
+    v: 1,
+    error: {
+      code: err.code,
+      message: err.message,
+      ...(err.field ? { field: err.field } : {}),
+    },
+  });
+  return true;
 }
 
 export function registerSessionRoutes(
@@ -448,6 +467,85 @@ export function registerSessionRoutes(
       sendBridgeError(res, err, { route: 'GET /session/:id/hooks', sessionId });
     }
   });
+
+  app.get('/session/:id/artifacts', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(await bridge.getSessionArtifacts(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/artifacts',
+        sessionId,
+      });
+    }
+  });
+
+  app.post(
+    '/session/:id/artifacts',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.addSessionArtifact(
+          sessionId,
+          safeBody(req) as unknown as Parameters<
+            AcpSessionBridge['addSessionArtifact']
+          >[1],
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        if (sendArtifactValidationError(res, err)) return;
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/artifacts',
+          sessionId,
+        });
+      }
+    },
+  );
+
+  app.delete(
+    '/session/:id/artifacts/:artifactId',
+    mutate({ strict: true }),
+    (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const artifactId = req.params['artifactId'];
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      if (!artifactId) {
+        res.status(400).json({
+          v: 1,
+          error: {
+            code: 'VALIDATION_FAILED',
+            message: '`artifactId` route parameter is required',
+            field: 'artifactId',
+          },
+        });
+        return;
+      }
+      try {
+        res
+          .status(200)
+          .json(
+            bridge.removeSessionArtifact(
+              sessionId,
+              artifactId,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'DELETE /session/:id/artifacts/:artifactId',
+          sessionId,
+        });
+      }
+    },
+  );
 
   app.post(
     '/session/:id/tasks/:taskId/cancel',

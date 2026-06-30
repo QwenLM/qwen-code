@@ -18,6 +18,11 @@ import type {
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
 import type {
+  SessionArtifactInput,
+  SessionArtifactMutationResult,
+  SessionArtifactsEnvelope,
+} from './sessionArtifacts.js';
+import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
@@ -490,6 +495,33 @@ export interface AcpSessionBridge {
     metadata: SessionMetadataUpdate,
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
+
+  /**
+   * List the structured artifacts registered for a live session. Throws
+   * `SessionNotFoundError` when the id is unknown.
+   */
+  getSessionArtifacts(sessionId: string): Promise<SessionArtifactsEnvelope>;
+
+  /**
+   * Register a client-supplied artifact for the session. Client artifacts use
+   * the daemon-issued client id from the request context for retention/audit;
+   * request bodies cannot self-assign client ids.
+   */
+  addSessionArtifact(
+    sessionId: string,
+    artifact: SessionArtifactInput,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactMutationResult>;
+
+  /**
+   * Remove an artifact from the session. Missing artifact ids are idempotent
+   * no-ops; unknown session ids still throw `SessionNotFoundError`.
+   */
+  removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context?: BridgeClientRequestContext,
+  ): SessionArtifactMutationResult;
 
   /**
    * Cast a vote on a pending `permission_request` (first-responder wins).

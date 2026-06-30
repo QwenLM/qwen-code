@@ -100,6 +100,12 @@ import {
   type PermissionAuditPublisher,
 } from './permissionMediator.js';
 import { PermissionForbiddenError } from './bridgeErrors.js';
+import {
+  SessionArtifactStore,
+  type SessionArtifactChange,
+  type SessionArtifactInput,
+  type SessionArtifactMutationResult,
+} from './sessionArtifacts.js';
 
 const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
   captureContext: () => undefined,
@@ -241,6 +247,8 @@ interface SessionEntry {
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
   events: EventBus;
+  /** Per-session structured artifact registry. */
+  artifacts: SessionArtifactStore;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -2239,6 +2247,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       channel: ci.channel,
       connection: ci.connection,
       events,
+      artifacts: new SessionArtifactStore({ sessionId, workspaceCwd }),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
@@ -2264,6 +2273,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // freshly-created EventBus. Idempotent on unknown sessionIds.
     ci.client.drainEarlyEvents(entry.sessionId, entry);
     return entry;
+  };
+
+  const publishArtifactChanges = (
+    entry: SessionEntry,
+    changes: SessionArtifactChange[],
+    originatorClientId?: string,
+  ): void => {
+    for (const change of changes) {
+      entry.events.publish({
+        type: 'artifact_changed',
+        data: { sessionId: entry.sessionId, change },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+    }
   };
 
   // A5: seed the snapshot caches from the agent's session-create response
@@ -3939,6 +3962,37 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       }
       return { displayName: entry.displayName };
+    },
+
+    async getSessionArtifacts(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.artifacts.list();
+    },
+
+    async addSessionArtifact(sessionId, artifact, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const input: SessionArtifactInput = {
+        ...artifact,
+        source: 'client',
+        clientId,
+        trustedPublisher: false,
+      };
+      const result: SessionArtifactMutationResult =
+        await entry.artifacts.upsertMany([input], { strict: true });
+      publishArtifactChanges(entry, result.changes, clientId);
+      return result;
+    },
+
+    removeSessionArtifact(sessionId, artifactId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const result = entry.artifacts.remove(artifactId);
+      publishArtifactChanges(entry, result.changes, clientId);
+      return result;
     },
 
     listWorkspaceSessions(workspaceCwd) {

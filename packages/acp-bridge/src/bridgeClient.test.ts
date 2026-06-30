@@ -50,6 +50,7 @@ import type { MidTurnQueueEntry } from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+import { SessionArtifactStore } from './sessionArtifacts.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -541,6 +542,90 @@ describe('BridgeClient — original timestamp preservation', () => {
     };
     // No envelope _meta → EventBus.publish applies its own Date.now() fallback.
     expect(frame._meta).toBeUndefined();
+  });
+});
+
+describe('BridgeClient — artifact ingress', () => {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  it('stores tool result artifacts and publishes artifact_changed', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
+    );
+    try {
+      const sessionId = 'sess:artifacts';
+      const publish = vi.fn().mockReturnValue(true);
+      const fakeEntry = {
+        sessionId,
+        events: { publish },
+        artifacts: new SessionArtifactStore({
+          sessionId,
+          workspaceCwd: workspace,
+        }),
+        pendingPermissionIds: new Set<string>(),
+        midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      };
+      const client = new BridgeClient(
+        ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+        noPermissionFlow as never,
+        { request: noPermissionFlow } as never,
+        0,
+        Infinity,
+      );
+
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-artifact',
+          content: [],
+          _meta: {
+            toolName: 'artifact',
+            artifactsTrustedPublisher: true,
+            artifacts: [
+              {
+                title: 'Dashboard',
+                storage: 'published',
+                url: 'file:///tmp/dashboard.html',
+                managedId: 'managed-1',
+              },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'session_update' }),
+      );
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'artifact_changed',
+          data: {
+            sessionId,
+            change: expect.objectContaining({
+              action: 'created',
+              artifact: expect.objectContaining({
+                title: 'Dashboard',
+                storage: 'published',
+              }),
+            }),
+          },
+        }),
+      );
+      await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
+        artifacts: [
+          {
+            title: 'Dashboard',
+            storage: 'published',
+            managedId: 'managed-1',
+          },
+        ],
+      });
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
   });
 });
 
