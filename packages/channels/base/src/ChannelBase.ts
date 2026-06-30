@@ -61,6 +61,7 @@ export interface ChannelScheduleController {
   ): Promise<ChannelCronJob[]>;
   disable(id: string): Promise<boolean>;
   validateCron(cron: string): void;
+  nextFireTime?(job: ChannelCronJob): Date;
 }
 
 export interface ChannelScheduledPromptOptions {
@@ -246,7 +247,7 @@ export abstract class ChannelBase {
   async runScheduledPrompt(
     job: ChannelCronJob,
     options: ChannelScheduledPromptOptions = {},
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     if (!this.supportsProactiveSend()) {
       throw new Error('Channel does not support proactive scheduled messages.');
     }
@@ -284,12 +285,12 @@ export abstract class ChannelBase {
 
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
     const generation = this.sessionGenerations.get(sessionId) ?? 0;
-    const current = prev.then(async () => {
+    const current = prev.then(async (): Promise<string | undefined> => {
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         process.stderr.write(
           `[${this.name}] dropped scheduled job ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
         );
-        return;
+        return undefined;
       }
 
       let doneResolve: () => void = () => {};
@@ -325,6 +326,7 @@ export abstract class ChannelBase {
         if (!promptState.cancelled && response) {
           await this.pushProactive(job.target, response);
         }
+        return response;
       } finally {
         promptBridge.off('textChunk', onChunk);
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
@@ -368,9 +370,9 @@ export abstract class ChannelBase {
     });
     this.sessionQueues.set(
       sessionId,
-      current.catch(() => {}),
+      current.then(() => undefined).catch(() => {}),
     );
-    await current;
+    return current;
   }
 
   private async runScheduledBridgePrompt(
@@ -839,12 +841,14 @@ export abstract class ChannelBase {
         return this.handleScheduleAdd(envelope, rest.join(' '));
       case 'list':
         return this.handleScheduleList(envelope);
+      case 'inspect':
+        return this.handleScheduleInspect(envelope, rest[0]);
       case 'cancel':
         return this.handleScheduleCancel(envelope, rest[0]);
       default:
         await this.sendMessage(
           envelope.chatId,
-          'Usage: /schedule add "<cron>" <prompt> | /schedule list | /schedule cancel <id>',
+          'Usage: /schedule add "<cron>" <prompt> | /schedule list | /schedule inspect <id> | /schedule cancel <id>',
         );
         return true;
     }
@@ -955,15 +959,73 @@ export abstract class ChannelBase {
     }
     await this.sendMessage(
       envelope.chatId,
-      jobs
-        .map((job) => {
-          const status = job.enabled ? 'enabled' : 'disabled';
-          const label = job.label ? ` ${job.label}` : '';
-          return `${job.id} ${job.cron} ${status}${label}`;
-        })
-        .join('\n'),
+      jobs.map((job) => this.formatScheduleListLine(job)).join('\n'),
     );
     return true;
+  }
+
+  private async handleScheduleInspect(
+    envelope: Envelope,
+    id: string | undefined,
+  ): Promise<boolean> {
+    if (!this.scheduleController) return true;
+    if (!id) {
+      await this.sendMessage(envelope.chatId, 'Usage: /schedule inspect <id>');
+      return true;
+    }
+    const jobs = await this.scheduleController.listForTarget(
+      this.name,
+      this.scheduleTargetFromEnvelope(envelope),
+    );
+    const job = jobs.find((candidate) => candidate.id === id);
+    if (!job) {
+      await this.sendMessage(envelope.chatId, `No scheduled job ${id}.`);
+      return true;
+    }
+
+    const lines = [
+      `Scheduled job ${job.id}`,
+      `Status: ${job.enabled ? 'enabled' : 'disabled'}, last=${this.lastScheduleStatus(job)}`,
+      `Cron: ${job.cron}`,
+      `Next: ${this.formatNextFireTime(job)}`,
+      `Runs: ${job.runCount}`,
+      `Created by: ${job.createdBy}`,
+      `Created: ${job.createdAt}`,
+    ];
+    if (job.lastFinishedAt) {
+      lines.push(`Last finished: ${job.lastFinishedAt}`);
+    }
+    if (job.lastError) {
+      lines.push(`Last error: ${job.lastError}`);
+    }
+    if (job.lastResultPreview) {
+      lines.push(`Last result: ${job.lastResultPreview}`);
+    }
+    lines.push(`Prompt: ${job.prompt}`);
+    await this.sendMessage(envelope.chatId, lines.join('\n'));
+    return true;
+  }
+
+  private formatScheduleListLine(job: ChannelCronJob): string {
+    const fields = [
+      job.id,
+      job.cron,
+      job.enabled ? 'enabled' : 'disabled',
+      `last=${this.lastScheduleStatus(job)}`,
+      `next=${this.formatNextFireTime(job)}`,
+      `runs=${job.runCount}`,
+    ];
+    if (job.label) fields.push(job.label);
+    return fields.join(' ');
+  }
+
+  private lastScheduleStatus(job: ChannelCronJob): string {
+    if (job.runningSince) return 'running';
+    return job.lastStatus ?? 'never';
+  }
+
+  private formatNextFireTime(job: ChannelCronJob): string {
+    return this.scheduleController?.nextFireTime?.(job).toISOString() ?? 'n/a';
   }
 
   private async handleScheduleCancel(

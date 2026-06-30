@@ -47,6 +47,7 @@ describe('ChannelCronStore', () => {
       enabled: true,
       createdAt: '2026-06-30T01:02:03.000Z',
       consecutiveFailures: 0,
+      runCount: 0,
     });
 
     const reloaded = new ChannelCronStore({
@@ -130,5 +131,33 @@ describe('ChannelCronStore', () => {
     await fs.writeFile(path.join(tmpDir, 'channels', 'cron.json'), '{', 'utf8');
 
     await expect(store.list()).rejects.toThrow(/Malformed JSON/);
+  });
+
+  it('loads jobs created before lifecycle fields existed', async () => {
+    await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, 'channels', 'cron.json'),
+      JSON.stringify([
+        {
+          ...input,
+          id: 'old-job',
+          enabled: true,
+          createdAt: '2026-06-30T01:02:03.000Z',
+          consecutiveFailures: 0,
+        },
+      ]),
+      'utf8',
+    );
+
+    await expect(store.list()).resolves.toEqual([
+      {
+        ...input,
+        id: 'old-job',
+        enabled: true,
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      },
+    ]);
   });
 });

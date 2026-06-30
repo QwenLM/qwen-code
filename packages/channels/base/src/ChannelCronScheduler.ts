@@ -4,11 +4,13 @@ import type {
   ChannelCronStore,
 } from './ChannelCronStore.js';
 
+const MAX_RESULT_PREVIEW_LENGTH = 500;
+
 export interface ChannelRoutineRunner {
   runScheduledPrompt(
     job: ChannelCronJob,
     options?: { timeoutMs?: number },
-  ): Promise<void>;
+  ): Promise<string | undefined>;
 }
 
 export interface ChannelCronSchedulerOptions {
@@ -116,14 +118,21 @@ export class ChannelCronScheduler {
     if (!latestJob?.enabled) return;
 
     try {
-      await channel.runScheduledPrompt(latestJob, {
+      await this.store.update(latestJob.id, {
+        runningSince: now.toISOString(),
+      });
+      const resultPreview = await channel.runScheduledPrompt(latestJob, {
         timeoutMs: this.jobTimeoutMs,
       });
       const patch: ChannelCronJobPatch = {
         lastFiredAt: now.toISOString(),
+        lastFinishedAt: now.toISOString(),
+        lastResultPreview: truncateResultPreview(resultPreview),
         lastStatus: 'ok',
         lastError: undefined,
         consecutiveFailures: 0,
+        runningSince: undefined,
+        runCount: latestJob.runCount + 1,
       };
       if (!latestJob.recurring) {
         patch.enabled = false;
@@ -151,12 +160,21 @@ export class ChannelCronScheduler {
     const consecutiveFailures = job.consecutiveFailures + 1;
     await this.store.update(job.id, {
       lastFiredAt: now.toISOString(),
+      lastFinishedAt: now.toISOString(),
       lastStatus: 'error',
       lastError: message,
       consecutiveFailures,
+      runningSince: undefined,
+      runCount: job.runCount + 1,
     });
     if (consecutiveFailures >= this.maxConsecutiveFailures) {
       await this.store.disable(job.id);
     }
   }
+}
+
+function truncateResultPreview(text: string | undefined): string | undefined {
+  return text === undefined
+    ? undefined
+    : text.slice(0, MAX_RESULT_PREVIEW_LENGTH);
 }

@@ -87,6 +87,8 @@ function createScheduleController(
     validateCron: (cron) => {
       parseCron(cron);
     },
+    nextFireTime: (job) =>
+      nextFireTime(job.cron, new Date(job.lastFiredAt ?? job.createdAt)),
   };
 }
 

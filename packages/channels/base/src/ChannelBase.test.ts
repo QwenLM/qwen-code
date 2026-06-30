@@ -474,6 +474,7 @@ describe('ChannelBase', () => {
         createdBy: 'User 1',
         createdAt: '2026-06-30T01:02:03.000Z',
         consecutiveFailures: 0,
+        runCount: 0,
       };
       const createSchedule = vi.fn(
         async (_input: ChannelCronJobInput) => created,
@@ -702,6 +703,109 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain(
         'does not support proactive scheduled messages for this chat target',
       );
+    });
+
+    it('/schedule list shows lifecycle state for jobs in the current target', async () => {
+      const listForTarget = vi.fn(async () => [
+        {
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'User 1',
+          createdAt: '2026-06-30T01:02:03.000Z',
+          lastStatus: 'ok' as const,
+          lastFinishedAt: '2026-06-30T09:01:00.000Z',
+          lastResultPreview: 'posted summary',
+          consecutiveFailures: 0,
+          runCount: 2,
+        },
+      ]);
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: vi.fn(),
+            listForTarget,
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+            nextFireTime: vi.fn(() => new Date('2026-07-01T09:00:00.000Z')),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/schedule list' }));
+
+      expect(listForTarget).toHaveBeenCalledWith('test-chan', {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        threadId: undefined,
+        isGroup: false,
+      });
+      expect(ch.sent[0]!.text).toContain('job-1 0 9 * * * enabled');
+      expect(ch.sent[0]!.text).toContain('last=ok');
+      expect(ch.sent[0]!.text).toContain('next=2026-07-01T09:00:00.000Z');
+      expect(ch.sent[0]!.text).toContain('runs=2');
+      expect(ch.sent[0]!.text).toContain('daily summary');
+    });
+
+    it('/schedule inspect shows lifecycle details for a current-target job', async () => {
+      const ch = createChannel(
+        {},
+        {
+          scheduleController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(async () => [
+              {
+                id: 'job-1',
+                channelName: 'test-chan',
+                target: {
+                  channelName: 'test-chan',
+                  senderId: 'user1',
+                  chatId: 'chat1',
+                },
+                cwd: '/tmp',
+                cron: '0 9 * * *',
+                prompt: 'post summary',
+                label: 'daily summary',
+                recurring: true,
+                enabled: true,
+                createdBy: 'User 1',
+                createdAt: '2026-06-30T01:02:03.000Z',
+                lastStatus: 'ok' as const,
+                lastFinishedAt: '2026-06-30T09:01:00.000Z',
+                lastResultPreview: 'posted summary',
+                consecutiveFailures: 0,
+                runCount: 2,
+              },
+            ]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+            nextFireTime: vi.fn(() => new Date('2026-07-01T09:00:00.000Z')),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/schedule inspect job-1' }));
+
+      expect(ch.sent[0]!.text).toContain('Scheduled job job-1');
+      expect(ch.sent[0]!.text).toContain('Status: enabled, last=ok');
+      expect(ch.sent[0]!.text).toContain('Next: 2026-07-01T09:00:00.000Z');
+      expect(ch.sent[0]!.text).toContain('Runs: 2');
+      expect(ch.sent[0]!.text).toContain(
+        'Last finished: 2026-06-30T09:01:00.000Z',
+      );
+      expect(ch.sent[0]!.text).toContain('Last result: posted summary');
     });
 
     it('/status shows active session', async () => {
@@ -4745,13 +4849,14 @@ describe('ChannelBase', () => {
         createdBy: 'Alice',
         createdAt: '2026-06-30T01:00:00.000Z',
         consecutiveFailures: 0,
+        runCount: 0,
       });
       await Promise.resolve();
       expect(bridge.prompt).toHaveBeenCalledTimes(1);
 
       resolveFirstPrompt('first response');
       await inbound;
-      await scheduled;
+      await expect(scheduled).resolves.toBe('scheduled response');
 
       expect(bridge.prompt).toHaveBeenCalledTimes(2);
       expect(bridge.prompt).toHaveBeenLastCalledWith(

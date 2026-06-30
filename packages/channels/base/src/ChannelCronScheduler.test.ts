@@ -25,6 +25,7 @@ describe('ChannelCronScheduler', () => {
     createdBy: 'Alice',
     createdAt: '2026-06-30T01:00:00.000Z',
     consecutiveFailures: 0,
+    runCount: 0,
   };
 
   beforeEach(() => {
@@ -43,7 +44,7 @@ describe('ChannelCronScheduler', () => {
         return true;
       }),
     };
-    runScheduledPrompt = vi.fn(async () => undefined);
+    runScheduledPrompt = vi.fn(async () => 'done summary');
   });
 
   it('fires an overdue enabled job through its channel and records success', async () => {
@@ -61,10 +62,33 @@ describe('ChannelCronScheduler', () => {
     });
     expect(store.update).toHaveBeenCalledWith('job-1', {
       lastFiredAt: '2026-06-30T01:05:30.000Z',
+      lastFinishedAt: '2026-06-30T01:05:30.000Z',
+      lastResultPreview: 'done summary',
       lastStatus: 'ok',
       lastError: undefined,
       consecutiveFailures: 0,
+      runningSince: undefined,
+      runCount: 1,
     });
+  });
+
+  it('truncates long result previews before storing success', async () => {
+    runScheduledPrompt.mockResolvedValue('x'.repeat(600));
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date('2026-06-30T01:01:00.000Z'),
+    });
+
+    await scheduler.tick();
+
+    expect(store.update).toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({
+        lastResultPreview: 'x'.repeat(500),
+      }),
+    );
   });
 
   it('does not replay a recurring job again after recording the catch-up fire', async () => {
@@ -98,9 +122,13 @@ describe('ChannelCronScheduler', () => {
 
     expect(store.update).toHaveBeenCalledWith('job-1', {
       lastFiredAt: '2026-06-30T01:05:30.000Z',
+      lastFinishedAt: '2026-06-30T01:05:30.000Z',
+      lastResultPreview: 'done summary',
       lastStatus: 'ok',
       lastError: undefined,
       consecutiveFailures: 0,
+      runningSince: undefined,
+      runCount: 1,
       enabled: false,
     });
     expect(store.disable).not.toHaveBeenCalled();
@@ -140,6 +168,29 @@ describe('ChannelCronScheduler', () => {
     });
   });
 
+  it('marks a job as running before awaiting the channel routine', async () => {
+    let finish!: (value: string) => void;
+    runScheduledPrompt.mockImplementation(
+      () => new Promise((resolve) => void (finish = resolve)),
+    );
+    const scheduler = new ChannelCronScheduler({
+      store,
+      channels: new Map([['feishu-main', { runScheduledPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    const tick = scheduler.tick();
+
+    await vi.waitFor(() => expect(runScheduledPrompt).toHaveBeenCalledOnce());
+    expect(store.update).toHaveBeenNthCalledWith(1, 'job-1', {
+      runningSince: '2026-06-30T01:05:30.000Z',
+    });
+
+    finish('done summary');
+    await tick;
+  });
+
   it('records failures and disables a job after repeated errors', async () => {
     jobs = [{ ...baseJob, consecutiveFailures: 4 }];
     runScheduledPrompt.mockRejectedValue(new Error('cannot cold send'));
@@ -155,9 +206,12 @@ describe('ChannelCronScheduler', () => {
 
     expect(store.update).toHaveBeenCalledWith('job-1', {
       lastFiredAt: '2026-06-30T01:05:30.000Z',
+      lastFinishedAt: '2026-06-30T01:05:30.000Z',
       lastStatus: 'error',
       lastError: 'cannot cold send',
       consecutiveFailures: 5,
+      runningSince: undefined,
+      runCount: 1,
     });
     expect(store.disable).toHaveBeenCalledWith('job-1');
   });

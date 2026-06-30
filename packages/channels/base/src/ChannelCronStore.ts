@@ -18,9 +18,13 @@ export interface ChannelCronJob {
   createdBy: string;
   createdAt: string;
   lastFiredAt?: string;
+  lastFinishedAt?: string;
+  lastResultPreview?: string;
   lastStatus?: ChannelCronJobStatus;
   lastError?: string;
   consecutiveFailures: number;
+  runningSince?: string;
+  runCount: number;
 }
 
 export type ChannelCronJobInput = Omit<
@@ -29,9 +33,13 @@ export type ChannelCronJobInput = Omit<
   | 'enabled'
   | 'createdAt'
   | 'lastFiredAt'
+  | 'lastFinishedAt'
+  | 'lastResultPreview'
   | 'lastStatus'
   | 'lastError'
   | 'consecutiveFailures'
+  | 'runningSince'
+  | 'runCount'
 >;
 
 export type ChannelCronJobPatch = Partial<
@@ -39,9 +47,13 @@ export type ChannelCronJobPatch = Partial<
     ChannelCronJob,
     | 'enabled'
     | 'lastFiredAt'
+    | 'lastFinishedAt'
+    | 'lastResultPreview'
     | 'lastStatus'
     | 'lastError'
     | 'consecutiveFailures'
+    | 'runningSince'
+    | 'runCount'
   >
 >;
 
@@ -86,6 +98,7 @@ export class ChannelCronStore {
       enabled: true,
       createdAt: this.now().toISOString(),
       consecutiveFailures: 0,
+      runCount: 0,
     };
     await this.updateJobs((jobs) => [...jobs, job]);
     return job;
@@ -175,7 +188,7 @@ export class ChannelCronStore {
         );
       }
     }
-    return parsed;
+    return parsed.map(normalizeJob);
   }
 
   private async writeJobs(jobs: ChannelCronJob[]): Promise<void> {
@@ -233,10 +246,24 @@ function isChannelCronJob(value: unknown): value is ChannelCronJob {
     typeof job['createdAt'] === 'string' &&
     (job['lastFiredAt'] === undefined ||
       typeof job['lastFiredAt'] === 'string') &&
+    (job['lastFinishedAt'] === undefined ||
+      typeof job['lastFinishedAt'] === 'string') &&
+    (job['lastResultPreview'] === undefined ||
+      typeof job['lastResultPreview'] === 'string') &&
     (job['lastStatus'] === undefined ||
       job['lastStatus'] === 'ok' ||
       job['lastStatus'] === 'error') &&
     (job['lastError'] === undefined || typeof job['lastError'] === 'string') &&
-    typeof job['consecutiveFailures'] === 'number'
+    typeof job['consecutiveFailures'] === 'number' &&
+    (job['runningSince'] === undefined ||
+      typeof job['runningSince'] === 'string') &&
+    (job['runCount'] === undefined || typeof job['runCount'] === 'number')
   );
+}
+
+function normalizeJob(job: ChannelCronJob): ChannelCronJob {
+  return {
+    ...job,
+    runCount: job.runCount ?? 0,
+  };
 }
