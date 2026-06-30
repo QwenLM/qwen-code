@@ -21,6 +21,9 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GEMINI');
 
 /**
  * A wrapper for GoogleGenAI that implements the ContentGenerator interface.
@@ -28,6 +31,9 @@ import type {
 export class GeminiContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
+  // Latch so the effort-clamp warning fires once per generator lifetime
+  // instead of on every request that needs the downgrade.
+  private effortClampWarned = false;
 
   constructor(
     options: {
@@ -137,8 +143,19 @@ export class GeminiContentGenerator implements ContentGenerator {
           thinkingLevel = 'MEDIUM' as ThinkingLevel;
           break;
         case 'high':
+          thinkingLevel = 'HIGH' as ThinkingLevel;
+          break;
         case 'xhigh':
         case 'max':
+          // Gemini has no tier above HIGH; log the clamp once (mirroring the
+          // Anthropic generator's one-time clamp warning) so a /effort xhigh|max
+          // that silently runs at HIGH leaves a trace in debug logs.
+          if (!this.effortClampWarned) {
+            debugLogger.warn(
+              `reasoning.effort='${reasoning.effort}' is not supported by Gemini; clamping to 'HIGH'.`,
+            );
+            this.effortClampWarned = true;
+          }
           thinkingLevel = 'HIGH' as ThinkingLevel;
           break;
         default:
