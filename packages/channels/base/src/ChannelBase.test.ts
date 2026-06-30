@@ -312,6 +312,34 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('/channel-memory refuses to show saved memory in group chats', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({
+          text: '/channel-memory',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'group-1',
+          text: 'Channel memory cannot be shown in group chats.',
+        },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('/channel-memory sanitizes stored memory before showing it', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('safe\u202Ehidden\n'),
@@ -2187,6 +2215,39 @@ describe('ChannelBase', () => {
       const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
       expect(promptText).toBe('Use repo conventions.\n\nship it');
+    });
+
+    it('does not inject channel memory into shared open sessions', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        {
+          allowedUsers: ['boss'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+          senderPolicy: 'open',
+        },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: 'ship it',
+          senderId: 'boss',
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'group-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[User 1] ship it');
     });
 
     it('sanitizes channel memory before injecting it into the prompt', async () => {

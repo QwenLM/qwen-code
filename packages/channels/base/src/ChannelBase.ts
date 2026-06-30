@@ -546,6 +546,13 @@ export abstract class ChannelBase {
       if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
         return true;
       }
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Channel memory cannot be shown in group chats.',
+        );
+        return true;
+      }
       const channelMemory = await this.getChannelMemory(envelope);
       if (!channelMemory) {
         return true;
@@ -1356,7 +1363,11 @@ export abstract class ChannelBase {
       if (shouldPrependSessionContext) {
         const context: string[] = [];
         let channelMemory: string | undefined;
-        if (this.isAuthorizedForChannelMemory(envelope)) {
+        if (
+          this.isAuthorizedForChannelMemory(envelope) &&
+          (!this.isSharedSession(envelope) ||
+            this.config.senderPolicy === 'allowlist')
+        ) {
           try {
             channelMemory = (
               await this.channelMemory?.readChannelMemory(
