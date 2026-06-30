@@ -111,9 +111,6 @@ export class QQChannel extends ChannelBase {
   /** Whether this process has never received READY (cold start vs RESUME fallback). */
   private coldStart: boolean = true;
 
-  /** Track onToolCall invocations for diagnostic purposes (capped log output). */
-  private toolCallCount = 0;
-
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
   /** Track the latest user messageId per chatId for proper reply (msg_id). */
@@ -560,14 +557,7 @@ export class QQChannel extends ChannelBase {
    * than waiting for the tool call to complete.
    */
   override onToolCall(_chatId: string, event: ToolCallEvent): void {
-    this.toolCallCount++;
-    if (this.toolCallCount <= 3) {
-      process.stderr.write(
-        `[QQ:${this.name}] onToolCall #${this.toolCallCount} session=${event.sessionId} tool=${event.title} hasState=${this.streamState.has(event.sessionId)}\n`,
-      );
-    }
-    // Only flush the triggering session — flushing all sessions would
-    // prematurely send partial buffers from unrelated concurrent conversations.
+    // Only flush the triggering session
     const state = this.streamState.get(event.sessionId);
     if (!state) return;
     if (state.timer) {
@@ -1424,7 +1414,6 @@ export class QQChannel extends ChannelBase {
       const selfMention = event.mentions?.find((m) => m.is_you);
       if (selfMention?.id) {
         this.botOpenId = selfMention.id;
-        process.stderr.write(`[QQ:${this.name}] botOpenId=${this.botOpenId}\n`);
         if (this.qqConfig.allowMention !== false) {
           this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
         }
@@ -1608,7 +1597,6 @@ export class QQChannel extends ChannelBase {
       const selfMention = event.mentions?.find((m) => m.is_you);
       if (selfMention?.id) {
         this.botOpenId = selfMention.id;
-        process.stderr.write(`[QQ:${this.name}] botOpenId=${this.botOpenId}\n`);
         if (this.qqConfig.allowMention !== false) {
           this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
         }
