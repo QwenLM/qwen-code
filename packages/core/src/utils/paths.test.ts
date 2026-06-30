@@ -989,7 +989,7 @@ describe('expandHomeDir', () => {
 
   it('should expand %userprofile%\\path to home directory path', () => {
     const result = expandHomeDir('%userprofile%\\documents');
-    expect(result).toBe(path.normalize(homeDir + '\\documents'));
+    expect(result).toBe(path.join(homeDir, 'documents'));
   });
 
   it('should return regular absolute path unchanged (but normalized)', () => {
