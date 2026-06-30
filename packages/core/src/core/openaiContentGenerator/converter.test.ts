@@ -4223,6 +4223,55 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('should flush buffered content before later tagged thinking content', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-content-before-tag-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_content: 'duplicate reasoning channel',
+                content: 'early visible ',
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const secondChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-content-before-tag-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: '<think>tagged reasoning</think>final answer' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'early visible ' },
+        { text: 'tagged reasoning', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
     it('should flush buffered content before current content when reasoning flushes on finish', () => {
       const context = withTaggedThinkingStreamParser();
 
