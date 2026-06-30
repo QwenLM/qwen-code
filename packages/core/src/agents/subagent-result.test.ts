@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { AgentTerminateMode } from './runtime/agent-types.js';
 import { toModelVisibleSubagentResult } from './subagent-result.js';
 
 describe('toModelVisibleSubagentResult', () => {
@@ -23,8 +24,24 @@ describe('toModelVisibleSubagentResult', () => {
     ['<analysis>scratch\n<summary>visible</summary>', 'visible'],
     ['a<analysis>one</analysis>b<analysis>two</analysis>', 'ab'],
     ['prefix <summary>visible</summary> suffix', 'prefix visible suffix'],
+    [
+      'important context<summary>additional info</summary>',
+      'important context additional info',
+    ],
+    [
+      '<summary>part1</summary> middle <summary>part2</summary>',
+      'part1 middle part2',
+    ],
     ['literal </analysis> marker', 'literal </analysis> marker'],
   ])('returns model-visible text for %j', (input, expected) => {
     expect(toModelVisibleSubagentResult(input)).toBe(expected);
+  });
+
+  it('preserves raw diagnostics for non-goal terminations', () => {
+    const raw = '<analysis>debug</analysis><summary>partial</summary>';
+
+    expect(toModelVisibleSubagentResult(raw, AgentTerminateMode.ERROR)).toBe(
+      raw,
+    );
   });
 });

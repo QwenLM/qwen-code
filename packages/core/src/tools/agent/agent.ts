@@ -1593,11 +1593,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       // Get the results
       const subagentRawText = subagent.getFinalText();
+      const terminateMode = subagent.getTerminateMode();
       const finalText = appendStopHookBlockingCapWarning(
-        toModelVisibleSubagentResult(subagentRawText),
+        toModelVisibleSubagentResult(subagentRawText, terminateMode),
         stopHookWarning,
       );
-      const terminateMode = subagent.getTerminateMode();
       const success = terminateMode === AgentTerminateMode.GOAL;
       const executionSummary = subagent.getExecutionSummary();
 
@@ -2533,7 +2533,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             );
             const finalText =
               appendStopHookBlockingCapWarning(
-                toModelVisibleSubagentResult(subagentRawText),
+                toModelVisibleSubagentResult(subagentRawText, terminateMode),
                 stopHookWarning,
               ) + wtSuffix;
             const completionStats = getCompletionStats();
@@ -2964,11 +2964,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         });
 
         const stopHookWarning = await runFramed();
+        const terminateMode = subagent.getTerminateMode();
         const finalText = appendStopHookBlockingCapWarning(
-          toModelVisibleSubagentResult(subagent.getFinalText()),
+          toModelVisibleSubagentResult(
+            subagent.getFinalText(),
+            terminateMode,
+          ),
           stopHookWarning,
         );
-        const terminateMode = subagent.getTerminateMode();
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {

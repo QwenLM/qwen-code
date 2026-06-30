@@ -534,7 +534,8 @@ export async function runForkedAgent(
 
     const terminateReason = headless.getTerminateMode();
     const finalText =
-      toModelVisibleSubagentResult(headless.getFinalText()) || undefined;
+      toModelVisibleSubagentResult(headless.getFinalText(), terminateReason) ||
+      undefined;
     const touched = [...filesTouched];
 
     if (terminateReason === AgentTerminateMode.CANCELLED) {

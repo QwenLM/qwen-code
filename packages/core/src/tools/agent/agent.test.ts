@@ -812,6 +812,27 @@ describe('AgentTool', () => {
       expect(llmText).not.toContain('<summary>');
     });
 
+    it('preserves diagnostic tags from failed subagent result', async () => {
+      const raw = '<analysis>debug</analysis><summary>partial</summary>';
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(raw);
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(raw);
+    });
+
     it('passes custom ignore files into worktree isolation file service', async () => {
       vi.useRealTimers();
       const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-'));

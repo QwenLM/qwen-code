@@ -936,7 +936,10 @@ export class BackgroundAgentResumeService {
 
           const terminateMode = subagent.getTerminateMode();
           const finalText = appendStopHookBlockingCapWarning(
-            toModelVisibleSubagentResult(subagent.getFinalText()),
+            toModelVisibleSubagentResult(
+              subagent.getFinalText(),
+              terminateMode,
+            ),
             stopHookWarning,
           );
           const stats = getCompletionStats(subagent, liveToolCallCount);
