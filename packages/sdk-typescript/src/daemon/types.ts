@@ -1379,6 +1379,27 @@ export interface DaemonMidTurnMessageResult {
   accepted: boolean;
 }
 
+/**
+ * One entry in the daemon's pending prompt queue. The `state` is
+ * `'running'` for the currently dispatching prompt and `'queued'`
+ * for prompts waiting in the FIFO.
+ */
+export interface DaemonPendingPromptSummary {
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
+export interface DaemonPendingPromptsResult {
+  pendingPrompts: DaemonPendingPromptSummary[];
+}
+
+export interface DaemonRemovePendingPromptResult {
+  removed: boolean;
+}
+
 export interface DaemonShellCommandResult {
   exitCode: number | null;
   output: string;

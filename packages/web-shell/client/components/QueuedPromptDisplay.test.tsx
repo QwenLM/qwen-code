@@ -3,10 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { getTranslator } from '../i18n';
-import {
-  QueuedPromptDisplay,
-  type QueuedPromptView,
-} from './QueuedPromptDisplay';
+import { QueuedPromptDisplay, type QueuedPrompt } from './QueuedPromptDisplay';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -39,7 +36,7 @@ function setup(
     onInsert: vi.fn(),
     onEdit: vi.fn(),
   };
-  const prompts: QueuedPromptView[] = overrides.prompts
+  const prompts: QueuedPrompt[] = overrides.prompts
     ? [...overrides.prompts]
     : [
         { id: 1, text: '排队消息一' },

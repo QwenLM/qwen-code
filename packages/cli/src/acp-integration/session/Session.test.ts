@@ -2347,6 +2347,87 @@ describe('Session', () => {
         ).toContain('Duplicate provider tool call id "shell_1"');
       });
 
+      it('stops an ACP prompt after repeated invalid tool parameters with fresh ids', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const build = vi.fn().mockImplementation(() => {
+          throw new Error('Parameter "questions" must be an array.');
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'ask_user_question',
+          kind: core.Kind.Other,
+          displayName: 'Ask User Question',
+          description: 'Ask user question',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_1',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_2',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_3',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'ask me before continuing' }],
+        });
+
+        expect(build).toHaveBeenCalledTimes(3);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors',
+          ),
+        );
+      });
+
       it('clears duplicate provider id tracking between ACP prompts', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         vi.mocked(mockChat.getHistoryFunctionResponseIds).mockReturnValue(

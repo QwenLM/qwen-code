@@ -145,6 +145,12 @@ export interface PendingClientRequest {
   kind: 'permission';
 }
 
+export interface PendingClientRequestRef {
+  conn: AcpConnection;
+  id: string;
+  req: PendingClientRequest;
+}
+
 export interface AcpConnectionDiagnostic {
   connectionIdPrefix: string;
   fromLoopback: boolean;
@@ -254,13 +260,13 @@ export class AcpConnection {
 
   /**
    * Allocate a fresh JSON-RPC id for an agent→client request. STRING-typed
-   * (`_qwen_perm_N`) so it can never collide with a client-originated id —
+   * (`_qwen_perm_<conn>_N`) so it can never collide with a client-originated id —
    * JSON-RPC 2.0 permits clients to use any number (incl. negatives) or
    * string, so a numeric namespace wasn't actually safe.
    */
   nextId(): string {
     this.idCounter += 1;
-    return `_qwen_perm_${this.idCounter}`;
+    return `_qwen_perm_${this.connectionId}_${this.idCounter}`;
   }
 
   touch(): void {
@@ -899,6 +905,64 @@ export class ConnectionRegistry {
     const conn = this.byId.get(connectionId);
     conn?.touch();
     return conn;
+  }
+
+  findPendingClientRequest(id: string): PendingClientRequestRef | undefined {
+    // Fast path: server-minted ids embed their originating connection
+    // (`_qwen_perm_<connectionId>_<counter>`, connectionId is a hyphenated
+    // `randomUUID()` with no underscores), so the owning connection is the
+    // substring before the last `_` — an O(1) lookup instead of scanning all
+    // connections on every client response.
+    if (id.startsWith('_qwen_perm_')) {
+      const body = id.slice('_qwen_perm_'.length);
+      const lastUnderscore = body.lastIndexOf('_');
+      if (lastUnderscore > 0) {
+        const conn = this.byId.get(body.slice(0, lastUnderscore));
+        const req = conn?.pending.get(id);
+        if (conn && req) return { conn, id, req };
+      }
+    }
+    // Fallback for client-chosen ids that don't match the server format.
+    for (const conn of this.byId.values()) {
+      const req = conn.pending.get(id);
+      if (req) return { conn, id, req };
+    }
+    return undefined;
+  }
+
+  /**
+   * Locate a pending permission entry matching `requestId` (a bridge
+   * `bridgeRequestId`, i.e. a per-request `randomUUID()`) and optionally
+   * `sessionId`, returning the first match.
+   *
+   * NOTE: `requestId` is unique per *request*, not per *pending entry*. The
+   * per-entry unique id is the `conn.pending` map key
+   * (`_qwen_perm_<connectionId>_N`), which is NOT what is matched here. A
+   * `permission_request` is delivered to every live subscriber of its session,
+   * so when connections co-own a session (multi-client attach) each mints its
+   * own entry sharing the same `bridgeRequestId`. More than one entry can
+   * therefore match, so this is a *read-only locator* for deriving a session /
+   * ownership from a wire `requestId`. To DELETE a resolved entry, act on the
+   * specific `conn`/map-key the caller already holds (see
+   * `AcpDispatcher.dropOwnPendingPermission`) — never delete by re-matching
+   * here, which could hit a sibling co-owner's entry.
+   */
+  findPendingPermission(
+    requestId: string,
+    sessionId?: string,
+  ): PendingClientRequestRef | undefined {
+    for (const conn of this.byId.values()) {
+      for (const [id, req] of conn.pending) {
+        if (
+          req.kind === 'permission' &&
+          req.bridgeRequestId === requestId &&
+          (sessionId === undefined || req.sessionId === sessionId)
+        ) {
+          return { conn, id, req };
+        }
+      }
+    }
+    return undefined;
   }
 
   delete(connectionId: string): boolean {
