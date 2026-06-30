@@ -168,4 +168,15 @@ describe('check-serve-fast-path-bundle', () => {
       offenders: [],
     });
   });
+
+  it('throws a descriptive error for invalid JSON metafiles', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-code-bad-meta-'));
+    tempDirs.push(tempDir);
+    const metafilePath = join(tempDir, 'esbuild.json');
+    writeFileSync(metafilePath, 'not json');
+
+    expect(() => checkServeFastPathBundle({ metafilePath })).toThrow(
+      /Invalid esbuild metafile.*Run `npm run build -- --cli-only && cross-env DEV=true npm run bundle` to regenerate it\./s,
+    );
+  });
 });

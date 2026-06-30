@@ -750,5 +750,33 @@ describe('AcpFileSystemService', () => {
       expect(String(err)).toContain('Write failed');
       expect(String(err)).not.toContain('[object Object]');
     });
+
+    it('converts RESOURCE_NOT_FOUND write errors to ENOENT', async () => {
+      const resourceNotFoundError = {
+        code: RESOURCE_NOT_FOUND_CODE,
+        message: 'File not found',
+      };
+      const client = {
+        writeTextFile: vi.fn().mockRejectedValue(resourceNotFoundError),
+      } as unknown as AgentSideConnection;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-9',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await expect(
+        svc.writeTextFile({
+          path: '/some/file.txt',
+          content: 'hello',
+        }),
+      ).rejects.toMatchObject({
+        code: 'ENOENT',
+        errno: -2,
+        path: '/some/file.txt',
+      });
+    });
   });
 });

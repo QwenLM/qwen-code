@@ -189,6 +189,9 @@ export class AcpFileSystemService implements FileSystemService {
         sessionId: this.sessionId,
       });
     } catch (error) {
+      if (getErrorCode(error) === RESOURCE_NOT_FOUND_CODE) {
+        throw createEnoentError(params.path);
+      }
       throw normalizeError(error);
     }
 
