@@ -1,0 +1,364 @@
+import type { CommandModule } from 'yargs';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import { DaemonChannelBridge, SessionRouter } from '@qwen-code/channel-base';
+import type {
+  ChannelAgentBridge,
+  ChannelBase,
+  DaemonChannelSessionClient,
+  DaemonChannelSessionFactory,
+  DaemonChannelSessionFactoryRequest,
+} from '@qwen-code/channel-base';
+import type { ServeChannelSelection } from '../../serve/types.js';
+import { normalizeServeChannelSelection } from '../../serve/channel-selection.js';
+import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  createChannel,
+  loadChannelsConfig,
+  loadChannelsFromExtensions,
+  parseConfiguredChannels,
+  registerSessionCleanup,
+  registerToolCallDispatch,
+  sessionsPath,
+  type ParsedChannel,
+} from './runtime.js';
+
+const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
+export const CHANNEL_DAEMON_WORKER_SENTINEL = 'QWEN_CHANNEL_DAEMON_WORKER';
+
+interface DaemonCapabilitiesLike {
+  features: string[];
+  workspaceCwd?: string;
+}
+
+interface DaemonClientLike {
+  capabilities(): Promise<DaemonCapabilitiesLike>;
+}
+
+interface DaemonSessionClientStaticLike {
+  createOrAttach(
+    client: DaemonClientLike,
+    req: {
+      workspaceCwd: string;
+      modelServiceId?: string;
+      sessionScope: 'thread';
+    },
+    clientId?: string,
+  ): Promise<DaemonChannelSessionClient>;
+  load(
+    client: DaemonClientLike,
+    sessionId: string,
+    req: {
+      workspaceCwd: string;
+      modelServiceId?: string;
+      sessionScope: 'thread';
+    },
+    clientId?: string,
+  ): Promise<DaemonChannelSessionClient>;
+}
+
+interface DaemonSdkLike {
+  DaemonClient: new (opts: {
+    baseUrl: string;
+    token?: string;
+  }) => DaemonClientLike;
+  DaemonSessionClient: DaemonSessionClientStaticLike;
+}
+
+interface ChannelDaemonWorkerReady {
+  pid: number;
+  channels: string[];
+}
+
+export interface ChannelDaemonWorkerHandle {
+  readonly channels: string[];
+  close(): Promise<void>;
+}
+
+export interface RunChannelDaemonWorkerOptions {
+  daemonUrl: string;
+  daemonToken?: string;
+  workspace: string;
+  selection: ServeChannelSelection;
+  loadDaemonSdk?: () => Promise<DaemonSdkLike>;
+  sendReady?: (ready: ChannelDaemonWorkerReady) => void;
+}
+
+export function createDaemonSessionFactory({
+  client,
+  DaemonSessionClient,
+  clientId,
+}: {
+  client: DaemonClientLike;
+  DaemonSessionClient: DaemonSessionClientStaticLike;
+  clientId: string;
+}): DaemonChannelSessionFactory {
+  return async (
+    req: DaemonChannelSessionFactoryRequest,
+  ): Promise<DaemonChannelSessionClient> => {
+    const daemonReq = {
+      workspaceCwd: req.workspaceCwd,
+      ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+      sessionScope: 'thread' as const,
+    };
+    if (req.sessionId) {
+      return await DaemonSessionClient.load(
+        client,
+        req.sessionId,
+        daemonReq,
+        clientId,
+      );
+    }
+    return await DaemonSessionClient.createOrAttach(
+      client,
+      daemonReq,
+      clientId,
+    );
+  };
+}
+
+export function createDaemonChannelBridgeFacade(
+  bridge: ChannelAgentBridge,
+  opts: { exposeShellCommand: boolean },
+): ChannelAgentBridge {
+  const facade: ChannelAgentBridge = {
+    get availableCommands() {
+      return bridge.availableCommands;
+    },
+    on: bridge.on.bind(bridge),
+    off: bridge.off.bind(bridge),
+    newSession: bridge.newSession.bind(bridge),
+    loadSession: bridge.loadSession.bind(bridge),
+    prompt: bridge.prompt.bind(bridge),
+    cancelSession: bridge.cancelSession.bind(bridge),
+  };
+
+  if (!opts.exposeShellCommand || !bridge.shellCommand) {
+    return facade;
+  }
+
+  return {
+    ...facade,
+    shellCommand: bridge.shellCommand.bind(bridge),
+  };
+}
+
+async function loadDaemonSdk(): Promise<DaemonSdkLike> {
+  return (await import('@qwen-code/sdk/daemon')) as unknown as DaemonSdkLike;
+}
+
+function selectedChannelNames(
+  channelsConfig: Record<string, unknown>,
+  selection: ServeChannelSelection,
+): string[] {
+  const names =
+    selection.mode === 'all' ? Object.keys(channelsConfig) : selection.names;
+  if (names.length === 0) {
+    throw new Error('No channels configured in settings.json.');
+  }
+  for (const name of names) {
+    if (!channelsConfig[name]) {
+      throw new Error(`Channel "${name}" not found in settings.`);
+    }
+  }
+  return names;
+}
+
+function firstModel(parsed: ParsedChannel[]): string | undefined {
+  const models = [
+    ...new Set(parsed.map((p) => p.config.model).filter(Boolean)),
+  ] as string[];
+  if (models.length > 1) {
+    writeStderrLine(
+      `[Channel] Warning: Multiple models configured (${models.join(', ')}). ` +
+        `Daemon worker will use "${models[0]}".`,
+    );
+  }
+  return models[0];
+}
+
+function validateChannelWorkspaces(
+  parsed: ParsedChannel[],
+  daemonWorkspace: string,
+): void {
+  for (const { name, config } of parsed) {
+    const channelWorkspace = canonicalizeWorkspace(config.cwd);
+    if (channelWorkspace !== daemonWorkspace) {
+      throw new Error(
+        `Channel "${name}" cwd "${channelWorkspace}" must use daemon workspace "${daemonWorkspace}".`,
+      );
+    }
+  }
+}
+
+export async function runChannelDaemonWorker(
+  opts: RunChannelDaemonWorkerOptions,
+): Promise<ChannelDaemonWorkerHandle> {
+  const sdk = await (opts.loadDaemonSdk ?? loadDaemonSdk)();
+  const client = new sdk.DaemonClient({
+    baseUrl: opts.daemonUrl,
+    ...(opts.daemonToken ? { token: opts.daemonToken } : {}),
+  });
+  const capabilities = await client.capabilities();
+  const daemonWorkspace = canonicalizeWorkspace(
+    capabilities.workspaceCwd ?? opts.workspace,
+  );
+  const requestedWorkspace = canonicalizeWorkspace(opts.workspace);
+  if (requestedWorkspace !== daemonWorkspace) {
+    throw new Error(
+      `Daemon workspace "${daemonWorkspace}" does not match worker workspace "${requestedWorkspace}".`,
+    );
+  }
+
+  await loadChannelsFromExtensions();
+  const channelsConfig = loadChannelsConfig(daemonWorkspace);
+  const names = selectedChannelNames(channelsConfig, opts.selection);
+  const parsed = await parseConfiguredChannels(channelsConfig, names);
+  validateChannelWorkspaces(parsed, daemonWorkspace);
+  const modelServiceId = firstModel(parsed);
+
+  const bridge = new DaemonChannelBridge({
+    cwd: daemonWorkspace,
+    sessionFactory: createDaemonSessionFactory({
+      client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: `qwen-channel-worker:${process.pid}`,
+    }),
+    ...(modelServiceId ? { modelServiceId } : {}),
+  });
+  await bridge.start();
+
+  try {
+    const bridgeFacade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: capabilities.features.includes(
+        SESSION_SHELL_COMMAND_FEATURE,
+      ),
+    });
+    const router = new SessionRouter(
+      bridgeFacade,
+      daemonWorkspace,
+      'user',
+      sessionsPath(),
+    );
+    for (const { name, config } of parsed) {
+      router.setChannelScope(name, config.sessionScope);
+    }
+
+    const channels = new Map<string, ChannelBase>();
+    for (const { name, config } of parsed) {
+      channels.set(
+        name,
+        await createChannel(name, config, bridgeFacade, { router }),
+      );
+    }
+    registerToolCallDispatch(bridgeFacade, router, channels);
+    registerSessionCleanup(bridgeFacade, router, channels);
+
+    const connected: string[] = [];
+    for (const [name, channel] of channels) {
+      try {
+        await channel.connect();
+        connected.push(name);
+        writeStdoutLine(`[Channel] "${name}" connected.`);
+      } catch (err) {
+        writeStderrLine(
+          `[Channel] Failed to connect "${name}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    if (connected.length === 0) {
+      throw new Error('No channels connected.');
+    }
+
+    opts.sendReady?.({ channels: connected, pid: process.pid });
+
+    return {
+      channels: connected,
+      async close() {
+        for (const name of connected) {
+          try {
+            channels.get(name)?.disconnect();
+          } catch {
+            // best-effort
+          }
+        }
+        router.clearAll();
+        bridge.stop();
+      },
+    };
+  } catch (err) {
+    bridge.stop();
+    throw err;
+  }
+}
+
+interface DaemonWorkerArgs {
+  channel?: string[];
+}
+
+function readRequiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} is required.`);
+  }
+  return value;
+}
+
+export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
+  command: 'daemon-worker',
+  describe: false,
+  builder: (yargs) =>
+    yargs.option('channel', {
+      type: 'string',
+      array: true,
+      description: 'Internal daemon-managed channel selection.',
+    }),
+  handler: async (argv) => {
+    try {
+      if (process.env[CHANNEL_DAEMON_WORKER_SENTINEL] !== '1') {
+        throw new Error('daemon-worker is an internal qwen serve command.');
+      }
+      const selection = normalizeServeChannelSelection(argv.channel);
+      if (!selection) {
+        throw new Error('--channel is required.');
+      }
+      const handle = await runChannelDaemonWorker({
+        daemonUrl: readRequiredEnv('QWEN_DAEMON_URL'),
+        daemonToken: process.env['QWEN_DAEMON_TOKEN'],
+        workspace: readRequiredEnv('QWEN_DAEMON_WORKSPACE'),
+        selection,
+        sendReady: (ready) => {
+          process.send?.({ type: 'ready', ...ready });
+        },
+      });
+
+      let shuttingDown = false;
+      const shutdown = async (signal: NodeJS.Signals) => {
+        if (shuttingDown) {
+          process.exit(1);
+        }
+        shuttingDown = true;
+        try {
+          await handle.close();
+          process.exit(0);
+        } catch (err) {
+          writeStderrLine(
+            `[Channel] daemon worker failed to shut down after ${signal}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          process.exit(1);
+        }
+      };
+      process.once('SIGINT', shutdown);
+      process.once('SIGTERM', shutdown);
+    } catch (err) {
+      writeStderrLine(
+        `[Channel] daemon worker failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+
+    await new Promise<void>(() => {});
+  },
+};

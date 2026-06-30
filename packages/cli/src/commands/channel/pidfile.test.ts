@@ -29,6 +29,7 @@ vi.mock('node:fs', () => {
 import {
   readServiceInfo,
   writeServiceInfo,
+  writeServeServiceInfo,
   removeServiceInfo,
   signalService,
   waitForExit,
@@ -60,8 +61,48 @@ describe('writeServiceInfo + readServiceInfo', () => {
 
     expect(info).not.toBeNull();
     expect(info!.pid).toBe(process.pid);
+    expect(info!.owner).toBe('channel');
     expect(info!.channels).toEqual(['telegram', 'dingtalk']);
     expect(info!.startedAt).toBeTruthy();
+  });
+
+  it('treats legacy pidfiles without owner as standalone channel services', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    const info = readServiceInfo();
+
+    expect(info).toMatchObject({
+      pid: 1234,
+      owner: 'channel',
+      channels: ['telegram'],
+    });
+  });
+
+  it('writes and reads serve-owned service info for a live serve process', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    writeServeServiceInfo({
+      channels: ['telegram', 'feishu'],
+      servePid: 4321,
+      workerPid: 8765,
+    });
+    const info = readServiceInfo();
+
+    expect(info).toMatchObject({
+      pid: 4321,
+      owner: 'serve',
+      servePid: 4321,
+      workerPid: 8765,
+      channels: ['telegram', 'feishu'],
+    });
   });
 
   it('returns null when no PID file exists', () => {

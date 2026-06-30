@@ -190,6 +190,33 @@ describe('resolveExtensionChannelEntrySpecifier', () => {
 });
 
 describe('startCommand.handler', () => {
+  it('refuses to start when channels are managed by qwen serve', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'serve',
+      pid: 1234,
+      servePid: 1234,
+      workerPid: 5678,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('managed by qwen serve'),
+    );
+    expect(mockBridgeStart).not.toHaveBeenCalled();
+  });
+
   it('loads settings.merged.proxy when no CLI proxy is provided', async () => {
     const settingsProxy = 'http://settings.example.com:8080';
     const envProxy = 'http://env.example.com:8080';

@@ -1,25 +1,27 @@
-import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { CommandModule } from 'yargs';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
-import { normalizeProxyUrl, Storage } from '@qwen-code/qwen-code-core';
+import { normalizeProxyUrl } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
-import type {
-  ChannelAgentBridge,
-  ChannelBase,
-  ChannelPlugin,
-  ToolCallEvent,
-} from '@qwen-code/channel-base';
-import { getPlugin, registerPlugin } from './channel-registry.js';
+import type { ChannelBase } from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import {
   readServiceInfo,
   writeServiceInfo,
   removeServiceInfo,
 } from './pidfile.js';
-import { getExtensionManager } from '../extensions/utils.js';
+import {
+  createChannel,
+  loadChannelsConfig,
+  loadChannelsFromExtensions,
+  parseConfiguredChannels,
+  registerSessionCleanup,
+  registerToolCallDispatch,
+  sessionsPath,
+} from './runtime.js';
+
+export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
 
 const MAX_CRASH_RESTARTS = 3;
 const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
@@ -54,142 +56,17 @@ export function resolveProxy(
   return proxyUrl;
 }
 
-function sessionsPath(): string {
-  return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
-}
-
-function loadChannelsConfig(): Record<string, unknown> {
-  const settings = loadSettings(process.cwd());
-  const channels = (
-    settings.merged as unknown as { channels?: Record<string, unknown> }
-  ).channels;
-  return channels || {};
-}
-
-export function resolveExtensionChannelEntrySpecifier(
-  extensionPath: string,
-  entry: string,
-): string {
-  return pathToFileURL(path.join(extensionPath, entry)).href;
-}
-
-/**
- * Load channel plugins from active extensions.
- * Extensions declare channels in their qwen-extension.json manifest.
- */
-async function loadChannelsFromExtensions(): Promise<number> {
-  let loaded = 0;
-  try {
-    const extensionManager = await getExtensionManager();
-    const extensions = extensionManager
-      .getLoadedExtensions()
-      .filter((e) => e.isActive && e.channels);
-
-    for (const ext of extensions) {
-      for (const [channelType, channelDef] of Object.entries(ext.channels!)) {
-        if (await getPlugin(channelType)) {
-          writeStderrLine(
-            `[Extensions] Skipping channel "${channelType}" from "${ext.name}": type already registered`,
-          );
-          continue;
-        }
-
-        const entrySpecifier = resolveExtensionChannelEntrySpecifier(
-          ext.path,
-          channelDef.entry,
-        );
-        try {
-          const module = (await import(entrySpecifier)) as {
-            plugin?: ChannelPlugin;
-          };
-          const plugin = module.plugin;
-
-          if (!plugin || typeof plugin.createChannel !== 'function') {
-            writeStderrLine(
-              `[Extensions] "${ext.name}": channel entry point does not export a valid plugin object`,
-            );
-            continue;
-          }
-
-          if (plugin.channelType !== channelType) {
-            writeStderrLine(
-              `[Extensions] "${ext.name}": channelType mismatch — manifest says "${channelType}", plugin says "${plugin.channelType}"`,
-            );
-            continue;
-          }
-
-          registerPlugin(plugin);
-          loaded++;
-          writeStdoutLine(
-            `[Extensions] Loaded channel "${channelType}" from "${ext.name}"`,
-          );
-        } catch (err) {
-          writeStderrLine(
-            `[Extensions] Failed to load channel "${channelType}" from "${ext.name}": ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    }
-  } catch (err) {
-    writeStderrLine(
-      `[Extensions] Failed to load extensions: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  return loaded;
-}
-
-async function createChannel(
-  name: string,
-  config: Awaited<ReturnType<typeof parseChannelConfig>>,
-  bridge: ChannelAgentBridge,
-  options?: { router?: SessionRouter; proxy?: string },
-): Promise<ChannelBase> {
-  const channelPlugin = await getPlugin(config.type);
-  if (!channelPlugin) {
-    throw new Error(`Unknown channel type: "${config.type}".`);
-  }
-  return channelPlugin.createChannel(name, config, bridge, options);
-}
-
-function registerToolCallDispatch(
-  bridge: ChannelAgentBridge,
-  router: SessionRouter,
-  channels: Map<string, ChannelBase>,
-): void {
-  bridge.on('toolCall', (event: ToolCallEvent) => {
-    const target = router.getTarget(event.sessionId);
-    if (target) {
-      const channel = channels.get(target.channelName);
-      if (channel) {
-        channel.onToolCall(target.chatId, event);
-      }
-    }
-  });
-}
-
-function registerSessionCleanup(
-  bridge: ChannelAgentBridge,
-  router: SessionRouter,
-  channels: Map<string, ChannelBase>,
-): void {
-  bridge.on('sessionDied', (event: { sessionId: string; reason?: string }) => {
-    writeStderrLine(
-      `[Channel] Session ${event.sessionId} died${event.reason ? ` (${event.reason})` : ''}, removing routing state`,
-    );
-    const target = router.getTarget(event.sessionId);
-    const channel = target ? channels.get(target.channelName) : undefined;
-    if (channel) {
-      channel.onSessionDied(event.sessionId);
-    } else {
-      router.removeSessionId(event.sessionId);
-    }
-  });
-}
-
 /** Check for duplicate instance and abort if one is already running. */
 function checkDuplicateInstance(): void {
   const existing = readServiceInfo();
   if (existing) {
+    if (existing.owner === 'serve') {
+      writeStderrLine(
+        `Error: Channel service is managed by qwen serve (PID ${existing.pid}, started ${existing.startedAt}).`,
+      );
+      writeStderrLine('Stop the qwen serve process to stop managed channels.');
+      process.exit(1);
+    }
     writeStderrLine(
       `Error: Channel service is already running (PID ${existing.pid}, started ${existing.startedAt}).`,
     );
@@ -337,22 +214,15 @@ async function startAll(proxy?: string): Promise<void> {
   }
 
   // Parse all configs upfront — fail fast on bad config
-  const parsed: Array<{
-    name: string;
-    config: Awaited<ReturnType<typeof parseChannelConfig>>;
-  }> = [];
-  for (const [name, raw] of Object.entries(channelsConfig)) {
-    try {
-      parsed.push({
-        name,
-        config: await parseChannelConfig(name, raw as Record<string, unknown>),
-      });
-    } catch (err) {
-      writeStderrLine(
-        `Error in channel "${name}": ${err instanceof Error ? err.message : String(err)}`,
-      );
-      process.exit(1);
-    }
+  let parsed;
+  try {
+    parsed = await parseConfiguredChannels(
+      channelsConfig,
+      Object.keys(channelsConfig),
+    );
+  } catch (err) {
+    writeStderrLine(err instanceof Error ? err.message : String(err));
+    process.exit(1);
   }
 
   const cliEntryPath = findCliEntryPath();

@@ -77,9 +77,21 @@ import {
   type DaemonStatusResponse,
 } from './daemon-status.js';
 import {
+  createChannelWorkerSupervisor,
+  createDisabledChannelWorkerSupervisor,
+  type ChannelWorkerSupervisor,
+  type CreateChannelWorkerSupervisorOptions,
+} from './channel-worker-supervisor.js';
+import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
+import { findCliEntryPath } from '../commands/channel/config-utils.js';
+import {
+  readServiceInfo,
+  removeServiceInfo,
+  writeServeServiceInfo,
+} from '../commands/channel/pidfile.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 // Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
@@ -499,6 +511,14 @@ export interface RunQwenServeDeps {
    * QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS, then 120s. Use 0 to disable.
    */
   runtimeStartupTimeoutMs?: number;
+  channelWorkerSupervisorFactory?: (
+    opts: CreateChannelWorkerSupervisorOptions,
+  ) => ChannelWorkerSupervisor;
+  channelServicePidfile?: {
+    readServiceInfo: typeof readServiceInfo;
+    writeServeServiceInfo: typeof writeServeServiceInfo;
+    removeServiceInfo: typeof removeServiceInfo;
+  };
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -811,6 +831,9 @@ function createBootstrapServeApp(input: {
   sessionShellCommandEnabled: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   getRuntimeError: () => string | undefined;
+  getChannelWorkerSnapshot: () => ReturnType<
+    ChannelWorkerSupervisor['snapshot']
+  >;
 }): Application {
   const {
     opts,
@@ -822,6 +845,7 @@ function createBootstrapServeApp(input: {
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError,
+    getChannelWorkerSnapshot,
   } = input;
   const app = express();
 
@@ -879,6 +903,7 @@ function createBootstrapServeApp(input: {
       return;
     }
     const runtimeError = getRuntimeError();
+    const channelWorker = getChannelWorkerSnapshot();
     const runtimeFailed = runtimeError !== undefined;
     const issue: DaemonStatusIssue = runtimeError
       ? {
@@ -952,6 +977,7 @@ function createBootstrapServeApp(input: {
           policy: permissionPolicy ?? 'first-responder',
         },
         channel: { live: false },
+        channelWorker,
         transport: {
           restSseActive: 0,
           acp: {
@@ -1108,6 +1134,11 @@ export async function runQwenServe(
       optsIn.cdpTunnelOverWs ??
       process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
   };
+  const channelServicePidfile = deps.channelServicePidfile ?? {
+    readServiceInfo,
+    writeServeServiceInfo,
+    removeServiceInfo,
+  };
   validateRateLimitOptions(opts);
 
   // Catch the `--hostname localhost:4170` / `127.0.0.1:4170`
@@ -1247,6 +1278,18 @@ export async function runQwenServe(
   // server.ts's raw `opts.workspace` and clients see one path on
   // `/capabilities` but another on `POST /session` responses.
   const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
+  if (opts.channelSelection) {
+    const existingChannelService = channelServicePidfile.readServiceInfo();
+    if (existingChannelService) {
+      const owner =
+        existingChannelService.owner === 'serve'
+          ? 'qwen serve'
+          : 'qwen channel start';
+      throw new Error(
+        `Channel service is already running under ${owner} (PID ${existingChannelService.pid}). Stop it before starting qwen serve --channel.`,
+      );
+    }
+  }
 
   // Read a lightweight settings summary once at boot for startup-time fields
   // used before the full runtime settings loader is allowed onto the hot path.
@@ -1508,6 +1551,18 @@ export async function runQwenServe(
     markRuntimeFailed = reject;
   });
   void runtimeReady.catch(() => {});
+  let channelWorker: ChannelWorkerSupervisor =
+    createDisabledChannelWorkerSupervisor();
+  const getChannelWorkerSnapshot = () => channelWorker.snapshot();
+  const writeChannelWorkerPidfile = (): void => {
+    if (!opts.channelSelection) return;
+    const snapshot = channelWorker.snapshot();
+    channelServicePidfile.writeServeServiceInfo({
+      channels: snapshot.channels,
+      servePid: process.pid,
+      workerPid: snapshot.pid,
+    });
+  };
 
   const handleBridge =
     deps.bridge ??
@@ -1814,6 +1869,7 @@ export async function runQwenServe(
       startup,
       fsFactory,
       daemonLog,
+      getChannelWorkerSnapshot,
       workspace: workspaceService,
       // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
       // so the WS provider and the child-answering bridge share one sender map.
@@ -1874,8 +1930,10 @@ export async function runQwenServe(
     runtimeAppForCleanup = runtime.app;
     runtimeApp = runtime.app;
     bridgeRef = runtime.bridge;
-    runtimeStartupSettled = true;
-    markRuntimeReady();
+    if (!opts.channelSelection) {
+      runtimeStartupSettled = true;
+      markRuntimeReady();
+    }
   }
 
   cliVersion ??= await cliVersionPromise;
@@ -1890,6 +1948,7 @@ export async function runQwenServe(
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError: () => runtimeStartupError,
+    getChannelWorkerSnapshot,
   });
   const app =
     runtimeApp ?? createDelegatingServeApp(bootstrapApp, () => runtimeApp);
@@ -1980,6 +2039,17 @@ export async function runQwenServe(
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      if (opts.channelSelection) {
+        channelWorker = (
+          deps.channelWorkerSupervisorFactory ?? createChannelWorkerSupervisor
+        )({
+          cliEntryPath: findCliEntryPath(),
+          daemonUrl: url,
+          ...(token ? { daemonToken: token } : {}),
+          workspace: boundWorkspace,
+          selection: opts.channelSelection,
+        });
+      }
       writeStdoutLine(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
@@ -2121,6 +2191,10 @@ export async function runQwenServe(
             if (shouldPreheat) {
               startBridgePreheat(runtime.bridge);
             }
+            if (opts.channelSelection) {
+              await channelWorker.start();
+              writeChannelWorkerPidfile();
+            }
             runtimeStartupSettled = true;
             clearRuntimeStartupTimer();
             markRuntimeReady();
@@ -2155,6 +2229,7 @@ export async function runQwenServe(
           // `qwen` processes in the operator's `ps` output.
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
+            channelWorker.killAllSync();
             bridgeRef?.killAllSync();
           } catch (err) {
             daemonLog.error(
@@ -2320,6 +2395,15 @@ export async function runQwenServe(
                   rl.setDraining(true);
                   rl.dispose();
                 }
+                await channelWorker.stop().catch((err) => {
+                  daemonLog.error(
+                    'channel worker stop error',
+                    err instanceof Error ? err : null,
+                  );
+                });
+                if (opts.channelSelection) {
+                  channelServicePidfile.removeServiceInfo();
+                }
                 const bridgeForShutdown = bridgeRef;
                 if (bridgeForShutdown) {
                   await bridgeForShutdown.shutdown().catch((err) => {
@@ -2401,6 +2485,17 @@ export async function runQwenServe(
         acpHandle?.attachServer?.(server);
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef);
+        }
+        if (opts.channelSelection && !runtimeStartupSettled) {
+          runtimeStarting = channelWorker
+            .start()
+            .then(() => {
+              writeChannelWorkerPidfile();
+              runtimeStartupSettled = true;
+              clearRuntimeStartupTimer();
+              markRuntimeReady();
+            })
+            .catch((err) => failRuntimeStartup(err, bridgeRef));
         }
       } else {
         startRuntime();

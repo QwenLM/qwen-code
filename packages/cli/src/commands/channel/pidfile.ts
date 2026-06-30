@@ -9,9 +9,12 @@ import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core';
 
 export interface ServiceInfo {
+  owner: 'channel' | 'serve';
   pid: number;
   startedAt: string;
   channels: string[];
+  servePid?: number;
+  workerPid?: number;
 }
 
 function pidFilePath(): string {
@@ -22,19 +25,34 @@ function isValidPid(pid: unknown): pid is number {
   return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0;
 }
 
-function isServiceInfo(value: unknown): value is ServiceInfo {
+function parseServiceInfo(value: unknown): ServiceInfo | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false;
+    return null;
   }
 
   const info = value as Partial<ServiceInfo>;
-  return (
-    isValidPid(info.pid) &&
-    typeof info.startedAt === 'string' &&
-    !Number.isNaN(Date.parse(info.startedAt)) &&
-    Array.isArray(info.channels) &&
-    info.channels.every((channel) => typeof channel === 'string')
-  );
+  const owner = info.owner ?? 'channel';
+  if (owner !== 'channel' && owner !== 'serve') return null;
+  if (
+    !isValidPid(info.pid) ||
+    typeof info.startedAt !== 'string' ||
+    Number.isNaN(Date.parse(info.startedAt)) ||
+    !Array.isArray(info.channels) ||
+    !info.channels.every((channel) => typeof channel === 'string')
+  ) {
+    return null;
+  }
+  if (info.servePid !== undefined && !isValidPid(info.servePid)) return null;
+  if (info.workerPid !== undefined && !isValidPid(info.workerPid)) return null;
+
+  return {
+    owner,
+    pid: info.pid,
+    startedAt: info.startedAt,
+    channels: info.channels,
+    ...(info.servePid !== undefined ? { servePid: info.servePid } : {}),
+    ...(info.workerPid !== undefined ? { workerPid: info.workerPid } : {}),
+  };
 }
 
 function unlinkPidFile(filePath: string): void {
@@ -77,36 +95,63 @@ export function readServiceInfo(): ServiceInfo | null {
     return null;
   }
 
-  if (!isServiceInfo(parsed)) {
+  const info = parseServiceInfo(parsed);
+  if (!info) {
     // Invalid file — clean up before treating it as a running service.
     unlinkPidFile(filePath);
     return null;
   }
 
-  if (!isProcessAlive(parsed.pid)) {
+  if (!isProcessAlive(info.pid)) {
     // Stale PID — process is dead, clean up
     unlinkPidFile(filePath);
     return null;
   }
 
-  return parsed;
+  return info;
 }
 
-/** Write PID file with current process info. */
-export function writeServiceInfo(channels: string[]): void {
+function writeInfo(info: ServiceInfo): void {
   const filePath = pidFilePath();
   const dir = path.dirname(filePath);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
+  writeFileSync(filePath, JSON.stringify(info, null, 2), 'utf-8');
+}
+
+/** Write PID file with current standalone channel process info. */
+export function writeServiceInfo(channels: string[]): void {
   const info: ServiceInfo = {
+    owner: 'channel',
     pid: process.pid,
     startedAt: new Date().toISOString(),
     channels,
   };
 
-  writeFileSync(filePath, JSON.stringify(info, null, 2), 'utf-8');
+  writeInfo(info);
+}
+
+export function writeServeServiceInfo({
+  channels,
+  servePid = process.pid,
+  workerPid,
+}: {
+  channels: string[];
+  servePid?: number;
+  workerPid?: number;
+}): void {
+  const info: ServiceInfo = {
+    owner: 'serve',
+    pid: servePid,
+    startedAt: new Date().toISOString(),
+    channels,
+    servePid,
+    ...(workerPid !== undefined ? { workerPid } : {}),
+  };
+
+  writeInfo(info);
 }
 
 /** Delete the PID file. */

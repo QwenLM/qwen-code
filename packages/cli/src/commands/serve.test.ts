@@ -85,6 +85,14 @@ describe('serve command args', () => {
     expect(buildParser().parseSync('')['open']).toBe(false);
     expect(buildParser().parseSync('--open')['open']).toBe(true);
   });
+
+  it('parses repeatable --channel values', () => {
+    const parsed = buildParser().parseSync(
+      '--channel telegram --channel feishu',
+    );
+
+    expect(parsed['channel']).toEqual(['telegram', 'feishu']);
+  });
 });
 
 describe('serve rate limit env parsing', () => {
@@ -111,6 +119,16 @@ describe('serve rate limit env parsing', () => {
     const handler = serveCommand.handler;
     if (!handler) throw new Error('serve handler missing');
     const argv = buildParser().parseSync('--rate-limit --no-web');
+    void handler(argv as Parameters<typeof handler>[0]);
+    await vi.waitFor(() => {
+      expect(mockRunQwenServe).toHaveBeenCalled();
+    });
+  }
+
+  async function startServeHandlerWithArgs(args: string) {
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(args);
     void handler(argv as Parameters<typeof handler>[0]);
     await vi.waitFor(() => {
       expect(mockRunQwenServe).toHaveBeenCalled();
@@ -155,6 +173,55 @@ describe('serve rate limit env parsing', () => {
         rateLimitWindowMs: 60000,
       }),
     );
+  });
+
+  it('passes normalized named channels to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --channel telegram --channel telegram --channel feishu',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
+      }),
+    );
+  });
+
+  it('passes --channel all as an all-channel selection', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --channel all');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelSelection: { mode: 'all' },
+      }),
+    );
+  });
+
+  it('rejects --channel all mixed with concrete channels', async () => {
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--no-web --channel all --channel telegram',
+    );
+
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(mockRunQwenServe).not.toHaveBeenCalled();
   });
 });
 

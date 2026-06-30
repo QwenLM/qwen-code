@@ -8,6 +8,7 @@ import express from 'express';
 import type { Application } from 'express';
 import type { DaemonLogger } from './daemon-logger.js';
 import type { DaemonStartupSnapshot } from './daemon-status.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -201,6 +202,7 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   workspace?: DaemonWorkspaceService;
   statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
@@ -550,6 +552,7 @@ export function createServeApp(
     getSupportedDeviceFlowProviders,
     deviceFlowRegistry,
     sessionShellCommandEnabled,
+    getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
   });
 
   registerCapabilitiesRoutes(app, {

@@ -28,6 +28,7 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -1252,6 +1253,192 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
       extraArgs: ['--experimental-lsp'],
     });
+  });
+});
+
+describe('runQwenServe channel worker supervisor', () => {
+  let tmpDir: string | undefined;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = undefined;
+    }
+  });
+
+  function makeFakeBridge(onShutdown?: () => void): HttpAcpBridge {
+    return {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockImplementation(async () => {
+        onShutdown?.();
+      }),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
+    } as unknown as HttpAcpBridge;
+  }
+
+  function makeWorker(snapshot: ChannelWorkerSnapshot) {
+    return {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(() => snapshot),
+    };
+  }
+
+  function makePidfileDeps() {
+    return {
+      readServiceInfo: vi.fn(() => null),
+      writeServeServiceInfo: vi.fn(),
+      removeServiceInfo: vi.fn(),
+    };
+  }
+
+  it('starts the channel worker after runtime mount and stops it before bridge shutdown', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-')),
+    );
+    const order: string[] = [];
+    const bridge = makeFakeBridge(() => order.push('bridge'));
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    worker.stop.mockImplementation(async () => {
+      order.push('worker');
+    });
+    const pidfile = makePidfileDeps();
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    expect(worker.start).toHaveBeenCalledTimes(1);
+    expect(pidfile.writeServeServiceInfo).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      servePid: process.pid,
+      workerPid: 1234,
+    });
+
+    await handle.close();
+
+    expect(order).toEqual(['worker', 'bridge']);
+    expect(pidfile.removeServiceInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a warning when the ready channel worker exits', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-status-')),
+    );
+    const snapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    };
+    const worker = makeWorker(snapshot);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      Object.assign(snapshot, {
+        state: 'exited',
+        exitCode: 1,
+        signal: null,
+      });
+      const res = await fetch(`${handle.url}/daemon/status`);
+      const body = await res.json();
+
+      expect(body).toMatchObject({
+        status: 'warning',
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: 'channel_worker_exited',
+            severity: 'warning',
+          }),
+        ]),
+        runtime: {
+          channelWorker: {
+            enabled: true,
+            state: 'exited',
+            pid: 1234,
+            channels: ['telegram'],
+            exitCode: 1,
+          },
+        },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('fails serve startup when the worker exits before ready', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-fail-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      channels: ['telegram'],
+      exitCode: 1,
+    });
+    worker.start.mockRejectedValueOnce(new Error('worker failed before ready'));
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge,
+          channelWorkerSupervisorFactory: vi.fn(() => worker),
+          channelServicePidfile: makePidfileDeps(),
+        },
+      ),
+    ).rejects.toThrow('worker failed before ready');
+
+    expect(bridge.shutdown).toHaveBeenCalled();
   });
 });
 
