@@ -324,6 +324,17 @@ function parsePermissionResponse(
       ? { outcome: 'cancelled' as const }
       : { outcome: 'selected' as const, optionId: outcome['optionId'] };
   const response: Record<string, unknown> = { outcome: cleanOutcome };
+  // `answers` is the one non-ACP permission-response field the bridge honours
+  // (AskUserQuestion). Forward it under the same shape the bridge validates —
+  // an object map of string values — so dropping it doesn't silently leave the
+  // agent with no submitted answers.
+  const answers = params['answers'];
+  if (
+    isObject(answers) &&
+    Object.values(answers).every((value) => typeof value === 'string')
+  ) {
+    response['answers'] = answers;
+  }
   if (isObject(params['_meta'])) {
     response['_meta'] = params['_meta'];
   }
@@ -1305,11 +1316,22 @@ export class AcpDispatcher {
             }
             return;
           }
-          // Drop the exact resolved entry through the shared helper (same
-          // pattern as resolveClientResponse), using the conn/map-key
-          // `pendingRef` already carries instead of re-matching by requestId.
-          if (pendingRef) {
-            this.dropResolvedPermission(pendingRef.conn, pendingRef.id);
+          // Drop ONLY the voting connection's own pending entry for this
+          // request — never the first registry-wide match (`pendingRef`), which
+          // may belong to a sibling connection. Under the consensus policy
+          // `respondToSessionPermission` returns true for an intermediate
+          // "recorded" vote, so deleting a sibling's entry here would drop a
+          // co-owner's still-needed outbound request and could stall the quorum
+          // until timeout/teardown. A cross-connection voter that never streamed
+          // the request has no own entry — leave the originator's for teardown.
+          for (const [pid, preq] of conn.pending) {
+            if (
+              preq.kind === 'permission' &&
+              preq.bridgeRequestId === requestId
+            ) {
+              this.dropResolvedPermission(conn, pid);
+              break;
+            }
           }
           this.replyConn(conn, id, {});
           return;

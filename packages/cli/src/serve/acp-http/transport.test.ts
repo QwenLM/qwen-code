@@ -1511,8 +1511,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         resp: { outcome: { outcome: 'selected', optionId: 'allow' } },
       });
       expect(voteCount).toBe(1);
-      // The entry was removed from A: a duplicate method vote now 404s rather
-      // than reaching the bridge again.
+      // B has no pending entry of its own (only A streamed the request), so its
+      // vote must NOT delete A's sibling entry — under the consensus policy that
+      // would drop a still-needed co-owner request. A's entry therefore survives,
+      // and a second vote still routes through to the bridge (rather than the
+      // handler 404-ing on a wrongly-deleted entry).
       await post(voterConnId, {
         jsonrpc: '2.0',
         id: 42,
@@ -1523,16 +1526,79 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           outcome: { outcome: 'selected', optionId: 'allow' },
         },
       });
-      const dup = (await voterReader.next()) as {
+      const ack2 = (await voterReader.next()) as {
         id: number;
-        error: { data?: { httpStatus?: number } };
+        result?: unknown;
       };
-      expect(dup.id).toBe(42);
-      expect(dup.error.data?.httpStatus).toBe(404);
-      expect(voteCount).toBe(1);
+      expect(ack2).toEqual({ jsonrpc: '2.0', id: 42, result: {} });
+      expect(voteCount).toBe(2);
     } finally {
       sessReader.close();
       voterReader.close();
+    }
+  });
+
+  it('session/permission forwards AskUserQuestion answers and drops unknown fields', async () => {
+    let forwarded: unknown;
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      _requestId: string,
+      resp: unknown,
+    ) => {
+      forwarded = resp;
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-ans',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 43,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 44,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-ans',
+          // Extra outcome sub-field (`force`) and top-level junk (`bogus`) must
+          // be stripped; the AskUserQuestion `answers` map must be forwarded.
+          outcome: { outcome: 'selected', optionId: 'allow', force: true },
+          answers: { q1: 'a1', q2: 'a2' },
+          bogus: 'nope',
+        },
+      });
+      const ack = (await connReader.next()) as { id: number; result?: unknown };
+      expect(ack).toEqual({ jsonrpc: '2.0', id: 44, result: {} });
+      expect(forwarded).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+        answers: { q1: 'a1', q2: 'a2' },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
     }
   });
 
