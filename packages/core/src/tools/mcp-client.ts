@@ -1031,7 +1031,9 @@ export async function discoverTools(
             cliConfig,
             mcpClient, // raw MCP Client for direct callTool with progress
             mcpTimeout,
+            cliConfig?.getMcpToolIdleTimeoutMs(),
             annotationsMap.get(funcDecl.name!),
+            mcpServerConfig.alwaysLoadTools === true,
           ),
         );
       } catch (error) {
@@ -1725,7 +1727,8 @@ export async function createTransport(
   ) {
     const provider = new ServiceAccountImpersonationProvider(mcpServerConfig);
     const transportOptions:
-      StreamableHTTPClientTransportOptions | SSEClientTransportOptions = {
+      | StreamableHTTPClientTransportOptions
+      | SSEClientTransportOptions = {
       authProvider: provider,
     };
 
@@ -1753,7 +1756,8 @@ export async function createTransport(
   ) {
     const provider = new GoogleCredentialProvider(mcpServerConfig);
     const transportOptions:
-      StreamableHTTPClientTransportOptions | SSEClientTransportOptions = {
+      | StreamableHTTPClientTransportOptions
+      | SSEClientTransportOptions = {
       authProvider: provider,
     };
     if (mcpServerConfig.httpUrl) {

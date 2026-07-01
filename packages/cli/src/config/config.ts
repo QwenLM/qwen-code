@@ -1414,7 +1414,8 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
-  const safeMode = argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
+  const safeMode =
+    argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
 
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
@@ -1858,9 +1859,11 @@ export async function loadCliConfig(
     // Use provided session ID without session resumption
     // Check if session ID is already in use
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExists(argv['sessionId']);
+    const exists = await sessionService.sessionExistsInAnyState(
+      argv['sessionId'],
+    );
     if (exists) {
-      const message = `Error: Session Id ${argv['sessionId']} is already in use.`;
+      const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       writeStderrLine(message);
       process.exit(1);
     }
@@ -1951,6 +1954,7 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand:
       bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
+    mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
     pendingMcpServers,
@@ -2096,9 +2100,7 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
     enableAutoSkill:
-      bareMode || safeMode
-        ? false
-        : (settings.memory?.enableAutoSkill ?? true),
+      bareMode || safeMode ? false : (settings.memory?.enableAutoSkill ?? true),
     autoSkillConfirm:
       bareMode || safeMode
         ? false

@@ -341,6 +341,33 @@ function findFinalAnswerIndex(
   return -1;
 }
 
+function collectFinalAssistantIdsByTurn(
+  items: readonly DisplayItem[],
+  isResponding: boolean,
+): ReadonlySet<string> {
+  const userIdxs: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type === 'message' && item.message.role === 'user') {
+      userIdxs.push(i);
+    }
+  }
+
+  const ids = new Set<string>();
+  for (let k = 0; k < userIdxs.length; k++) {
+    if (k === userIdxs.length - 1 && isResponding) continue;
+    const start = userIdxs[k];
+    const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const answerIdx = findFinalAnswerIndex(items, start, end);
+    if (answerIdx < 0) continue;
+    const item = items[answerIdx];
+    if (item.type === 'message' && item.message.role === 'assistant') {
+      ids.add(item.message.id);
+    }
+  }
+  return ids;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, and mid-turn assistant text.
  * The final answer and any system/shell/insight rows (errors, cancellations,
@@ -1099,6 +1126,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       }
       return null;
     }, [isResponding, mergedMessages]);
+    const finalAssistantIdsByTurn = useMemo(
+      () => collectFinalAssistantIdsByTurn(displayItems, isResponding),
+      [displayItems, isResponding],
+    );
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -1123,7 +1154,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       useRef(catchingUp);
     const catchingUpRef = useRef(catchingUp);
     const prevHasTailContent = useRef(false);
+    const pendingFollowRecheck = useRef(false);
+    const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
+    const pendingFollowRecheckTimer = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
+    const containerRef = useRef<HTMLDivElement>(null);
 
     const setShouldFollow = useCallback(
       (value: boolean) => {
@@ -1152,8 +1187,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         collapseEnabled,
       ],
     );
-
-    const containerRef = useRef<HTMLDivElement>(null);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -1213,19 +1246,69 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       return containerRef.current;
     }, []);
 
+    const recheckFollowFromScrollGeometry = useCallback(() => {
+      const el = containerRef.current;
+      if (!el) return;
+      const distanceFromBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight;
+      setShouldFollow(distanceFromBottom < 30);
+    }, [setShouldFollow]);
+
+    const scheduleFollowRecheck = useCallback(() => {
+      pendingFollowRecheck.current = true;
+      if (pendingFollowRecheckFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+      }
+      if (pendingFollowRecheckTimer.current !== undefined) {
+        window.clearTimeout(pendingFollowRecheckTimer.current);
+      }
+      pendingFollowRecheckFrame.current = window.requestAnimationFrame(
+        recheckFollowFromScrollGeometry,
+      );
+      // Turn content uses a 180ms grid transition. The real scrollHeight can
+      // cross the overflow threshold only after the animation advances, so do a
+      // final geometry read once the expansion has settled.
+      pendingFollowRecheckTimer.current = window.setTimeout(() => {
+        pendingFollowRecheck.current = false;
+        pendingFollowRecheckFrame.current = undefined;
+        pendingFollowRecheckTimer.current = undefined;
+        recheckFollowFromScrollGeometry();
+      }, 220);
+    }, [recheckFollowFromScrollGeometry]);
+
+    useEffect(
+      () => () => {
+        if (pendingFollowRecheckFrame.current !== undefined) {
+          window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+        }
+        if (pendingFollowRecheckTimer.current !== undefined) {
+          window.clearTimeout(pendingFollowRecheckTimer.current);
+        }
+      },
+      [],
+    );
+
     const handleToggleCollapse = useCallback(
       (turnId: string, nextExpanded: boolean) => {
         // Expanding/collapsing a turn is an explicit reading action. Pause
         // follow so streaming output does not yank the viewport back to the
         // tail while the user is inspecting history.
-        setShouldFollow(false);
+        const el = containerRef.current;
+        if (el && el.scrollHeight <= el.clientHeight + 1) {
+          // If there is no scrollbar yet, there is no meaningful "not at
+          // bottom" state to report. The toggle may create overflow though, so
+          // re-check after the expanded/collapsed rows have been laid out.
+          scheduleFollowRecheck();
+        } else {
+          setShouldFollow(false);
+        }
         setCollapseOverrides((prev) => {
           const next = new Map(prev);
           next.set(turnId, nextExpanded);
           return next;
         });
       },
-      [setShouldFollow],
+      [scheduleFollowRecheck, setShouldFollow],
     );
 
     const getItemKey = useCallback(
@@ -1623,7 +1706,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                displayItem.message.id === lastCompletedAssistantId
+                finalAssistantIdsByTurn.has(displayItem.message.id)
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -1658,6 +1741,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         onShowContextDetail,
         headerOffset,
         visibleItems,
+        finalAssistantIdsByTurn,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
@@ -1691,6 +1775,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     useLayoutEffect(() => {
       if (catchingUp) return;
       if (scrollCooldown.current) return;
+      if (pendingFollowRecheck.current) return;
       if (shouldFollow.current) {
         const lastId = getLastUserMessageId(messages);
         const isNewUserMessage =
