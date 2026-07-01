@@ -46,6 +46,68 @@ let activeCallbackServer: http.Server | null = null;
 let activeCallbackTimeout: ReturnType<typeof setTimeout> | null = null;
 
 /**
+ * Node.js error codes for transient network failures eligible for retry.
+ */
+const TRANSIENT_NETWORK_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+]);
+
+/**
+ * Determines if an error is a transient network error eligible for retry
+ * during OAuth token requests.
+ */
+function isTransientNetworkError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+
+  const code = (error as { code?: string }).code;
+  if (code && TRANSIENT_NETWORK_ERROR_CODES.has(code)) {
+    return true;
+  }
+
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes('timeout') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('enotfound') ||
+    message.includes('econnrefused')
+  );
+}
+
+/**
+ * Retries an OAuth token request once on transient network errors.
+ * Uses a short 500ms delay before retry.
+ *
+ * @param operation A human-readable name for the operation (for logging)
+ * @param fn The async function to retry
+ * @returns The result of the operation
+ */
+async function retryOAuthTokenRequest<T>(
+  operation: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (isTransientNetworkError(error)) {
+      debugLogger.info(
+        `[OAuth] Retrying ${operation} due to transient network error: ${getErrorMessage(error)}`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return await fn();
+    }
+    throw error;
+  }
+}
+
+/**
  * OAuth configuration for an MCP server.
  */
 export interface MCPOAuthConfig {
@@ -479,14 +541,16 @@ export class MCPOAuthProvider {
       }
     }
 
-    const response = await fetch(config.tokenUrl!, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json, application/x-www-form-urlencoded',
-      },
-      body: params.toString(),
-    });
+    const response = await retryOAuthTokenRequest('token exchange', () =>
+      fetch(config.tokenUrl!, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json, application/x-www-form-urlencoded',
+        },
+        body: params.toString(),
+      }),
+    );
 
     const responseText = await response.text();
     const contentType = response.headers.get('content-type') || '';
@@ -609,14 +673,16 @@ export class MCPOAuthProvider {
       }
     }
 
-    const response = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json, application/x-www-form-urlencoded',
-      },
-      body: params.toString(),
-    });
+    const response = await retryOAuthTokenRequest('token refresh', () =>
+      fetch(tokenUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json, application/x-www-form-urlencoded',
+        },
+        body: params.toString(),
+      }),
+    );
 
     const responseText = await response.text();
     const contentType = response.headers.get('content-type') || '';

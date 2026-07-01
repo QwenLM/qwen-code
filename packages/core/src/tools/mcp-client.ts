@@ -58,6 +58,7 @@ import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { retryWithBackoff } from '../utils/retry.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -78,6 +79,104 @@ const debugLogger = createDebugLogger('MCP');
 
 const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
+
+/**
+ * Node.js error codes for transient network failures.
+ * These are eligible for retry during MCP capability discovery.
+ */
+const TRANSIENT_NETWORK_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+]);
+
+/**
+ * HTTP status codes for transient server errors eligible for retry.
+ * 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout.
+ */
+const TRANSIENT_HTTP_STATUS_CODES = new Set([502, 503, 504]);
+
+/**
+ * Determines if an error is a transient network error eligible for retry
+ * during MCP capability discovery.
+ *
+ * Checks for:
+ * - Node.js error codes: ECONNRESET, ETIMEDOUT, ENOTFOUND, ECONNREFUSED, etc.
+ * - HTTP status codes: 502, 503, 504
+ * - Error messages containing "timeout" or "connection" keywords
+ */
+function isTransientNetworkError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+
+  // Check Node.js error code (e.g., ECONNRESET)
+  const code = (error as { code?: string }).code;
+  if (code && TRANSIENT_NETWORK_ERROR_CODES.has(code)) {
+    return true;
+  }
+
+  // Check HTTP status code (e.g., 502, 503, 504)
+  const status =
+    (error as { status?: number; statusCode?: number }).status ??
+    (error as { status?: number; statusCode?: number }).statusCode;
+  if (status && TRANSIENT_HTTP_STATUS_CODES.has(status)) {
+    return true;
+  }
+
+  // Check error message for timeout/connection keywords (fallback)
+  const message = getErrorMessage(error).toLowerCase();
+  if (
+    message.includes('timeout') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('enotfound') ||
+    message.includes('econnrefused')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Retries an MCP discovery operation with short exponential backoff.
+ *
+ * Configuration:
+ * - Up to 3 attempts (1 initial + 2 retries)
+ * - Initial delay: 500ms, max delay: 2000ms
+ * - Only retries on transient network errors (ECONNRESET, ETIMEDOUT, etc.)
+ * - Does NOT retry on permanent errors (401, 403, method not found)
+ * - Logs each retry attempt for debugging
+ *
+ * @param operation A human-readable name for the operation (e.g., 'tools/list')
+ * @param serverName The MCP server name (for logging)
+ * @param fn The async function to retry
+ * @returns The result of the operation
+ */
+async function retryMcpDiscovery<T>(
+  operation: string,
+  serverName: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return retryWithBackoff(fn, {
+    maxAttempts: 3,
+    initialDelayMs: 500,
+    maxDelayMs: 2000,
+    shouldRetryOnError: (error: Error) => {
+      const isTransient = isTransientNetworkError(error);
+      if (isTransient) {
+        debugLogger.info(
+          `[MCP Discovery] Retrying ${operation} for ${serverName} due to transient error: ${getErrorMessage(error)}`,
+        );
+      }
+      return isTransient;
+    },
+  });
+}
 
 export function getMcpOAuthDialogInstruction(
   action: 'authenticate' | 're-authenticate',
@@ -967,7 +1066,9 @@ export async function discoverTools(
     const mcpCallableTool = mcpToTool(mcpClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
-    const tool = await mcpCallableTool.tool();
+    const tool = await retryMcpDiscovery('tools/list', mcpServerName, () =>
+      mcpCallableTool.tool(),
+    );
 
     if (!Array.isArray(tool.functionDeclarations)) {
       // This is a valid case for a prompt-only server
@@ -978,7 +1079,11 @@ export async function discoverTools(
     // that are not preserved by mcpToTool's functionDeclarations conversion.
     const annotationsMap = new Map<string, McpToolAnnotations>();
     try {
-      const listToolsResult = await mcpClient.listTools();
+      const listToolsResult = await retryMcpDiscovery(
+        'listTools',
+        mcpServerName,
+        () => mcpClient.listTools(),
+      );
       for (const mcpTool of listToolsResult.tools) {
         if (mcpTool.annotations) {
           annotationsMap.set(mcpTool.name, mcpTool.annotations);
@@ -1095,9 +1200,14 @@ export async function listMcpPrompts(
   mcpClient: Client,
 ): Promise<DiscoveredMCPPrompt[]> {
   try {
-    const response = await mcpClient.request(
-      { method: 'prompts/list', params: {} },
-      ListPromptsResultSchema,
+    const response = await retryMcpDiscovery(
+      'prompts/list',
+      mcpServerName,
+      () =>
+        mcpClient.request(
+          { method: 'prompts/list', params: {} },
+          ListPromptsResultSchema,
+        ),
     );
 
     return response.prompts.map((prompt) => ({
@@ -1206,9 +1316,14 @@ export async function listMcpResources(
   mcpClient: Client,
 ): Promise<DiscoveredMCPResource[]> {
   try {
-    const response = await mcpClient.request(
-      { method: 'resources/list', params: {} },
-      ListResourcesResultSchema,
+    const response = await retryMcpDiscovery(
+      'resources/list',
+      mcpServerName,
+      () =>
+        mcpClient.request(
+          { method: 'resources/list', params: {} },
+          ListResourcesResultSchema,
+        ),
     );
 
     return response.resources.map((resource) => ({
@@ -1725,7 +1840,8 @@ export async function createTransport(
   ) {
     const provider = new ServiceAccountImpersonationProvider(mcpServerConfig);
     const transportOptions:
-      StreamableHTTPClientTransportOptions | SSEClientTransportOptions = {
+      | StreamableHTTPClientTransportOptions
+      | SSEClientTransportOptions = {
       authProvider: provider,
     };
 
@@ -1753,7 +1869,8 @@ export async function createTransport(
   ) {
     const provider = new GoogleCredentialProvider(mcpServerConfig);
     const transportOptions:
-      StreamableHTTPClientTransportOptions | SSEClientTransportOptions = {
+      | StreamableHTTPClientTransportOptions
+      | SSEClientTransportOptions = {
       authProvider: provider,
     };
     if (mcpServerConfig.httpUrl) {

@@ -2389,4 +2389,163 @@ describe('mcp-client', () => {
       expect(hasNetworkTransport(config)).toBe(false);
     });
   });
+
+  describe('MCP Discovery Retry on Transient Network Errors', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('listMcpPrompts retries on ECONNRESET and succeeds', async () => {
+      const mockClient = {
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error('Connection reset'), {
+              code: 'ECONNRESET',
+            }),
+          )
+          .mockResolvedValueOnce({ prompts: [{ name: 'test-prompt' }] }),
+      } as unknown as ClientLib.Client;
+
+      const promise = listMcpPrompts('test-server', mockClient);
+
+      // Advance timers to trigger retry
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const result = await promise;
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('test-prompt');
+      expect(mockClient.request).toHaveBeenCalledTimes(2);
+    });
+
+    it('listMcpPrompts retries on ETIMEDOUT and succeeds', async () => {
+      const mockClient = {
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error('Connection timed out'), {
+              code: 'ETIMEDOUT',
+            }),
+          )
+          .mockResolvedValueOnce({ prompts: [{ name: 'test-prompt' }] }),
+      } as unknown as ClientLib.Client;
+
+      const promise = listMcpPrompts('test-server', mockClient);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const result = await promise;
+      expect(result).toHaveLength(1);
+      expect(mockClient.request).toHaveBeenCalledTimes(2);
+    });
+
+    it('listMcpPrompts retries on HTTP 503 and succeeds', async () => {
+      const mockClient = {
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error('Service Unavailable'), { status: 503 }),
+          )
+          .mockResolvedValueOnce({ prompts: [{ name: 'test-prompt' }] }),
+      } as unknown as ClientLib.Client;
+
+      const promise = listMcpPrompts('test-server', mockClient);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const result = await promise;
+      expect(result).toHaveLength(1);
+      expect(mockClient.request).toHaveBeenCalledTimes(2);
+    });
+
+    it('listMcpPrompts does not retry on permanent errors (401)', async () => {
+      const mockClient = {
+        request: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error('Unauthorized'), { status: 401 }),
+          ),
+      } as unknown as ClientLib.Client;
+
+      const result = await listMcpPrompts('test-server', mockClient);
+      expect(result).toEqual([]);
+      expect(mockClient.request).toHaveBeenCalledTimes(1);
+    });
+
+    it('listMcpPrompts exhausts retries and returns empty on persistent transient error', async () => {
+      const mockClient = {
+        request: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error('Connection reset'), {
+              code: 'ECONNRESET',
+            }),
+          ),
+      } as unknown as ClientLib.Client;
+
+      const promise = listMcpPrompts('test-server', mockClient);
+
+      // Advance timers for all retries (3 attempts total)
+      await vi.advanceTimersByTimeAsync(3000);
+
+      const result = await promise;
+      expect(result).toEqual([]);
+      expect(mockClient.request).toHaveBeenCalledTimes(3);
+    });
+
+    it('listMcpResources retries on ECONNRESET and succeeds', async () => {
+      const mockClient = {
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error('Connection reset'), {
+              code: 'ECONNRESET',
+            }),
+          )
+          .mockResolvedValueOnce({ resources: [{ uri: 'test://resource' }] }),
+      } as unknown as ClientLib.Client;
+
+      const promise = listMcpResources('test-server', mockClient);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const result = await promise;
+      expect(result).toHaveLength(1);
+      expect(result[0].uri).toBe('test://resource');
+      expect(mockClient.request).toHaveBeenCalledTimes(2);
+    });
+
+    it('listMcpResources retries on HTTP 502 and succeeds', async () => {
+      const mockClient = {
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error('Bad Gateway'), { status: 502 }),
+          )
+          .mockResolvedValueOnce({ resources: [{ uri: 'test://resource' }] }),
+      } as unknown as ClientLib.Client;
+
+      const promise = listMcpResources('test-server', mockClient);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const result = await promise;
+      expect(result).toHaveLength(1);
+      expect(mockClient.request).toHaveBeenCalledTimes(2);
+    });
+
+    it('listMcpResources does not retry on method not found', async () => {
+      const mockClient = {
+        request: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error('Method not found'), { code: -32601 }),
+          ),
+      } as unknown as ClientLib.Client;
+
+      const result = await listMcpResources('test-server', mockClient);
+      expect(result).toEqual([]);
+      expect(mockClient.request).toHaveBeenCalledTimes(1);
+    });
+  });
 });
