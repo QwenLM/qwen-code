@@ -6,7 +6,6 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { detectLineEnding } from '../services/fileSystemService.js';
@@ -25,7 +24,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { logFileOperation } from '../telemetry/loggers.js';
@@ -446,13 +445,12 @@ class NotebookEditInvocation extends BaseToolInvocation<
   ): Promise<ToolCallConfirmationDetails> {
     const prepared = await this.prepareEdit(abortSignal);
     const fileName = path.basename(this.params.notebook_path);
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
       prepared.originalContent,
       prepared.updatedContent,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
 
     const confirmationDetails: ToolEditConfirmationDetails = {
@@ -660,13 +658,12 @@ class NotebookEditInvocation extends BaseToolInvocation<
       }
 
       const fileName = path.basename(this.params.notebook_path);
-      const fileDiff = Diff.createPatch(
+      const fileDiff = createPatchSmart(
         fileName,
         prepared.originalContent,
         prepared.updatedContent,
         'Current',
         'Proposed',
-        DEFAULT_DIFF_OPTIONS,
       );
       const diffStat = getDiffStat(
         fileName,
