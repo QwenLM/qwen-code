@@ -307,11 +307,11 @@ SOFTWARE.
 
 
 ============================================================
-fast-uri@3.0.6
+fast-uri@3.1.3
 (git+https://github.com/fastify/fast-uri.git)
 
-Copyright (c) 2021 The Fastify Team
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
+Copyright (c) 2021-present The Fastify team <https://github.com/fastify/fastify#team>
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -1665,7 +1665,7 @@ SOFTWARE.
 
 
 ============================================================
-hasown@2.0.2
+hasown@2.0.4
 (git+https://github.com/inspect-js/hasOwn.git)
 
 MIT License
@@ -2340,7 +2340,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ============================================================
-path-to-regexp@8.2.0
+path-to-regexp@8.4.2
 (https://github.com/pillarjs/path-to-regexp.git)
 
 The MIT License (MIT)
@@ -2478,7 +2478,7 @@ THE SOFTWARE.
 
 
 ============================================================
-hono@4.12.23
+hono@4.12.27
 (git+https://github.com/honojs/hono.git)
 
 MIT License
@@ -2669,7 +2669,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ============================================================
-markdown-it@14.1.0
+markdown-it@14.2.0
 (No repository found)
 
 Copyright (c) 2014 Vitaly Puzrin, Alex Kocharin.
@@ -2974,7 +2974,7 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ============================================================
-linkify-it@5.0.0
+linkify-it@5.0.1
 (No repository found)
 
 Copyright (c) 2015 Vitaly Puzrin.

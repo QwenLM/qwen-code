@@ -139,12 +139,15 @@ export class UserPromptEvent implements BaseTelemetryEvent {
   prompt_id: string;
   auth_type?: string;
   prompt?: string;
+  /** Model that actually processed the prompt (e.g. an inline override). */
+  model?: string;
 
   constructor(
     prompt_length: number,
     prompt_Id: string,
     auth_type?: string,
     prompt?: string,
+    model?: string,
   ) {
     this['event.name'] = 'user_prompt';
     this['event.timestamp'] = new Date().toISOString();
@@ -152,6 +155,7 @@ export class UserPromptEvent implements BaseTelemetryEvent {
     this.prompt_id = prompt_Id;
     this.auth_type = auth_type;
     this.prompt = prompt;
+    this.model = model;
   }
 }
 

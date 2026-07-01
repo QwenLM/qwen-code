@@ -1,41 +1,109 @@
 .content {
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.6;
   color: var(--foreground);
+  font-family: var(--font-sans);
   min-width: 0;
   max-width: 100%;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+}
+
+.content > :first-child {
+  margin-top: 0;
+}
+
+.content > :last-child {
+  margin-bottom: 0;
+}
+
+.content strong,
+.content b {
+  color: var(--foreground);
+  font-weight: 500;
 }
 
 .content h1,
 .content h2,
 .content h3,
-.content h4 {
-  margin: 12px 0 6px;
-  font-weight: 700;
+.content h4,
+.content h5,
+.content h6 {
+  margin-bottom: 0.75rem;
   color: var(--foreground);
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .content h1 {
-  font-size: 1.3em;
+  margin-top: 1.5rem;
+  font-size: 18px;
 }
 
 .content h2 {
-  font-size: 1.15em;
+  margin-top: 1.25rem;
+  font-size: 16px;
 }
 
 .content h3 {
-  font-size: 1.05em;
+  margin-top: 1rem;
+  font-size: 15px;
+}
+
+.content h4,
+.content h5,
+.content h6 {
+  margin-top: 0.75rem;
+  font-size: 14px;
+}
+
+.content h5,
+.content h6 {
+  font-weight: 500;
 }
 
 .content p {
-  margin: 6px 0;
+  margin: 0 0 1rem;
 }
+
+.content ul,
+.content ol {
+  margin: 0.5rem 0 1rem;
+  padding-left: 1.5rem;
+  list-style-position: outside;
+}
+
 .content ul {
-  padding-left: 20px;
+  list-style-type: disc;
 }
+
+.content ol {
+  padding-left: 2.25rem;
+  list-style-type: decimal;
+}
+
 .content li {
-  margin: 2px 0;
+  margin-bottom: 0.5rem;
+}
+
+.content li > p:first-child {
+  display: inline;
+  margin: 0;
+}
+
+.content li > p + p {
+  display: block;
+  margin-top: 0.5rem;
+}
+
+.content li > ul,
+.content li > ol {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+  padding-left: 1rem;
+}
+
+.content li > ol {
+  padding-left: 1.75rem;
 }
 
 .content li::marker {
@@ -43,23 +111,27 @@
 }
 
 .content blockquote {
-  margin: 6px 0;
-  padding: 2px 10px;
-  border-left: 3px solid var(--border);
+  margin: 1.5rem 0;
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--border);
   color: var(--muted-foreground);
+  font-style: normal;
 }
 
 .content hr {
   border: none;
   border-top: 1px solid var(--border);
-  margin: 12px 0;
+  margin: 1rem 0;
 }
 
 .inlineCode {
   font-family: var(--font-mono);
   font-size: 0.9em;
-  padding: 1px 5px;
+  font-weight: 500;
+  margin: 0 2px;
+  padding: 2px 4px;
   background: var(--secondary);
+  box-shadow: 0 0 0 0.5px var(--border);
   border-radius: 3px;
   color: var(--foreground);
 }
@@ -71,124 +143,84 @@
 
 .link:hover {
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .tableWrapper {
   position: relative;
   overflow-x: auto;
-  margin: 6px 0;
-}
-
-.tableToggle {
-  position: absolute;
-  right: 8px;
-  top: 4px;
-  z-index: 4;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--subtle-bg);
-  color: var(--muted-foreground);
-  cursor: pointer;
-  transition:
-    background 0.15s,
-    color 0.15s,
-    border-color 0.15s;
-}
-
-.tableToggle svg {
-  display: block;
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-}
-
-.tableToggle:not(.tableToggleActive):hover {
-  color: var(--foreground);
-  background: var(--subtle-bg-strong);
-}
-
-.tableToggleInline {
-  position: static;
-  margin-left: auto;
-}
-
-.tableToggleActive {
-  background: var(--agent-blue-500);
-  color: var(--card);
-  border-color: var(--agent-blue-500);
-}
-
-.tableToggleActive:hover {
-  filter: brightness(1.08);
+  margin: 1.5rem 0;
+  width: 100%;
 }
 
 .table {
   border-collapse: collapse;
-  font-size: 13px;
+  display: table;
+  table-layout: auto;
+  font-size: 14px;
   width: 100%;
+  max-width: 100%;
 }
 
 .table th,
 .table td {
   border: 1px solid var(--border);
-  padding: 4px 8px;
+  padding: 0.6rem 0.5rem;
   text-align: left;
-}
-
-.tableWrapper:has(.tableToggle) .table th:last-child,
-.tableWrapper:has(.tableToggle) .table td:last-child {
-  padding-right: 40px;
+  vertical-align: top;
 }
 
 .table th {
-  background: var(--subtle-bg);
-  font-weight: 600;
+  background: transparent;
+  color: var(--foreground);
+  font-weight: 500;
 }
 
 .image {
   max-width: 100%;
+  height: auto;
   border-radius: 4px;
-  margin: 6px 0;
+  margin: 1.5rem 0;
+  display: block;
 }
 
 .codeBlock {
   margin: 8px 0;
-  border-radius: var(--radius);
-  overflow: hidden;
-  border: 1px solid var(--border);
   min-width: 0;
   max-width: 100%;
+  overflow: hidden;
+  border: 0.5px solid var(--border);
+  border-radius: 4px;
 }
 
 .codeBlockHeader {
   display: flex;
+  height: 32px;
   align-items: center;
   justify-content: space-between;
-  padding: 3px 10px;
+  padding: 0 12px;
   background: var(--subtle-bg);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0.5px solid var(--border);
 }
 
 .codeBlockLang {
-  font-size: 11px;
-  color: var(--muted-foreground);
-  text-transform: lowercase;
+  font-size: 12px;
+  color: var(--foreground);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .codeBlockCopy {
-  font-size: 11px;
-  padding: 1px 6px;
+  min-width: 20px;
+  min-height: 20px;
+  padding: 2px 6px;
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 3px;
+  border: none;
+  border-radius: 4px;
   color: var(--muted-foreground);
   font-family: var(--font-mono);
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -198,12 +230,14 @@
 }
 
 .codeBlockContent {
-  padding: 10px 14px;
-  overflow-x: auto;
+  max-width: 100%;
+  max-height: none;
+  padding: 8px 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
   font-size: 13px;
   line-height: 1.5;
   background: var(--secondary);
-  max-width: 100%;
 }
 
 .codeBlockContent pre {
@@ -216,7 +250,8 @@
 
 .codeBlockPlain {
   color: var(--muted-foreground);
-  white-space: pre;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .codeBlockContent :global(.shiki) {
@@ -227,6 +262,8 @@
 
 .codeBlockContent :global(.shiki) code {
   display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .mermaidBlock {
