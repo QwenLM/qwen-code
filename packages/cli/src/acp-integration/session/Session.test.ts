@@ -346,6 +346,7 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    runVisionBridgeSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
     switchModelSpy = vi
@@ -2253,6 +2254,118 @@ describe('Session', () => {
       const sent = firstSentMessage();
       expect(textParts(sent)).toContain('[transcribed image]');
       expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+    });
+
+    it('strips image parts when the vision bridge is cancelled before applying', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: false,
+        status: 'skipped',
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+        egressOccurred: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(
+        textParts(sent).some((t: string) => t.includes('look at this')),
+      ).toBe(true);
+    });
+
+    it('preserves oversized inline images for the vision bridge', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      try {
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'qwen3.7-plus',
+        });
+        runVisionBridgeSpy.mockResolvedValue({
+          applied: true,
+          status: 'ok',
+          parts: [{ text: 'look at this' }, { text: '[large image]' }],
+          transcript: '[large image]',
+          convertedCount: 1,
+          omittedCount: 0,
+          modelId: 'qwen3.7-plus',
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'QUJDREVGR0hJSktMTU5PUFFSU1Q=',
+            },
+          ],
+        });
+
+        const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
+          ?.parts as Part[];
+        expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(firstSentMessage())).toContain('[large image]');
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+    });
+
+    it('falls back to text-only parts when the vision bridge throws', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockRejectedValue(new Error('provider unavailable'));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(
+        textParts(sent).some((t: string) => t.includes('look at this')),
+      ).toBe(true);
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('provider unavailable'),
+      );
     });
 
     describe('conversation_finished telemetry (#4602 review)', () => {
