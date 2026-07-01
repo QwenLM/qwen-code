@@ -42,7 +42,7 @@
 
 .inProgress .icon,
 .inProgress .text {
-  color: var(--agent-blue-500);
+  color: var(--foreground);
 }
 
 .completed .icon {
