@@ -556,11 +556,12 @@ export function resolveHomeLoopResolverRoots({
   homeQwenDir?: string;
   homeDir?: string;
   qwenHome?: string;
-} = {}): { homeDir: string; homeQwenDir: string } {
+} = {}): { homeConfineRoot: string; homeQwenDir: string } {
   // qwenHome truthy → QWEN_HOME is itself the global dir, so confine within
   // homeQwenDir; the homeDir param is only consulted when qwenHome is unset.
   return {
-    homeDir: (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
+    homeConfineRoot:
+      (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
     homeQwenDir,
   };
 }
@@ -2815,18 +2816,10 @@ export class Session implements SessionContext {
       // Resolve the home/global loop.md from the QWEN_HOME-aware global dir (the
       // rest of Qwen honors QWEN_HOME for `.qwen`); reading raw os.homedir() here
       // would always hit the real `~/.qwen` and ignore a relocated config home.
-      // Confinement root for the home candidate's resolved target: $QWEN_HOME
-      // when set (it IS the global dir), else $HOME — keeps the earlier
-      // confinement (an in-root dotfile symlink resolves; an escape is refused).
-      // The `|| path.dirname(homeQwenDir)` guards an empty os.homedir() (minimal
-      // containers with no HOME): an empty root makes isWithin('', target) always
-      // true, trivially bypassing the symlink confinement. homeQwenDir
-      // (Storage.getGlobalQwenDir()) is always non-empty, so its parent is a
-      // sound non-empty fallback root.
-      const { homeDir, homeQwenDir } = resolveHomeLoopResolverRoots();
+      const { homeConfineRoot, homeQwenDir } = resolveHomeLoopResolverRoots();
       this.loopTickResolver = new LoopTickResolver({
         projectRoot: root,
-        homeDir,
+        homeDir: homeConfineRoot,
         homeQwenDir,
         // The project `.qwen/loop.md` is repo-controlled, so an untrusted folder
         // must not read it and feed it to the model (mirrors getProjectHooks()'s

@@ -5680,8 +5680,21 @@ describe('Session', () => {
         // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
         // (os.homedir()); the guard makes it the non-empty parent of the
         // empty-home-safe global qwen dir.
-        expect(roots.homeDir).not.toBe('');
-        expect(roots.homeDir).toBe(path.dirname(homeQwenDir));
+        expect(roots.homeConfineRoot).not.toBe('');
+        expect(roots.homeConfineRoot).toBe(path.dirname(homeQwenDir));
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
+      });
+
+      it('confines the home loop resolver within QWEN_HOME when set', () => {
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen-home');
+
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: path.join(os.tmpdir(), 'real-home'),
+          homeQwenDir,
+          qwenHome: homeQwenDir,
+        });
+
+        expect(roots.homeConfineRoot).toBe(homeQwenDir);
         expect(roots.homeQwenDir).toBe(homeQwenDir);
       });
 
