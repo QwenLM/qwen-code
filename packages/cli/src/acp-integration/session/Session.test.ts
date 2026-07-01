@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
+  resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
 import type { Content, FunctionCall, Part } from '@google/genai';
@@ -181,18 +182,25 @@ function createEmptyStream() {
 
 /**
  * Points os.homedir() at `home` for a test by overriding the env vars libuv
- * reads (HOME on POSIX, USERPROFILE on Windows) — the module export itself can't
- * be spied under ESM. Returns a restore function.
+ * reads — the module export itself can't be spied under ESM. Returns a restore
+ * function.
  */
 function setFakeHome(home: string): () => void {
-  const prev = {
-    HOME: process.env['HOME'],
-    USERPROFILE: process.env['USERPROFILE'],
-  };
-  process.env['HOME'] = home;
-  process.env['USERPROFILE'] = home;
+  const keys = [
+    'HOME',
+    'USERPROFILE',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'HOMESHARE',
+  ] as const;
+  const prev = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  ) as Record<(typeof keys)[number], string | undefined>;
+  for (const key of keys) {
+    process.env[key] = home;
+  }
   return () => {
-    for (const key of ['HOME', 'USERPROFILE'] as const) {
+    for (const key of keys) {
       if (prev[key] === undefined) delete process.env[key];
       else process.env[key] = prev[key];
     }
@@ -5931,7 +5939,7 @@ describe('Session', () => {
         });
       });
 
-      it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', async () => {
+      it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', () => {
         // Minimal containers with no HOME make os.homedir() === ''. With QWEN_HOME
         // unset the home confinement root must NOT collapse to '': isWithin('',
         // anyPath) is trivially true, so an empty root lets a home
@@ -5939,66 +5947,33 @@ describe('Session', () => {
         // The guard falls back to the parent of the global qwen dir
         // (Storage.getGlobalQwenDir(), itself empty-home-safe), which is the
         // homeQwenDir Session passes to the resolver.
-        const tmpDir = await fs.mkdtemp(
-          path.join(os.tmpdir(), 'loop-md-nohome-'),
-        );
-        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
-        // HOME='' makes libuv's os.homedir() return '' on every platform — it
-        // null-checks HOME, never its emptiness.
-        const restoreHome = setFakeHome('');
-        const prevQwenHome = process.env['QWEN_HOME'];
-        delete process.env['QWEN_HOME'];
-        loopTickResolverDepsSpy.mockClear();
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen');
 
-        const scheduler = {
-          size: 1,
-          hasPendingWork: true,
-          start: vi.fn(
-            (
-              callback: (job: { prompt: string; cronExpr?: string }) => void,
-            ) => {
-              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
-            },
-          ),
-          stop: vi.fn(),
-          getExitSummary: vi.fn().mockReturnValue(undefined),
-        };
-        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: '',
+          homeQwenDir,
+          qwenHome: '',
+        });
 
-        try {
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'hello' }],
-          });
+        // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
+        // (os.homedir()); the guard makes it the non-empty parent of the
+        // empty-home-safe global qwen dir.
+        expect(roots.homeConfineRoot).not.toBe('');
+        expect(roots.homeConfineRoot).toBe(path.dirname(homeQwenDir));
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
+      });
 
-          await vi.waitFor(
-            () => {
-              expect(loopTickResolverDepsSpy).toHaveBeenCalled();
-            },
-            {
-              timeout: 3000,
-            },
-          );
+      it('confines the home loop resolver within QWEN_HOME when set', () => {
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen-home');
 
-          const deps = loopTickResolverDepsSpy.mock.calls.at(-1)![0] as {
-            homeDir: string;
-            homeQwenDir?: string;
-          };
-          // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
-          // (os.homedir()); the guard makes it the non-empty parent of the
-          // empty-home-safe global qwen dir.
-          expect(deps.homeDir).not.toBe('');
-          expect(deps.homeDir).toBe(path.dirname(deps.homeQwenDir!));
-        } finally {
-          if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
-          else process.env['QWEN_HOME'] = prevQwenHome;
-          restoreHome();
-          await fs.rm(tmpDir, { recursive: true, force: true });
-        }
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: path.join(os.tmpdir(), 'real-home'),
+          homeQwenDir,
+          qwenHome: homeQwenDir,
+        });
+
+        expect(roots.homeConfineRoot).toBe(homeQwenDir);
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
       });
 
       it('reads the home loop.md from QWEN_HOME, not the real ~/.qwen', async () => {
