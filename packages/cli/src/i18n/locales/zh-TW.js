@@ -590,6 +590,35 @@ export default {
   'checking...': '檢查中...',
   'not updatable': '不可更新',
   error: '錯誤',
+  'Get or set any setting by dot-path key':
+    '透過點號路徑鍵查看或設定任意設定項',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    '無效的布林值："{{value}}"。請使用 "true" 或 "false"。',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    '無法切換數字類型的設定。請提供值：key=<number>。',
+  'Invalid number value: "{{value}}".': '無效的數字值："{{value}}"。',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    '無法切換字串類型的設定。請提供值：key=<value>。',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    '無法切換列舉類型的設定。請提供以下選項之一：{{options}}。',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    '無效的列舉值："{{value}}"。有效值：{{options}}。',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    '"{{type}}" 類型的設定無法透過 /config 修改。請直接編輯 settings.json。',
+  'Unsupported setting type: "{{type}}".': '不支援的設定類型："{{type}}"。',
+  'Available settings:': '可用設定：',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    '未知的設定鍵："{{key}}"。您是不是想設定 "{{suggestion}}"？',
+  'Unknown setting key: "{{key}}".': '未知的設定鍵："{{key}}"。',
+  'Failed to set "{{key}}": {{error}}': '設定 "{{key}}" 失敗：{{error}}',
+  'Set {{key}} = {{value}}': '已設定 {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '（此設定需要重新啟動才能生效。）',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '（安全敏感設定 — 請確認您沒有洩露憑證。）',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    '出於安全原因，禁止透過 /config 將 tools.approvalMode 設定為 "yolo"。如果您了解相關風險，請直接編輯 settings.json。',
+  '(empty)': '(空)',
   'View and edit Qwen Code settings': '查看和編輯 Qwen Code 設置',
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
@@ -1230,8 +1259,12 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
-    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，--vision 可設置視覺橋接模型，[model-id] 可立即切換）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，--vision 可設置視覺橋接模型，[model-id] 可立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    "此模式不支援內聯一次性覆寫——請先執行 '/model {{model}}'，再發送你的提示。",
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    "內聯一次性覆寫無法切換 provider。'{{model}}' 屬於另一個 provider——請先執行 '/model {{model}}'，再發送你的提示。",
   "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
     "⚠ '{{model}}' 不是已知的圖像能力模型；視覺橋接處理圖片時可能會失敗。",
   'Set a lighter model for prompt suggestions and speculative execution':

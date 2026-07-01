@@ -36,7 +36,16 @@ export const statusCommand: CommandModule = {
       process.exit(0);
     }
 
-    writeStdoutLine(`Channel service: running (PID ${info.pid})`);
+    if (info.owner === 'serve') {
+      writeStdoutLine(
+        `Channel service: managed by qwen serve (PID ${info.pid})`,
+      );
+      if (info.workerPid !== undefined) {
+        writeStdoutLine(`Worker PID:      ${info.workerPid}`);
+      }
+    } else {
+      writeStdoutLine(`Channel service: running (PID ${info.pid})`);
+    }
     writeStdoutLine(`Uptime:          ${formatUptime(info.startedAt)}`);
     writeStdoutLine('');
 

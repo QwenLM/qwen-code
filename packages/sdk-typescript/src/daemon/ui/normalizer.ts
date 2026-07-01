@@ -49,6 +49,7 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'budget_would_exceed',
 ]);
 
+const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
 const MAX_DETAILS_LENGTH = 4096;
 
 export function normalizeDaemonEvent(
@@ -1103,6 +1104,29 @@ function normalizeMemoryChanged(
   base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const scope = getString(event.data, 'scope');
+  if (scope === 'managed') {
+    const source = getString(event.data, 'source');
+    const taskId = getString(event.data, 'taskId');
+    const touchedScopes = (event.data as Record<string, unknown> | undefined)?.[
+      'touchedScopes'
+    ];
+    if (
+      !(source && taskId && Array.isArray(touchedScopes)) ||
+      touchedScopes.some((s) => s !== 'user' && s !== 'project')
+    ) {
+      return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
+    }
+    return [
+      {
+        ...base,
+        type: 'workspace.memory.changed',
+        scope,
+        source,
+        taskId,
+        touchedScopes: touchedScopes as Array<'user' | 'project'>,
+      },
+    ];
+  }
   const filePath = getString(event.data, 'filePath');
   const mode = getString(event.data, 'mode');
   // Use the `numberField` helper so NaN /
@@ -1119,7 +1143,7 @@ function normalizeMemoryChanged(
     (mode !== 'append' && mode !== 'replace') ||
     bytesWritten === undefined
   ) {
-    return fallbackDebug(event, base, 'malformed memory_changed payload');
+    return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
   }
   return [
     {

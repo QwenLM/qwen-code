@@ -211,6 +211,23 @@ export interface DaemonSessionSummary {
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  isArchived?: boolean;
+}
+
+export type DaemonSessionArchiveState = 'active' | 'archived';
+
+export interface DaemonArchiveSessionsResult {
+  archived: string[];
+  alreadyArchived: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: string }>;
+}
+
+export interface DaemonUnarchiveSessionsResult {
+  unarchived: string[];
+  alreadyActive: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: string }>;
 }
 
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
@@ -550,6 +567,38 @@ export interface DaemonWriteMemoryResult {
    * `changed: true` (the legacy contract).
    */
   changed?: boolean;
+}
+
+export type DaemonWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+
+export type DaemonWorkspaceMemoryRememberTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed';
+
+export interface DaemonWorkspaceMemoryRememberResult {
+  summary?: string;
+  filesTouched: string[];
+  touchedScopes: Array<'user' | 'project'>;
+}
+
+export interface DaemonWorkspaceMemoryRememberTask {
+  taskId: string;
+  status: DaemonWorkspaceMemoryRememberTaskStatus;
+  contextMode: DaemonWorkspaceMemoryRememberContextMode;
+  createdAt: string;
+  updatedAt: string;
+  result?: DaemonWorkspaceMemoryRememberResult;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface DaemonWorkspaceMemoryRememberOptions {
+  contextMode?: DaemonWorkspaceMemoryRememberContextMode;
+  clientId?: string;
 }
 
 export type DaemonContentHash = `sha256:${string}`;

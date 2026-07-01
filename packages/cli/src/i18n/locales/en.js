@@ -1433,8 +1433,12 @@ export default {
     'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
-    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.",
   "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
     "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.",
   'Set a lighter model for prompt suggestions and speculative execution':
@@ -2291,6 +2295,36 @@ export default {
     'Failed to authenticate with Coding Plan: {{error}}',
   '中国 (China)': '中国 (China)',
   '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  'Get or set any setting by dot-path key':
+    'Get or set any setting by dot-path key',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    'Invalid boolean value: "{{value}}". Use "true" or "false".',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    'Cannot toggle a number setting. Provide a value: key=<number>.',
+  'Invalid number value: "{{value}}".': 'Invalid number value: "{{value}}".',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    'Cannot toggle a string setting. Provide a value: key=<value>.',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    'Cannot toggle an enum setting. Provide one of: {{options}}.',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    'Invalid enum value: "{{value}}". Valid values: {{options}}.',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
+  'Unsupported setting type: "{{type}}".':
+    'Unsupported setting type: "{{type}}".',
+  'Available settings:': 'Available settings:',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?',
+  'Unknown setting key: "{{key}}".': 'Unknown setting key: "{{key}}".',
+  'Failed to set "{{key}}": {{error}}': 'Failed to set "{{key}}": {{error}}',
+  'Set {{key}} = {{value}}': 'Set {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '(This setting requires a restart to take effect.)',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '(Security-sensitive setting — verify you are not exposing credentials.)',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.',
+  '(empty)': '(empty)',
   Global: 'Global',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Select region for Coding Plan:',

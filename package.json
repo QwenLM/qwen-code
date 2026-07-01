@@ -61,6 +61,7 @@
     "lint:ci": "eslint . --ext .ts,.tsx --max-warnings 0 && eslint integration-tests --max-warnings 0",
     "lint:sdk:python": "python3 -m ruff check --config packages/sdk-python/pyproject.toml packages/sdk-python",
     "lint:all": "node scripts/lint.js",
+    "audit:runtime:critical": "npm audit --omit=dev --audit-level=critical",
     "format": "prettier --experimental-cli --write .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "typecheck:sdk:python": "python3 -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src",
@@ -152,7 +153,7 @@
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "ink": "^7.0.3",
-    "simple-git": "^3.28.0"
+    "simple-git": "^3.36.0"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",

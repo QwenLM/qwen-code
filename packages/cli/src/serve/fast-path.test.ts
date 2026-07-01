@@ -552,6 +552,12 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('falls back to the full parser for daemon-managed channels', () => {
+    expect(parseServeFastPathArgs(['serve', '--channel', 'telegram'])).toEqual({
+      kind: 'fallback',
+    });
+  });
+
   it('handles every yargs serve long option or explicitly falls back', () => {
     const options = (
       buildServeCommandParser() as unknown as {
@@ -600,10 +606,11 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
-    const expectedFallbackOptions = new Set(['help', 'version']);
+    const expectedFallbackOptions = new Set(['channel', 'help', 'version']);
 
     expect(longOptionNames.sort()).toEqual(
       [...sampleArgvByOption.keys()].sort(),

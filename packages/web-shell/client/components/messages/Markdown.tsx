@@ -24,6 +24,7 @@ import {
 import { useI18n } from '../../i18n';
 import {
   useWebShellCustomization,
+  type MarkdownTableMode,
   type MarkdownContentSource,
 } from '../../customization';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
@@ -38,7 +39,7 @@ interface MarkdownProps {
    * the content settles, avoiding flicker and wasted re-tokenization.
    */
   isStreaming?: boolean;
-  enhanceTables?: boolean;
+  tableMode?: MarkdownTableMode;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -413,114 +414,11 @@ function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
 
-function PlainMarkdownTable({
-  children,
-  toggle,
-}: {
-  children?: ReactNode;
-  toggle?: ReactNode;
-}) {
+function PlainMarkdownTable({ children }: { children?: ReactNode }) {
   return (
     <div className={styles.tableWrapper}>
-      {toggle}
       <table className={styles.table}>{children}</table>
     </div>
-  );
-}
-
-function TableBasicIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="6" y="6" width="12" height="12" rx="1" />
-      <path d="M6 10h12" />
-      <path d="M6 14h12" />
-      <path d="M12 6v12" />
-    </svg>
-  );
-}
-
-const TableAdvancedIcon = TableBasicIcon;
-
-function ToggleableMarkdownTable({
-  children,
-  tableResetKey,
-}: {
-  children?: ReactNode;
-  tableResetKey: string;
-}) {
-  const [enhanced, setEnhanced] = useState(false);
-  const { t } = useI18n();
-
-  if (enhanced) {
-    const fallbackToggle = (
-      <button
-        className={`${styles.tableToggle} ${styles.tableToggleActive}`}
-        type="button"
-        onClick={() => setEnhanced(false)}
-        title={t('markdownTable.toggleBasic')}
-        aria-label={t('markdownTable.toggleBasic')}
-        aria-pressed={true}
-      >
-        <TableBasicIcon />
-      </button>
-    );
-    const fallback = (
-      <PlainMarkdownTable toggle={fallbackToggle}>
-        {children}
-      </PlainMarkdownTable>
-    );
-    const toolbarToggle = (
-      <button
-        className={`${styles.tableToggle} ${styles.tableToggleInline} ${styles.tableToggleActive}`}
-        type="button"
-        onClick={() => setEnhanced(false)}
-        title={t('markdownTable.toggleBasic')}
-        aria-label={t('markdownTable.toggleBasic')}
-        aria-pressed={true}
-      >
-        <TableBasicIcon />
-      </button>
-    );
-    const plainFallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
-    return (
-      <EnhancedMarkdownTableBoundary
-        fallback={fallback}
-        resetKey={tableResetKey}
-      >
-        <EnhancedMarkdownTable
-          fallback={plainFallback}
-          toolbarExtra={toolbarToggle}
-        >
-          {children}
-        </EnhancedMarkdownTable>
-      </EnhancedMarkdownTableBoundary>
-    );
-  }
-
-  const toggleButton = (
-    <button
-      className={styles.tableToggle}
-      type="button"
-      onClick={() => setEnhanced(true)}
-      title={t('markdownTable.toggleAdvanced')}
-      aria-label={t('markdownTable.toggleAdvanced')}
-      aria-pressed={false}
-    >
-      <TableAdvancedIcon />
-    </button>
-  );
-  return (
-    <PlainMarkdownTable toggle={toggleButton}>{children}</PlainMarkdownTable>
   );
 }
 
@@ -616,11 +514,11 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 }
 
 // `code`/`pre`/`a`/`img` are stable references; only `table` is created per
-// call (it closes over enhanceTables/tableResetKey). Recreating the components
+// call (it closes over tableMode/tableResetKey). Recreating the components
 // object for a table reset therefore never changes the `code` element type, so
 // code blocks are not remounted.
 function createComponents(
-  enhanceTables?: boolean,
+  tableMode: MarkdownTableMode = 'basic',
   tableResetKey = '',
 ): Components {
   return {
@@ -629,11 +527,17 @@ function createComponents(
     a: MarkdownLink,
     img: MarkdownImage,
     table({ children }: { children?: ReactNode }) {
-      if (enhanceTables) {
+      if (tableMode === 'advanced') {
+        const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
         return (
-          <ToggleableMarkdownTable tableResetKey={tableResetKey}>
-            {children}
-          </ToggleableMarkdownTable>
+          <EnhancedMarkdownTableBoundary
+            fallback={fallback}
+            resetKey={tableResetKey}
+          >
+            <EnhancedMarkdownTable fallback={fallback}>
+              {children}
+            </EnhancedMarkdownTable>
+          </EnhancedMarkdownTableBoundary>
         );
       }
       return <PlainMarkdownTable>{children}</PlainMarkdownTable>;
@@ -647,29 +551,32 @@ export const Markdown = memo(function Markdown({
   content,
   source,
   isStreaming,
-  enhanceTables,
+  tableMode,
 }: MarkdownProps) {
-  const { markdown } = useWebShellCustomization();
+  const { markdown, markdownTableMode } = useWebShellCustomization();
   const sourceMarkdown = source ? markdown : undefined;
   const renderedContent =
     content && source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
+  const effectiveTableMode = isStreaming
+    ? 'basic'
+    : (tableMode ?? markdownTableMode ?? 'basic');
   const components = useMemo(() => {
-    if (enhanceTables) {
-      return createComponents(true, renderedContent);
+    if (effectiveTableMode === 'advanced') {
+      return createComponents('advanced', renderedContent);
     }
     return COMPONENTS_DEFAULT;
-  }, [enhanceTables, renderedContent]);
+  }, [effectiveTableMode, renderedContent]);
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
     return {
       ...components,
       ...sourceComponents,
-      ...(enhanceTables ? { table: components.table } : {}),
+      ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
-  }, [components, enhanceTables, sourceComponents]);
+  }, [components, effectiveTableMode, sourceComponents]);
 
   if (!content) return null;
   const remarkPlugins = sourceMarkdown?.remarkPlugins

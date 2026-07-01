@@ -629,6 +629,35 @@ export default {
   // ============================================================================
   // Commands - General (continued)
   // ============================================================================
+  'Get or set any setting by dot-path key':
+    '通过点号路径键查看或设置任意配置项',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    '无效的布尔值："{{value}}"。请使用 "true" 或 "false"。',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    '无法切换数字类型的设置。请提供值：key=<number>。',
+  'Invalid number value: "{{value}}".': '无效的数字值："{{value}}"。',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    '无法切换字符串类型的设置。请提供值：key=<value>。',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    '无法切换枚举类型的设置。请提供以下选项之一：{{options}}。',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    '无效的枚举值："{{value}}"。有效值：{{options}}。',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    '"{{type}}" 类型的设置无法通过 /config 修改。请直接编辑 settings.json。',
+  'Unsupported setting type: "{{type}}".': '不支持的设置类型："{{type}}"。',
+  'Available settings:': '可用设置：',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    '未知的设置键："{{key}}"。您是不是想设置 "{{suggestion}}"？',
+  'Unknown setting key: "{{key}}".': '未知的设置键："{{key}}"。',
+  'Failed to set "{{key}}": {{error}}': '设置 "{{key}}" 失败：{{error}}',
+  'Set {{key}} = {{value}}': '已设置 {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '（此设置需要重启才能生效。）',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '（安全敏感设置 — 请确认您没有泄露凭据。）',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    '出于安全原因，禁止通过 /config 将 tools.approvalMode 设置为 "yolo"。如果您了解相关风险，请直接编辑 settings.json。',
+  '(empty)': '（空）',
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   Settings: '设置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
@@ -1344,8 +1373,12 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
-    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    "此模式不支持内联一次性覆盖——请先运行 '/model {{model}}'，再发送你的提示。",
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    "内联一次性覆盖无法切换 provider。'{{model}}' 属于另一个 provider——请先运行 '/model {{model}}'，再发送你的提示。",
   "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
     "⚠ '{{model}}' 不是已知的图像能力模型；视觉桥接处理图片时可能会失败。",
   'Set a lighter model for prompt suggestions and speculative execution':

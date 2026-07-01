@@ -1302,6 +1302,49 @@ describe('daemon event schema', () => {
     expect(asKnownDaemonEvent(missing)).toBeUndefined();
   });
 
+  it('narrows managed memory_changed events from hidden remember tasks', () => {
+    const valid: DaemonEvent = {
+      id: 10,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['project', 'user'],
+      },
+    };
+
+    const known = asKnownDaemonEvent(valid);
+    expect(known?.type).toBe('memory_changed');
+    expect(isDaemonEventType(valid, 'memory_changed')).toBe(true);
+
+    const missingTask: DaemonEvent = {
+      id: 11,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        touchedScopes: ['project'],
+      },
+    };
+    expect(asKnownDaemonEvent(missingTask)).toBeUndefined();
+
+    const badTouchedScope: DaemonEvent = {
+      id: 12,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['bad'],
+      },
+    };
+    expect(asKnownDaemonEvent(badTouchedScope)).toBeUndefined();
+  });
+
   it('narrows agent_changed events and rejects malformed payloads', () => {
     const valid: DaemonEvent = {
       id: 10,

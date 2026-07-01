@@ -95,6 +95,7 @@ import type {
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import * as uiTelemetry from './uiTelemetry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 describe('loggers', () => {
   const mockLogger = {
@@ -250,6 +251,32 @@ describe('loggers', () => {
           prompt: 'test-prompt',
           prompt_id: 'prompt-id-8',
           auth_type: 'vertex-ai',
+        },
+      });
+    });
+
+    it('should include the model attribute when set (e.g. inline override)', () => {
+      const event = new UserPromptEvent(
+        11,
+        'prompt-id-model',
+        AuthType.USE_OPENAI,
+        'test-prompt',
+        'qwen-max',
+      );
+
+      logUserPrompt(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'User prompt. Length: 11.',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_USER_PROMPT,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          prompt_length: 11,
+          prompt: 'test-prompt',
+          prompt_id: 'prompt-id-model',
+          auth_type: 'openai',
+          model: 'qwen-max',
         },
       });
     });
@@ -479,6 +506,30 @@ describe('loggers', () => {
       logApiResponse(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('suppresses chatRecordingService writes inside hidden runs', () => {
+      const mockRecordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => false,
+        getChatRecordingService: () => ({
+          recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+        }),
+      } as unknown as Config;
+
+      const event = new ApiResponseEvent(
+        'resp-id',
+        'test-model',
+        50,
+        'user_query',
+      );
+      runWithChatRecordingSuppressed(() => {
+        logApiResponse(configWithRecording, event);
+      });
+
+      expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+      expect(mockUiEvent.addEvent).toHaveBeenCalled();
     });
   });
 
