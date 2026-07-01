@@ -18,7 +18,9 @@ export function levelLabel(level: SkillLevel): string {
       return t('Extension');
     case 'bundled':
       return t('Bundled');
-    default:
-      return level;
+    default: {
+      const _exhaustive: never = level;
+      return _exhaustive;
+    }
   }
 }
