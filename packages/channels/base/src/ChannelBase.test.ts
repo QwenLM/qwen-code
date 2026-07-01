@@ -32,6 +32,7 @@ class TestChannel extends ChannelBase {
     [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
+  responseCompleteGate?: Promise<void>;
 
   async connect() {
     this.connected = true;
@@ -91,6 +92,15 @@ class TestChannel extends ChannelBase {
     sessionId: string,
   ): void {
     this.responseChunks.push({ chatId, chunk, sessionId });
+  }
+
+  protected override async onResponseComplete(
+    chatId: string,
+    fullText: string,
+    sessionId: string,
+  ): Promise<void> {
+    await this.responseCompleteGate;
+    await super.onResponseComplete(chatId, fullText, sessionId);
   }
 }
 
@@ -4639,6 +4649,62 @@ describe('ChannelBase', () => {
       });
     });
 
+    it('dispatches shared-router tool calls through the active prompt context', async () => {
+      let resolveSecond!: (value: string) => void;
+      const pendingSecond = new Promise<string>((resolve) => {
+        resolveSecond = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce('first')
+        .mockReturnValueOnce(pendingSecond);
+      const ch = createChannel({ sessionScope: 'single' });
+
+      await ch.handleInbound(
+        envelope({ chatId: 'first-chat', senderId: 'alice' }),
+      );
+      const secondPrompt = ch.handleInbound(
+        envelope({
+          chatId: 'second-chat',
+          senderId: 'bob',
+          messageId: 'second-message',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![0] as string;
+      const toolCall = {
+        sessionId,
+        toolCallId: 'tool-shared',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+        rawInput: { path: 'README.md' },
+      };
+
+      ch.dispatchToolCall(toolCall);
+
+      expect(ch.toolCalls).toEqual([
+        { chatId: 'second-chat', event: toolCall },
+      ]);
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'tool_call',
+            chatId: 'second-chat',
+            messageId: 'second-message',
+            toolCall: expect.objectContaining({ toolCallId: 'tool-shared' }),
+          }),
+        ]),
+      );
+      const lifecycleToolCall = ch.taskEvents.find(
+        (event) => event.type === 'tool_call',
+      );
+      expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
+
+      resolveSecond('second response');
+      await secondPrompt;
+    });
+
     it('emits failed lifecycle event when prompting rejects', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error('agent boom'),
@@ -4735,12 +4801,9 @@ describe('ChannelBase', () => {
       );
       resolvePrompt('late response');
       await Promise.resolve();
-      expect(ch.taskEvents).not.toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ type: 'text_chunk' }),
-          expect.objectContaining({ type: 'completed' }),
-        ]),
-      );
+      const eventTypes = ch.taskEvents.map((event) => event.type);
+      expect(eventTypes).not.toContain('text_chunk');
+      expect(eventTypes).not.toContain('completed');
       expect(ch.responseChunks).toEqual([]);
       resolveCancel();
       await Promise.all([prompt, cancel]);
@@ -4808,6 +4871,42 @@ describe('ChannelBase', () => {
       await cancel;
       resolvePrompt('late');
       await prompt;
+    });
+
+    it('does not emit completed when cancellation starts during response delivery', async () => {
+      let releaseDelivery!: () => void;
+      const deliveryGate = new Promise<void>((resolve) => {
+        releaseDelivery = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.responseCompleteGate = deliveryGate;
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      releaseDelivery();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(ch.taskEvents.map((event) => event.type)).not.toContain(
+        'completed',
+      );
+
+      resolveCancel();
+      await Promise.all([prompt, cancel]);
+      expect(ch.taskEvents.map((event) => event.type)).toEqual([
+        'started',
+        'cancelled',
+      ]);
     });
 
     it('emits one cancellation lifecycle event for repeated /cancel commands', async () => {

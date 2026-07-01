@@ -8,6 +8,7 @@ import type {
   ChannelTaskLifecycleEvent,
   DispatchMode,
   Envelope,
+  SanitizedToolCallEvent,
   SessionTarget,
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
@@ -182,31 +183,37 @@ export abstract class ChannelBase {
     Array<{ text: string; envelope: Envelope }>
   > = new Map();
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
-    const target = this.router.getTarget(event.sessionId);
-    if (target) {
-      const active = this.activePrompts.get(event.sessionId);
-      if (active && !active.cancelled && !active.cancelPending) {
-        const safeToolCall: ToolCallEvent = {
-          sessionId: event.sessionId,
-          toolCallId: event.toolCallId,
-          kind: sanitizeLogText(event.kind, 20),
-          title: sanitizeLogText(event.title, 80),
-          status: sanitizeLogText(event.status, 20),
-        };
-        this.emitTaskLifecycle({
-          ...this.lifecycleBase(target.chatId, event.sessionId),
-          type: 'tool_call',
-          toolCall: safeToolCall,
-        });
-      }
-      this.onToolCall(target.chatId, event);
-    }
+    this.dispatchToolCall(event);
   };
   private readonly bridgeSessionDiedListener = (
     event: SessionDiedEvent,
   ): void => {
     this.onSessionDied(event.sessionId);
   };
+
+  dispatchToolCall(event: ToolCallEvent): void {
+    const target = this.router.getTarget(event.sessionId);
+    const active = this.activePrompts.get(event.sessionId);
+    const chatId = active?.chatId ?? target?.chatId;
+    if (!chatId) {
+      return;
+    }
+    if (active && !active.cancelled && !active.cancelPending) {
+      const safeToolCall: SanitizedToolCallEvent = {
+        sessionId: event.sessionId,
+        toolCallId: event.toolCallId,
+        kind: sanitizeLogText(event.kind, 20),
+        title: sanitizeLogText(event.title, 80),
+        status: sanitizeLogText(event.status, 20),
+      };
+      this.emitTaskLifecycle({
+        ...this.lifecycleBase(chatId, event.sessionId, active.messageId),
+        type: 'tool_call',
+        toolCall: safeToolCall,
+      });
+    }
+    this.onToolCall(chatId, event);
+  }
 
   constructor(
     name: string,
@@ -557,12 +564,7 @@ export abstract class ChannelBase {
           job.id,
           options.timeoutMs,
         );
-        if (promptState.cancelRequested && !promptState.cancelled) {
-          const cancelled = await promptState.cancelRequested;
-          if (cancelled) {
-            promptState.cancelled = true;
-          }
-        }
+        await this.settleCancelRequested(promptState);
         if (promptState.cancelled) {
           throw new ChannelLoopSkippedError('loop cancelled before delivery');
         }
@@ -575,6 +577,7 @@ export abstract class ChannelBase {
         if (response && !promptState.cancelled) {
           await this.pushProactive(job.target, response);
         }
+        await this.settleCancelRequested(promptState);
         if (promptState.cancelled) {
           throw new ChannelLoopSkippedError('loop cancelled before delivery');
         }
@@ -584,12 +587,7 @@ export abstract class ChannelBase {
         });
         return response;
       } catch (err) {
-        if (promptState.cancelRequested && !promptState.cancelled) {
-          const cancelled = await promptState.cancelRequested;
-          if (cancelled) {
-            promptState.cancelled = true;
-          }
-        }
+        await this.settleCancelRequested(promptState);
         if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
           this.emitTaskCancellation(promptState, sessionId, 'timeout');
           promptState.cancelled = true;
@@ -734,6 +732,27 @@ export abstract class ChannelBase {
       );
     } finally {
       clearTimeout(graceTimer);
+    }
+  }
+
+  private async settleCancelRequested(active: ActivePrompt): Promise<void> {
+    if (!active.cancelRequested || active.cancelled) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const cancelled = await Promise.race([
+        active.cancelRequested,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), CLEAR_CANCEL_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+      if (cancelled) {
+        active.cancelled = true;
+      }
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -2447,12 +2466,7 @@ export abstract class ChannelBase {
           imageMimeType,
         });
 
-        if (promptState.cancelRequested && !promptState.cancelled) {
-          const cancelled = await promptState.cancelRequested;
-          if (cancelled) {
-            promptState.cancelled = true;
-          }
-        }
+        await this.settleCancelRequested(promptState);
 
         // If cancelled, skip sending the response
         if (!promptState.cancelled && response) {
@@ -2462,6 +2476,7 @@ export abstract class ChannelBase {
             await this.onResponseComplete(envelope.chatId, response, sessionId);
           }
         }
+        await this.settleCancelRequested(promptState);
         if (!promptState.cancelled) {
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
@@ -2473,12 +2488,7 @@ export abstract class ChannelBase {
           });
         }
       } catch (err) {
-        if (promptState.cancelRequested && !promptState.cancelled) {
-          const cancelled = await promptState.cancelRequested;
-          if (cancelled) {
-            promptState.cancelled = true;
-          }
-        }
+        await this.settleCancelRequested(promptState);
         if (!promptState.cancelled) {
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
