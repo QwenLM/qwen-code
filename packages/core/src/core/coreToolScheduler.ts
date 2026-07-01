@@ -812,6 +812,7 @@ const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
   errorType: ToolErrorType | undefined,
+  artifacts?: ToolArtifact[],
 ): ToolCallResponseInfo => ({
   callId: request.callId,
   error,
@@ -827,7 +828,33 @@ const createErrorResponse = (
   resultDisplay: error.message,
   errorType,
   contentLength: error.message.length,
+  ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
 });
+
+const createCancelledResponse = (
+  request: ToolCallRequestInfo,
+  reason: string,
+  artifacts?: ToolArtifact[],
+): ToolCallResponseInfo => {
+  const errorMessage = `[Operation Cancelled] Reason: ${reason}`;
+  return {
+    callId: request.callId,
+    responseParts: [
+      {
+        functionResponse: {
+          id: request.callId,
+          name: request.name,
+          response: { error: errorMessage },
+        },
+      },
+    ],
+    resultDisplay: undefined,
+    error: undefined,
+    errorType: undefined,
+    contentLength: errorMessage.length,
+    ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
+  };
+};
 
 function serializeToolResponse(
   response: ToolCallResponseInfo,
@@ -1191,7 +1218,7 @@ export class CoreToolScheduler {
   private setStatusInternal(
     targetCallId: string,
     status: 'cancelled',
-    reason: string,
+    reason: string | ToolCallResponseInfo,
   ): void;
   private setStatusInternal(
     targetCallId: string,
@@ -1304,30 +1331,36 @@ export class CoreToolScheduler {
           }
 
           const errorMessage = `[Operation Cancelled] Reason: ${auxiliaryData}`;
+          const response =
+            typeof auxiliaryData === 'object' && auxiliaryData !== null
+              ? (auxiliaryData as ToolCallResponseInfo)
+              : {
+                  callId: currentCall.request.callId,
+                  responseParts: [
+                    {
+                      functionResponse: {
+                        id: currentCall.request.callId,
+                        name: currentCall.request.name,
+                        response: {
+                          error: errorMessage,
+                        },
+                      },
+                    },
+                  ],
+                  resultDisplay:
+                    this.compactResultDisplayForInteractiveHistory(
+                      resultDisplay,
+                    ),
+                  error: undefined,
+                  errorType: undefined,
+                  contentLength: errorMessage.length,
+                };
           return {
             request: currentCall.request,
             tool: toolInstance,
             invocation,
             status: 'cancelled',
-            response: {
-              callId: currentCall.request.callId,
-              responseParts: [
-                {
-                  functionResponse: {
-                    id: currentCall.request.callId,
-                    name: currentCall.request.name,
-                    response: {
-                      error: errorMessage,
-                    },
-                  },
-                },
-              ],
-              resultDisplay:
-                this.compactResultDisplayForInteractiveHistory(resultDisplay),
-              error: undefined,
-              errorType: undefined,
-              contentLength: errorMessage.length,
-            },
+            response,
             durationMs,
             outcome,
           } as CancelledToolCall;
@@ -3741,6 +3774,7 @@ export class CoreToolScheduler {
         // It is a failure
         // PostToolUseFailure Hook
         let errorMessage = toolResult.error.message;
+        let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
             {
@@ -3767,6 +3801,7 @@ export class CoreToolScheduler {
           if (failureHookResult.additionalContext) {
             errorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
+          failureHookArtifacts = failureHookResult.artifacts;
         }
 
         // Truncate oversized error messages (e.g., large stderr)
@@ -3796,6 +3831,7 @@ export class CoreToolScheduler {
           scheduledCall.request,
           error,
           toolResult.error.type,
+          failureHookArtifacts,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
@@ -3826,6 +3862,7 @@ export class CoreToolScheduler {
       if (aborted) {
         // PostToolUseFailure Hook (user interrupt)
         let cancelMessage = 'User cancelled tool execution.';
+        let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
             {
@@ -3852,18 +3889,30 @@ export class CoreToolScheduler {
           if (failureHookResult.additionalContext) {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
+          failureHookArtifacts = failureHookResult.artifacts;
         }
         this.safelyAddToolResultAttributes(
           span,
           toolName,
           `CANCELLED: ${cancelMessage}`,
         );
-        this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        this.setStatusInternal(
+          callId,
+          'cancelled',
+          failureHookArtifacts && failureHookArtifacts.length > 0
+            ? createCancelledResponse(
+                scheduledCall.request,
+                cancelMessage,
+                failureHookArtifacts,
+              )
+            : cancelMessage,
+        );
         setToolSpanCancelled(span);
         return;
       } else {
         // PostToolUseFailure Hook
         let exceptionErrorMessage = errorMessage;
+        let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
             {
@@ -3890,6 +3939,7 @@ export class CoreToolScheduler {
           if (failureHookResult.additionalContext) {
             exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
+          failureHookArtifacts = failureHookResult.artifacts;
         }
         this.safelyAddToolResultAttributes(
           span,
@@ -3905,6 +3955,7 @@ export class CoreToolScheduler {
               ? new Error(exceptionErrorMessage)
               : new Error(String(executionError)),
             ToolErrorType.UNHANDLED_EXCEPTION,
+            failureHookArtifacts,
           ),
         );
         setToolSpanFailure(

@@ -130,6 +130,8 @@ function isTrustedArtifactToolUpdate(
     sessionUpdate?: unknown;
     status?: unknown;
   };
+  // ToolCallEmitter stamps _meta.toolName from the actual tool invocation. The
+  // artifact payload itself is never allowed to self-declare publisher trust.
   return (
     update.sessionUpdate === 'tool_call_update' &&
     update.status === 'completed' &&
@@ -867,6 +869,9 @@ export class BridgeClient implements Client {
       );
       return;
     }
+    // Hook artifact events are tied to the active prompt lifecycle. Late events
+    // from an already-finished prompt are dropped instead of mutating an idle
+    // session behind the client's current snapshot.
     if (entry.promptActive !== true) {
       writeStderrLine(
         `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_idle`,

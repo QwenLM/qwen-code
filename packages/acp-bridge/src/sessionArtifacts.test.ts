@@ -206,6 +206,43 @@ describe('SessionArtifactStore', () => {
     expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
   });
 
+  it('uses managedId as identity when published artifacts also include a url', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-managed-identity',
+      workspaceCwd: workspace,
+    });
+
+    const first = await store.upsertMany(
+      [
+        {
+          title: 'Published A',
+          storage: 'published',
+          managedId: 'managed-a',
+          url: 'https://example.com/shared',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    const second = await store.upsertMany(
+      [
+        {
+          title: 'Published B',
+          storage: 'published',
+          managedId: 'managed-b',
+          url: 'https://example.com/shared',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(first.changes[0]?.action).toBe('created');
+    expect(second.changes[0]?.action).toBe('created');
+    expect((await store.list()).artifacts).toEqual([
+      expect.objectContaining({ managedId: 'managed-a' }),
+      expect.objectContaining({ managedId: 'managed-b' }),
+    ]);
+  });
+
   it('evicts non-retained old artifacts before client-retained artifacts', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's3',
@@ -239,7 +276,7 @@ describe('SessionArtifactStore', () => {
     );
   });
 
-  it('drops new overflow instead of evicting existing client-retained artifacts', async () => {
+  it('evicts the oldest client-retained artifact when no other overflow candidate exists', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's3-retained',
       workspaceCwd: workspace,
@@ -265,10 +302,16 @@ describe('SessionArtifactStore', () => {
       { title: 'Tool overflow', url: 'https://example.com/tool-overflow' },
     ]);
 
-    expect(overflow.changes).toEqual([]);
+    expect(overflow.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: first.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
     expect(
       (await store.list()).artifacts.map((artifact) => artifact.id),
-    ).toEqual([first.changes[0]?.artifactId, second.changes[0]?.artifactId]);
+    ).toEqual([second.changes[0]?.artifactId, overflow.changes[0]?.artifactId]);
   });
 
   it('rejects workspace path traversal', async () => {
@@ -463,6 +506,18 @@ describe('SessionArtifactStore', () => {
       store.upsertMany(
         [
           {
+            title: 'safe\u202eevil',
+            url: 'https://example.com/bidi',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
             title: 'Report',
             url: 'https://example.com/metadata',
             metadata: { preview: '<iframe src="https://example.com">' },
@@ -606,7 +661,10 @@ describe('SessionArtifactStore', () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date(Date.now() + 6_000));
       const artifact = (await store.list()).artifacts[0];
-      expect(artifact).toMatchObject({ status: 'missing' });
+      expect(artifact).toMatchObject({
+        status: 'missing',
+        storage: 'external_url',
+      });
       expect(artifact).not.toHaveProperty('sizeBytes');
       expect(artifact).not.toHaveProperty('workspacePath');
     } finally {

@@ -6535,6 +6535,58 @@ describe('CoreToolScheduler telemetry spans', () => {
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
   });
 
+  it('preserves PostToolUseFailure artifacts on toolResult.error responses', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'failure-hook',
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              artifacts: [
+                {
+                  title: 'Failure report',
+                  workspacePath: 'reports/failure.html',
+                },
+              ],
+            },
+          },
+        }),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'tool failed',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Failure report',
+          workspacePath: 'reports/failure.html',
+        },
+      ]);
+    }
+  });
+
   it('sets tool failure status when span attribute recording fails', async () => {
     const { spanRecord, completedCalls } = await runSingleTool({
       throwSpanSetAttribute: true,
@@ -7166,6 +7218,51 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(failureHookSpan!.hookMetadata?.success).toBe(true);
   });
 
+  it('preserves PostToolUseFailure artifacts on user-abort cancellations', async () => {
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${req.eventName}-hook`,
+        success: true,
+        output:
+          req.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  artifacts: [
+                    {
+                      title: 'Cancel report',
+                      workspacePath: 'reports/cancel.html',
+                    },
+                  ],
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        throw new Error('aborted');
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('cancelled');
+    if (completedCall.status === 'cancelled') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Cancel report',
+          workspacePath: 'reports/cancel.html',
+        },
+      ]);
+    }
+  });
+
   it('PostToolUseFailure hook span records is_interrupt=false on real exception path (#4321)', async () => {
     // Companion to the abort test — same hook event but the
     // executeError-not-from-abort branch tags is_interrupt:false. A
@@ -7192,6 +7289,46 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(failureHookSpan).toBeDefined();
     expect(failureHookSpan!.attributes['is_interrupt']).toBe(false);
     expect(failureHookSpan!.hookMetadata?.success).toBe(true);
+  });
+
+  it('preserves PostToolUseFailure artifacts on thrown exceptions', async () => {
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${req.eventName}-hook`,
+        success: true,
+        output:
+          req.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  artifacts: [
+                    {
+                      title: 'Exception report',
+                      workspacePath: 'reports/exception.html',
+                    },
+                  ],
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockRejectedValue(new Error('real boom')),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Exception report',
+          workspacePath: 'reports/exception.html',
+        },
+      ]);
+    }
   });
 
   it('every span recorded in a successful tool call is ended (#3731 Phase 2)', async () => {

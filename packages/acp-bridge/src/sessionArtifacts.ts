@@ -173,33 +173,38 @@ export class SessionArtifactStore {
     options: { strict?: boolean; trustedPublisher?: boolean } = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
-      const normalized: NormalizedArtifact[] = [];
-      for (const input of inputs) {
-        try {
-          normalized.push(
-            await this.normalizeInput(
+      const normalizedResults = await Promise.all(
+        inputs.map(async (input) => {
+          try {
+            return await this.normalizeInput(
               input,
               ++this.receivedSeq,
               options.trustedPublisher === true,
-            ),
-          );
-        } catch (error) {
-          if (options.strict) {
-            throw error;
+            );
+          } catch (error) {
+            if (options.strict) {
+              throw error;
+            }
+            const message =
+              error instanceof Error ? error.message : String(error);
+            writeStderrLine(
+              `[artifacts] session=${this.sessionId} action=dropped reason=${JSON.stringify(
+                message,
+              )}`,
+            );
+            return undefined;
           }
-          const message =
-            error instanceof Error ? error.message : String(error);
-          writeStderrLine(
-            `[artifacts] session=${this.sessionId} action=dropped reason=${JSON.stringify(
-              message,
-            )}`,
-          );
-        }
-      }
+        }),
+      );
+      const normalized = normalizedResults.filter(
+        (artifact): artifact is NormalizedArtifact => artifact !== undefined,
+      );
 
       const changes: SessionArtifactChange[] = [];
       for (const artifact of coalesceByIdentity(normalized)) {
-        const existing = this.artifacts.get(artifact.id);
+        const existing =
+          this.artifacts.get(artifact.id) ??
+          this.findPublishedUpgradeTarget(artifact);
         if (!existing) {
           const stored: StoredArtifact = {
             ...artifact,
@@ -236,6 +241,22 @@ export class SessionArtifactStore {
     });
   }
 
+  private findPublishedUpgradeTarget(
+    artifact: NormalizedArtifact,
+  ): StoredArtifact | undefined {
+    if (
+      artifact.storage !== 'published' ||
+      !artifact.trustedPublisher ||
+      !artifact.managedId ||
+      !artifact.url
+    ) {
+      return undefined;
+    }
+    return this.artifacts.get(
+      stableArtifactId(this.sessionId, `url:${artifact.url}`),
+    );
+  }
+
   async remove(
     artifactId: string,
     options?: { clientId?: string },
@@ -245,6 +266,9 @@ export class SessionArtifactStore {
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
+      // Client-created artifacts are owner-protected when the route has a
+      // daemon client id. Tool/hook artifacts are session-scoped outputs and
+      // may be removed by any caller that already passed session mutation auth.
       if (
         existing.source === 'client' &&
         existing.clientId !== undefined &&
@@ -419,6 +443,7 @@ export class SessionArtifactStore {
       artifact.sizeBytes = status.sizeBytes;
       if (status.escaped) {
         delete artifact.workspacePath;
+        artifact.storage = 'external_url';
       }
       artifact.lastStatAt = options.now ?? Date.now();
     } catch (error) {
@@ -742,7 +767,8 @@ function selectEvictionCandidate(
             SOURCE_RESERVATIONS[artifact.retentionSource],
       ),
     ) ??
-    oldest(candidates.filter((artifact) => !artifact.clientRetained))
+    oldest(candidates.filter((artifact) => !artifact.clientRetained)) ??
+    oldest(candidates)
   );
 }
 
@@ -938,7 +964,7 @@ function buildIdentityKey(input: {
   url?: string;
 }): string {
   if (input.workspacePath) return `workspace:${input.workspacePath}`;
-  if (input.managedId && !input.url) return `managed:${input.managedId}`;
+  if (input.managedId) return `managed:${input.managedId}`;
   if (input.url) return `url:${input.url}`;
   throw new SessionArtifactValidationError(
     'artifact identity requires workspacePath, managedId, or url',
@@ -1016,7 +1042,13 @@ function normalizeString(
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
-    if (code <= 0x1f || code === 0x7f) {
+    if (
+      code <= 0x1f ||
+      code === 0x7f ||
+      (code >= 0x200b && code <= 0x200f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      code === 0xfeff
+    ) {
       return true;
     }
   }
