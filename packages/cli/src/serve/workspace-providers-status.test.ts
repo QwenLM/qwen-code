@@ -15,6 +15,13 @@ const coreMock = vi.hoisted(() => ({
   throwModelsConfigError: false,
   modelsConfigErrorMessage:
     'Failed loading provider https://user:secret@broken.example/v1',
+  debugLogger: {
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    isEnabled: vi.fn(() => false),
+    warn: vi.fn(),
+  },
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -30,6 +37,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   }
   return {
     ...actual,
+    createDebugLogger: () => coreMock.debugLogger,
     ModelsConfig: TestModelsConfig,
   };
 });
@@ -62,6 +70,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     coreMock.throwModelsConfigError = false;
     coreMock.modelsConfigErrorMessage =
       'Failed loading provider https://user:secret@broken.example/v1';
+    coreMock.debugLogger.warn.mockClear();
     resetHomeEnvBootstrapForTesting();
   });
 
@@ -120,6 +129,42 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const second = await provider(workspace, false);
     expect(second.current?.modelId).toBe('model-b(openai)');
+  });
+
+  it('returns the workspace approval mode', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      tools: { approvalMode: 'yolo' },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('yolo');
+  });
+
+  it('normalizes legacy workspace approval mode spelling', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      tools: { approvalMode: 'auto_edit' },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('auto-edit');
+  });
+
+  it('warns and falls back for an unknown workspace approval mode', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      tools: { approvalMode: 'auto-edt' },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('default');
+    expect(coreMock.debugLogger.warn).toHaveBeenCalledWith(
+      '[workspace-providers-status] unrecognized approvalMode "auto-edt", falling back to default',
+    );
   });
 
   it('marks only the model matching persisted model.baseUrl as current', async () => {
