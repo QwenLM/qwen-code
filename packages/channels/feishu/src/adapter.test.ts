@@ -642,7 +642,7 @@ describe('FeishuChannel', () => {
   });
 
   describe('onCardAction: cancelSession failure', () => {
-    it('shows "停止失败" when cancelSession throws', async () => {
+    it('shows failed status when cancelSession throws', async () => {
       const bridge = createMockBridge();
       (bridge.cancelSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
         new Error('session not found'),
@@ -704,7 +704,7 @@ describe('FeishuChannel', () => {
 
       expect(updateCardSpy).toHaveBeenCalled();
       const cardText = updateCardSpy.mock.calls[0][1] as string;
-      expect(cardText).toContain('停止失败');
+      expect(cardText).toContain('已失败，请重试');
     });
   });
 
@@ -1069,6 +1069,38 @@ describe('FeishuChannel', () => {
       expect(updateCard.mock.calls[0]![1]).toContain('已取消');
     });
 
+    it('treats prompt-end during stop cancellation as cancelled', async () => {
+      const channel = createChannel();
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      cardSessions.set('inbound_1', {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: false,
+        cancelling: true,
+        accumulatedText: 'partial answer',
+        lastUpdateAt: Date.now(),
+      });
+
+      const updateCard = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      expect(updateCard.mock.calls[0]![1]).toContain('已取消');
+    });
+
     it('finalizes creating cards as failed instead of stopped after prompt end', async () => {
       const channel = createChannel();
       let resolveCreateCard:
@@ -1298,6 +1330,44 @@ describe('FeishuChannel', () => {
       );
 
       expect(updateCard.mock.calls[0]![1]).toContain('已完成');
+    });
+
+    it('reserves final card space for the completed status label', async () => {
+      const channel = createChannel();
+      const sessionToInboundMsg = getPrivateMethod<Map<string, string>>(
+        channel,
+        'sessionToInboundMsg',
+      );
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      sessionToInboundMsg.set('session_1', 'inbound_1');
+      cardSessions.set('inbound_1', {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'answer',
+        lastUpdateAt: Date.now(),
+      });
+
+      const updateCard = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+
+      await getPrivateMethod<
+        (chatId: string, fullText: string, sessionId: string) => Promise<void>
+      >(channel, 'onResponseComplete').call(
+        channel,
+        'oc_chat_id',
+        'x'.repeat(20_000),
+        'session_1',
+      );
+
+      const rendered = updateCard.mock.calls[0]![1] as string;
+      expect(rendered).toContain('已完成');
+      expect(rendered.length).toBeLessThanOrEqual(20_000);
     });
   });
 

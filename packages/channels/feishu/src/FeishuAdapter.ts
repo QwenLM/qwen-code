@@ -1093,14 +1093,19 @@ export class FeishuChannel extends ChannelBase {
     const atSender = this.msgToSenderName.get(inboundMsgId);
     let displayText = atSender ? `${atSender}\n\n${fullText}` : fullText;
     const completedLabel = this.statusLabelFor('completed');
+    const completedSuffix = `\n\n---\n*${completedLabel}*`;
     // Enforce card size limit to avoid wasted API round-trips
     const MAX_FINAL_CARD_CHARS = 20_000;
-    if (displayText.length > MAX_FINAL_CARD_CHARS) {
+    if (displayText.length + completedSuffix.length > MAX_FINAL_CARD_CHARS) {
       const prefix = atSender ? `${atSender}\n\n` : '';
       const suffix = '\n\n_(内容过长，已截断早期内容)_';
       const fenceReserve = 4; // potential '```\n' prepend for fence rebalancing
       const maxBody =
-        MAX_FINAL_CARD_CHARS - prefix.length - suffix.length - fenceReserve;
+        MAX_FINAL_CARD_CHARS -
+        prefix.length -
+        suffix.length -
+        completedSuffix.length -
+        fenceReserve;
       displayText = prefix + fullText.slice(-maxBody) + suffix;
       // Re-balance code fences after truncation (line-by-line, handles indented fences)
       if (this.countFences(displayText) % 2 === 1) {
@@ -1153,14 +1158,14 @@ export class FeishuChannel extends ChannelBase {
     if (cardState?.created) {
       const updated = await this.updateCard(
         cardState.messageId,
-        `${displayText}\n\n---\n*${completedLabel}*`,
+        `${displayText}${completedSuffix}`,
         true,
         inboundMsgId,
       );
       if (!updated) {
         // Fallback: try without tables (card table number limit, code-fence aware)
         const noTableText = this.stripTables(
-          `${displayText}\n\n---\n*${completedLabel}*`,
+          `${displayText}${completedSuffix}`,
           '(表格内容请查看原文)',
         );
         const retried = await this.updateCard(
@@ -1206,7 +1211,7 @@ export class FeishuChannel extends ChannelBase {
     if (result.success) {
       const finalized = await this.updateCard(
         result.messageId,
-        `${displayText}\n\n---\n*${completedLabel}*`,
+        `${displayText}${completedSuffix}`,
         true,
         inboundMsgId,
       );
@@ -1335,7 +1340,8 @@ export class FeishuChannel extends ChannelBase {
         } else if (cs.created) {
           cs.stopped = true;
           const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
-          const terminalStatus = cs.terminalStatus || 'failed';
+          const terminalStatus =
+            cs.terminalStatus ?? (cs.cancelling ? 'cancelled' : 'failed');
           const terminalLabel = this.statusLabelFor(terminalStatus);
           const text = cs.accumulatedText
             ? (atPrefix
@@ -1573,8 +1579,8 @@ export class FeishuChannel extends ChannelBase {
           const prefix =
             cardState.atPrefix || this.msgToSenderName.get(inboundId) || '';
           const stopLabel = cancelSucceeded
-            ? '*已停止生成*'
-            : '*停止失败，请重试*';
+            ? `*${this.stopLabelFor(cardState.terminalStatus)}*`
+            : `*${this.statusLabelFor('failed')}*`;
           const contentPart = cardState.accumulatedText.trim()
             ? cardState.accumulatedText + '\n\n---\n' + stopLabel
             : stopLabel;
