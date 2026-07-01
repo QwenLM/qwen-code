@@ -262,8 +262,22 @@ describe('sendMessage', () => {
 
     await ch.sendMessage('test-chat-id', 'hello');
 
-    // Only markdown attempt — no passive context so no retry
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    // Markdown attempt + plain-text fallback
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      1,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'hello' } },
+    );
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      2,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { content: 'hello', msg_type: 0 },
+    );
   });
 
   it('returns early when disposed', async () => {
@@ -491,8 +505,8 @@ describe('sendMessage', () => {
 
     await ch.sendMessage('test-chat-id', '**bold**');
 
-    // Only 1 attempt (no passive context = no retry). No crash.
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    // Markdown attempt + plain-text fallback. No crash.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -395,8 +395,7 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 200)})\n`,
         );
 
-        // Passive reply failed (rate-limited 429, expired 400, etc.) —
-        // roll back msgSeqMap and retry as active message (no msg_id/msg_seq).
+        // Roll back msgSeqMap if we had a msgId (passive reply context)
         if (msgId) {
           this.msgSeqMap.set(msgId, nextSeq - 1);
           process.stderr.write(
@@ -415,16 +414,26 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status}: ${(await activeResp.text().catch(() => '')).slice(0, 100)})\n`,
           );
-          // Active retry failed — don't retry passive plain-text if rate limited
+          // If 429 on active retry, don't fall through to plain-text
           if (activeResp.status === 429) {
-            if (msgId) {
-              this.msgSeqMap.set(msgId, nextSeq - 1);
-              this.saveQQState();
-            }
+            if (msgId) this.saveQQState();
             return;
           }
         }
-        if (msgId) this.saveQQState();
+
+        // Plain-text fallback for ALL markdown rejections (with or without msgId)
+        const plainBody: Record<string, unknown> = { content: text, msg_type: 0 };
+        if (msgId) {
+          plainBody['msg_id'] = msgId;
+          plainBody['msg_seq'] = nextSeq;
+        }
+        const plainResp = await sendQQMessage(
+          route.base,
+          route.path,
+          this.accessToken,
+          plainBody,
+        );
+        if (plainResp.ok && msgId) this.saveQQState();
         return;
       }
 
