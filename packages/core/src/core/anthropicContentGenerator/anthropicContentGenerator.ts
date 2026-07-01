@@ -111,11 +111,15 @@ interface ParsedClaudeModelVersion {
  * `idealab:…`) match the same Anthropic models on the wire. The minor-version
  * group is capped at one or two digits with a trailing `(?!\d)` so an 8-digit
  * date suffix (`claude-opus-4-20250514` = Opus 4.0) is not mis-parsed as a giant
- * minor version — otherwise `minor` would be `20250514` (or, with a bare 1–2
- * digit cap, the greedy `20`), wrongly clearing `atLeast(4, 6)` / `atLeast(4, 7)`
- * gates the model doesn't support (a server 400). Dated ids that do carry a
- * minor, like `claude-opus-4-7-20251101`, still resolve to minor `7`; a bare
- * major (`claude-opus-5`) resolves to minor `0`.
+ * minor version. The `{1,2}` cap alone is not enough — `\d{1,2}` is greedy and
+ * still matches `20` from `20250514`; it's the trailing `(?!\d)` negative
+ * lookahead that does the real work, forcing the engine to backtrack past any
+ * digit-followed match so the optional minor group fails to match entirely.
+ * Both together make dated ids with no real minor resolve to `minor = 0`
+ * (otherwise `minor` would wrongly clear `atLeast(4, 6)` / `atLeast(4, 7)` gates
+ * the model doesn't support — a server 400). Dated ids that do carry a minor,
+ * like `claude-opus-4-7-20251101`, still resolve to minor `7`; a bare major
+ * (`claude-opus-5`) resolves to minor `0`.
  */
 function parseClaudeModelVersion(
   model: string,
@@ -251,6 +255,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   // Latch so the 'max' clamp warning fires once per generator lifetime
   // instead of on every request that needs the downgrade.
   private effortClampWarned = false;
+  private budgetDropWarned = false;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -863,6 +868,23 @@ export class AnthropicContentGenerator implements ContentGenerator {
         type: 'enabled',
         budget_tokens: reasoning.budget_tokens,
       };
+    }
+
+    // A model that rejects manual thinking (Opus 4.7+, every 5.x) discards an
+    // explicit budget_tokens in favor of adaptive thinking + output_config.
+    // effort. Every other clamp in this PR leaves a one-time trace; mirror that
+    // here so the dropped user override isn't silently invisible.
+    if (
+      reasoning?.budget_tokens !== undefined &&
+      this.modelRejectsManualThinking() &&
+      !this.budgetDropWarned
+    ) {
+      debugLogger.warn(
+        `reasoning.budget_tokens=${reasoning.budget_tokens} is ignored on '${
+          this.contentGeneratorConfig.model ?? 'unknown'
+        }' (Opus 4.7+/5.x use adaptive thinking); output_config.effort governs thinking depth instead.`,
+      );
+      this.budgetDropWarned = true;
     }
 
     // Models that support adaptive thinking use { type: 'adaptive' } without

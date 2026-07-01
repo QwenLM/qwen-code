@@ -1620,6 +1620,80 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    it("passes effort: 'xhigh' through on a reseller-prefixed Opus 4.7 (bedrock/…)", async () => {
+      // The version regex is intentionally unanchored so reseller-prefixed ids
+      // gate identically to bare Anthropic ids. If it ever gets anchored, this
+      // model would fall back to low/medium/high and silently clamp xhigh away.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'bedrock/claude-opus-4-7',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'bedrock/claude-opus-4-7',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'xhigh' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'xhigh' } }),
+      );
+    });
+
+    it("passes effort: 'max' through on a 5.x family model (claude-sonnet-5-0)", async () => {
+      // Every 5.x family grants xhigh/max via the `major >= 5` branch,
+      // regardless of family. Locks in that the 5.x gating isn't accidentally
+      // narrowed to specific families.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-sonnet-5-0',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-sonnet-5-0',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'max' } }),
+      );
+    });
+
     it("clamps effort: 'max' to 'high' on claude-haiku-4-6 (haiku 4.x lacks max)", async () => {
       // The `max` tier on 4.x is documented as opus/sonnet only; the family
       // guard keeps haiku 4.x off `max` (which would 400) even though it is

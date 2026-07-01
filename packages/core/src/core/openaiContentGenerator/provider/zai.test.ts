@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type OpenAI from 'openai';
 import { ZaiOpenAICompatibleProvider } from './zai.js';
+import { determineProvider } from '../index.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { Config } from '../../../config/config.js';
 
@@ -65,6 +66,53 @@ describe('ZaiOpenAICompatibleProvider', () => {
         model: 'gpt-4o',
       } as ContentGeneratorConfig;
       expect(ZaiOpenAICompatibleProvider.isZaiProvider(config)).toBe(false);
+    });
+  });
+
+  // Guards the dispatch chain in determineProvider(): a future reordering of the
+  // provider checks (or an anchored hostname test) could silently misroute GLM
+  // requests through the DefaultOpenAICompatibleProvider, dropping the z.ai
+  // reasoning_effort reshape with no test failure.
+  describe('determineProvider routing', () => {
+    const cliConfig = {
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getProxy: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config;
+
+    it('routes api.z.ai base URLs to the Zai provider', () => {
+      const provider = determineProvider(
+        {
+          apiKey: 'k',
+          baseUrl: 'https://api.z.ai/api/paas/v4',
+          model: 'glm-5.2',
+        } as ContentGeneratorConfig,
+        cliConfig,
+      );
+      expect(provider).toBeInstanceOf(ZaiOpenAICompatibleProvider);
+    });
+
+    it('routes open.bigmodel.cn base URLs to the Zai provider', () => {
+      const provider = determineProvider(
+        {
+          apiKey: 'k',
+          baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+          model: 'glm-4.6',
+        } as ContentGeneratorConfig,
+        cliConfig,
+      );
+      expect(provider).toBeInstanceOf(ZaiOpenAICompatibleProvider);
+    });
+
+    it('routes glm-* models on a non-Zai hostname to the Zai provider', () => {
+      const provider = determineProvider(
+        {
+          apiKey: 'k',
+          baseUrl: 'https://my-vllm.example.com/v1',
+          model: 'glm-4.6',
+        } as ContentGeneratorConfig,
+        cliConfig,
+      );
+      expect(provider).toBeInstanceOf(ZaiOpenAICompatibleProvider);
     });
   });
 

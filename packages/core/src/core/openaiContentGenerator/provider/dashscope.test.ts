@@ -654,6 +654,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
+    it('vision model: injects enable_thinking and strips nested reasoning on a qwen-vl model', () => {
+      // The vision branch of buildRequest duplicates the enable_thinking / strip
+      // logic; exercise it directly so a divergence from the text path is caught.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen-vl-max',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        model: 'qwen-vl-max',
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['reasoning']).toBeUndefined();
+      expect(result['vl_high_resolution_images']).toBe(true);
+    });
+
     it('keeps the nested reasoning for a non-qwen wire model (no enable_thinking, no strip)', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {

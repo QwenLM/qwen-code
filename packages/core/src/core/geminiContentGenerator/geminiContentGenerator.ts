@@ -158,8 +158,21 @@ export class GeminiContentGenerator implements ContentGenerator {
           }
           thinkingLevel = 'HIGH' as ThinkingLevel;
           break;
-        default:
+        case undefined:
+          // No effort set — let the model pick its own default.
           thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
+          break;
+        default: {
+          // Exhaustiveness guard: every ReasoningEffort tier (and undefined) is
+          // handled above, so this is unreachable. Adding a new tier without a
+          // matching case makes this a TypeScript compile error rather than a
+          // silent fall-through to UNSPECIFIED. (A `default` is required here by
+          // the eslint default-case rule.)
+          const _exhaustive: never = reasoning.effort;
+          void _exhaustive;
+          thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
+          break;
+        }
       }
 
       return {

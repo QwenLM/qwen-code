@@ -43,22 +43,36 @@ export const useEffortCommand = (
           'model.reasoningEffort',
           effort,
         );
-        // `setReasoningEffort` is a no-op when thinking is explicitly disabled
-        // (`reasoning: false`). Mirror the slash-command path's read-back check
-        // so the dialog doesn't silently close with nothing applied: the tier is
-        // still persisted for future sessions, but tell the user it won't take
-        // effect until thinking is re-enabled.
-        if (addItem && config.getReasoningEffort() !== effort) {
-          addItem(
-            {
-              type: MessageType.INFO,
-              text: t(
-                'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-                { tier: effort },
-              ),
-            },
-            Date.now(),
-          );
+        // Mirror the slash-command path's read-back so the dialog reports the
+        // outcome in-chat instead of silently closing (the status line is the
+        // only other signal). `setReasoningEffort` is a no-op when thinking is
+        // explicitly disabled (`reasoning: false`): the tier is still persisted
+        // for future sessions, but say it won't take effect until thinking is
+        // re-enabled; otherwise confirm the requested tier.
+        if (addItem) {
+          if (config.getReasoningEffort() !== effort) {
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: t(
+                  'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
+                  { tier: effort },
+                ),
+              },
+              Date.now(),
+            );
+          } else {
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: t(
+                  'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
+                  { tier: effort },
+                ),
+              },
+              Date.now(),
+            );
+          }
         }
       } finally {
         setIsEffortDialogOpen(false);
