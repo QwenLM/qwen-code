@@ -194,7 +194,16 @@ export class ChannelLoopScheduler {
         await this.recordSkipped(latestJob.id, runningSince);
         return;
       }
-      const currentJob = await this.findJob(latestJob.id);
+      let currentJob: ChannelLoop | undefined;
+      try {
+        currentJob = await this.findJob(latestJob.id);
+      } catch (findErr) {
+        process.stderr.write(
+          `[scheduler] findJob failed in catch for loop ${latestJob.id}: ${findErr instanceof Error ? findErr.message : String(findErr)}\n`,
+        );
+        await this.clearRunningSince(latestJob.id, runningSince);
+        return;
+      }
       if (this.generation !== generation || !currentJob?.enabled) {
         await this.clearRunningSince(latestJob.id, runningSince);
         return;

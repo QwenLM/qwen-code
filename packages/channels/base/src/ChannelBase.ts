@@ -336,7 +336,10 @@ export abstract class ChannelBase {
           options.timeoutMs,
         );
         if (promptState.cancelRequested && !promptState.cancelled) {
-          promptState.cancelled = await promptState.cancelRequested;
+          const cancelled = await promptState.cancelRequested;
+          if (cancelled) {
+            promptState.cancelled = true;
+          }
         }
         if (promptState.cancelled) {
           throw new ChannelLoopSkippedError('loop cancelled before delivery');
@@ -1748,7 +1751,10 @@ export abstract class ChannelBase {
         });
 
         if (promptState.cancelRequested && !promptState.cancelled) {
-          promptState.cancelled = await promptState.cancelRequested;
+          const cancelled = await promptState.cancelRequested;
+          if (cancelled) {
+            promptState.cancelled = true;
+          }
         }
 
         // If cancelled, skip sending the response

@@ -38,6 +38,7 @@ export class TelegramChannel extends ChannelBase {
   private bot: Bot;
   private botId: number = 0;
   private botUsername: string = '';
+  private signalHandlersRegistered = false;
 
   constructor(
     name: string,
@@ -46,14 +47,7 @@ export class TelegramChannel extends ChannelBase {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
-    const botConfig = this.proxy
-      ? {
-          client: {
-            baseFetchConfig: { agent: new HttpsProxyAgent(this.proxy) },
-          },
-        }
-      : undefined;
-    this.bot = new Bot(config.token, botConfig);
+    this.bot = this.createBot();
     this.registerCommand('start', async (envelope) => {
       await this.sendMessage(envelope.chatId, TELEGRAM_START_MESSAGE);
       return true;
@@ -69,11 +63,23 @@ export class TelegramChannel extends ChannelBase {
     return target.threadId === undefined || /^\d+$/u.test(target.threadId);
   }
 
+  private createBot(): Bot {
+    const botConfig = this.proxy
+      ? {
+          client: {
+            baseFetchConfig: { agent: new HttpsProxyAgent(this.proxy) },
+          },
+        }
+      : undefined;
+    return new Bot(this.config.token, botConfig);
+  }
+
   private getFileUrl(filePath: string): string {
     return `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
   }
 
   async connect(): Promise<void> {
+    this.bot = this.createBot();
     const botInfo = await this.bot.api.getMe();
     this.botId = botInfo.id;
     this.botUsername = botInfo.username ?? '';
@@ -246,8 +252,11 @@ export class TelegramChannel extends ChannelBase {
       );
     });
 
-    process.once('SIGINT', () => this.bot.stop());
-    process.once('SIGTERM', () => this.bot.stop());
+    if (!this.signalHandlersRegistered) {
+      process.once('SIGINT', () => this.bot.stop());
+      process.once('SIGTERM', () => this.bot.stop());
+      this.signalHandlersRegistered = true;
+    }
   }
 
   private async registerBotCommands(): Promise<void> {

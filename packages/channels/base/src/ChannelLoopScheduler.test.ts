@@ -562,6 +562,45 @@ describe('ChannelLoopScheduler', () => {
     writeSpy.mockRestore();
   });
 
+  it('clears running state when failure-state reload fails', async () => {
+    runLoopPrompt.mockRejectedValue(new Error('cannot cold send'));
+    (store.list as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(jobs)
+      .mockResolvedValueOnce(jobs)
+      .mockRejectedValueOnce(new Error('cron unreadable'));
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const scheduler = new ChannelLoopScheduler({
+      store,
+      channels: new Map([['feishu-main', { runLoopPrompt }]]),
+      now: () => new Date(nowMs),
+      nextFireTime: () => new Date(nowMs - 60_000),
+    });
+
+    try {
+      await scheduler.tick();
+
+      await vi.waitFor(() => {
+        expect(store.update).toHaveBeenCalledWith('job-1', {
+          runningSince: undefined,
+        });
+      });
+      expect(store.update).not.toHaveBeenCalledWith(
+        'job-1',
+        expect.objectContaining({ lastStatus: 'error' }),
+      );
+      expect(store.disable).not.toHaveBeenCalled();
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[scheduler] findJob failed in catch for loop job-1: cron unreadable',
+        ),
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
   it('does not record skipped loop turns as job failures', async () => {
     runLoopPrompt.mockRejectedValue(new ChannelLoopSkippedError('user steer'));
     const scheduler = new ChannelLoopScheduler({
