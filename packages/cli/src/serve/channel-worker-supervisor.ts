@@ -10,6 +10,7 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from './channel-worker-env.js';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 
@@ -117,6 +118,10 @@ function requestedChannelNames(
   selection: ServeChannelSelection,
 ): string[] | undefined {
   return selection.mode === 'names' ? [...selection.names] : undefined;
+}
+
+function sanitizeWorkerError(error: string): string {
+  return Array.from(sanitizeLogText(error, 512)).slice(0, 512).join('');
 }
 
 function notifyExit(
@@ -299,7 +304,8 @@ export function createChannelWorkerSupervisor(
             state,
             code,
             signal,
-            snapshot.error ?? (ready ? undefined : message),
+            snapshot.error ??
+              (ready ? undefined : sanitizeWorkerError(message)),
           );
           if (ready && !stopping && !exitNotified) {
             exitNotified = true;
@@ -316,10 +322,10 @@ export function createChannelWorkerSupervisor(
           snapshot = {
             ...snapshot,
             state: 'failed',
-            error: err.message,
+            error: sanitizeWorkerError(err.message),
           };
           if (!settled) {
-            failBeforeReady(err);
+            failBeforeReady(new Error(snapshot.error));
           }
         }
         startupTimer = setTimeout(() => {
@@ -329,7 +335,7 @@ export function createChannelWorkerSupervisor(
           snapshot = {
             ...snapshot,
             state: 'failed',
-            error,
+            error: sanitizeWorkerError(error),
           };
           failBeforeReady(new Error(error));
           if (child === startedChild) {

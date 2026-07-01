@@ -965,12 +965,13 @@ describe('daemonWorkerCommand', () => {
       });
 
       process.emit('SIGTERM', 'SIGTERM');
-      expect(mockBridgeStop).not.toHaveBeenCalled();
-      finishBridgeStart();
       await handler;
 
       expect(mockBridgeStop).toHaveBeenCalled();
-      expect(exit).toHaveBeenCalledWith(0);
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        '[Channel] daemon worker failed: Daemon worker startup aborted.',
+      );
     } finally {
       finishBridgeStart?.();
       restoreSend();

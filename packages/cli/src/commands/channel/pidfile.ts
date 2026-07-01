@@ -6,6 +6,7 @@ import {
   unlinkSync,
   openSync,
   closeSync,
+  constants,
   ftruncateSync,
   writeSync,
 } from 'node:fs';
@@ -167,7 +168,7 @@ export function writeServeServiceInfo({
   const filePath = pidFilePath();
   let fd: number;
   try {
-    fd = openSync(filePath, 'r+');
+    fd = openSync(filePath, constants.O_RDWR | constants.O_NOFOLLOW);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       writeInfo(info, 'wx');

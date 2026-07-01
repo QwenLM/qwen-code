@@ -10,6 +10,8 @@ const fsFds = vi.hoisted(() => {
   const fds = {
     next: 3,
     paths: {} as Record<number, string>,
+    flags: {} as Record<number, string | number | undefined>,
+    openedFlags: [] as Array<string | number | undefined>,
   };
   return fds;
 });
@@ -40,7 +42,7 @@ vi.mock('node:fs', () => {
       }
       fsStore[p] = data;
     },
-    openSync: (p: string) => {
+    openSync: (p: string, flags?: string | number) => {
       if (!(p in fsStore)) {
         const err = new Error('ENOENT') as NodeJS.ErrnoException;
         err.code = 'ENOENT';
@@ -48,10 +50,13 @@ vi.mock('node:fs', () => {
       }
       const fd = fsFds.next++;
       fsFds.paths[fd] = p;
+      fsFds.flags[fd] = flags;
+      fsFds.openedFlags.push(flags);
       return fd;
     },
     closeSync: (fd: number) => {
       delete fsFds.paths[fd];
+      delete fsFds.flags[fd];
     },
     ftruncateSync: (fd: number) => {
       const fdPath = fsFds.paths[fd];
@@ -72,6 +77,10 @@ vi.mock('node:fs', () => {
     mkdirSync: () => {},
     unlinkSync: (p: string) => {
       delete fsStore[p];
+    },
+    constants: {
+      O_RDWR: 2,
+      O_NOFOLLOW: 0x20000,
     },
   };
   return { ...mock, default: mock };
@@ -105,6 +114,8 @@ beforeEach(() => {
   for (const k of Object.keys(fsStore)) delete fsStore[k];
   fsFds.next = 3;
   for (const k of Object.keys(fsFds.paths)) delete fsFds.paths[Number(k)];
+  for (const k of Object.keys(fsFds.flags)) delete fsFds.flags[Number(k)];
+  fsFds.openedFlags.length = 0;
 });
 
 afterEach(() => {
@@ -187,6 +198,7 @@ describe('writeServiceInfo + readServiceInfo', () => {
       workerPid: 8765,
       channels: ['telegram'],
     });
+    expect(fsFds.openedFlags).toContain(2 | 0x20000);
   });
 
   it('does not let serve metadata updates overwrite standalone pidfiles', () => {

@@ -464,6 +464,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         return;
       }
       pendingShutdownReason = reason;
+      startupAbortController.abort();
     };
     const onEarlyDisconnect = () => {
       if (pendingShutdownReason) {

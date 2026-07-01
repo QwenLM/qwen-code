@@ -219,7 +219,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
-  it('preserves the pre-ready error when the worker exits after an error', async () => {
+  it('sanitizes the pre-ready error when the worker exits after an error', async () => {
     const child = new FakeChild();
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
@@ -230,17 +230,23 @@ describe('createChannelWorkerSupervisor', () => {
     });
 
     const started = supervisor.start();
-    child.emit('error', new Error('spawn error'));
+    const unsafeMessage = `spawn error\nfake log line\r${'\u001b'}[31m${'x'.repeat(600)}`;
+    child.emit('error', new Error(unsafeMessage));
     child.emit('exit', 1, null);
 
-    await expect(started).rejects.toThrow('spawn error');
-    expect(supervisor.snapshot()).toMatchObject({
+    await expect(started).rejects.toThrow('spawn error\\nfake log line');
+    const snapshot = supervisor.snapshot();
+    expect(snapshot).toMatchObject({
       enabled: true,
       state: 'failed',
       exitCode: 1,
       signal: null,
-      error: 'spawn error',
     });
+    expect(snapshot.error).toContain('spawn error');
+    expect(snapshot.error).not.toContain('\n');
+    expect(snapshot.error).not.toContain('\r');
+    expect(snapshot.error).not.toContain('\u001b');
+    expect(snapshot.error!.length).toBeLessThanOrEqual(512);
   });
 
   it('still signals a worker error without an observed exit when pid is absent', async () => {
