@@ -9,6 +9,7 @@ import {
   appendManagedAutoMemoryToUserMemory,
   buildManagedAutoMemoryPrompt,
   CONDENSED_DO_NOT_SAVE_SECTION,
+  CONDENSED_TEAM_GUIDANCE,
   CONDENSED_WHEN_TO_ACCESS_SECTION,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
 } from './prompt.js';
@@ -371,5 +372,38 @@ describe('managed auto-memory prompt helpers', () => {
     expect(CONDENSED_DO_NOT_SAVE_SECTION.length).toBeGreaterThan(0);
     expect(CONDENSED_WHEN_TO_ACCESS_SECTION).toBeDefined();
     expect(CONDENSED_WHEN_TO_ACCESS_SECTION.length).toBeGreaterThan(0);
+  });
+
+  it('exports CONDENSED_TEAM_GUIDANCE with user-memory privacy rule', () => {
+    expect(CONDENSED_TEAM_GUIDANCE).toBeDefined();
+    expect(CONDENSED_TEAM_GUIDANCE.length).toBeGreaterThan(0);
+    const joined = CONDENSED_TEAM_GUIDANCE.join('\n');
+    expect(joined).toContain('`user` memories are always private');
+    expect(joined).toContain('never save them to TEAM');
+  });
+
+  it('condensed do-not-save section covers all key exclusions from full version', () => {
+    const joined = CONDENSED_DO_NOT_SAVE_SECTION.join('\n');
+    expect(joined).toContain('conventions');
+    expect(joined).toContain('project structure');
+    expect(joined).toContain('recent changes');
+    expect(joined).toContain('who-changed-what');
+    expect(joined).toContain('guessed tool-call formats');
+    expect(joined).toContain('owner');
+    expect(joined).toContain('escalation path');
+    expect(joined).toContain('surprising');
+    expect(joined).toContain('non-obvious');
+  });
+
+  it('condensed stale-memory bullet includes remediation step', () => {
+    const joined = CONDENSED_WHEN_TO_ACCESS_SECTION.join('\n');
+    expect(joined).toContain('trust what you observe now');
+    expect(joined).toContain('update or remove the stale memory');
+  });
+
+  it('condensed save section includes index truncation warning', () => {
+    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+    expect(prompt).toContain('lines after 200 will be truncated');
+    expect(prompt).toContain('keep each index concise');
   });
 });

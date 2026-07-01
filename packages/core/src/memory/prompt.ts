@@ -135,7 +135,7 @@ export const CONDENSED_WHEN_TO_ACCESS_SECTION: readonly string[] = [
   '- Access memory when relevant or when user references prior-conversation work.',
   '- You MUST access memory when the user explicitly asks you to check, recall, or remember.',
   '- If the user says to ignore memory, proceed as if empty.',
-  '- Memory records can become stale — verify against current state before acting on them.',
+  '- Memory records can become stale. If a recalled memory conflicts with current information, trust what you observe now and update or remove the stale memory rather than acting on it.',
 ];
 
 /**
@@ -147,9 +147,9 @@ export const CONDENSED_WHEN_TO_ACCESS_SECTION: readonly string[] = [
 export const CONDENSED_DO_NOT_SAVE_SECTION: readonly string[] = [
   '## Do not save',
   '',
-  '- Code patterns, architecture, or file paths (read the project instead)',
-  '- Git history or debugging solutions',
-  '- MCP tool names, schemas, or failed call transcripts (save only confirmed durable workarounds or warnings)',
+  '- Code patterns, conventions, architecture, file paths, or project structure (read the project instead)',
+  '- Git history, recent changes, or who-changed-what — debugging solutions',
+  '- MCP tool names, schemas, guessed tool-call formats, or failed call transcripts (save only confirmed durable workarounds, warnings, owner, or escalation path)',
   '- Ephemeral task state or current conversation context',
   '- Content already in QWEN.md or AGENTS.md',
   '',
@@ -237,6 +237,15 @@ export interface TeamAutoMemorySection {
  * knows when a memory belongs in the shared tier — and never to put secrets
  * there.
  */
+/**
+ * Condensed version of the team-scope guidance from {@link buildTeamScopeSection}.
+ * Used in the empty-index (condensed) prompt path for multi-tier setups
+ * that include a team directory.
+ */
+export const CONDENSED_TEAM_GUIDANCE: readonly string[] = [
+  'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. Never save secrets to TEAM. `user` memories are always private — never save them to TEAM. For TEAM memory, only write the file (Step 1) — its index is auto-generated; do NOT hand-edit the team MEMORY.md.',
+];
+
 function buildTeamScopeSection(): string[] {
   return [
     '## Saving to team memory',
@@ -362,6 +371,7 @@ export function buildManagedAutoMemoryPrompt(
       '- Keep the name, description, and type fields in memory files up-to-date with the content.',
       '- Organize memories semantically by topic, not chronologically.',
       '- Update or remove memories that turn out to be wrong or outdated.',
+      `- Every \`MEMORY.md\` index is always loaded into your conversation context \u2014 lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise.`,
     ];
 
     const condensedSave = multiTier
@@ -375,13 +385,13 @@ export function buildManagedAutoMemoryPrompt(
           ...MEMORY_FRONTMATTER_EXAMPLE,
           '',
           '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry: one line, under ~150 chars: `- [Title](file.md) — one-line hook`.',
-          '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
+          '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file.',
           '- Do not write duplicate memories. First check if there is an existing memory in any of your memory directories you can update before writing a new one.',
           ...condensedMaintenanceBullets,
           ...(teamSection !== undefined
             ? [
                 '',
-                'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. Never save secrets to TEAM. For TEAM memory, only write the file (Step 1) — its index is auto-generated; do NOT hand-edit the team MEMORY.md.',
+                ...CONDENSED_TEAM_GUIDANCE,
               ]
             : []),
         ]
