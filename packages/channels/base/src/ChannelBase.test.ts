@@ -4560,6 +4560,23 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('sanitizes failed lifecycle errors', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('agent boom\nsecret second line'),
+      );
+      const ch = createChannel();
+
+      await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'agent boom\\nsecret second line',
+        }),
+      ]);
+    });
+
     it('emits cancellation lifecycle event for /cancel', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
@@ -4741,6 +4758,53 @@ describe('ChannelBase', () => {
           }),
         ]),
       );
+    });
+
+    it('emits /clear cancellation lifecycle before prompt end cleanup', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          resolvePrompt('late');
+          return Promise.resolve();
+        },
+      );
+      const ch = createChannel();
+      const order: string[] = [];
+      vi.spyOn(
+        ch as unknown as {
+          onTaskLifecycle: (event: ChannelTaskLifecycleEvent) => void;
+        },
+        'onTaskLifecycle',
+      ).mockImplementation((event) => {
+        if (event.type === 'cancelled') {
+          order.push('cancelled');
+        }
+      });
+      vi.spyOn(
+        ch as unknown as {
+          onPromptEnd: (
+            chatId: string,
+            sessionId: string,
+            messageId?: string,
+          ) => void;
+        },
+        'onPromptEnd',
+      ).mockImplementation(() => {
+        order.push('end');
+      });
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-clear' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      await prompt;
+
+      expect(order).toEqual(['cancelled', 'end']);
     });
 
     it('does not emit a second cancellation lifecycle event when /clear follows /cancel', async () => {
