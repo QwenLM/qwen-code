@@ -14,7 +14,9 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
-import { MINIMUM_MAX_HEIGHT } from '../components/shared/MaxSizedBox.js';
+// Minimum content lines to keep in a clipped live preview before the
+// "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
+const MIN_PENDING_CONTENT_LINES = 1;
 
 interface MarkdownDisplayProps {
   text: string;
@@ -193,7 +195,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // (constrainHeight on — both non-VP and VP pending items pass a budget).
   const pendingLineBudget =
     isPending && availableTerminalHeight !== undefined
-      ? Math.max(MINIMUM_MAX_HEIGHT, availableTerminalHeight) - 1
+      ? Math.max(MIN_PENDING_CONTENT_LINES + 1, availableTerminalHeight) - 1
       : undefined;
   const pendingClipped =
     pendingLineBudget !== undefined && allLines.length > pendingLineBudget;
@@ -590,7 +592,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     return (
       <Box flexDirection="column">
         {contentBlocks}
-        <Text color={theme.text.secondary}>… generating more …</Text>
+        <Text color={theme.text.secondary} wrap="truncate">
+          ... generating more ...
+        </Text>
       </Box>
     );
   }

@@ -147,6 +147,29 @@ describe('<MarkdownDisplay />', () => {
       expect(lastFrame() ?? '').toContain('line 60');
     });
 
+    it('handles a code fence spanning the clip boundary', () => {
+      // The head-slice can cut between an opening fence and its close; the
+      // parser's EOF inCodeBlock flush then renders the (unclosed) block. The
+      // frame must still stay within the budget.
+      const text = [
+        'intro line',
+        '',
+        '```ts',
+        ...Array.from({ length: 50 }, (_, i) => `code ${i}`),
+        '```',
+      ].join(eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={10}
+        />,
+      );
+      const lineCount = (lastFrame() ?? '').split('\n').length;
+      expect(lineCount).toBeLessThanOrEqual(10);
+    });
+
     it('renders unordered lists with different markers', () => {
       const text = `
 - item A
