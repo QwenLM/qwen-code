@@ -64,4 +64,26 @@ describe('statusCommand', () => {
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Worker PID:      5678');
   });
+
+  it('omits worker pid when serve-owned metadata has no live worker', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'serve',
+      pid: 1234,
+      servePid: 1234,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    await expect(invokeStatus()).rejects.toThrow('process.exit: 0');
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Channel service: managed by qwen serve (PID 1234)',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Worker PID:'),
+    );
+  });
 });
