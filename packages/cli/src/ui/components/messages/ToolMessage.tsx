@@ -55,6 +55,14 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
+
+// Bare C0 control bytes (plus DEL / C1) that `escapeAnsiCtrlCodes` (ansi-regex)
+// leaves untouched because they carry no ESC prefix — BEL \x07, BS \x08,
+// VT \x0b, FF \x0c, CR \x0d, SO \x0e, SI \x0f, etc. TAB (\x09) and LF (\x0a)
+// are intentionally preserved: they legitimately structure multi-line tool
+// output rendered in the transcript. Used to sanitize raw `detailedDisplay`.
+// eslint-disable-next-line no-control-regex
+const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 export type TextEmphasis = 'high' | 'medium' | 'low';
 type DiffResultDisplay = Pick<
   FileDiff,
@@ -690,12 +698,25 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     detailedDisplay.length > 0;
   // `detailedDisplay` is RAW, un-sanitized tool output (file contents, grep
   // hits, directory listings). A malicious repo could embed terminal control
-  // sequences (e.g. `\x1b[?1049l` to drop the alt-screen, OSC 52 clipboard
-  // writes) that would execute when the transcript renders the full content
-  // unfiltered. Neutralize them with the same escaper used for agent
-  // names/descriptions above before it reaches `<Text>`.
+  // codes that execute when the transcript renders the full content unfiltered.
+  // Two passes, memoized (the content can be ~25K chars and this runs on every
+  // render): (1) `escapeAnsiCtrlCodes` neutralizes ESC-prefixed ANSI sequences
+  // (`\x1b[?1049l`, OSC 52 clipboard, …) — the same escaper used for agent
+  // names above; (2) strip bare C0 control bytes that lack an ESC prefix so
+  // ansi-regex misses them (BEL `\x07`, BS `\x08`, FF `\x0c`, SO/SI, CR, …),
+  // keeping only TAB and LF which legitimately structure multi-line output.
+  const sanitizedDetailedDisplay = React.useMemo(
+    () =>
+      typeof detailedDisplay === 'string'
+        ? escapeAnsiCtrlCodes(detailedDisplay).replace(
+            BARE_C0_CONTROL_CHARS_REGEX,
+            '',
+          )
+        : detailedDisplay,
+    [detailedDisplay],
+  );
   const effectiveResultDisplay = usingDetailedDisplay
-    ? escapeAnsiCtrlCodes(detailedDisplay)
+    ? sanitizedDetailedDisplay
     : resultDisplay;
 
   // detailedDisplay is RAW tool output (file content, grep hits, directory

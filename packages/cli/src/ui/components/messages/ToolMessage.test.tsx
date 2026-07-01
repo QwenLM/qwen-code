@@ -329,7 +329,9 @@ describe('<ToolMessage />', () => {
           name="ReadFile"
           description="evil.txt"
           resultDisplay="Read 1 file"
-          detailedDisplay={'before\x1b[?1049lafter\x1b]52;c;ZXZpbA==\x07end'}
+          detailedDisplay={
+            'before\x1b[?1049lafter\x1b]52;c;ZXZpbA==\x07mid\x08\x0c\x0eend'
+          }
           fullDetail
           forceShowResult
         />,
@@ -339,9 +341,15 @@ describe('<ToolMessage />', () => {
       // The visible text survives; the raw ESC (\x1b) control byte does not.
       expect(output).toContain('before');
       expect(output).toContain('after');
+      expect(output).toContain('mid');
       expect(output).toContain('end');
       expect(output).not.toContain('\x1b[?1049l');
       expect(output).not.toContain('\x1b]52;');
+      // Bare C0 bytes without an ESC prefix (BEL, BS, FF, SO) are stripped too.
+      expect(output).not.toContain('\x07');
+      expect(output).not.toContain('\x08');
+      expect(output).not.toContain('\x0c');
+      expect(output).not.toContain('\x0e');
     });
 
     it('keeps the summary when forced but NOT in fullDetail mode (main-view force)', () => {
