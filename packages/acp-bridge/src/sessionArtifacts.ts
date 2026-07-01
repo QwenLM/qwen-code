@@ -35,6 +35,7 @@ const SOURCE_RESERVATIONS: Record<DaemonSessionArtifactSource, number> = {
   client: 50,
   hook: 50,
 };
+const WORKSPACE_STATUS_REFRESH_TTL_MS = 5_000;
 
 export interface ToolArtifactLike {
   kind?: DaemonSessionArtifactKind;
@@ -129,6 +130,7 @@ interface NormalizedArtifact extends DaemonSessionArtifact {
   receivedSeq: number;
   retentionSource: DaemonSessionArtifactSource;
   trustedPublisher: boolean;
+  lastStatAt?: number;
 }
 
 interface StoredArtifact extends NormalizedArtifact {
@@ -330,6 +332,7 @@ export class SessionArtifactStore {
       storage,
       source,
       status: workspaceStatus?.status ?? 'available',
+      ...(workspacePath ? { lastStatAt: Date.now() } : {}),
       title,
       description,
       workspacePath,
@@ -357,30 +360,56 @@ export class SessionArtifactStore {
   }
 
   private async refreshWorkspaceStatuses(): Promise<void> {
+    const now = Date.now();
     await Promise.all(
       Array.from(this.artifacts.values())
         .filter((artifact) => artifact.workspacePath)
-        .map((artifact) => this.refreshWorkspaceStatus(artifact)),
+        .filter((artifact) => shouldRefreshWorkspaceStatus(artifact, now))
+        .map((artifact) =>
+          this.refreshWorkspaceStatus(artifact, {
+            onError: 'missing',
+            now,
+          }),
+        ),
     );
   }
 
   private async refreshWorkspaceStatus(
     artifact: StoredArtifact,
+    options: { onError: 'missing' | 'preserve'; now?: number },
   ): Promise<void> {
     if (!artifact.workspacePath) {
       return;
     }
-    const status = await getWorkspaceStatus(
-      this.workspaceCwd,
-      artifact.workspacePath,
-      this.getRealWorkspaceCwd(),
-    );
-    artifact.status = status.status;
-    artifact.sizeBytes = status.sizeBytes;
+    try {
+      const status = await getWorkspaceStatus(
+        this.workspaceCwd,
+        artifact.workspacePath,
+        this.getRealWorkspaceCwd(),
+      );
+      artifact.status = status.status;
+      artifact.sizeBytes = status.sizeBytes;
+      artifact.lastStatAt = options.now ?? Date.now();
+    } catch {
+      if (options.onError === 'preserve') {
+        return;
+      }
+      artifact.status = 'missing';
+      artifact.sizeBytes = undefined;
+      artifact.lastStatAt = options.now ?? Date.now();
+    }
   }
 
   private getRealWorkspaceCwd(): Promise<string> {
-    this.realWorkspaceCwdPromise ??= fs.realpath(this.workspaceCwd);
+    if (!this.realWorkspaceCwdPromise) {
+      const promise = fs.realpath(this.workspaceCwd).catch((error: unknown) => {
+        if (this.realWorkspaceCwdPromise === promise) {
+          this.realWorkspaceCwdPromise = undefined;
+        }
+        throw error;
+      });
+      this.realWorkspaceCwdPromise = promise;
+    }
     return this.realWorkspaceCwdPromise;
   }
 
@@ -398,7 +427,9 @@ export class SessionArtifactStore {
       (artifact) => !createdInThisBatch.has(artifact.id),
     );
     await Promise.all(
-      candidates.map((artifact) => this.refreshWorkspaceStatus(artifact)),
+      candidates.map((artifact) =>
+        this.refreshWorkspaceStatus(artifact, { onError: 'preserve' }),
+      ),
     );
 
     while (this.artifacts.size > this.maxArtifacts) {
@@ -483,6 +514,7 @@ function mergeBatchArtifact(
       receivedSeq: existing.receivedSeq,
       retentionSource: existing.retentionSource,
       clientRetained: existing.clientRetained || next.clientRetained,
+      lastStatAt: undefined,
     };
     delete merged.workspacePath;
     return merged;
@@ -494,6 +526,7 @@ function mergeBatchArtifact(
     metadata: mergeMetadata(existing.metadata, next),
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
+    lastStatAt: next.lastStatAt ?? existing.lastStatAt,
   };
 }
 
@@ -524,6 +557,9 @@ function mergeArtifact(
     retentionSource: existing.retentionSource,
     trustedPublisher: existing.trustedPublisher || incoming.trustedPublisher,
     clientRetained: existing.clientRetained || incoming.clientRetained,
+    lastStatAt: publishedUpgrade
+      ? undefined
+      : (incoming.lastStatAt ?? existing.lastStatAt),
     updatedAt: existing.updatedAt,
   };
 
@@ -597,6 +633,16 @@ function countByRetentionSource(
     counts[artifact.retentionSource]++;
   }
   return counts;
+}
+
+function shouldRefreshWorkspaceStatus(
+  artifact: StoredArtifact,
+  now: number,
+): boolean {
+  return (
+    artifact.lastStatAt === undefined ||
+    now - artifact.lastStatAt >= WORKSPACE_STATUS_REFRESH_TTL_MS
+  );
 }
 
 function selectEvictionCandidate(
@@ -816,7 +862,9 @@ function buildIdentityKey(input: {
   if (input.workspacePath) return `workspace:${input.workspacePath}`;
   if (input.managedId && !input.url) return `managed:${input.managedId}`;
   if (input.url) return `url:${input.url}`;
-  return `${input.storage}:unknown`;
+  throw new SessionArtifactValidationError(
+    'artifact identity requires workspacePath, managedId, or url',
+  );
 }
 
 function stableArtifactId(sessionId: string, identityKey: string): string {
@@ -898,7 +946,7 @@ function hasControlCharacter(value: string): boolean {
 }
 
 function hasUnsafeDisplayPayload(value: string): boolean {
-  return /<\s*(script|iframe|object|embed|img|svg)\b|javascript\s*:|on[a-z]+\s*=/i.test(
+  return /<\s*(script|iframe|object|embed|applet|img|svg|math|style|link|base|meta|form)\b|javascript\s*:|data\s*:\s*text\/html|on[a-z]+\s*=/i.test(
     value,
   );
 }
@@ -1048,10 +1096,7 @@ async function getWorkspaceStatus(
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
       return { status: 'missing', escaped: true };
     }
-    const stat = await fs.lstat(realPath);
-    if (stat.isSymbolicLink()) {
-      return { status: 'missing', escaped: true };
-    }
+    const stat = await fs.stat(realPath);
     return {
       status: 'available',
       ...(stat.isFile() ? { sizeBytes: stat.size } : {}),

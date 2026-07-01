@@ -192,10 +192,6 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
     ) {
       return '"storage" must be workspace, external_url, managed, or published';
     }
-    if (!params.title) {
-      return 'Missing or empty "title"';
-    }
-
     const locators = [
       trimOptional(params.workspacePath),
       trimOptional(params.managedId),

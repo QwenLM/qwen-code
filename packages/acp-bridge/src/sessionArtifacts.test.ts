@@ -21,6 +21,7 @@ describe('SessionArtifactStore', () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await fs.rm(workspace, { recursive: true, force: true });
   });
 
@@ -260,6 +261,31 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'description' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: '<style>body{background:url(https://example.com/x)}</style>',
+            url: 'https://example.com/style',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Report',
+            description: '<a href="data:text/html,<script>alert(1)</script>">',
+            url: 'https://example.com/data',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'description' });
   });
 
   it('does not create empty metadata or emit ghost updates', async () => {
@@ -306,6 +332,7 @@ describe('SessionArtifactStore', () => {
         }),
       ).rejects.toMatchObject({ field: 'workspacePath' });
     } finally {
+      vi.useRealTimers();
       await fs.rm(outside, { recursive: true, force: true });
     }
   });
@@ -324,6 +351,8 @@ describe('SessionArtifactStore', () => {
     });
 
     await fs.rm(path.join(workspace, 'report.txt'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
     const missing = (await store.list()).artifacts[0];
     expect(missing).toMatchObject({ status: 'missing' });
     expect(missing).not.toHaveProperty('sizeBytes');
@@ -349,15 +378,18 @@ describe('SessionArtifactStore', () => {
         path.join(workspace, 'report.txt'),
       );
 
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(Date.now() + 6_000));
       const artifact = (await store.list()).artifacts[0];
       expect(artifact).toMatchObject({ status: 'missing' });
       expect(artifact).not.toHaveProperty('sizeBytes');
     } finally {
+      vi.useRealTimers();
       await fs.rm(outside, { recursive: true, force: true });
     }
   });
 
-  it('does not hide unexpected workspace status errors', async () => {
+  it('resets cached workspace realpath after a refresh failure', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's7-realpath-error',
       workspaceCwd: workspace,
@@ -374,7 +406,43 @@ describe('SessionArtifactStore', () => {
           strict: true,
         }),
       ).rejects.toThrow('permission denied');
+
+      await expect(
+        store.upsertMany([{ title: 'Denied', workspacePath: 'denied.txt' }], {
+          strict: true,
+        }),
+      ).resolves.toMatchObject({
+        changes: [expect.objectContaining({ action: 'created' })],
+      });
     } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
+  it('marks workspace artifacts missing when list refresh hits an fs error', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-list-refresh-error',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    await store.upsertMany([{ title: 'Report', workspacePath: 'report.txt' }], {
+      strict: true,
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const realpathSpy = vi
+      .spyOn(fs, 'realpath')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+
+    try {
+      const artifact = (await store.list()).artifacts[0];
+      expect(artifact).toMatchObject({ status: 'missing' });
+      expect(artifact).not.toHaveProperty('sizeBytes');
+    } finally {
+      vi.useRealTimers();
       realpathSpy.mockRestore();
     }
   });
@@ -398,6 +466,25 @@ describe('SessionArtifactStore', () => {
       expect(
         realpathSpy.mock.calls.filter(([target]) => target === workspace),
       ).toHaveLength(1);
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
+  it('uses cached workspace status while the refresh ttl is fresh', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-status-cache',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    await store.upsertMany([{ title: 'Report', workspacePath: 'report.txt' }], {
+      strict: true,
+    });
+
+    const realpathSpy = vi.spyOn(fs, 'realpath');
+    try {
+      await store.list();
+      expect(realpathSpy).not.toHaveBeenCalled();
     } finally {
       realpathSpy.mockRestore();
     }
