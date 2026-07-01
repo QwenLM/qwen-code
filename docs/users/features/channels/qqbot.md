@@ -62,7 +62,7 @@ export QQ_APP_SECRET=<your-app-secret>
       "senderPolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
-      "instructions": "你是一个通过 QQ Bot 对话的 AI 助手。回复控制在 2000 字符以内。",
+      "instructions": "你是一个通过 QQ Bot 对话的 AI 助手。",
       "blockStreaming": "on",
       "groupPolicy": "disabled",
       "groups": {
