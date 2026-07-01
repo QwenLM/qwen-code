@@ -252,7 +252,10 @@ describe('ChannelBase', () => {
           .mockRejectedValue(new Error('Channel memory exceeds maximum size')),
         clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
       };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
       const stderrSpy = vi
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
@@ -271,6 +274,37 @@ describe('ChannelBase', () => {
         expect.stringContaining('Channel memory exceeds maximum size'),
       );
       stderrSpy.mockRestore();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/remember-channel refuses to save memory in group chats', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '/remember-channel group note',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'group-1',
+          text: 'Channel memory cannot be changed in group chats.',
+        },
+      ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
@@ -303,7 +337,10 @@ describe('ChannelBase', () => {
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
         clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
       };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
 
       await ch.handleInbound(
         envelope({ text: '/channel-memory', senderId: 'alice' }),
@@ -321,7 +358,10 @@ describe('ChannelBase', () => {
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
         clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
       };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
 
       await ch.handleInbound(
         envelope({
@@ -479,6 +519,37 @@ describe('ChannelBase', () => {
       ]);
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
       stderrSpy.mockRestore();
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('/forget-channel refuses to clear memory in group chats', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '/forget-channel confirm',
+          senderId: 'alice',
+          isGroup: true,
+          chatId: 'group-1',
+          isMentioned: true,
+        }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'group-1',
+          text: 'Channel memory cannot be changed in group chats.',
+        },
+      ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 

@@ -512,6 +512,13 @@ export abstract class ChannelBase {
       if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
         return true;
       }
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Channel memory cannot be changed in group chats.',
+        );
+        return true;
+      }
       if (args.trim() === '') {
         await this.sendMessage(
           envelope.chatId,
@@ -582,6 +589,13 @@ export abstract class ChannelBase {
 
     this.registerCommand('forget-channel', async (envelope, args) => {
       if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Channel memory cannot be changed in group chats.',
+        );
         return true;
       }
       if (args.toLowerCase() !== 'confirm') {
