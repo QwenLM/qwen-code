@@ -13,6 +13,7 @@ import type {
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
@@ -32,6 +33,7 @@ function escapeRegex(s: string): string {
 
 export class WeixinChannel extends ChannelBase {
   private abortController: AbortController | null = null;
+  private activeTypingChats = new Set<string>();
   private baseUrl: string;
   private token: string = '';
 
@@ -129,11 +131,25 @@ export class WeixinChannel extends ChannelBase {
   }
 
   protected override onPromptStart(chatId: string): void {
-    this.setTyping(chatId, true).catch(() => {});
+    this.startTyping(chatId);
   }
 
   protected override onPromptEnd(chatId: string): void {
-    this.setTyping(chatId, false).catch(() => {});
+    this.stopTyping(chatId);
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startTyping(event.chatId);
+      return;
+    }
+    if (
+      event.type === 'completed' ||
+      event.type === 'cancelled' ||
+      event.type === 'failed'
+    ) {
+      this.stopTyping(event.chatId);
+    }
   }
 
   private async handleInboundWithMedia(
@@ -277,6 +293,19 @@ export class WeixinChannel extends ChannelBase {
       this.abortController.abort();
       this.abortController = null;
     }
+  }
+
+  private startTyping(chatId: string): void {
+    if (this.activeTypingChats.has(chatId)) return;
+    this.activeTypingChats.add(chatId);
+    this.setTyping(chatId, true).catch(() => {
+      this.activeTypingChats.delete(chatId);
+    });
+  }
+
+  private stopTyping(chatId: string): void {
+    if (!this.activeTypingChats.delete(chatId)) return;
+    this.setTyping(chatId, false).catch(() => {});
   }
 
   private async setTyping(userId: string, typing: boolean): Promise<void> {
