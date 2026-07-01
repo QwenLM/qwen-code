@@ -644,6 +644,76 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('visible.txt');
       expect(result.llmContent).not.toContain('hidden.secret');
     });
+
+    it('does not over-ignore nested dirs for a root-anchored gitignore pattern', async () => {
+      // Regression: `/dist` is anchored to the repo root and must NOT exclude
+      // a nested `src/dist`. Traversal pruning delegates to the real gitignore
+      // logic, so anchoring is preserved (a lossy `/dist` -> `**/dist/**`
+      // conversion would wrongly prune src/dist while walking).
+      await fs.writeFile(path.join(tempRootDir, '.gitignore'), '/dist\n');
+      await fs.mkdir(path.join(tempRootDir, 'dist'));
+      await fs.writeFile(path.join(tempRootDir, 'dist', 'root.keep'), 'x');
+      await fs.mkdir(path.join(tempRootDir, 'src', 'dist'), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(tempRootDir, 'src', 'dist', 'nested.keep'),
+        'x',
+      );
+
+      const invocation = new GlobTool(mockConfig).build({
+        pattern: '**/*.keep',
+      });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('nested.keep');
+      expect(result.llmContent).not.toContain('root.keep');
+    });
+
+    it('prunes a gitignored directory (e.g. node_modules) during traversal', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.gitignore'),
+        'node_modules/\n',
+      );
+      await fs.mkdir(path.join(tempRootDir, 'node_modules', 'pkg'), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(tempRootDir, 'node_modules', 'pkg', 'dep.keep'),
+        'x',
+      );
+      await fs.mkdir(path.join(tempRootDir, 'app'));
+      await fs.writeFile(path.join(tempRootDir, 'app', 'main.keep'), 'x');
+
+      const invocation = new GlobTool(mockConfig).build({
+        pattern: '**/*.keep',
+      });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('main.keep');
+      expect(result.llmContent).not.toContain('dep.keep');
+    });
+
+    it('honors gitignore negation re-inclusion during traversal', async () => {
+      // `!build/keep.keep` re-includes a file under an otherwise-ignored path.
+      // Dropping negations (as a pattern conversion must) would wrongly prune
+      // it; delegating to the real ignore logic preserves re-inclusion.
+      await fs.writeFile(
+        path.join(tempRootDir, '.gitignore'),
+        'build/**\n!build/keep.keep\n',
+      );
+      await fs.mkdir(path.join(tempRootDir, 'build'));
+      await fs.writeFile(path.join(tempRootDir, 'build', 'keep.keep'), 'x');
+      await fs.writeFile(path.join(tempRootDir, 'build', 'skip.keep'), 'x');
+
+      const invocation = new GlobTool(mockConfig).build({
+        pattern: '**/*.keep',
+      });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('keep.keep');
+      expect(result.llmContent).not.toContain('skip.keep');
+    });
   });
 
   describe('file count truncation', () => {

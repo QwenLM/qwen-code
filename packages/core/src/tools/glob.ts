@@ -142,6 +142,31 @@ class GlobToolInvocation extends BaseToolInvocation<
       effectivePattern = escape(effectivePattern);
     }
 
+    const projectRoot = this.config.getTargetDir();
+    const fileFilteringOptions = this.getFileFilteringOptions();
+
+    // Prune ignored directories DURING traversal (glob's `childrenIgnored`)
+    // rather than only post-filtering the results. Delegating to
+    // FileDiscoveryService reuses the real .gitignore/.qwenignore semantics
+    // (anchoring, negation/re-inclusion, nested ignore files) — a hand-rolled
+    // gitignore→glob pattern conversion cannot reproduce these correctly.
+    const isTraversalIgnored = (entry: { fullpath(): string }): boolean => {
+      const relativePath = path.relative(projectRoot, entry.fullpath());
+      // Never prune paths outside the project root (e.g. an external search
+      // dir); ignore rules are only defined relative to the root.
+      if (
+        !relativePath ||
+        relativePath.startsWith('..') ||
+        path.isAbsolute(relativePath)
+      ) {
+        return false;
+      }
+      return this.fileService.shouldIgnoreFile(
+        relativePath,
+        fileFilteringOptions,
+      );
+    };
+
     const entries = (await glob(effectivePattern, {
       cwd: searchDir,
       withFileTypes: true,
@@ -151,20 +176,23 @@ class GlobToolInvocation extends BaseToolInvocation<
       dot: true,
       follow: false,
       signal,
+      ignore: {
+        ignored: isTraversalIgnored,
+        childrenIgnored: isTraversalIgnored,
+      },
     })) as GlobPath[];
 
     // Filter using paths relative to the project root (the base that
     // FileDiscoveryService uses for .gitignore / .qwenignore evaluation).
     // Using searchDir-relative paths would cause ignore rules to be
     // evaluated against incorrect paths when searchDir != projectRoot.
-    const projectRoot = this.config.getTargetDir();
     const relativePaths = entries.map((p) =>
       path.relative(projectRoot, p.fullpath()),
     );
 
     const { filteredPaths } = this.fileService.filterFilesWithReport(
       relativePaths,
-      this.getFileFilteringOptions(),
+      fileFilteringOptions,
     );
 
     const normalizePathForComparison = (p: string) =>
