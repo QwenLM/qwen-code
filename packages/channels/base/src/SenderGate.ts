@@ -47,4 +47,20 @@ export class SenderGate {
         throw new Error(`Unknown sender policy: ${this.policy}`);
     }
   }
+
+  isAllowed(senderId: string): boolean {
+    switch (this.policy) {
+      case 'open':
+        return true;
+      case 'allowlist':
+        return this.allowedUsers.has(senderId);
+      case 'pairing':
+        return (
+          this.allowedUsers.has(senderId) ||
+          this.pairingStore?.isApproved(senderId) === true
+        );
+      default:
+        throw new Error(`Unknown sender policy: ${this.policy}`);
+    }
+  }
 }

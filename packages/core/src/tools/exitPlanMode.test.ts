@@ -14,6 +14,8 @@ import {
 import { ToolConfirmationOutcome } from './tools.js';
 import { runPlanApprovalGate } from '../plan-gate/planApprovalGate.js';
 import type { GateDecision, MergedGateFinding } from '../plan-gate/types.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 vi.mock('../plan-gate/planApprovalGate.js', async (importOriginal) => {
   const actual =
@@ -364,6 +366,85 @@ describe('ExitPlanModeTool', () => {
       const invocation = tool.build(params);
       expect(invocation.toolLocations()).toEqual([]);
     });
+
+    it('allows by default inside subagent context to avoid approval UI', async () => {
+      const invocation = tool.build({ plan: 'Subagent plan' });
+
+      const permission = await runWithAgentContext('agent-1', () =>
+        invocation.getDefaultPermission(),
+      );
+
+      expect(permission).toBe('allow');
+    });
+
+    it('allows by default inside teammate context to avoid approval UI', async () => {
+      const invocation = tool.build({ plan: 'Teammate plan' });
+
+      const permission = runWithTeammateIdentity(
+        {
+          agentId: 'agent@test',
+          agentName: 'agent',
+          teamName: 'test',
+          isTeamLead: false,
+        },
+        () => invocation.getDefaultPermission(),
+      );
+
+      await expect(permission).resolves.toBe('allow');
+    });
+
+    it('falls back to generic confirmation inside subagent context', async () => {
+      const invocation = tool.build({ plan: 'Subagent plan' });
+
+      const confirmation = await runWithAgentContext('agent-1', () =>
+        invocation.getConfirmationDetails(new AbortController().signal),
+      );
+
+      expect(confirmation.type).toBe('info');
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+    });
+
+    it('rejects inside subagent context without saving or changing mode', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const invocation = tool.build({ plan: 'Subagent plan' });
+
+      const result = await runWithAgentContext('agent-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('not available inside subagents');
+      expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+    });
+
+    it('rejects inside teammate context without saving or changing mode', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const invocation = tool.build({ plan: 'Teammate plan' });
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'agent@test',
+          agentName: 'agent',
+          teamName: 'test',
+          isTeamLead: false,
+        },
+        () => invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('not available inside subagents');
+      expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+    });
   });
 
   describe('tool description', () => {
@@ -614,20 +695,68 @@ describe('ExitPlanModeTool', () => {
 
       const result = await tool.build(params).execute(signal);
 
-      // Should return plan_summary (NOT rejected) so user is not trapped
+      // Should return plan_summary (NOT rejected) while staying in plan mode.
       expect(result.returnDisplay).toEqual({
         type: 'plan_summary',
-        message: expect.stringContaining('confirm whether to execute'),
+        message: expect.stringContaining('plan mode remains active'),
         plan: params.plan,
       });
+      expect(result.returnDisplay).not.toEqual(
+        expect.objectContaining({ rejected: true }),
+      );
       expect(result.llmContent).toContain('Ask the user');
       // Should NOT set gate pending flags
       expect(gateState.needsUserPending).toBe(false);
       expect(gateState.capEscalationPending).toBe(false);
-      // Should restore to DEFAULT (not pre-plan YOLO) to force confirmation dialog
-      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+      expect(gateState.gateMode).toBe('user_takeover');
+      // Should stay in PLAN mode until the user explicitly approves.
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalledWith(
         ApprovalMode.DEFAULT,
       );
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
+    });
+
+    it('should preserve plan mode when gate is unavailable for a minimal plan', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const gateState = {
+        entryId: 1,
+        reviewCount: 0,
+        gateMode: 'capped' as const,
+        enteredByModel: true,
+        lastFindings: [],
+        capEscalationPending: false,
+        needsUserPending: false,
+      };
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        gateState,
+      );
+      mockedRunPlanApprovalGate.mockResolvedValue({
+        kind: 'unavailable',
+        reason: 'review model timed out',
+      });
+
+      const params: ExitPlanModeParams = {
+        plan: 'x',
+        originalRequest: 'Test minimal fallback',
+      };
+      const signal = new AbortController().signal;
+
+      const result = await tool.build(params).execute(signal);
+
+      expect(result.returnDisplay).toEqual({
+        type: 'plan_summary',
+        message: expect.stringContaining('plan mode remains active'),
+        plan: params.plan,
+      });
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(gateState.gateMode).toBe('user_takeover');
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
     });
   });

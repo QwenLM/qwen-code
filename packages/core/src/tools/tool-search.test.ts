@@ -12,10 +12,14 @@ import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import type { ToolResult } from './tools.js';
 import { CronCreateTool } from './cron-create.js';
 import { CronDeleteTool } from './cron-delete.js';
 import { CronListTool } from './cron-list.js';
 import { LoopWakeupTool } from './loop-wakeup.js';
+import { ToolNames } from './tool-names.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -585,6 +589,145 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).toContain('"name":"always_loaded"');
     expect(registry.isDeferredToolRevealed('always_loaded')).toBe(false);
     expect(setToolsSpy).not.toHaveBeenCalled();
+  });
+
+  it('select: exit_plan_mode remains inspectable in the main session', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.EXIT_PLAN_MODE,
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    const setToolsSpy = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: setToolsSpy,
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: `select:${ToolNames.EXIT_PLAN_MODE}` })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.EXIT_PLAN_MODE}"`,
+    );
+    expect(registry.isDeferredToolRevealed(ToolNames.EXIT_PLAN_MODE)).toBe(
+      false,
+    );
+    expect(setToolsSpy).not.toHaveBeenCalled();
+  });
+
+  it.each<{
+    toolName: string;
+    shouldDefer: boolean;
+    alwaysLoad: boolean;
+  }>([
+    {
+      toolName: ToolNames.ENTER_PLAN_MODE,
+      shouldDefer: false,
+      alwaysLoad: false,
+    },
+    {
+      toolName: ToolNames.EXIT_PLAN_MODE,
+      shouldDefer: true,
+      alwaysLoad: true,
+    },
+  ])(
+    'select: rejects $toolName inside subagent-like context without revealing or syncing tools',
+    async ({ toolName, shouldDefer, alwaysLoad }) => {
+      registry.registerTool(
+        new MockTool({
+          name: toolName,
+          shouldDefer,
+          alwaysLoad,
+        }),
+      );
+      const setToolsSpy = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+        setTools: setToolsSpy,
+        refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+      } as never);
+
+      const tool = new ToolSearchTool(config);
+      const contextCases: Array<{
+        run: (callback: () => Promise<ToolResult>) => Promise<ToolResult>;
+      }> = [
+        {
+          run: (callback) => runWithAgentContext('agent-1', callback),
+        },
+        {
+          run: (callback) =>
+            runWithTeammateIdentity(
+              {
+                agentId: 'agent@test',
+                agentName: 'agent',
+                teamName: 'test',
+                isTeamLead: false,
+              },
+              callback,
+            ),
+        },
+      ];
+
+      for (const { run } of contextCases) {
+        const result = await run(() =>
+          tool
+            .build({ query: `select:${toolName}` })
+            .execute(new AbortController().signal),
+        );
+
+        expect(String(result.llmContent)).toContain(
+          'not available inside subagents',
+        );
+        expect(String(result.llmContent)).toContain('return your plan');
+        expect(result.error?.message).toContain(
+          'not available inside subagents',
+        );
+        expect(result.error?.message).toContain('return your plan');
+        expect(String(result.returnDisplay)).toContain('1 unavailable');
+        expect(String(result.llmContent)).not.toContain(`"name":"${toolName}"`);
+        expect(registry.isDeferredToolRevealed(toolName)).toBe(false);
+        expect(setToolsSpy).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('select: loads allowed tools while rejecting plan lifecycle tools inside subagent context', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.READ_FILE,
+        shouldDefer: false,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.ENTER_PLAN_MODE,
+        shouldDefer: false,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () =>
+      tool
+        .build({
+          query: `select:${ToolNames.READ_FILE},${ToolNames.ENTER_PLAN_MODE}`,
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.READ_FILE}"`,
+    );
+    expect(String(result.llmContent)).not.toContain(
+      `"name":"${ToolNames.ENTER_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).toContain(
+      'not available inside subagents',
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
   });
 
   it('+must-word filters candidates whose name does not contain the required term', async () => {
