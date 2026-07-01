@@ -31,6 +31,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   LoopTickResult,
+  VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -117,6 +118,10 @@ import {
   getProviderToolCallId,
   parsePositiveIntegerEnv,
   DEFAULT_TOKEN_LIMIT,
+  hasImageParts,
+  normalizeParts,
+  runVisionBridge,
+  shouldRunVisionBridge,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -5407,11 +5412,14 @@ export class Session implements SessionContext {
       embeddedContext.length === 0 &&
       extensionParts.length === 0
     ) {
-      return parts;
+      return this.#applyVisionBridgeIfNeeded(parts, abortSignal);
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
-      return [...parts, ...extensionParts];
+      return this.#applyVisionBridgeIfNeeded(
+        [...parts, ...extensionParts],
+        abortSignal,
+      );
     }
 
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
@@ -5443,9 +5451,14 @@ export class Session implements SessionContext {
 
     // Read files using readManyFiles utility
     if (pathSpecsToRead.length > 0) {
+      const preserveUnsupportedImageForBridge =
+        shouldRunVisionBridge(this.config);
       const readResult = await readManyFiles(this.config, {
         paths: pathSpecsToRead,
         signal: abortSignal,
+        ...(preserveUnsupportedImageForBridge
+          ? { preserveUnsupportedImageForBridge }
+          : {}),
       });
 
       const contentParts = Array.isArray(readResult.contentParts)
@@ -5490,7 +5503,65 @@ export class Session implements SessionContext {
       }
     }
 
-    return processedQueryParts;
+    return this.#applyVisionBridgeIfNeeded(processedQueryParts, abortSignal);
+  }
+
+  async #applyVisionBridgeIfNeeded(
+    parts: Part[],
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
+      return parts;
+    }
+
+    debugLogger.debug('vision bridge: gate matched, running conversion');
+    const bridgeResult = await runVisionBridge({
+      config: this.config,
+      parts,
+      signal: abortSignal,
+    });
+    debugLogger.debug(
+      `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
+    );
+
+    if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
+      await this.messageEmitter.emitAgentMessage(
+        this.#formatVisionBridgeNotice(bridgeResult),
+      );
+    }
+
+    if (bridgeResult.applied && bridgeResult.parts != null) {
+      return normalizeParts(bridgeResult.parts);
+    }
+
+    return parts;
+  }
+
+  #formatVisionBridgeNotice(result: VisionBridgeResult): string {
+    const modelName = result.modelId ?? 'vision model';
+    const target = result.modelEndpoint
+      ? `${modelName} (${result.modelEndpoint})`
+      : modelName;
+    const egressNote = result.egressOccurred
+      ? ` Your image and prompt/context were sent to ${target}.`
+      : '';
+
+    if (result.status === 'failed') {
+      const reason = result.egressOccurred
+        ? 'the vision model request failed'
+        : 'the vision bridge could not run';
+      return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+    }
+
+    if (result.status === 'skipped') {
+      return `Vision bridge (${modelName}) skipped.${egressNote}`;
+    }
+
+    const omitted =
+      result.omittedCount > 0
+        ? ` ${result.omittedCount} image(s) were omitted.`
+        : '';
+    return `Converted ${result.convertedCount} image(s) to text via ${target}.${omitted}${egressNote}`;
   }
 
   async #resolveExtensionMentionParts(
