@@ -58,6 +58,7 @@ This guide provides solutions to common issues and debugging tips, including top
 - **Q: A customization (extension, hook, skill, or MCP server) seems to be breaking Qwen Code. How do I isolate it?**
   - A: Start Qwen Code with the `--safe-mode` flag to disable all customizations — context files, hooks, extensions, skills, MCP servers, permission rules, approval mode overrides, memory features, and sandbox settings — for the session. If the problem disappears in safe mode, re-enable your customizations one at a time to find the culprit.
     - Example: `qwen --safe-mode`
+    - Alternative: set the environment variable `QWEN_CODE_SAFE_MODE=true` if the CLI cannot accept flags.
 
 ## Common error messages and solutions
 
