@@ -48,6 +48,7 @@ import {
   type CommandHookConfig,
   type HttpHookConfig,
 } from '../hooks/types.js';
+import { invalidateCollectedSkillEntriesCache } from '../tools/skill-utils.js';
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 const SKILLS_CONFIG_DIR = 'skills';
@@ -134,6 +135,12 @@ export class SkillManager {
    * timeout, matching the disk-change path's semantics.
    */
   async notifyConfigChanged(): Promise<void> {
+    // Invalidate the module-level skill-entries cache (skill-utils.ts) so
+    // that `collectAvailableSkillEntries()` recomputes with the updated
+    // disabled-skill set. Without this, callers that cached the result
+    // during startup would serve stale entries after the user toggles
+    // `skills.disabled` via the `/skills` dialog.
+    invalidateCollectedSkillEntriesCache();
     await this.notifyChangeListeners();
   }
 
@@ -494,6 +501,11 @@ export class SkillManager {
       `Skills cache refreshed: ${totalSkills} total skills loaded ` +
         `(${conditional.length} conditional)`,
     );
+    // Invalidate the collected-skill-entries cache so that callers who
+    // cached the result of `collectAvailableSkillEntries()` (startup
+    // reminder, SkillTool, drainSkillAndCommandReminders) will recompute
+    // with the updated skill set.
+    invalidateCollectedSkillEntriesCache();
     await this.notifyChangeListeners();
   }
 
