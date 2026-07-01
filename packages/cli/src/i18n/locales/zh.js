@@ -1587,8 +1587,6 @@ export default {
   'Select Model (global)': '选择模型（全局）',
   ' (this project)': '（当前项目）',
   ' (global)': '（全局）',
-  'Model: {{model}} (project)': '模型：{{model}}（项目）',
-  'Model: {{model}} (global)': '模型：{{model}}（全局）',
   'API Key': 'API Key',
   '(default)': '(默认)',
   '(not set)': '(未设置)',

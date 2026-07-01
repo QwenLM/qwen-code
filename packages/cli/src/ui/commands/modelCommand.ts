@@ -350,9 +350,9 @@ export const modelCommand: SlashCommand = {
     const { scopeOverride, remaining: args } = parseScopeFlags(rawArgs);
     const scopeSuffix =
       scopeOverride === SettingScope.Workspace
-        ? ' (project)'
+        ? t(' (this project)')
         : scopeOverride === SettingScope.User
-          ? ' (global)'
+          ? t(' (global)')
           : '';
     const isVoiceModelCommand =
       args === '--voice' || args.startsWith('--voice ');
@@ -721,18 +721,10 @@ export const modelCommand: SlashCommand = {
         modelName,
         scopeOverride,
       );
-      const contentKey =
-        scopeOverride === SettingScope.Workspace
-          ? 'Model: {{model}} (project)'
-          : scopeOverride === SettingScope.User
-            ? 'Model: {{model}} (global)'
-            : undefined;
       return {
         type: 'message',
         messageType: 'info',
-        content: contentKey
-          ? t(contentKey, { model: effectiveModelName })
-          : t('Model') + ': ' + effectiveModelName,
+        content: t('Model') + ': ' + effectiveModelName + scopeSuffix,
       };
     }
 

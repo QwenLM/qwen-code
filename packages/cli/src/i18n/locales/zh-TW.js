@@ -1445,8 +1445,6 @@ export default {
   'Select Model (global)': '選擇模型（全域）',
   ' (this project)': '（當前專案）',
   ' (global)': '（全域）',
-  'Model: {{model}} (project)': '模型：{{model}}（專案）',
-  'Model: {{model}} (global)': '模型：{{model}}（全域）',
   'API Key': 'API Key',
   '(default)': '(默認)',
   '(not set)': '(未設置)',

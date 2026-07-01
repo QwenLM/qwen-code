@@ -1995,7 +1995,7 @@ describe('modelCommand', () => {
       );
       expect(result).toMatchObject({
         type: 'message',
-        content: expect.stringContaining('(project)'),
+        content: expect.stringContaining('(this project)'),
       });
     });
 
@@ -2024,7 +2024,7 @@ describe('modelCommand', () => {
       const result = await modelCommand.action!(ctx, '--project qwen-max');
       expect(result).toMatchObject({
         type: 'message',
-        content: expect.stringContaining('(project)'),
+        content: expect.stringContaining('(this project)'),
       });
     });
 
