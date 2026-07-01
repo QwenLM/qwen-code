@@ -1878,6 +1878,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   ): Promise<void> => {
     if (!ci || ci.channel !== entry.channel) {
       if (opts?.throwOnFailure === true) {
+        writeStderrLine(
+          `qwen serve: ${label} ACP session close channel unavailable ` +
+            `for session ${JSON.stringify(entry.sessionId)}; agent close skipped`,
+        );
         throw new Error(
           `ACP session close channel unavailable for ${entry.sessionId}`,
         );

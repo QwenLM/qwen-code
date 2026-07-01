@@ -802,6 +802,8 @@ export function registerSessionRoutes(
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
     try {
+      // Keep close+remove under one gate so a load/resume cannot recreate the
+      // same live session between the bridge close and transcript deletion.
       const deleteResponse = await archiveCoordinator.runExclusiveMany(
         uniqueIds,
         async () => {

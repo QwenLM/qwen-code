@@ -135,6 +135,53 @@ function isSessionNotFoundError(err: unknown): boolean {
   );
 }
 
+interface ArchiveSessionBuckets {
+  active: string[];
+  alreadyArchived: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: unknown }>;
+}
+
+async function classifyArchiveSessionIds(
+  service: SessionService,
+  sessionIds: string[],
+): Promise<ArchiveSessionBuckets> {
+  const result: ArchiveSessionBuckets = {
+    active: [],
+    alreadyArchived: [],
+    notFound: [],
+    errors: [],
+  };
+  const locationResults = await Promise.allSettled(
+    sessionIds.map(async (sessionId) => ({
+      sessionId,
+      location: await service.getSessionLocation(sessionId),
+    })),
+  );
+  for (let i = 0; i < locationResults.length; i++) {
+    const sessionId = sessionIds[i]!;
+    const locationResult = locationResults[i]!;
+    if (locationResult.status === 'rejected') {
+      result.errors.push({ sessionId, error: locationResult.reason });
+      continue;
+    }
+    const location = locationResult.value.location;
+    if (location === undefined) {
+      result.notFound.push(sessionId);
+    } else if (location === 'archived') {
+      result.alreadyArchived.push(sessionId);
+    } else if (location === 'conflict') {
+      result.errors.push({
+        sessionId,
+        error: new Error(`Session archive conflict: ${sessionId}`),
+      });
+    } else {
+      result.active.push(sessionId);
+    }
+  }
+  return result;
+}
+
 function logSessionArchiveResult(
   action: 'archive' | 'unarchive',
   result: {
@@ -204,69 +251,62 @@ export async function archiveDaemonSessions(params: {
   const notFound: string[] = [];
   const errors: Array<{ sessionId: string; error: unknown }> = [];
 
-  await coordinator.runExclusiveMany(uniqueSessionIds, async () => {
-    const activeIds: string[] = [];
-    for (const sessionId of uniqueSessionIds) {
-      try {
-        const location = await service.getSessionLocation(sessionId);
-        if (location === undefined) {
-          notFound.push(sessionId);
-        } else if (location === 'archived') {
-          alreadyArchived.push(sessionId);
-        } else if (location === 'conflict') {
-          errors.push({
-            sessionId,
-            error: new Error(`Session archive conflict: ${sessionId}`),
-          });
-        } else {
-          activeIds.push(sessionId);
-        }
-      } catch (err) {
-        errors.push({ sessionId, error: err });
-      }
-    }
+  const initial = await classifyArchiveSessionIds(service, uniqueSessionIds);
+  const activeIds = initial.active;
+  alreadyArchived.push(...initial.alreadyArchived);
+  notFound.push(...initial.notFound);
+  errors.push(...initial.errors);
 
-    // Close+flush before moving JSONL: live writers keep the active path.
-    // If the later move fails, the active JSONL remains and a retry treats
-    // SessionNotFound as the recoverable "already closed" state.
-    const closeResults = await Promise.allSettled(
-      activeIds.map(async (sessionId) => {
-        try {
-          await bridge.closeSession(sessionId, undefined, {
-            requireAgentClose: true,
-          });
-        } catch (err) {
-          if (!isSessionNotFoundError(err)) {
-            throw err;
+  if (activeIds.length > 0) {
+    await coordinator.runExclusiveMany(activeIds, async () => {
+      const locked = await classifyArchiveSessionIds(service, activeIds);
+      const closableIds = locked.active;
+      alreadyArchived.push(...locked.alreadyArchived);
+      notFound.push(...locked.notFound);
+      errors.push(...locked.errors);
+
+      // Close+flush before moving JSONL: live writers keep the active path.
+      // If the later move fails, the active JSONL remains and a retry treats
+      // SessionNotFound as the recoverable "already closed" state.
+      const closeResults = await Promise.allSettled(
+        closableIds.map(async (sessionId) => {
+          try {
+            await bridge.closeSession(sessionId, undefined, {
+              requireAgentClose: true,
+            });
+          } catch (err) {
+            if (!isSessionNotFoundError(err)) {
+              throw err;
+            }
           }
+        }),
+      );
+      const archiveIds: string[] = [];
+      for (let i = 0; i < closeResults.length; i++) {
+        const sessionId = closableIds[i]!;
+        const result = closeResults[i]!;
+        if (result.status === 'fulfilled') {
+          archiveIds.push(sessionId);
+        } else {
+          errors.push({ sessionId, error: result.reason });
         }
-      }),
-    );
-    const archiveIds: string[] = [];
-    for (let i = 0; i < closeResults.length; i++) {
-      const sessionId = activeIds[i]!;
-      const result = closeResults[i]!;
-      if (result.status === 'fulfilled') {
-        archiveIds.push(sessionId);
-      } else {
-        errors.push({ sessionId, error: result.reason });
       }
-    }
 
-    try {
-      const result = await service.archiveSessions(archiveIds, {
-        knownLocation: 'active',
-      });
-      archived.push(...result.archived);
-      alreadyArchived.push(...result.alreadyArchived);
-      notFound.push(...result.notFound);
-      errors.push(...result.errors);
-    } catch (err) {
-      for (const sessionId of archiveIds) {
-        errors.push({ sessionId, error: err });
+      try {
+        const archiveResult = await service.archiveSessions(archiveIds, {
+          knownLocation: 'active',
+        });
+        archived.push(...archiveResult.archived);
+        alreadyArchived.push(...archiveResult.alreadyArchived);
+        notFound.push(...archiveResult.notFound);
+        errors.push(...archiveResult.errors);
+      } catch (err) {
+        for (const sessionId of archiveIds) {
+          errors.push({ sessionId, error: err });
+        }
       }
-    }
-  });
+    });
+  }
 
   logSessionArchiveResult('archive', {
     requested: uniqueSessionIds,

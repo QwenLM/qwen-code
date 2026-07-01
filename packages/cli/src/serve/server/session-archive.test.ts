@@ -83,11 +83,10 @@ describe('archiveDaemonSessions', () => {
     vi.restoreAllMocks();
   });
 
-  it('deduplicates ids and avoids re-reading classified active sessions', async () => {
+  it('deduplicates ids and archives one active session', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440002';
     writeSessionFile(workspaceDir, sessionId, 'active');
     const service = new SessionService(workspaceDir);
-    const getLocationSpy = vi.spyOn(service, 'getSessionLocation');
     const closeSession = vi.fn().mockResolvedValue(undefined);
 
     const result = await archiveDaemonSessions({
@@ -104,13 +103,38 @@ describe('archiveDaemonSessions', () => {
       errors: [],
     });
     expect(closeSession).toHaveBeenCalledTimes(1);
-    expect(getLocationSpy).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       false,
     );
     expect(
       fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
     ).toBe(true);
+  });
+
+  it('does not lock ids that are already archived or missing', async () => {
+    const archivedId = '550e8400-e29b-41d4-a716-446655440003';
+    const missingId = '550e8400-e29b-41d4-a716-446655440004';
+    writeSessionFile(workspaceDir, archivedId, 'archived');
+    const service = new SessionService(workspaceDir);
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+    const coordinator = new SessionArchiveCoordinator();
+
+    await coordinator.runSharedMany([archivedId, missingId], async () => {
+      const result = await archiveDaemonSessions({
+        sessionIds: [archivedId, missingId],
+        service,
+        bridge: { closeSession },
+        coordinator,
+      });
+
+      expect(result).toEqual({
+        archived: [],
+        alreadyArchived: [archivedId],
+        notFound: [missingId],
+        errors: [],
+      });
+    });
+    expect(closeSession).not.toHaveBeenCalled();
   });
 });
 
