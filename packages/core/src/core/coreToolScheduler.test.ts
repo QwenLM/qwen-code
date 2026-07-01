@@ -6348,6 +6348,71 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     expect(statuses).not.toContain('awaiting_approval');
   });
 
+  it('lets a plan-required teammate submit a plan before approval', async () => {
+    const getConfirmationDetails = vi.fn().mockResolvedValue({
+      type: 'info' as const,
+      title: 'Confirm Exit Plan Mode',
+      prompt: 'Submit plan',
+      onConfirm: vi.fn().mockResolvedValue(undefined),
+    });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'plan submitted',
+      returnDisplay: 'plan submitted',
+    });
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails,
+      execute,
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      tool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      { avoidPermissionPrompts: true },
+    );
+
+    await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test-team',
+        agentName: 'planner',
+        teamName: 'test-team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () =>
+        scheduler.schedule(
+          [
+            {
+              callId: 'plan-required-exit-plan-mode',
+              name: ToolNames.EXIT_PLAN_MODE,
+              args: { plan: 'Investigate, then implement.' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-plan-required-exit-plan-mode',
+            },
+          ],
+          new AbortController().signal,
+        ),
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(getConfirmationDetails).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledTimes(1);
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+    const statuses = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .map((call) => call.status);
+    expect(statuses).toContain('scheduled');
+    expect(statuses).not.toContain('awaiting_approval');
+  });
+
   it('blocks trusted MCP-like default-allow tools before leader approval', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'mutated remote system',

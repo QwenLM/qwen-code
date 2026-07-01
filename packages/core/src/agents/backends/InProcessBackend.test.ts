@@ -623,6 +623,33 @@ describe('InProcessBackend', () => {
     expect(parentConfig.setApprovalMode).not.toHaveBeenCalled();
   });
 
+  it('restores a plan-mode per-agent config to default without mutating the parent config', async () => {
+    const parentConfig = createMockConfig() as unknown as {
+      getApprovalMode: ReturnType<typeof vi.fn>;
+      setApprovalMode: ReturnType<typeof vi.fn>;
+    };
+    const backendWithParentMode = new InProcessBackend(parentConfig as never);
+    await backendWithParentMode.init();
+
+    const config = createSpawnConfig('agent-1');
+    config.inProcess!.approvalMode = PLAN_MODE;
+
+    await backendWithParentMode.spawnAgent(config);
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const lastCall = MockAgentCore.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+
+    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
+    const agentContext = runtimeContext as unknown as Config;
+    agentContext.setApprovalMode(DEFAULT_MODE);
+
+    expect(agentContext.getApprovalMode()).toBe(DEFAULT_MODE);
+    expect(agentContext.getPrePlanMode()).toBe(DEFAULT_MODE);
+    expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
+    expect(parentConfig.setApprovalMode).not.toHaveBeenCalled();
+  });
+
   it('uses a teammate-scoped plan file path in per-agent config', async () => {
     const parentConfig = createMockConfig() as unknown as {
       getPlanFilePath: ReturnType<typeof vi.fn>;
