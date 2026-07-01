@@ -58,7 +58,8 @@ export class WebhookServer {
 
       if (this.options.tls) {
         // HTTPS mode
-        let cert: Buffer; let key: Buffer;
+        let cert: Buffer;
+        let key: Buffer;
         try {
           cert = fs.readFileSync(this.options.tls.cert);
           key = fs.readFileSync(this.options.tls.key);
@@ -129,20 +130,20 @@ export class WebhookServer {
       return;
     }
 
+    // Read body BEFORE auth so HMAC can sign the actual payload
+    let body = '';
+    for await (const chunk of req) {
+      body += chunk.toString();
+    }
+
     // Authenticate if configured
     if (trigger.auth) {
-      const authResult = this.authenticate(req, trigger.auth);
+      const authResult = this.authenticate(req, trigger.auth, body);
       if (!authResult) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized' }));
         return;
       }
-    }
-
-    // Parse body
-    let body = '';
-    for await (const chunk of req) {
-      body += chunk.toString();
     }
 
     let payload: unknown;
@@ -173,6 +174,7 @@ export class WebhookServer {
   private authenticate(
     req: IncomingMessage,
     auth: { type: 'bearer' | 'hmac'; secret?: string },
+    body: string,
   ): boolean {
     if (!auth.secret) {
       return true;
@@ -181,7 +183,9 @@ export class WebhookServer {
     const authHeader = req.headers.authorization || '';
 
     if (auth.type === 'bearer') {
-      return authHeader === `Bearer ${auth.secret}`;
+      const expected = `Bearer ${auth.secret}`;
+      if (authHeader.length !== expected.length) return false;
+      return timingSafeEqual(Buffer.from(authHeader), Buffer.from(expected));
     }
 
     if (auth.type === 'hmac') {
@@ -195,7 +199,7 @@ export class WebhookServer {
 
       const providedSig = signature.slice(7);
       const expectedSig = createHmac('sha256', auth.secret)
-        .update('')
+        .update(body)
         .digest('hex');
 
       try {

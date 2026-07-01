@@ -78,6 +78,7 @@ export class ScheduleDaemon {
   private loadedTasks = new Map<string, ScheduleTask>();
   private forceSandbox: boolean;
   private channelRegistry: ChannelRegistry;
+  private fireAtTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(options: DaemonOptions = {}) {
     this.scheduler = new CronScheduler(null);
@@ -114,6 +115,12 @@ export class ScheduleDaemon {
     this.state = 'stopping';
 
     this.scheduler.stop();
+
+    // Clear all pending fireAt timers
+    for (const timer of this.fireAtTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.fireAtTimers.clear();
 
     const promises = [...this.activeFires.values()].map(async (fire) => {
       if (fire.child.exitCode === null) {
@@ -221,9 +228,10 @@ export class ScheduleDaemon {
       const delayMs = fireAtDate.getTime() - now.getTime();
 
       // Schedule a one-shot timeout
-      setTimeout(() => {
+      const timerId = setTimeout(() => {
         void this.fireTask(task, 'fireAt');
       }, delayMs);
+      this.fireAtTimers.set(definition.taskId, timerId);
 
       this.loadedTasks.set(definition.taskId, task);
       debugLogger.info(
@@ -290,7 +298,7 @@ export class ScheduleDaemon {
       approvalMode,
       '--output-format',
       'stream-json',
-      '--max-walls-time',
+      '--max-wall-time',
       String(DEFAULT_MAX_WALL_TIME_SECONDS),
     ];
     if (definition.model) {

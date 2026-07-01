@@ -146,7 +146,7 @@ export const scheduleCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'info',
-          content: `Task ${taskId} updated.\\n${formatScheduleTaskSummary(task)}`,
+          content: `Task ${taskId} updated.\n${formatScheduleTaskSummary(task)}`,
         };
       } catch (err) {
         return {
