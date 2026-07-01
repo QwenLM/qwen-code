@@ -6,9 +6,8 @@
 
 import { vi, describe, it, expect } from 'vitest';
 import { skillsCommand } from './skillsCommand.js';
-import { type CommandContext } from './types.js';
+import type { SlashCommandActionReturn , type CommandContext  } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import { MessageType } from '../types.js';
 
 interface FakeSkill {
   name: string;
@@ -131,19 +130,27 @@ describe('skillsCommand bare entry', () => {
       executionMode: 'acp',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.SKILLS_LIST,
-        skills: [
-          { name: 'high', description: 'High priority', level: 'Project' },
-          { name: 'mid', description: 'Mid priority', level: 'User' },
-          { name: 'low', description: 'Low priority', level: 'Bundled' },
-        ],
-      },
-      expect.any(Number),
-    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('high'),
+    });
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+    expect(content).toContain('High priority');
+    expect(content).toContain('(Project)');
+    expect(content).toContain('Mid priority');
+    expect(content).toContain('(User)');
+    expect(content).toContain('Low priority');
+    expect(content).toContain('(Bundled)');
+    const highIdx = content.indexOf('high');
+    const midIdx = content.indexOf('mid');
+    const lowIdx = content.indexOf('low');
+    expect(highIdx).toBeLessThan(midIdx);
+    expect(midIdx).toBeLessThan(lowIdx);
   });
 
   it('omits non-user-invocable skills from the non-interactive listing', async () => {
@@ -162,18 +169,14 @@ describe('skillsCommand bare entry', () => {
       executionMode: 'non_interactive',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.SKILLS_LIST,
-        skills: [
-          { name: 'alpha', description: 'Alpha skill', level: 'Bundled' },
-          { name: 'gamma', description: 'Gamma skill', level: 'Bundled' },
-        ],
-      },
-      expect.any(Number),
-    );
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+    expect(content).toContain('alpha');
+    expect(content).toContain('gamma');
+    expect(content).not.toContain('model-only');
   });
 
   it('omits disabled skills from the non-interactive listing', async () => {
@@ -189,18 +192,14 @@ describe('skillsCommand bare entry', () => {
       executionMode: 'non_interactive',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.SKILLS_LIST,
-        skills: [
-          { name: 'alpha', description: 'Alpha', level: 'Bundled' },
-          { name: 'gamma', description: 'Gamma', level: 'Bundled' },
-        ],
-      },
-      expect.any(Number),
-    );
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+    expect(content).toContain('alpha');
+    expect(content).toContain('gamma');
+    expect(content).not.toContain('beta');
   });
 
   it('shows no available skills when all loaded skills are not user invocable', async () => {
@@ -210,15 +209,13 @@ describe('skillsCommand bare entry', () => {
       executionMode: 'acp',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.INFO,
-        text: 'All skills are marked as non-user-invocable.',
-      },
-      expect.any(Number),
-    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'All skills are marked as non-user-invocable.',
+    });
   });
 
   it('shows a clarifying message when all skills are disabled in non-interactive mode', async () => {
@@ -233,17 +230,15 @@ describe('skillsCommand bare entry', () => {
       executionMode: 'acp',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.INFO,
-        text: expect.stringMatching(
-          /disabled.*settings\.json|skills\.disabled/i,
-        ),
-      },
-      expect.any(Number),
-    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringMatching(
+        /disabled.*settings\.json|skills\.disabled/i,
+      ),
+    });
   });
 });
 
