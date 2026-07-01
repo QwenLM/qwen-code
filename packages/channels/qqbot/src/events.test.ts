@@ -491,13 +491,7 @@ describe('handleGroup', () => {
 
     pvt['handleGroup'](
       makeGroupEvent({
-        mentions: [
-          {
-            member_openid: 'bot-openid',
-            is_you: true,
-            scope: 'single' as const,
-          },
-        ],
+        mentions: [],
       }),
     );
     await vi.advanceTimersByTimeAsync(600);

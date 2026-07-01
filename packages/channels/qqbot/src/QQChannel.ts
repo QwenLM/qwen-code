@@ -441,7 +441,10 @@ export class QQChannel extends ChannelBase {
             activeBody,
           );
           if (activeResp.ok) {
-            if (msgId) this.saveQQState();
+            if (msgId) {
+              this.msgSeqMap.set(msgId, nextSeq);
+              this.saveQQState();
+            }
             return;
           }
           process.stderr.write(
@@ -751,14 +754,10 @@ export class QQChannel extends ChannelBase {
           // grow without bound across weeks of uptime.
           this.msgSeqMap.delete(entry.msgId);
           this.replyMsgId.delete(chatId);
-          // Cascade eviction to chatTypeMap and groupActiveMsgEnabled:
-          // if there's been no replyMsgId activity for 5 minutes, the
-          // routing/message-permission entries for that chatId are stale.
-          // chatTypeMap will be re-populated on the next inbound message;
-          // groupActiveMsgEnabled will be re-populated on the next
-          // GROUP_MSG_REJECT/RECEIVE event.
-          this.chatTypeMap.delete(chatId);
-          this.groupActiveMsgEnabled.delete(chatId);
+          // Keep chatTypeMap and groupActiveMsgEnabled even after 5 minutes
+          // without replyMsgId activity, to avoid breaking proactive sends
+          // (loops/cron) that rely on them. Only replyMsgId and msgSeqMap
+          // entries are evicted here.
         }
       }
     }, 60_000);
@@ -1423,7 +1422,10 @@ export class QQChannel extends ChannelBase {
           intents:
             Intent.C2C_MESSAGE |
             Intent.GROUP_AT_MESSAGE |
-            (this.qqConfig.groupAllPolicy !== 'log' ? Intent.GROUP_MESSAGE : 0),
+            (this.qqConfig.groupAllPolicy === 'keyword' ||
+            this.qqConfig.groupAllPolicy === 'all'
+              ? Intent.GROUP_MESSAGE
+              : 0),
           shard: [0, 1],
           properties: {},
         },
@@ -1722,16 +1724,24 @@ export class QQChannel extends ChannelBase {
     }
     const chatId = event.group_openid;
     this.chatTypeMap.set(chatId, 'group');
-    if (this.groupActiveMsgEnabled.get(chatId) === false) {
-      process.stderr.write(
-        `[QQ:${this.name}] handleGroup blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
-      );
-      return;
-    }
-
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
     const { isAtBot, isSlash, text, senderName } = result;
+
+    // Only block non-@-bot messages — passive replies to @-mentions
+    // must still be delivered. Outbound sendMessage already has a more
+    // precise guard (!msgId + groupActiveMsgEnabled === false).
+    if (this.groupActiveMsgEnabled.get(chatId) === false) {
+      if (!isAtBot) {
+        process.stderr.write(
+          `[QQ:${this.name}] handleGroup blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
+        );
+        return;
+      }
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroup: active messages disabled but @-bot allowed through (passive)\n`,
+      );
+    }
 
     if (!isAtBot) {
       process.stderr.write(
