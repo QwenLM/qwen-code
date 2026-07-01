@@ -794,6 +794,8 @@ describe('BridgeClient — artifact ingress', () => {
       expect(publish).not.toHaveBeenCalled();
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('artifact store unavailable');
+      expect(logged).toContain('"name":"Error"');
+      expect(logged).toContain('"stack":');
     } finally {
       stderr.mockRestore();
     }

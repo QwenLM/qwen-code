@@ -113,6 +113,17 @@ function truncateArtifactInputs(
   return artifacts.slice(0, limit);
 }
 
+function artifactIngestionErrorReason(error: unknown): unknown {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  return {
+    name: error.name,
+    message: error.message,
+    stack: error.stack?.split('\n').slice(0, 4).join('\n'),
+  };
+}
+
 function extractSessionUpdateArtifacts(
   params: SessionNotification,
   updateMeta: Record<string, unknown> | undefined,
@@ -940,10 +951,9 @@ export class BridgeClient implements Client {
       const result = await entry.artifacts.upsertMany(artifacts, options);
       this.publishArtifactChanges(entry, result.changes);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       writeStderrLine(
         `[artifacts] session=${entry.sessionId} action=dropped reason=${JSON.stringify(
-          message,
+          artifactIngestionErrorReason(error),
         )}`,
       );
     }
