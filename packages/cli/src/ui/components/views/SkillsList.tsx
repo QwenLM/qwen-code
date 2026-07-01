@@ -7,8 +7,10 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
+import type { SkillLevel } from '@qwen-code/qwen-code-core';
 import { type SkillDefinition } from '../../types.js';
 import { t } from '../../../i18n/index.js';
+import { levelLabel } from '../../utils/skill-level-label.js';
 
 const NAME_COLUMN = 24;
 
@@ -44,7 +46,7 @@ export const SkillsList: React.FC<SkillsListProps> = ({ skills }) => (
           )}
           {skill.level && (
             <Text color={theme.text.secondary}>
-              {'  '}({skill.level})
+              {'  '}({levelLabel(skill.level as SkillLevel)})
             </Text>
           )}
         </Box>
