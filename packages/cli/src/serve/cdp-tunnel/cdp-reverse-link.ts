@@ -251,7 +251,6 @@ export class CdpReverseLink {
       },
     ).then(
       (info) => {
-        this.attached = true;
         this.emulator?.setTabInfo(info);
         return info;
       },
@@ -340,6 +339,7 @@ export class CdpReverseLink {
       });
       return;
     }
+    this.attached = true;
     attach.pending.resolve({ url: frame.url, title: frame.title });
   }
 

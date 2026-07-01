@@ -1526,7 +1526,7 @@ export type DaemonRuntimeMcpAddResult =
   | {
       readonly name: string;
       readonly skipped: true;
-      readonly reason: 'budget_warning_only';
+      readonly reason: 'budget_warning_only' | 'runtime_name_conflict';
     };
 
 /**

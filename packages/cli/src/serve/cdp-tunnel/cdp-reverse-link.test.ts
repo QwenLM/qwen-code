@@ -120,6 +120,23 @@ describe('CdpReverseLink (Plan C #5626)', () => {
     expect(sent.some((f) => f.type === 'cdp_command')).toBe(false);
   });
 
+  it('does not stay attached after an attached ack and detach in the same tick', async () => {
+    const { link, sent } = setup();
+    const attachP = link.attach();
+    const attachId = (sent[0] as { id: number }).id;
+
+    link.handleInbound({ type: 'cdp_attached', id: attachId });
+    link.handleInbound({ type: 'cdp_detach', reason: 'tab closed' });
+    await attachP;
+
+    const cmdP = link.forwardToTab('Runtime.evaluate', undefined);
+    cmdP.catch(() => undefined);
+    await Promise.resolve();
+
+    expect(sent.filter((f) => f.type === 'cdp_attach')).toHaveLength(2);
+    expect(sent.some((f) => f.type === 'cdp_command')).toBe(false);
+  });
+
   it('dispose rejects pending commands and refuses new ones', async () => {
     const { link } = setup();
     const inflight = link.forwardToTab('Runtime.enable', undefined);

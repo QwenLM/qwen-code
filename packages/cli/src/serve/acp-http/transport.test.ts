@@ -124,6 +124,25 @@ describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
         '--wsEndpoint',
         'ws://127.0.0.1:4170/cdp',
       ],
+      alwaysLoadTools: true,
+      __qwenRuntimeMcpIfAbsent: true,
+    });
+  });
+
+  it('uses the listening host for a specific non-wildcard bind', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(
+        4170,
+        pkgJsonPath,
+        { cli: 'bin/cli.js' },
+        '192.168.1.20',
+      ),
+    ).toMatchObject({
+      args: [
+        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
+        '--wsEndpoint',
+        'ws://192.168.1.20:4170/cdp',
+      ],
     });
   });
 });
@@ -414,6 +433,7 @@ class FakeBridge {
   runtimeMcpRemoves: Array<{ name: string; originatorClientId: string }> = [];
   runtimeMcpAddResult: { shadowedSettings?: boolean } = {};
   runtimeMcpAddError: Error | undefined;
+  runtimeMcpBeforeAddResolve: (() => Promise<void>) | undefined;
   async addRuntimeMcpServer(
     name: string,
     config: Record<string, unknown>,
@@ -421,6 +441,7 @@ class FakeBridge {
   ) {
     this.runtimeMcpAdds.push({ name, config, originatorClientId });
     if (this.runtimeMcpAddError) throw this.runtimeMcpAddError;
+    await this.runtimeMcpBeforeAddResolve?.();
     return {
       name,
       transport: 'stdio',
@@ -5850,6 +5871,30 @@ describe('ACP WebSocket transport security', () => {
     );
     ws.close();
     await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
+  it('removes chrome-devtools MCP if the CDP bridge disconnects during registration', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    let ws: WebSocket | undefined;
+    bridge.runtimeMcpBeforeAddResolve = async () => {
+      ws?.close();
+      await new Promise<void>((resolve) => {
+        if (!ws) {
+          resolve();
+          return;
+        }
+        ws.once('close', () => resolve());
+      });
+    };
+
+    ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
+    });
   });
 
   it('retries chrome-devtools MCP registration after add failure', async () => {

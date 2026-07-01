@@ -212,8 +212,8 @@ export interface ServeOptions {
    * Phase 2 "reverse tool channel"). When enabled, a connected WS client may
    * send `mcp_register` / `mcp_message` / `mcp_unregister` frames so the
    * daemon's agent can call tools that execute in the client (e.g. the Chrome
-   * extension's browser tools). `runQwenServe` enables this by default; callers
-   * may pass `false` to disable it.
+   * extension's browser tools). `runQwenServe` only enables this when a caller
+   * or environment variable opts in.
    */
   clientMcpOverWs?: boolean;
   /**
