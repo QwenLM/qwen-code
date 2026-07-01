@@ -575,7 +575,11 @@ export abstract class ChannelBase {
           }
         }
         if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
-          this.emitTaskCancellation(promptState, sessionId, 'timeout');
+          this.emitTaskCancellation(
+            promptState,
+            sessionId,
+            this.loopSkippedCancellationReason(err),
+          );
           promptState.cancelled = true;
         }
         if (
@@ -719,6 +723,61 @@ export abstract class ChannelBase {
     } finally {
       clearTimeout(graceTimer);
     }
+  }
+
+  private loopSkippedCancellationReason(
+    err: ChannelLoopSkippedError,
+  ): 'cancel_command' | 'clear' | 'timeout' {
+    if (err.message.includes('cancelled')) {
+      return 'cancel_command';
+    }
+    if (err.message.includes('cleared') || err.message.includes('dropped')) {
+      return 'clear';
+    }
+    return 'timeout';
+  }
+
+  protected requestActivePromptCancellation(
+    sessionId: string,
+    reason: 'cancel_command' | 'clear' | 'steer' = 'cancel_command',
+  ): Promise<boolean> {
+    const active = this.activePrompts.get(sessionId);
+    if (!active) {
+      return Promise.resolve()
+        .then(() => this.bridge.cancelSession(sessionId))
+        .then(
+          () => true,
+          (err) => {
+            process.stderr.write(
+              `[${this.name}] cancelSession failed for session=${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+            return false;
+          },
+        );
+    }
+    const cancelRequested =
+      active.cancelRequested ??
+      Promise.resolve()
+        .then(() => this.bridge.cancelSession(sessionId))
+        .then(
+          () => true,
+          (err) => {
+            process.stderr.write(
+              `[${this.name}] cancelSession failed for session=${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+            active.cancelRequested = undefined;
+            return false;
+          },
+        );
+    active.cancelRequested = cancelRequested;
+    return cancelRequested.then((cancelSucceeded) => {
+      if (cancelSucceeded) {
+        active.cancelled = true;
+        this.stopActiveStreaming(active, sessionId, reason);
+        this.emitTaskCancellation(active, sessionId, reason);
+      }
+      return cancelSucceeded;
+    });
   }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}

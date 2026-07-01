@@ -1552,15 +1552,12 @@ export class FeishuChannel extends ChannelBase {
       const inboundId = targetInboundMsgId;
 
       const handleStop = async () => {
-        let cancelSucceeded = true;
-        if (sessionId) {
-          await this.bridge.cancelSession(sessionId).catch((err) => {
-            cancelSucceeded = false;
-            process.stderr.write(
-              `[Feishu:${this.name}] cancelSession failed for msg=${inboundId}: ${err instanceof Error ? err.message : err}\n`,
-            );
-          });
-        }
+        const cancelSucceeded = sessionId
+          ? await this.requestActivePromptCancellation(
+              sessionId,
+              'cancel_command',
+            )
+          : true;
         // Only mark as stopped after cancelSession succeeds. If it failed,
         // don't set stopped=true — let the agent continue running normally.
         if (cancelSucceeded) {

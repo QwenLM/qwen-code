@@ -66,6 +66,10 @@ class TestChannel extends ChannelBase {
     this.registerCancelCommand();
   }
 
+  cancelPromptForTest(sessionId: string): Promise<boolean> {
+    return this.requestActivePromptCancellation(sessionId, 'cancel_command');
+  }
+
   protected override onPromptStart(
     chatId: string,
     sessionId: string,
@@ -4717,6 +4721,37 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('does not emit failed after an adapter-initiated cancellation rejects', async () => {
+      let rejectPrompt!: (error: Error) => void;
+      const pendingPrompt = new Promise<string>((_resolve, reject) => {
+        rejectPrompt = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-stop' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const cancel = ch.cancelPromptForTest('s-1');
+      expect(cancel).toBeDefined();
+      rejectPrompt(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      await expect(prompt).rejects.toThrow('aborted');
+      await expect(cancel).resolves.toBe(true);
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-stop',
+        }),
+        expect.objectContaining({
+          type: 'cancelled',
+          reason: 'cancel_command',
+          messageId: 'm-stop',
+        }),
+      ]);
+    });
+
     it('does not emit tool call lifecycle events after cancellation', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
@@ -7347,7 +7382,7 @@ describe('ChannelBase', () => {
         expect.objectContaining({
           type: 'cancelled',
           messageId: 'job-1',
-          reason: 'timeout',
+          reason: 'clear',
         }),
       ]);
     });
