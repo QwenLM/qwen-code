@@ -3376,7 +3376,9 @@ describe('ChannelBase', () => {
       expect(firstPrompt).toContain('Memory scope:');
       expect(firstPrompt).toContain('- namespace: qwen-tag:ops');
       expect(firstPrompt).toContain('- mode: metadata-only');
-      expect(firstPrompt).toMatch(/storage isolation: not enforced/i);
+      expect(firstPrompt).toContain(
+        '- data from other channels must not be shared.',
+      );
       expect(firstPrompt.indexOf('Channel identity:')).toBeLessThan(
         firstPrompt.indexOf('Be concise.'),
       );
@@ -3384,6 +3386,36 @@ describe('ChannelBase', () => {
       const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[1]![1] as string;
       expect(secondPrompt).not.toContain('Channel identity:');
+    });
+
+    it('prepends channel boundary metadata for identity-only config', async () => {
+      const ch = createChannel({
+        identity: { id: 'ops-agent', displayName: 'Ops Agent' },
+      });
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![1] as string;
+      expect(firstPrompt).toContain('Channel identity:');
+      expect(firstPrompt).toContain('- id: ops-agent');
+      expect(firstPrompt).toContain('Memory scope:');
+      expect(firstPrompt).toContain('- namespace: channel:test-chan');
+    });
+
+    it('prepends channel boundary metadata for memory-scope-only config', async () => {
+      const ch = createChannel({
+        memoryScope: { namespace: 'qwen-tag:ops' },
+      });
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+
+      const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![1] as string;
+      expect(firstPrompt).toContain('Channel identity:');
+      expect(firstPrompt).toContain('- id: channel:test-chan');
+      expect(firstPrompt).toContain('Memory scope:');
+      expect(firstPrompt).toContain('- namespace: qwen-tag:ops');
     });
 
     it('sanitizes configured channel metadata before rendering prompt and status text', async () => {
@@ -4505,8 +4537,12 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope());
       const started = ch.taskEvents.find((event) => event.type === 'started');
       expect(started).toBeDefined();
-      started!.identity.displayName = 'mutated';
-      started!.memoryScope.namespace = 'mutated-memory';
+      expect(() => {
+        started!.identity.displayName = 'mutated';
+      }).toThrow(TypeError);
+      expect(() => {
+        started!.memoryScope.namespace = 'mutated-memory';
+      }).toThrow(TypeError);
 
       await ch.handleInbound(envelope({ text: '/who' }));
 
@@ -7027,6 +7063,26 @@ describe('ChannelBase', () => {
         consecutiveFailures: 0,
         runCount: 0,
       });
+      await ch.runLoopPrompt({
+        id: 'job-2',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary again',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 1,
+      });
 
       const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0]![1] as string;
@@ -7036,6 +7092,12 @@ describe('ChannelBase', () => {
       expect(promptText).toContain('Reply briefly.');
       expect(promptText).toContain(
         '[Loop "daily summary" created by Alice]\n\npost summary',
+      );
+      const secondPromptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![1] as string;
+      expect(secondPromptText).not.toContain('Channel identity:');
+      expect(secondPromptText).toContain(
+        '[Loop "daily summary" created by Alice]\n\npost summary again',
       );
     });
 
