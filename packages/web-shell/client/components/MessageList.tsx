@@ -385,7 +385,7 @@ function collectFinalAssistantIdsByTurn(
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (item.type === 'message' && item.message.role === 'user') {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
       userIdxs.push(i);
     }
   }

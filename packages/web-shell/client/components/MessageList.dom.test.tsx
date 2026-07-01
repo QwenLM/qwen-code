@@ -14,8 +14,17 @@ vi.mock('../App', async () => {
 vi.mock('./MessageItem', async () => {
   const React = await import('react');
   return {
-    MessageItem: ({ message }: { message: Message }) =>
-      React.createElement('div', { 'data-testid': `msg-${message.id}` }),
+    MessageItem: ({
+      message,
+      showAssistantActions,
+    }: {
+      message: Message;
+      showAssistantActions?: boolean;
+    }) =>
+      React.createElement('div', {
+        'data-testid': `msg-${message.id}`,
+        'data-assistant-actions': String(Boolean(showAssistantActions)),
+      }),
   };
 });
 vi.mock('./messages/tools/ParallelAgentsGroup', () => ({
@@ -122,6 +131,10 @@ function mount(
 
 const has = (c: HTMLElement, id: string) =>
   c.querySelector(`[data-testid="msg-${id}"]`) !== null;
+const assistantActions = (c: HTMLElement, id: string) =>
+  c
+    .querySelector(`[data-testid="msg-${id}"]`)
+    ?.getAttribute('data-assistant-actions');
 const isCollapsed = (c: HTMLElement, id: string) =>
   c
     .querySelector(`[data-testid="msg-${id}"]`)
@@ -401,5 +414,11 @@ describe('MessageList — turn collapse (DOM)', () => {
       top: 1200,
       behavior: 'smooth',
     });
+  });
+
+  it('shows assistant actions on the final answer of a user_shell turn', () => {
+    const c = mount([userShellMsg('shell'), asstMsg('a1')]);
+
+    expect(assistantActions(c, 'a1')).toBe('true');
   });
 });
