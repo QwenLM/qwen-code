@@ -427,8 +427,12 @@ export default {
   'Theme "{{themeName}}" not found.': 'Theme "{{themeName}}" not found.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Theme "{{themeName}}" not found in selected scope.',
-  'Clear conversation history and free up context':
-    'Clear conversation history and free up context',
+  'Clear conversation history (use --all to also reset IDE/editor context)':
+    'Clear conversation history (use --all to also reset IDE/editor context)',
+  'Complete reset (also clears IDE/editor context store)':
+    'Complete reset (also clears IDE/editor context store)',
+  'Are you sure you want to completely reset the session?':
+    'Are you sure you want to completely reset the session?',
   'Compresses the context by replacing it with a summary.':
     'Compresses the context by replacing it with a summary.',
   'Fast context compression without AI. Strips old tool outputs and thinking parts.':
