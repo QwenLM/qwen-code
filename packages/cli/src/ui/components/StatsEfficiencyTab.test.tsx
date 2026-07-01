@@ -96,3 +96,46 @@ describe('EfficiencyTab model table capping', () => {
     expect(frame).not.toContain('more (run /stats');
   });
 });
+
+const makeToolData = (): StatsData => ({
+  ...makeData(),
+  toolLeaderboard: [
+    { name: 'grep', count: 60, totalDurationMs: 1000, successRate: 100 },
+    { name: 'glob', count: 50, totalDurationMs: 1000, successRate: 100 },
+    { name: 'bash', count: 40, totalDurationMs: 1000, successRate: 90 },
+    { name: 'edit', count: 30, totalDurationMs: 1000, successRate: 80 },
+    { name: 'write', count: 20, totalDurationMs: 1000, successRate: 70 },
+    { name: 'read', count: 10, totalDurationMs: 1000, successRate: 60 },
+  ],
+});
+
+describe('EfficiencyTab tool leaderboard capping', () => {
+  it('lists only the top N tools and collapses the rest into a "+N more" line', () => {
+    const { lastFrame } = render(
+      <EfficiencyTab data={makeToolData()} bodyWidth={80} maxToolRows={2} />,
+    );
+    const frame = lastFrame() ?? '';
+
+    // Top two in leaderboard order are shown.
+    expect(frame).toContain('grep');
+    expect(frame).toContain('glob');
+    // The remaining four are hidden.
+    expect(frame).not.toContain('bash');
+    expect(frame).not.toContain('edit');
+    expect(frame).not.toContain('write');
+    // ...and summarized by the overflow line.
+    expect(frame).toContain('+4 more');
+    expect(frame).toContain('run /stats for the full list');
+  });
+
+  it('lists every tool and shows no overflow line when maxToolRows is unset', () => {
+    const { lastFrame } = render(
+      <EfficiencyTab data={makeToolData()} bodyWidth={80} />,
+    );
+    const frame = lastFrame() ?? '';
+
+    expect(frame).toContain('grep');
+    expect(frame).toContain('read');
+    expect(frame).not.toContain('more (run /stats');
+  });
+});

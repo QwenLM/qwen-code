@@ -222,8 +222,9 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
     { isActive: isFocused },
   );
 
-  const hintText =
-    activeTab === 'session'
+  const hintText = !isFocused
+    ? ''
+    : activeTab === 'session'
       ? 'tab \xB7 esc'
       : activeTab === 'activity' && range === 'all'
         ? 'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc'

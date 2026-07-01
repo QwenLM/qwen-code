@@ -1089,6 +1089,10 @@ export function SettingsDialog({
           // normalize the key name) also delete rather than being swallowed.
           setFocusZone('search');
           setSearchQuery((q) => removeLastGrapheme(q));
+          // Consume the keypress, mirroring the isPrintableSearchChar branch
+          // below, so a handler added after this else-if chain never runs on
+          // deletion keys.
+          return;
         } else if (showRestartPrompt && name === 'r') {
           // Restart must win over the implicit-search-entry gesture: handle it
           // here, before isPrintableSearchChar consumes `r`. Without this, the
