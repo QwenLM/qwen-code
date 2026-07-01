@@ -443,7 +443,7 @@ export class QQChannel extends ChannelBase {
             return;
           }
           process.stderr.write(
-            `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status}: ${(await activeResp.text().catch(() => '')).slice(0, 100)})\n`,
+            `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status}: ${sanitizeLogText(await activeResp.text().catch(() => ''), 200)})\n`,
           );
           if (activeResp.status === 429) {
             process.stderr.write(
@@ -481,7 +481,9 @@ export class QQChannel extends ChannelBase {
         this.msgSeqMap.set(msgId, nextSeq - 1);
         this.saveQQState();
       }
-      process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
+      process.stderr.write(
+        `[QQ:${this.name}] Send error: ${sanitizeLogText(String(e), 200)}\n`,
+      );
     }
   }
 
@@ -657,6 +659,9 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] idleFlush send failed: ${err}\n`,
           );
+          // Clean up pending stream delete marker so onResponseComplete
+          // can retry via the buffer.
+          this.pendingStreamDelete.delete(sessionId);
           // Restore buffer on failure so onResponseComplete can retry.
           s.buffer = toFlush + s.buffer;
         })
@@ -1146,6 +1151,12 @@ export class QQChannel extends ChannelBase {
         this.serverRequestedReconnect ||
         (code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts);
 
+      // Non-1000 close codes (e.g. 4009) imply the server-side session is
+      // gone; skip the RESUME attempt and go straight to IDENTIFY.
+      if (code !== 1000) {
+        this.tryResume = false;
+      }
+
       this.serverRequestedReconnect = false;
 
       if (shouldReconnect && this.connectReject) {
@@ -1355,6 +1366,10 @@ export class QQChannel extends ChannelBase {
         // Flush state first to persist any debounced updates before
         // coldStart=true triggers a full restore on the next READY.
         this.flushQQState();
+        // Mark not ready to prevent concurrent processors from calling
+        // saveQQState() during the INVALID_SESSION recovery window,
+        // avoiding a TOCTOU race with the coldStart restore.
+        this._ready = false;
         // Trigger full state restore on the next READY — the gateway
         // assigned a new session_id, so in-memory routing state
         // (chatTypeMap, replyMsgId, msgSeqMap) must be reloaded.
