@@ -2367,7 +2367,7 @@ export class AcpDispatcher {
             }
             return;
           }
-          const result = this.bridge.removeSessionArtifact(
+          const result = await this.bridge.removeSessionArtifact(
             sessionId,
             artifactId,
             this.sessionCtx(conn, sessionId, loopback),

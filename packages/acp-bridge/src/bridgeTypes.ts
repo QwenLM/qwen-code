@@ -524,7 +524,7 @@ export interface AcpSessionBridge {
     sessionId: string,
     artifactId: string,
     context?: BridgeClientRequestContext,
-  ): SessionArtifactMutationResult;
+  ): Promise<SessionArtifactMutationResult>;
 
   /**
    * Cast a vote on a pending `permission_request` (first-responder wins).

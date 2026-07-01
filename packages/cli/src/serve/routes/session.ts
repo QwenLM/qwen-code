@@ -565,7 +565,7 @@ export function registerSessionRoutes(
   app.delete(
     '/session/:id/artifacts/:artifactId',
     mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
       const artifactId = req.params['artifactId'];
@@ -583,15 +583,12 @@ export function registerSessionRoutes(
         return;
       }
       try {
-        res
-          .status(200)
-          .json(
-            bridge.removeSessionArtifact(
-              sessionId,
-              artifactId,
-              clientId !== undefined ? { clientId } : undefined,
-            ),
-          );
+        const result = await bridge.removeSessionArtifact(
+          sessionId,
+          artifactId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'DELETE /session/:id/artifacts/:artifactId',

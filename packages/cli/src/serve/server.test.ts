@@ -1406,7 +1406,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return addSessionArtifactImpl(sessionId, artifact, context);
     },
-    removeSessionArtifact(sessionId, artifactId, context) {
+    async removeSessionArtifact(sessionId, artifactId, context) {
       removeSessionArtifactCalls.push({
         sessionId,
         artifactId,

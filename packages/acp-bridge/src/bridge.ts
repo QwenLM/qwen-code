@@ -4028,11 +4028,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return result;
     },
 
-    removeSessionArtifact(sessionId, artifactId, context) {
+    async removeSessionArtifact(sessionId, artifactId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
-      const result = entry.artifacts.remove(artifactId);
+      const result = await entry.artifacts.remove(artifactId);
       publishArtifactChanges(entry, result.changes, clientId);
       return result;
     },

@@ -385,7 +385,7 @@ class FakeBridge {
     this.lastAddedArtifact = { sessionId, artifact, context };
     return { v: 1, sessionId, changes: [] };
   }
-  removeSessionArtifact(
+  async removeSessionArtifact(
     sessionId: string,
     artifactId: string,
     context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2],

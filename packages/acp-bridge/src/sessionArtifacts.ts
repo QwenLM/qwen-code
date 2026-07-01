@@ -145,6 +145,7 @@ export class SessionArtifactStore {
   private receivedSeq = 0;
   private insertSeq = 0;
   private realWorkspaceCwdPromise?: Promise<string>;
+  private operationQueue: Promise<void> = Promise.resolve();
 
   constructor(options: SessionArtifactStoreOptions) {
     this.sessionId = options.sessionId;
@@ -153,101 +154,117 @@ export class SessionArtifactStore {
   }
 
   async list(): Promise<SessionArtifactsEnvelope> {
-    await this.refreshWorkspaceStatuses();
-    return {
-      v: 1,
-      sessionId: this.sessionId,
-      artifacts: Array.from(this.artifacts.values())
-        .sort((a, b) => a.insertSeq - b.insertSeq)
-        .map(toPublicArtifact),
-      generatedAt: new Date().toISOString(),
-      limits: { maxArtifacts: this.maxArtifacts },
-    };
+    return this.enqueue(async () => {
+      await this.refreshWorkspaceStatuses();
+      return {
+        v: 1,
+        sessionId: this.sessionId,
+        artifacts: Array.from(this.artifacts.values())
+          .sort((a, b) => a.insertSeq - b.insertSeq)
+          .map(toPublicArtifact),
+        generatedAt: new Date().toISOString(),
+        limits: { maxArtifacts: this.maxArtifacts },
+      };
+    });
   }
 
   async upsertMany(
     inputs: SessionArtifactInput[],
     options: { strict?: boolean; trustedPublisher?: boolean } = {},
   ): Promise<SessionArtifactMutationResult> {
-    const normalized: NormalizedArtifact[] = [];
-    for (const input of inputs) {
-      try {
-        normalized.push(
-          await this.normalizeInput(
-            input,
-            ++this.receivedSeq,
-            options.trustedPublisher === true,
-          ),
-        );
-      } catch (error) {
-        if (options.strict) {
-          throw error;
+    return this.enqueue(async () => {
+      const normalized: NormalizedArtifact[] = [];
+      for (const input of inputs) {
+        try {
+          normalized.push(
+            await this.normalizeInput(
+              input,
+              ++this.receivedSeq,
+              options.trustedPublisher === true,
+            ),
+          );
+        } catch (error) {
+          if (options.strict) {
+            throw error;
+          }
+          const message =
+            error instanceof Error ? error.message : String(error);
+          writeStderrLine(
+            `[artifacts] session=${this.sessionId} action=dropped reason=${JSON.stringify(
+              message,
+            )}`,
+          );
         }
-        const message = error instanceof Error ? error.message : String(error);
-        writeStderrLine(
-          `[artifacts] session=${this.sessionId} action=dropped reason=${JSON.stringify(
-            message,
-          )}`,
-        );
-      }
-    }
-
-    const changes: SessionArtifactChange[] = [];
-    for (const artifact of coalesceByIdentity(normalized)) {
-      const existing = this.artifacts.get(artifact.id);
-      if (!existing) {
-        const stored: StoredArtifact = {
-          ...artifact,
-          insertSeq: ++this.insertSeq,
-        };
-        this.artifacts.set(stored.id, stored);
-        changes.push({
-          action: 'created',
-          artifactId: stored.id,
-          artifact: toPublicArtifact(stored),
-        });
-        continue;
       }
 
-      const updated = mergeArtifact(existing, artifact);
-      if (updated.changed) {
-        this.artifacts.set(existing.id, updated.artifact);
-        changes.push({
-          action: 'updated',
-          artifactId: existing.id,
-          artifact: toPublicArtifact(updated.artifact),
-        });
+      const changes: SessionArtifactChange[] = [];
+      for (const artifact of coalesceByIdentity(normalized)) {
+        const existing = this.artifacts.get(artifact.id);
+        if (!existing) {
+          const stored: StoredArtifact = {
+            ...artifact,
+            insertSeq: ++this.insertSeq,
+          };
+          this.artifacts.set(stored.id, stored);
+          changes.push({
+            action: 'created',
+            artifactId: stored.id,
+            artifact: toPublicArtifact(stored),
+          });
+          continue;
+        }
+
+        const updated = mergeArtifact(existing, artifact);
+        if (updated.changed) {
+          this.artifacts.set(existing.id, updated.artifact);
+          changes.push({
+            action: 'updated',
+            artifactId: existing.id,
+            artifact: toPublicArtifact(updated.artifact),
+          });
+        }
       }
-    }
 
-    const createdIds = new Set(
-      changes
-        .filter((change) => change.action === 'created')
-        .map((change) => change.artifactId),
-    );
-    changes.push(...(await this.evictOverflow(createdIds, changes)));
+      const createdIds = new Set(
+        changes
+          .filter((change) => change.action === 'created')
+          .map((change) => change.artifactId),
+      );
+      changes.push(...(await this.evictOverflow(createdIds, changes)));
 
-    return { v: 1, sessionId: this.sessionId, changes };
+      return { v: 1, sessionId: this.sessionId, changes };
+    });
   }
 
-  remove(artifactId: string): SessionArtifactMutationResult {
-    const existing = this.artifacts.get(artifactId);
-    if (!existing) {
-      return { v: 1, sessionId: this.sessionId, changes: [] };
-    }
-    this.artifacts.delete(artifactId);
-    return {
-      v: 1,
-      sessionId: this.sessionId,
-      changes: [
-        {
-          action: 'removed',
-          artifactId,
-          artifact: toPublicArtifact(existing),
-          reason: 'explicit',
-        },
-      ],
-    };
+  async remove(artifactId: string): Promise<SessionArtifactMutationResult> {
+    return this.enqueue(async () => {
+      const existing = this.artifacts.get(artifactId);
+      if (!existing) {
+        return { v: 1, sessionId: this.sessionId, changes: [] };
+      }
+      this.artifacts.delete(artifactId);
+      return {
+        v: 1,
+        sessionId: this.sessionId,
+        changes: [
+          {
+            action: 'removed',
+            artifactId,
+            artifact: toPublicArtifact(existing),
+            reason: 'explicit',
+          },
+        ],
+      };
+    });
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operationQueue.then(operation, operation);
+    this.operationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async normalizeInput(

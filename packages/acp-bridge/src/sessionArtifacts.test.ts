@@ -57,10 +57,64 @@ describe('SessionArtifactStore', () => {
       ],
     });
 
-    expect(store.remove(artifactId!).changes).toMatchObject([
-      { action: 'removed', artifactId, reason: 'explicit' },
+    await expect(store.remove(artifactId!)).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+    });
+    await expect(store.remove(artifactId!)).resolves.toMatchObject({
+      changes: [],
+    });
+  });
+
+  it('serializes concurrent store operations', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-queue',
+      workspaceCwd: workspace,
+    });
+
+    const first = store.upsertMany([
+      { title: 'First', url: 'https://example.com/first' },
     ]);
-    expect(store.remove(artifactId!).changes).toEqual([]);
+    const second = store.upsertMany([
+      { title: 'Second', url: 'https://example.com/second' },
+    ]);
+    const listed = store.list();
+
+    await expect(first).resolves.toMatchObject({
+      changes: [
+        {
+          action: 'created',
+          artifact: { title: 'First' },
+        },
+      ],
+    });
+    await expect(second).resolves.toMatchObject({
+      changes: [
+        {
+          action: 'created',
+          artifact: { title: 'Second' },
+        },
+      ],
+    });
+    await expect(listed).resolves.toMatchObject({
+      artifacts: [{ title: 'First' }, { title: 'Second' }],
+    });
+
+    const firstId = (await first).changes[0]?.artifactId;
+    const removed = store.remove(firstId!);
+    const afterRemove = store.list();
+
+    await expect(removed).resolves.toMatchObject({
+      changes: [
+        {
+          action: 'removed',
+          artifactId: firstId,
+          reason: 'explicit',
+        },
+      ],
+    });
+    await expect(afterRemove).resolves.toMatchObject({
+      artifacts: [{ title: 'Second' }],
+    });
   });
 
   it('rejects untrusted published artifacts and allows trusted published upgrades', async () => {
