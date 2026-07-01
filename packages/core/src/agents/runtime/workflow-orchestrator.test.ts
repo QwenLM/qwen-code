@@ -38,6 +38,7 @@ const {
     prompt: string;
     signal?: AbortSignal;
     promptConfigSystemPrompt?: string;
+    promptConfigInitialMessages?: unknown[];
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
   }>,
@@ -117,7 +118,7 @@ vi.mock('./agent-headless.js', () => ({
     create: async (
       name: string,
       _runtimeContext: unknown,
-      promptConfig: { systemPrompt?: string },
+      promptConfig: { systemPrompt?: string; initialMessages?: unknown[] },
       _modelConfig: unknown,
       runConfig: { max_turns?: number; max_time_minutes?: number },
       toolConfig?: { tools?: string[]; disallowedTools?: string[] },
@@ -138,6 +139,7 @@ vi.mock('./agent-headless.js', () => ({
           prompt: ctx.get('task_prompt') as string,
           signal,
           promptConfigSystemPrompt: promptConfig.systemPrompt,
+          promptConfigInitialMessages: promptConfig.initialMessages,
           runConfig,
           toolConfig,
         });
@@ -1095,6 +1097,12 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.prompt).toBe('hello');
   });
 
+  it('does not suppress env bootstrap with an empty initial history', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    expect(created[0]!.promptConfigInitialMessages).toBeUndefined();
+  });
+
   it('strips internal tags from fast-path final text', async () => {
     nextFinalText.value =
       '<analysis>scratch</analysis><summary>clean result</summary>';
@@ -1759,8 +1767,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // by one test does not bleed into the next (mockImplementation is
   // persistent; the per-test overrides below rely on a clean baseline).
   beforeEach(async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     worktreeStubs.instances.length = 0;
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
@@ -2536,8 +2545,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
 
   it("isolation:'worktree' refuses when git is not available", async () => {
     worktreeStubs.instances.length = 0; // reset
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2558,8 +2568,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' refuses when cwd is not a git repository", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2577,8 +2588,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' refuses when parent working tree is dirty", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2596,8 +2608,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' surfaces createUserWorktree failure", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2625,8 +2638,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // suffix and was previously untested.
 
   it("isolation:'worktree' cleanup: removeUserWorktree failure preserves path+branch", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2656,8 +2670,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' cleanup: branchPreserved race yields branch-only suffix", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2680,8 +2695,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   it("isolation:'worktree' cleanup: thrown removeUserWorktree preserves path+branch", async () => {
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
@@ -2773,8 +2789,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // the worktree on disk.
   it("isolation:'worktree' + schema setup throws → worktree is still cleaned up", async () => {
     const removeCalls: string[] = [];
-    const { GitWorktreeService } =
-      await import('../../services/gitWorktreeService.js');
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
       // Track removeUserWorktree calls — the fallback finally must call it.

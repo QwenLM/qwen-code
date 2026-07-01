@@ -56,6 +56,7 @@ interface MockSession {
     req: unknown,
     signal?: AbortSignal,
   ) => Promise<NonBlockingPromptAccepted>;
+  removePendingPrompt: (promptId: string) => Promise<{ removed: boolean }>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
   heartbeat: () => Promise<{ ok: boolean }>;
@@ -106,6 +107,15 @@ interface MockClient {
   getWorkspaceAgent: () => Promise<unknown>;
   createWorkspaceAgent: () => Promise<unknown>;
   deleteWorkspaceAgent: () => Promise<void>;
+  getPendingPrompts: (
+    sessionId: string,
+    opts?: { clientId?: string },
+  ) => Promise<unknown>;
+  removePendingPrompt: (
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ) => Promise<{ removed: boolean }>;
   branchSession: (
     sessionId: string,
     req: { name?: string },
@@ -137,6 +147,8 @@ const sdkMocks = vi.hoisted(() => {
   const getWorkspaceAgent = vi.fn();
   const createWorkspaceAgent = vi.fn();
   const deleteWorkspaceAgent = vi.fn();
+  const getPendingPrompts = vi.fn();
+  const removePendingPrompt = vi.fn();
   const branchSession = vi.fn();
 
   class MockDaemonClient {
@@ -160,6 +172,8 @@ const sdkMocks = vi.hoisted(() => {
     getWorkspaceAgent = getWorkspaceAgent;
     createWorkspaceAgent = createWorkspaceAgent;
     deleteWorkspaceAgent = deleteWorkspaceAgent;
+    getPendingPrompts = getPendingPrompts;
+    removePendingPrompt = removePendingPrompt;
     branchSession = branchSession;
     dispose = vi.fn();
   }
@@ -193,6 +207,8 @@ const sdkMocks = vi.hoisted(() => {
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
+    getPendingPrompts,
+    removePendingPrompt,
     branchSession,
     reset() {
       sessions.length = 0;
@@ -269,6 +285,10 @@ const sdkMocks = vi.hoisted(() => {
       createWorkspaceAgent.mockResolvedValue({ ok: true });
       deleteWorkspaceAgent.mockReset();
       deleteWorkspaceAgent.mockResolvedValue(undefined);
+      getPendingPrompts.mockReset();
+      getPendingPrompts.mockResolvedValue({ pendingPrompts: [] });
+      removePendingPrompt.mockReset();
+      removePendingPrompt.mockResolvedValue({ removed: true });
       branchSession.mockReset();
       branchSession.mockResolvedValue({
         sessionId: 'branch-session',
@@ -924,6 +944,214 @@ describe('DaemonSessionProvider', () => {
     expect(session.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
+  it('returns the prompt id from submitPrompt', async () => {
+    const session = createMockSession({
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'pending-1',
+        lastEventId: 10,
+      })),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.submitPrompt('queued prompt'),
+    ).resolves.toEqual({ promptId: 'pending-1' });
+  });
+
+  it('removes an accepted pending prompt when submitPrompt was already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort(createAbortError());
+    const removePendingPrompt = vi.fn(async () => ({ removed: true }));
+    const session = createMockSession({
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'pending-1',
+        lastEventId: 10,
+      })),
+      removePendingPrompt,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await act(async () => {
+      await expect(
+        providerActions.submitPrompt('queued prompt', {
+          signal: controller.signal,
+          optimisticUserMessage: false,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    expect(removePendingPrompt).toHaveBeenCalledWith('pending-1');
+  });
+
+  it('removes an accepted pending prompt when submitPrompt is aborted', async () => {
+    const controller = new AbortController();
+    const submitPrompt = vi.fn(async (_req: unknown, signal?: AbortSignal) => {
+      expect(signal).toBeUndefined();
+      controller.abort(createAbortError());
+      return { promptId: 'pending-1', lastEventId: 10 };
+    });
+    const removePendingPrompt = vi.fn(async () => ({ removed: true }));
+    const session = createMockSession({
+      submitPrompt,
+      removePendingPrompt,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await act(async () => {
+      await expect(
+        providerActions.submitPrompt('queued prompt', {
+          signal: controller.signal,
+          optimisticUserMessage: false,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    expect(removePendingPrompt).toHaveBeenCalledWith('pending-1');
+  });
+
+  it('reports a notice when aborted submitPrompt cleanup fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const controller = new AbortController();
+    const removeError = new Error('delete failed');
+    const session = createMockSession({
+      submitPrompt: vi.fn(async () => {
+        controller.abort(createAbortError());
+        return { promptId: 'pending-1', lastEventId: 10 };
+      }),
+      removePendingPrompt: vi.fn(async () => {
+        throw removeError;
+      }),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await act(async () => {
+      await expect(
+        providerActions.submitPrompt('queued prompt', {
+          signal: controller.signal,
+          optimisticUserMessage: false,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      '[submitPrompt] removePendingPrompt failed after abort',
+      removeError,
+    );
+    expect(notices).toMatchObject([
+      {
+        category: 'user_action',
+        operation: 'send_prompt',
+        code: 'daemon.send_prompt.pending_cleanup_failed',
+      },
+    ]);
+    warn.mockRestore();
+  });
+
+  it('returns safe pending prompt results when no session is connected', async () => {
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    const providerActions = requireActions(actions);
+
+    await expect(providerActions.getPendingPrompts()).resolves.toEqual({
+      pendingPrompts: [],
+    });
+    await expect(
+      providerActions.removePendingPrompt('pending-1'),
+    ).resolves.toEqual({ removed: false });
+  });
+
+  it('routes stale-session pending prompt removal through the daemon client', async () => {
+    const session = createMockSession({
+      sessionId: 'session-current',
+      clientId: 'client-current',
+      removePendingPrompt: vi.fn(async () => ({ removed: true })),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.removePendingPrompt('pending-old', {
+        sessionId: 'session-old',
+      }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(session.removePendingPrompt).not.toHaveBeenCalled();
+    expect(sdkMocks.removePendingPrompt).toHaveBeenCalledWith(
+      'session-old',
+      'pending-old',
+    );
+  });
+
+  it('rejects stale-session pending prompt refreshes', async () => {
+    const session = createMockSession({ sessionId: 'session-current' });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.getPendingPrompts({ sessionId: 'session-old' }),
+    ).rejects.toThrow('Session changed before pending prompts refresh');
+  });
+
   it('keeps prompt loading active after non-blocking prompt acceptance', async () => {
     const turnComplete = createDeferred<void>();
     const session = createMockSession({
@@ -994,6 +1222,64 @@ describe('DaemonSessionProvider', () => {
           block.text.includes('turn_complete (unrecognized daemon event)'),
       ),
     ).toBe(false);
+  });
+
+  it('shows waiting state when a queued prompt starts before assistant output', async () => {
+    const turnComplete = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* queuedPromptEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          v: 1,
+          id: 11,
+          type: 'pending_prompt_started',
+          timestamp: '2025-01-01T00:00:00.000Z',
+          sessionId: 'session-1',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'prompt-queued',
+            text: 'queued hello',
+          },
+        };
+        await Promise.race([
+          turnComplete.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 12,
+          type: 'turn_complete',
+          timestamp: '2025-01-01T00:00:01.000Z',
+          sessionId: 'session-1',
+          data: { promptId: 'prompt-queued', stopReason: 'end_turn' },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+    function Harness() {
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(streamingState).toBe('waiting');
+
+    await act(async () => {
+      turnComplete.resolve();
+      await flushPromises();
+    });
+    expect(streamingState).toBe('idle');
   });
 
   it('settles non-blocking prompts when turn completion arrives before acceptance returns', async () => {
@@ -6131,6 +6417,8 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
         promptId: 'prompt-1',
         lastEventId: 0,
       })),
+    removePendingPrompt:
+      opts.removePendingPrompt ?? vi.fn(async () => ({ removed: true })),
     cancel: opts.cancel ?? vi.fn(async () => {}),
     setModel:
       opts.setModel ??

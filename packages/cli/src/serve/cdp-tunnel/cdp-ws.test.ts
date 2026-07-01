@@ -178,7 +178,7 @@ describe('attachCdpClient (Plan C #5626)', () => {
       error: { message: 'Permission denied' },
     });
 
-    await vi.waitFor(() => expect(ws.closed?.code).toBe(1000));
+    await vi.waitFor(() => expect(ws.closed?.code).toBe(1011));
     expect(ws.closed?.reason).toBe('cdp attach failed');
     expect(bridge.cdpBound).toBe(false);
   });

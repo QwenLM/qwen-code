@@ -67,6 +67,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // hierarchical QWEN.md state and accepts append/replace writes scoped
   // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
+  workspace_memory_remember: {
+    since: 'v1',
+    modes: ['workspace', 'clean'],
+  },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
   // `SubagentManager` over HTTP so remote clients can list / read /
@@ -255,8 +259,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `mcp_register` { server }, `mcp_message` { id, server, payload }
   // (bidirectional, request/response correlated by `id`), `mcp_unregister`
   // { server }. Advertised CONDITIONALLY so clients pre-flight this tag before
-  // attempting to register a client-hosted server. `runQwenServe` enables it by
-  // default unless the caller or env disables it.
+  // attempting to register a client-hosted server. `runQwenServe` enables it
+  // only when explicitly requested by option or env.
   client_mcp_over_ws: { since: 'v1' },
   // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
   // where a loopback puppeteer client (chrome-devtools-mcp) drives ONE real tab

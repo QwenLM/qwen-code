@@ -552,6 +552,38 @@ export interface DaemonWriteMemoryResult {
   changed?: boolean;
 }
 
+export type DaemonWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+
+export type DaemonWorkspaceMemoryRememberTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed';
+
+export interface DaemonWorkspaceMemoryRememberResult {
+  summary?: string;
+  filesTouched: string[];
+  touchedScopes: Array<'user' | 'project'>;
+}
+
+export interface DaemonWorkspaceMemoryRememberTask {
+  taskId: string;
+  status: DaemonWorkspaceMemoryRememberTaskStatus;
+  contextMode: DaemonWorkspaceMemoryRememberContextMode;
+  createdAt: string;
+  updatedAt: string;
+  result?: DaemonWorkspaceMemoryRememberResult;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface DaemonWorkspaceMemoryRememberOptions {
+  contextMode?: DaemonWorkspaceMemoryRememberContextMode;
+  clientId?: string;
+}
+
 export type DaemonContentHash = `sha256:${string}`;
 
 const DAEMON_CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
@@ -1345,6 +1377,27 @@ export interface DaemonSessionBtwResult {
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
+}
+
+/**
+ * One entry in the daemon's pending prompt queue. The `state` is
+ * `'running'` for the currently dispatching prompt and `'queued'`
+ * for prompts waiting in the FIFO.
+ */
+export interface DaemonPendingPromptSummary {
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
+export interface DaemonPendingPromptsResult {
+  pendingPrompts: DaemonPendingPromptSummary[];
+}
+
+export interface DaemonRemovePendingPromptResult {
+  removed: boolean;
 }
 
 export interface DaemonShellCommandResult {

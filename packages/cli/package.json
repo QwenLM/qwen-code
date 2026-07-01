@@ -53,6 +53,7 @@
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
     "@qwen-code/qwen-code-core": "file:../core",
+    "@qwen-code/sdk": "file:../sdk-typescript",
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",
     "ansi-regex": "^6.2.2",

@@ -874,7 +874,7 @@ export abstract class ChannelBase {
       const bridgeShellCommand = this.bridge.shellCommand;
       if (cmd && bridgeShellCommand) {
         try {
-          const result = await this.bridge.shellCommand!(sessionId, cmd);
+          const result = await bridgeShellCommand(sessionId, cmd);
           const longestRun = Math.max(
             0,
             ...Array.from(
