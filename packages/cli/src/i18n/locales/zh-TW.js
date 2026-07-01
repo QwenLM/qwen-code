@@ -473,17 +473,17 @@ export default {
   'Open in editor': '在編輯器中打開',
   'Edit tools': '編輯工具',
   'Edit color': '編輯顏色',
-  '❌ Error:': '❌ 錯誤:',
+  '✗ Error:': '✗ 錯誤:',
   'Are you sure you want to delete agent "{{name}}"?':
     '您確定要刪除智能體 "{{name}}" 嗎？',
   'Project Level (.qwen/agents/)': '項目級 (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': '用戶級 (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ 子智能體創建成功！',
+  '✓ Subagent Created Successfully!': '✓ 子智能體創建成功！',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     '子智能體 "{{name}}" 已保存到 {{level}} 級別。',
   'Name: ': '名稱: ',
   'Location: ': '位置: ',
-  '❌ Error saving subagent:': '❌ 保存子智能體時出錯:',
+  '✗ Error saving subagent:': '✗ 保存子智能體時出錯:',
   'Warnings:': '警告:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     '名稱 "{{name}}" 在 {{level}} 級別已存在 - 將覆蓋現有子智能體',
@@ -1259,8 +1259,12 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).':
-    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，--vision 可設置視覺橋接模型，[model-id] 可立即切換）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，--vision 可設置視覺橋接模型，[model-id] 可立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    "此模式不支援內聯一次性覆寫——請先執行 '/model {{model}}'，再發送你的提示。",
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    "內聯一次性覆寫無法切換 provider。'{{model}}' 屬於另一個 provider——請先執行 '/model {{model}}'，再發送你的提示。",
   "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
     "⚠ '{{model}}' 不是已知的圖像能力模型；視覺橋接處理圖片時可能會失敗。",
   'Set a lighter model for prompt suggestions and speculative execution':
@@ -1390,9 +1394,9 @@ export default {
   'Choose how to proceed with your session:': '選擇如何繼續您的會話：',
   'Start new chat session': '開始新的聊天會話',
   'Continue previous conversation': '繼續之前的對話',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 歡迎回來！（最後更新：{{timeAgo}}）',
-  '🎯 Overall Goal:': '🎯 總體目標：',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    '歡迎回來！（最後更新：{{timeAgo}}）',
+  'Overall Goal:': '總體目標：',
   'Connect a Provider': '連接服務商',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '必須連接一個服務商才能繼續。再次按 Ctrl+C 退出',
@@ -1559,8 +1563,8 @@ export default {
   'Press Esc again to clear.': '再次按 Esc 清除',
   'Press ↑ to edit queued messages': '按 ↑ 編輯排隊消息',
   'No MCP servers configured.': '未配置 MCP servers',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers 正在啟動（{{count}} 個正在初始化）...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers 正在啟動（{{count}} 個正在初始化）...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     '注意：首次啟動可能需要更長時間。工具可用性將自動更新',
   'Configured MCP servers:': '已配置的 MCP servers：',
@@ -1583,7 +1587,7 @@ export default {
   'Prompts:': '提示：',
   'Resources:': '資源：',
   Blocked: '已阻止',
-  '💡 Tips:': '💡 提示：',
+  '★ Tips:': '★ 提示：',
   Use: '使用',
   'to show server and tool descriptions': '顯示伺服器和工具描述',
   'to show tool parameter schemas': '顯示 tool parameter schemas',
@@ -1869,7 +1873,7 @@ export default {
   'Enter your Coding Plan API key: ': '請輸入您的 Coding Plan API Key：',
   'Select authentication method:': '選擇認證方式：',
   '\n=== Authentication Status ===\n': '\n=== 認證狀態 ===\n',
-  '⚠️  No authentication method configured.\n': '⚠️  未配置認證方式。\n',
+  '⚠  No authentication method configured.\n': '⚠  未配置認證方式。\n',
   'Run one of the following commands to get started:\n':
     '運行以下命令之一開始配置：\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1891,8 +1895,8 @@ export default {
   '  Current Model: {{model}}': '  當前模型：{{model}}',
   '  Config Version: {{version}}': '  配置版本：{{version}}',
   '  Status: API key configured\n': '  狀態：API Key 已配置\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  認證方式：阿里雲百鍊 Coding Plan（不完整）',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  認證方式：阿里雲百鍊 Coding Plan（不完整）',
   '  Issue: API key not found in environment or settings\n':
     '  問題：在環境變量或設置中未找到 API Key\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':

@@ -73,6 +73,8 @@ export function sanitizePromptText(text: string): string {
     text
       .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
       .replace(/^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm, '$1$2$3')
+      // Fold ASCII C0/DEL, including CR/LF/TAB, so attacker-controlled group
+      // text cannot create prompt lines outside the adapter's sender attribution.
       // eslint-disable-next-line no-control-regex
       .replace(/[\u0000-\u001f\u007f]/g, ' ')
   );
