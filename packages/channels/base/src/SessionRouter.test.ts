@@ -237,7 +237,9 @@ describe('SessionRouter', () => {
       ['non-string value', 42],
     ])('rejects a %s returned by newSession', async (_label, sessionId) => {
       const router = new SessionRouter(mockBridge(), '/default');
-      const newSession = vi.fn(async (): Promise<string> => sessionId as string);
+      const newSession = vi.fn(
+        async (): Promise<string> => sessionId as string,
+      );
       router.setBridge({
         ...mockBridge(),
         newSession,
@@ -319,6 +321,13 @@ describe('SessionRouter', () => {
       expect(router.hasSession('ch', 'bob', 'other-chat')).toBe(true);
     });
 
+    it('single scope: no-chat lookup does not assign the shared session to one sender', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'single');
+      await router.resolve('ch', 'alice', 'chat1');
+
+      expect(router.hasSession('ch', 'alice')).toBe(false);
+    });
+
     it('prefix-scans when chatId omitted', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       await router.resolve('ch', 'alice', 'chat1');
@@ -373,6 +382,14 @@ describe('SessionRouter', () => {
       // Any sender/chat removes the one shared session.
       expect(router.removeSession('ch', 'bob', 'other-chat')).toEqual([sid]);
       expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
+    });
+
+    it('single scope: no-chat removal does not assign the shared session to one sender', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'single');
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+
+      expect(router.removeSession('ch', 'alice')).toEqual([]);
+      expect(router.getTarget(sid)).toBeDefined();
     });
 
     it('removes all sender sessions when chatId omitted', async () => {
@@ -454,6 +471,74 @@ describe('SessionRouter', () => {
   });
 
   describe('restoreSessions', () => {
+    it('logs malformed persisted session files', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writeFileSync(persistPath, '{bad');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        await expect(router.restoreSessions()).resolves.toEqual({
+          restored: 0,
+          failed: 0,
+        });
+
+        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('[SessionRouter] Corrupted persist file at');
+        expect(logged).toContain('sessions.json');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('logs failed restores with sanitized persisted fields', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice\nforged:chat1': {
+            sessionId: 'old\nsession',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      bridge = {
+        ...mockBridge(),
+        loadSession: vi.fn().mockRejectedValue(new Error('bad\nreason')),
+      } as unknown as ChannelAgentBridge;
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        await expect(router.restoreSessions()).resolves.toEqual({
+          restored: 0,
+          failed: 1,
+        });
+
+        const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('old\\nsession');
+        expect(logged).toContain('ch:alice\\nforged:chat1');
+        expect(logged).toContain('bad\\nreason');
+        expect(logged).not.toContain('old\nsession');
+        expect(logged).not.toContain('bad\nreason');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('treats falsy restored session ids as failed restores', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);

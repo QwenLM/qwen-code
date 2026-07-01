@@ -20,6 +20,7 @@ import {
 } from '../daemon-status.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { ServeOptions } from '../types.js';
+import type { ChannelWorkerSnapshot } from '../channel-worker-supervisor.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 
@@ -40,6 +41,7 @@ interface RegisterDaemonStatusRoutesDeps {
   getSupportedDeviceFlowProviders: () => DeviceFlowProviderId[];
   deviceFlowRegistry: DeviceFlowRegistry;
   sessionShellCommandEnabled: boolean;
+  getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
 }
 
 export function registerDaemonStatusRoutes(
@@ -73,6 +75,7 @@ export function registerDaemonStatusRoutes(
           supportedDeviceFlowProviders: deps.getSupportedDeviceFlowProviders(),
           deviceFlowRegistry: deps.deviceFlowRegistry,
           sessionShellCommandEnabled: deps.sessionShellCommandEnabled,
+          getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
         }),
       );
     } catch (err) {

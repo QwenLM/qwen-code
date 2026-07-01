@@ -469,6 +469,94 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.signal).toBe(ctrl.signal);
   });
 
+  it('forwards pending prompt list requests with encoded session id and clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'hello',
+            state: 'queued',
+            queuedAt: 1_700_000_000_000,
+          },
+        ],
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.getPendingPrompts()).resolves.toEqual({
+      pendingPrompts: [
+        {
+          promptId: 'prompt-1',
+          text: 'hello',
+          state: 'queued',
+          queuedAt: 1_700_000_000_000,
+        },
+      ],
+    });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/pending-prompts',
+    );
+    expect(calls[0]?.method).toBe('GET');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('forwards pending prompt removals with encoded ids and clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { removed: false }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(
+      session.removePendingPrompt('prompt with/slash'),
+    ).resolves.toEqual({ removed: false });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/pending-prompts/prompt%20with%2Fslash',
+    );
+    expect(calls[0]?.method).toBe('DELETE');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('maps pending prompt HTTP failures through DaemonClient errors', async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(404, { error: 'not found' }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    await expect(session.getPendingPrompts()).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(session.removePendingPrompt('p-1')).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
   it('forwards session-scoped operations through DaemonClient', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/prompt')) {

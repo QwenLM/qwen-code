@@ -1,27 +1,31 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import type { PromptImage } from '../adapters/promptTypes';
-import { getTranslator } from '../i18n';
-import { isCommandPrompt } from '../utils/localCommandQueue';
-import { cssUrlVar } from '../utils/cssUrlVar';
 import deleteIconUrl from '../assets/icons/delete.svg';
 import editIconUrl from '../assets/icons/edit.svg';
 import insertIconUrl from '../assets/icons/insert.svg';
 import queueIconUrl from '../assets/icons/queue.svg';
+import type { getTranslator } from '../i18n';
+import { cssUrlVar } from '../utils/cssUrlVar';
+import { isCommandPrompt } from '../utils/localCommandQueue';
 import styles from '../App.module.css';
 
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 
-export interface QueuedPromptView {
+export interface QueuedPrompt {
   id: number;
+  sessionId?: string;
   text: string;
   images?: PromptImage[];
-}
-
-interface QueuedPromptDisplayProps {
-  prompts: readonly QueuedPromptView[];
-  t: ReturnType<typeof getTranslator>;
-  onDelete: (id: number) => void;
-  onInsert: (id: number) => void;
-  onEdit: (id: number) => void;
+  onComplete?: () => void;
+  serverPromptId?: string;
+  serverState?: 'submitting' | 'queued' | 'running';
+  isEditing?: boolean;
+  isRemoving?: boolean;
 }
 
 export function QueuedPromptDisplay({
@@ -30,7 +34,13 @@ export function QueuedPromptDisplay({
   onDelete,
   onInsert,
   onEdit,
-}: QueuedPromptDisplayProps) {
+}: {
+  prompts: readonly QueuedPrompt[];
+  t: ReturnType<typeof getTranslator>;
+  onDelete: (id: number) => void;
+  onInsert: (id: number) => void;
+  onEdit: (id: number) => void;
+}) {
   if (prompts.length === 0) return null;
 
   return (
@@ -42,10 +52,25 @@ export function QueuedPromptDisplay({
             ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
             : normalizedPreview;
         const imageCount = prompt.images?.length ?? 0;
-        // A command (/… or !…) can't be inserted into the running turn — insert
-        // injects raw text the model would see literally, never running the
-        // command. Show the action disabled so it stays visible but inert.
         const isCommand = isCommandPrompt(prompt.text);
+        const isSubmitting = prompt.serverState === 'submitting';
+        const isRunning = prompt.serverState === 'running';
+        const isRemoving = prompt.isRemoving === true;
+        const isBusy =
+          isSubmitting || isRunning || prompt.isEditing === true || isRemoving;
+        let insertTitle = t('queue.insertTip');
+        if (isBusy) {
+          insertTitle = t('queue.submittingDisabled');
+        } else if (isCommand) {
+          insertTitle = t('queue.insertCommandDisabled');
+        }
+        let editTitle = t('queue.editTip');
+        if (isBusy) {
+          editTitle = t('queue.submittingDisabled');
+        }
+        const deleteTitle = isBusy
+          ? t('queue.submittingDisabled')
+          : t('queue.deleteTip');
         return (
           <div key={prompt.id} className={styles.queuedPrompt}>
             <span className={styles.queuedPromptIcon} aria-hidden="true">
@@ -59,6 +84,16 @@ export function QueuedPromptDisplay({
               {imageCount > 0
                 ? ` ${t('queue.imageCount', { count: imageCount })}`
                 : ''}
+              {isSubmitting || prompt.isEditing || isRemoving ? (
+                <span className={styles.queuedPromptState}>
+                  <span className={styles.queuedPromptSpinner} />
+                  {isRemoving
+                    ? t('queue.removing')
+                    : prompt.isEditing
+                      ? t('queue.editing')
+                      : t('queue.submitting')}
+                </span>
+              ) : null}
             </span>
             <span className={styles.queuedPromptActions}>
               {imageCount === 0 && (
@@ -66,10 +101,8 @@ export function QueuedPromptDisplay({
                   type="button"
                   className={styles.queuedPromptAction}
                   onClick={() => onInsert(prompt.id)}
-                  disabled={isCommand}
-                  title={
-                    isCommand ? t('queue.insertCommandDisabled') : undefined
-                  }
+                  disabled={isCommand || isBusy}
+                  title={insertTitle}
                 >
                   <span
                     className={styles.queuedPromptActionIcon}
@@ -83,8 +116,9 @@ export function QueuedPromptDisplay({
                 type="button"
                 className={styles.queuedPromptAction}
                 onClick={() => onDelete(prompt.id)}
+                disabled={isBusy}
                 aria-label={t('queue.delete')}
-                title={t('queue.delete')}
+                title={deleteTitle}
               >
                 <span
                   className={styles.queuedPromptActionIcon}
@@ -96,8 +130,9 @@ export function QueuedPromptDisplay({
                 type="button"
                 className={styles.queuedPromptAction}
                 onClick={() => onEdit(prompt.id)}
+                disabled={isBusy}
                 aria-label={t('queue.edit')}
-                title={t('queue.edit')}
+                title={editTitle}
               >
                 <span
                   className={styles.queuedPromptActionIcon}
@@ -109,6 +144,7 @@ export function QueuedPromptDisplay({
           </div>
         );
       })}
+      <div className={styles.queuedHint}>{t('queue.footer')}</div>
     </div>
   );
 }

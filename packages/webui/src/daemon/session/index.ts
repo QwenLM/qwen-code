@@ -40,7 +40,10 @@ export type {
   DaemonTodoPriority,
   DaemonTodoStatus,
   DaemonWorkspaceEventSignals,
+  PendingPromptActionOptions,
   SendPromptOptions,
+  SubmitPromptOptions,
+  SubmitPromptResult,
 } from './types.js';
 export {
   extractDaemonTodosFromToolBlock,
