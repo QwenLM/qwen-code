@@ -115,12 +115,10 @@ export function createDaemonSessionActions({
     setRestoreSessionId(undefined);
   }
 
-  function startSessionSwitch(
+  function startPendingSessionLoad(
     sessionId: string,
-    mode: 'load' | 'resume',
-    opts?: SessionSwitchOptions,
+    mode: PendingSessionLoad['mode'],
   ): Promise<void> {
-    manualSessionClearRef.current = false;
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
     if (pendingSessionLoadRef.current) {
@@ -141,7 +139,7 @@ export function createDaemonSessionActions({
               addNotice,
               `${capitalize(mode)} session failed`,
               new Error(`Session ${mode} timed out`),
-              mode === 'load' ? 'load_session' : 'resume_session',
+              mode === 'resume' ? 'resume_session' : 'load_session',
             ),
           );
         }
@@ -155,6 +153,16 @@ export function createDaemonSessionActions({
         reject,
       };
     });
+    return loadPromise;
+  }
+
+  function startSessionSwitch(
+    sessionId: string,
+    mode: 'load' | 'resume',
+    opts?: SessionSwitchOptions,
+  ): Promise<void> {
+    manualSessionClearRef.current = false;
+    const loadPromise = startPendingSessionLoad(sessionId, mode);
     const currentSessionId = sessionRef.current?.sessionId;
     const activePrompt = currentSessionId
       ? activePromptsRef.current.get(currentSessionId)
@@ -564,13 +572,15 @@ export function createDaemonSessionActions({
     },
 
     async attachSession() {
-      requireSessionForAction(
+      const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
         'Attach session failed',
         'load_session',
       );
+      const loadPromise = startPendingSessionLoad(session.sessionId, 'attach');
       setAttachSessionNonce((nonce) => nonce + 1);
+      return loadPromise;
     },
 
     async clearSession() {
@@ -585,20 +595,20 @@ export function createDaemonSessionActions({
           console.warn('[DaemonSessionActions] detach on clear failed:', error);
         }
       }
-      setConnection((current) => ({
-        status: 'connected',
-        workspaceCwd: current.workspaceCwd,
-        commands: current.commands,
-        skills: current.skills,
-        models: current.models,
-        currentModel: current.currentModel,
-        currentMode: current.currentMode,
-        contextWindow: current.contextWindow,
-        providers: current.providers,
-        supportedCommands: current.supportedCommands,
-        context: current.context,
-        capabilities: current.capabilities,
-      }));
+      setConnection((current) => {
+        const next = { ...current };
+        delete next.sessionId;
+        delete next.clientId;
+        delete next.displayName;
+        delete next.tokenUsage;
+        delete next.tokenCount;
+        return {
+          ...next,
+          status: 'connected',
+          catchingUp: undefined,
+          error: undefined,
+        };
+      });
     },
 
     async newSession() {

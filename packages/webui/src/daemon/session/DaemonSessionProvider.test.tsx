@@ -457,9 +457,20 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('can send immediately after creating a session from the empty state', async () => {
-    const createdSession = createMockSession({ sessionId: 'lazy-session' });
-    const loadedSession = createMockSession({
+    const createdSession = createMockSession({
       sessionId: 'lazy-session',
+      supportedCommands: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'lazy-session',
+        availableCommands: [
+          {
+            name: '/context',
+            description: 'Show context',
+            input: null,
+          },
+        ],
+        availableSkills: ['review'],
+      })),
       events: async function* createdSessionEvents() {
         yield {
           v: 1,
@@ -471,11 +482,13 @@ describe('DaemonSessionProvider', () => {
         };
       },
     });
-    sdkMocks.sessions.push(createdSession, loadedSession);
+    sdkMocks.sessions.push(createdSession);
     let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       actions = useDaemonActions();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -488,7 +501,21 @@ describe('DaemonSessionProvider', () => {
     let result: Promise<PromptResult> | undefined;
     await act(async () => {
       await providerActions.createSession();
-      await providerActions.attachSession();
+    });
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+    expect(connection?.commands?.map((command) => command.name)).toContain(
+      '/context',
+    );
+    expect(connection?.skills).toContain('review');
+
+    await act(async () => {
       result = providerActions.sendPrompt('hello');
       await flushPromises();
     });

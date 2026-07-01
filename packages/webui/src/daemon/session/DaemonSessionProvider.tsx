@@ -569,8 +569,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
+          const canReuseSessionMetadata =
+            attachedExistingSession &&
+            connectionRef.current.commands !== undefined &&
+            connectionRef.current.skills !== undefined &&
+            connectionRef.current.supportedCommands !== undefined &&
+            connectionRef.current.context !== undefined;
           const [providerResult, commandResult, contextResult] =
-            attachedExistingSession
+            canReuseSessionMetadata
               ? [undefined, undefined, undefined]
               : await Promise.allSettled([
                   client.workspaceProviders(),
@@ -1235,15 +1241,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       hasCurrentSessionActivePromptRef.current = () => false;
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-      if (pendingSessionLoadRef.current) {
+      const keepSessionForNextEffect =
+        session?.sessionId === skipNextCleanupDetachSessionIdRef.current;
+      if (pendingSessionLoadRef.current && !keepSessionForNextEffect) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.reject(
           new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
         pendingSessionLoadRef.current = undefined;
       }
-      const keepSessionForNextEffect =
-        session?.sessionId === skipNextCleanupDetachSessionIdRef.current;
       if (keepSessionForNextEffect) {
         skipNextCleanupDetachSessionIdRef.current = undefined;
       } else if (session?.clientId) {

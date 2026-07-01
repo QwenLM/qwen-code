@@ -415,7 +415,7 @@ export type SettledPrompt =
 export interface PendingSessionLoad {
   id: number;
   sessionId: string;
-  mode: 'load' | 'resume';
+  mode: 'load' | 'resume' | 'attach';
   timeout: ReturnType<typeof setTimeout>;
   resolve: () => void;
   reject: (error: unknown) => void;

@@ -65,7 +65,12 @@ function ControlledSession({
     }
 
     void request
-      .catch(() => {})
+      .catch((error: unknown) => {
+        console.warn(
+          '[WebShellWithProviders] session transition failed:',
+          error,
+        );
+      })
       .finally(() => {
         if (pendingRequestRef.current === requestKey) {
           pendingRequestRef.current = undefined;

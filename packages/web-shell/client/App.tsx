@@ -1265,15 +1265,27 @@ export function App({
         await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).createSession();
-        if (modelId) {
-          await sessionActions.setModel(modelId);
-        }
-        if (modeId && isDaemonApprovalMode(modeId)) {
-          await sessionActions.setApprovalMode(modeId);
-        }
         await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).attachSession();
+        if (modelId) {
+          await sessionActions.setModel(modelId).catch((error: unknown) => {
+            console.warn(
+              '[WebShell] failed to set model for new session:',
+              error,
+            );
+          });
+        }
+        if (modeId && isDaemonApprovalMode(modeId)) {
+          await sessionActions
+            .setApprovalMode(modeId)
+            .catch((error: unknown) => {
+              console.warn(
+                '[WebShell] failed to set approval mode for new session:',
+                error,
+              );
+            });
+        }
       })().finally(() => {
         createSessionPromiseRef.current = null;
       });
