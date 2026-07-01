@@ -354,7 +354,16 @@ class FakeBridge {
         context: Parameters<HttpAcpBridge['addSessionArtifact']>[2];
       }
     | undefined;
+  lastArtifactListSessionId: string | undefined;
+  lastRemovedArtifact:
+    | {
+        sessionId: string;
+        artifactId: string;
+        context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
+      }
+    | undefined;
   async getSessionArtifacts(sessionId: string) {
+    this.lastArtifactListSessionId = sessionId;
     return {
       v: 1,
       sessionId,
@@ -371,7 +380,12 @@ class FakeBridge {
     this.lastAddedArtifact = { sessionId, artifact, context };
     return { v: 1, sessionId, changes: [] };
   }
-  removeSessionArtifact(sessionId: string, artifactId: string) {
+  removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2],
+  ) {
+    this.lastRemovedArtifact = { sessionId, artifactId, context };
     return {
       v: 1,
       sessionId,
@@ -4839,6 +4853,35 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('_qwen/session/artifacts returns the session artifact snapshot', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/artifacts',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          artifacts: [],
+          limits: { maxArtifacts: 200 },
+        },
+      });
+      expect(bridge.lastArtifactListSessionId).toBe('sess-1');
+    });
+
     it('_qwen/session/artifacts/add forwards only public artifact fields', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -4889,6 +4932,43 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(artifact).not.toHaveProperty('clientId');
       expect(artifact).not.toHaveProperty('toolName');
       expect(artifact).not.toHaveProperty('hookEventName');
+    });
+
+    it('_qwen/session/artifacts/remove forwards artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          changes: [
+            {
+              action: 'removed',
+              artifactId: 'artifact-1',
+              reason: 'explicit',
+            },
+          ],
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toMatchObject({
+        sessionId: 'sess-1',
+        artifactId: 'artifact-1',
+      });
     });
 
     it('session methods reject unowned session', async () => {
