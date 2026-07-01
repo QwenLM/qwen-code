@@ -393,6 +393,7 @@ export interface WebShellProps {
 type SessionActionsWithCreate = {
   createSession: () => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
+  closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
 };
 
@@ -1251,6 +1252,11 @@ export function App({
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  useEffect(() => {
+    if (connection.sessionId) {
+      createSessionPromiseRef.current = null;
+    }
+  }, [connection.sessionId]);
   const ensureSessionForPrompt = useCallback(() => {
     if (connectionRef.current.sessionId) return Promise.resolve();
     if (!createSessionPromiseRef.current) {
@@ -1265,8 +1271,9 @@ export function App({
           modelId,
           modeId,
         });
-      })().finally(() => {
+      })().catch((error: unknown) => {
         createSessionPromiseRef.current = null;
+        throw error;
       });
     }
     return createSessionPromiseRef.current;
@@ -1300,15 +1307,15 @@ export function App({
           setIsPreparingPrompt(false);
         }
       }
-      if (opts?.clearComposerOnPromptStart) {
-        editorRef.current?.clear();
-      }
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
       };
-      const result = (
+      if (opts?.clearComposerOnPromptStart) {
+        editorRef.current?.clear();
+      }
+      const result = await (
         sessionActions.sendPrompt as (
           promptText: string,
           options?: SendPromptOptionsWithRetry,
@@ -2398,12 +2405,15 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--voice ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
-              return submitPromptFromEditor(
-                text,
-                images,
-                'Failed to send /model --voice',
+              const voiceModelId = modelArg.replace(/^--voice\s+/, '');
+              setWorkspaceSetting(
+                'workspace',
+                'voiceModel',
+                voiceModelId,
+              ).catch((error: unknown) =>
+                reportError(error, t('model.setVoice')),
               );
+              return true;
             }
             if (modelArg) {
               if (!connectionRef.current.sessionId) {
@@ -3003,6 +3013,7 @@ export function App({
       selectedLanguage,
       setPendingModel,
       setPendingMode,
+      setWorkspaceSetting,
       showContextUsage,
       t,
       workspaceActions,
@@ -3252,21 +3263,13 @@ export function App({
     [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError],
   );
 
-  // Persist via the prompt channel (like `/model --fast`): the daemon's command
-  // processor writes `voiceModel` to settings. The `/workspace/settings` route
-  // is token-gated, but browser voice runs on loopback-no-token — so this is
-  // the path that actually works there. The daemon's /voice/stream reads it back.
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle') {
-        blockLocalCommandDuringTurn();
-        return;
-      }
-      sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
-        reportError(error, t('model.setVoice'));
-      });
+      setWorkspaceSetting('workspace', 'voiceModel', modelId).catch(
+        (error: unknown) => reportError(error, t('model.setVoice')),
+      );
     },
-    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError, t],
+    [reportError, setWorkspaceSetting, t],
   );
 
   const commands = useMemo(() => {

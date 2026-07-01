@@ -82,6 +82,10 @@ export function getConnectionAfterSessionClear(
     delete next.displayName;
     delete next.tokenUsage;
     delete next.tokenCount;
+    delete next.commands;
+    delete next.skills;
+    delete next.supportedCommands;
+    delete next.context;
   }
   return {
     ...next,
@@ -125,6 +129,12 @@ export function createDaemonSessionActions({
     setPromptStatus('idle');
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
     if (pendingSessionLoadRef.current) {
+      if (
+        skipNextCleanupDetachSessionIdRef.current ===
+        pendingSessionLoadRef.current.sessionId
+      ) {
+        skipNextCleanupDetachSessionIdRef.current = undefined;
+      }
       clearTimeout(pendingSessionLoadRef.current.timeout);
       pendingSessionLoadRef.current.reject(
         new DOMException('Session cleared', 'AbortError'),

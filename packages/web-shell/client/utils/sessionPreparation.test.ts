@@ -12,6 +12,7 @@ function createActions(
   return {
     createSession: vi.fn(async () => sessionResult),
     attachSession: vi.fn(async () => {}),
+    closeSession: vi.fn(async () => {}),
     clearSession: vi.fn(async () => {}),
     setModel: vi.fn(async () => modelResult),
     setApprovalMode: vi.fn(async () => approvalModeResult),
@@ -108,10 +109,17 @@ describe('createAndAttachSessionForPrompt', () => {
     );
   });
 
-  it('clears the created session when attach fails', async () => {
+  it('closes and clears the created session when attach fails', async () => {
+    const order: string[] = [];
     const error = new Error('attach failed');
     const warn = vi.fn();
     const actions = createActions({
+      closeSession: vi.fn(async () => {
+        order.push('close');
+      }),
+      clearSession: vi.fn(async () => {
+        order.push('clear');
+      }),
       attachSession: vi.fn(async () => {
         throw error;
       }),
@@ -126,12 +134,42 @@ describe('createAndAttachSessionForPrompt', () => {
       }),
     ).rejects.toThrow(error);
 
+    expect(actions.closeSession).toHaveBeenCalledOnce();
     expect(actions.clearSession).toHaveBeenCalledOnce();
+    expect(order).toEqual(['close', 'clear']);
     expect(actions.setModel).not.toHaveBeenCalled();
     expect(actions.setApprovalMode).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(
       '[WebShell] failed to attach new session:',
       error,
+    );
+  });
+
+  it('still clears the created session when close after attach failure fails', async () => {
+    const attachError = new Error('attach failed');
+    const closeError = new Error('close failed');
+    const warn = vi.fn();
+    const actions = createActions({
+      attachSession: vi.fn(async () => {
+        throw attachError;
+      }),
+      closeSession: vi.fn(async () => {
+        throw closeError;
+      }),
+    });
+
+    await expect(
+      createAndAttachSessionForPrompt({
+        sessionActions: actions,
+        warn,
+      }),
+    ).rejects.toThrow(attachError);
+
+    expect(actions.closeSession).toHaveBeenCalledOnce();
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to close unattached session:',
+      closeError,
     );
   });
 });

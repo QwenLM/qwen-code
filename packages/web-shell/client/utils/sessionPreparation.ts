@@ -6,6 +6,7 @@ import {
 type PromptSessionActions = {
   createSession: () => Promise<unknown>;
   attachSession: () => Promise<void>;
+  closeSession: () => Promise<void>;
   clearSession: () => Promise<void>;
   setModel: (modelId: string) => Promise<unknown>;
   setApprovalMode: (mode: DaemonApprovalMode) => Promise<unknown>;
@@ -31,6 +32,9 @@ export async function createAndAttachSessionForPrompt({
     await sessionActions.attachSession();
   } catch (error) {
     warn('[WebShell] failed to attach new session:', error);
+    await sessionActions.closeSession().catch((closeError: unknown) => {
+      warn('[WebShell] failed to close unattached session:', closeError);
+    });
     await sessionActions.clearSession().catch((clearError: unknown) => {
       warn('[WebShell] failed to clear unattached session:', clearError);
     });

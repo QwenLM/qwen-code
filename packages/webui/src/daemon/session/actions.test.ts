@@ -21,6 +21,10 @@ describe('getConnectionAfterSessionClear', () => {
         clientId: 'client-a',
         displayName: 'Session A',
         tokenCount: 42,
+        commands: [{ name: 'old-command' }],
+        skills: ['old-skill'],
+        supportedCommands: { commands: [] },
+        context: { tokens: 1, maxTokens: 10 },
         catchingUp: true,
         error: 'old error',
       } as DaemonConnectionState,
@@ -37,6 +41,10 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
     expect(next).not.toHaveProperty('tokenCount');
+    expect(next).not.toHaveProperty('commands');
+    expect(next).not.toHaveProperty('skills');
+    expect(next).not.toHaveProperty('supportedCommands');
+    expect(next).not.toHaveProperty('context');
   });
 
   it('preserves a concurrently loaded session', () => {
@@ -48,6 +56,10 @@ describe('getConnectionAfterSessionClear', () => {
         clientId: 'client-b',
         displayName: 'Session B',
         tokenCount: 7,
+        commands: [{ name: 'new-command' }],
+        skills: ['new-skill'],
+        supportedCommands: { commands: [{ name: 'new-command' }] },
+        context: { tokens: 2, maxTokens: 20 },
         catchingUp: true,
         error: 'old error',
       } as DaemonConnectionState,
@@ -61,6 +73,10 @@ describe('getConnectionAfterSessionClear', () => {
       clientId: 'client-b',
       displayName: 'Session B',
       tokenCount: 7,
+      commands: [{ name: 'new-command' }],
+      skills: ['new-skill'],
+      supportedCommands: { commands: [{ name: 'new-command' }] },
+      context: { tokens: 2, maxTokens: 20 },
       catchingUp: undefined,
       error: undefined,
     });
@@ -116,6 +132,39 @@ describe('createDaemonSessionActions', () => {
     expect(createDetachedSession).toHaveBeenCalledOnce();
   });
 
+  it('starts an attach session load and bumps the attach nonce', async () => {
+    const session = createMockSession('session-a');
+    const setAttachSessionNonce = vi.fn();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      session,
+      setAttachSessionNonce,
+    });
+
+    const attachPromise = actions.attachSession();
+
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      id: 1,
+      sessionId: 'session-a',
+      mode: 'attach',
+    });
+    expect(setAttachSessionNonce).toHaveBeenCalledOnce();
+    const nonceUpdater = setAttachSessionNonce.mock.calls[0]?.[0];
+    expect(typeof nonceUpdater).toBe('function');
+    expect(nonceUpdater?.(1)).toBe(2);
+
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.resolve();
+    await expect(attachPromise).resolves.toBeUndefined();
+  });
+
+  it('rejects attachSession when no session exists', async () => {
+    const { actions } = createActionsHarness();
+
+    await expect(actions.attachSession()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+  });
+
   it('aborts active prompts and rejects pending session loads when clearing', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
@@ -156,6 +205,7 @@ function createActionsHarness(
     createDetachedSession?: ReturnType<typeof vi.fn>;
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
     session?: ReturnType<typeof createMockSession>;
+    setAttachSessionNonce?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -207,10 +257,15 @@ function createActionsHarness(
     setRestoreSessionId: vi.fn(),
     setRestoreMode: vi.fn(),
     setRestoreSessionNonce: vi.fn(),
-    setAttachSessionNonce: vi.fn(),
+    setAttachSessionNonce: opts.setAttachSessionNonce ?? vi.fn(),
     setNewSessionNonce: vi.fn(),
   });
-  return { actions, getConnection: () => connection, sessionRef };
+  return {
+    actions,
+    getConnection: () => connection,
+    pendingSessionLoadRef,
+    sessionRef,
+  };
 }
 
 function createMockSession(sessionId: string) {

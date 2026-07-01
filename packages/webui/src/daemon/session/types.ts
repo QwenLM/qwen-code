@@ -110,8 +110,6 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Behavior when the active session is missing (404/410). Defaults to create. */
-  missingSessionBehavior?: 'create' | 'disconnect';
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
   /** Maximum reconnect delay in milliseconds after backoff. */

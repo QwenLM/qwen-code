@@ -194,7 +194,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     includeRawEvent = false,
     autoConnect = true,
     autoReconnect = true,
-    missingSessionBehavior = 'disconnect',
     reconnectDelayMs = 1_000,
     maxReconnectDelayMs = 10_000,
     heartbeatIntervalMs = 30_000,
@@ -803,6 +802,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (pendingLoadToResolve) {
             pendingSessionLoadRef.current = undefined;
             clearTimeout(pendingLoadToResolve.timeout);
+            if (
+              skipNextCleanupDetachSessionIdRef.current ===
+              activeSession.sessionId
+            ) {
+              skipNextCleanupDetachSessionIdRef.current = undefined;
+            }
             pendingLoadToResolve.resolve();
           }
           let sawEvent = false;
@@ -1148,13 +1153,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
-          const wasLoadingRequestedSession =
-            restoreSessionId !== undefined || reconnectSessionId !== undefined;
-          const shouldDisconnectMissingSession =
-            isTerminal &&
-            !isAuthFailure &&
-            (missingSessionBehavior === 'disconnect' ||
-              wasLoadingRequestedSession);
           if (failedSessionId && (isAuthFailure || isTerminal)) {
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
@@ -1173,6 +1171,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             (pendingLoad.sessionId === restoreSessionId ||
               pendingLoad.sessionId === reconnectSessionId)
           ) {
+            if (
+              skipNextCleanupDetachSessionIdRef.current ===
+              pendingLoad.sessionId
+            ) {
+              skipNextCleanupDetachSessionIdRef.current = undefined;
+            }
             pendingSessionLoadRef.current = undefined;
             clearTimeout(pendingLoad.timeout);
             pendingLoad.reject(error);
@@ -1187,20 +1191,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               setConnection({ status: 'error', error: message });
               return;
             }
-            if (shouldDisconnectMissingSession) {
-              setConnection((current) => ({
-                ...current,
-                status: 'disconnected',
-                sessionId: undefined,
-                error: message,
-                catchingUp: undefined,
-              }));
-              return;
-            }
-            reconnectSessionId = undefined;
-            if (restoreSessionId) {
-              setRestoreSessionId(undefined);
-            }
+            setConnection((current) => ({
+              ...current,
+              status: 'disconnected',
+              sessionId: undefined,
+              error: message,
+              catchingUp: undefined,
+            }));
+            return;
           } else {
             // Retriable error (network failure, timeout, etc.) — preserve
             // the session so the next iteration skips the full load() and
@@ -1277,9 +1275,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         );
         pendingSessionLoadRef.current = undefined;
       }
-      if (keepSessionForNextEffect && !isUnmounting) {
-        skipNextCleanupDetachSessionIdRef.current = undefined;
-      } else if (session?.clientId) {
+      if (!keepSessionForNextEffect && session?.clientId) {
         void detachDaemonClient({
           baseUrl: resolvedBaseUrl!,
           token: resolvedToken,
@@ -1296,7 +1292,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [
     autoConnect,
     autoReconnect,
-    missingSessionBehavior,
     resolvedBaseUrl,
     resolvedToken,
     workspaceCwd,
