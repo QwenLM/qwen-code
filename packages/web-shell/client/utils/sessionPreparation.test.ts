@@ -2,19 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { createAndAttachSessionForPrompt } from './sessionPreparation';
 
 type CreateSessionArgs = Parameters<typeof createAndAttachSessionForPrompt>[0];
-type CreateSessionResult = Awaited<
-  ReturnType<CreateSessionArgs['sessionActions']['createSession']>
->;
-type SetModelResult = Awaited<
-  ReturnType<CreateSessionArgs['sessionActions']['setModel']>
->;
-type SetApprovalModeResult = Awaited<
-  ReturnType<CreateSessionArgs['sessionActions']['setApprovalMode']>
->;
-
-const sessionResult = { sessionId: 'session-1' } as CreateSessionResult;
-const modelResult = { model: 'qwen3' } as SetModelResult;
-const approvalModeResult = { mode: 'yolo' } as SetApprovalModeResult;
+const sessionResult = { sessionId: 'session-1' };
+const modelResult = { model: 'qwen3' };
+const approvalModeResult = { mode: 'yolo' };
 
 function createActions(
   overrides: Partial<CreateSessionArgs['sessionActions']> = {},

@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  DAEMON_APPROVAL_MODES,
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
@@ -124,7 +125,7 @@ import { BtwMessage } from './components/messages/BtwMessage';
 import {
   createAndAttachSessionForPrompt,
   isDaemonApprovalMode,
-} from './sessionPreparation';
+} from './utils/sessionPreparation';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
@@ -386,6 +387,7 @@ export interface WebShellProps {
 type SessionActionsWithCreate = {
   createSession: () => Promise<{ sessionId: string }>;
   attachSession: () => Promise<void>;
+  clearSession: () => Promise<void>;
 };
 
 const emptyComposerApi: WebShellComposerApi = {
@@ -1999,7 +2001,9 @@ export function App({
     // it stuck open with the page scroll still locked, matching loadSidebarSession.
     closeMobileDrawer();
     try {
-      await sessionActions.clearSession();
+      await (
+        sessionActions as typeof sessionActions & SessionActionsWithCreate
+      ).clearSession();
       onSessionIdChange?.(undefined);
       return true;
     } catch (error) {

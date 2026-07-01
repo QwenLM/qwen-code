@@ -1,13 +1,14 @@
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
-  type DaemonSessionActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 
-type PromptSessionActions = Pick<
-  DaemonSessionActions,
-  'createSession' | 'attachSession' | 'setModel' | 'setApprovalMode'
->;
+type PromptSessionActions = {
+  createSession: () => Promise<unknown>;
+  attachSession: () => Promise<void>;
+  setModel: (modelId: string) => Promise<unknown>;
+  setApprovalMode: (mode: DaemonApprovalMode) => Promise<unknown>;
+};
 
 export function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
   return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
