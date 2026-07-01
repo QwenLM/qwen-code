@@ -684,6 +684,60 @@ export function getSessionTimelineEntries(
   return entries;
 }
 
+function toolTimelineSignature(tool: ACPToolCall): string {
+  const rawOutput =
+    tool.rawOutput && typeof tool.rawOutput === 'object'
+      ? (tool.rawOutput as Record<string, unknown>)
+      : undefined;
+  return [
+    tool.callId,
+    tool.toolName,
+    tool.kind ?? '',
+    tool.status,
+    tool.parentToolCallId ?? '',
+    tool.subContent ? 'sub-content' : '',
+    tool.subTools?.length ?? 0,
+    String(tool.args?.subagent_type ?? ''),
+    tool.args?.run_in_background === true ? 'background' : '',
+    String(rawOutput?.['type'] ?? ''),
+    String(rawOutput?.['status'] ?? ''),
+  ].join(':');
+}
+
+export function getSessionTimelineSignature(
+  messages: readonly Message[],
+): string {
+  return messages
+    .map((message) => {
+      const base = `${message.id}:${message.role}:${message.timestamp ?? ''}`;
+      switch (message.role) {
+        case 'assistant':
+        case 'thinking':
+          return `${base}:${message.isStreaming ? 'streaming' : message.content}`;
+        case 'tool_group':
+          return `${base}:${message.tools.map(toolTimelineSignature).join(',')}`;
+        case 'system':
+          return `${base}:${message.variant}:${message.source ?? ''}:${message.content}`;
+        case 'user':
+          return `${base}:${message.content}`;
+        case 'user_shell':
+          return `${base}:${message.command}`;
+        case 'plan':
+        case 'btw':
+        case 'insight_progress':
+        case 'insight_ready':
+        case 'insight_error':
+          return base;
+        default: {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const _exhaustive: never = message;
+          return base;
+        }
+      }
+    })
+    .join('|');
+}
+
 function isExecutionWorkStep(item: DisplayItem): boolean {
   if (item.type === 'parallel_agents') return true;
   if (item.type === 'turn_collapse') return false;
@@ -1543,10 +1597,19 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       () => groupParallelAgents(mergedMessages),
       [mergedMessages],
     );
-    const sessionTimelineEntries = useMemo(
-      () => getSessionTimelineEntries(mergedMessages),
-      [mergedMessages],
-    );
+    const sessionTimelineSignature =
+      getSessionTimelineSignature(mergedMessages);
+    const sessionTimelineCache = useRef<{
+      signature: string;
+      entries: SessionTimelineEntry[];
+    } | null>(null);
+    if (sessionTimelineCache.current?.signature !== sessionTimelineSignature) {
+      sessionTimelineCache.current = {
+        signature: sessionTimelineSignature,
+        entries: getSessionTimelineEntries(mergedMessages),
+      };
+    }
+    const sessionTimelineEntries = sessionTimelineCache.current.entries;
     const sessionTimelineEntryIndexById = useMemo(
       () =>
         new Map(
@@ -2043,6 +2106,24 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       ],
     );
 
+    const scrollToMessageState = useRef<{
+      visibleItems: readonly DisplayItem[];
+      displayItems: readonly DisplayItem[];
+      headerOffset: number;
+      performScrollToRow: (rowIndex: number) => void;
+    }>({
+      visibleItems: [],
+      displayItems: [],
+      headerOffset: 0,
+      performScrollToRow: () => {},
+    });
+    scrollToMessageState.current = {
+      visibleItems,
+      displayItems,
+      headerOffset,
+      performScrollToRow,
+    };
+
     // A scroll target that currently sits inside a collapsed turn: expand the
     // turn, then finish the scroll once its rows materialize in `visibleItems`.
     const pendingScrollRef = useRef<{
@@ -2052,6 +2133,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     const scrollToMessage = useCallback(
       (messageId: string, callId?: string): boolean => {
+        const { visibleItems, displayItems, headerOffset, performScrollToRow } =
+          scrollToMessageState.current;
         const visibleIndex = findDisplayItemIndex(
           visibleItems,
           messageId,
@@ -2088,7 +2171,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         });
         return true;
       },
-      [visibleItems, displayItems, headerOffset, performScrollToRow],
+      [],
     );
 
     useImperativeHandle(

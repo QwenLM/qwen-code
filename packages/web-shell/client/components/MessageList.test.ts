@@ -6,6 +6,7 @@ import {
   findTurnIdForIndex,
   getSessionTimelineEntries,
   getSessionTimelineRangeForIndexes,
+  getSessionTimelineSignature,
   getTurnTimelineNode,
   getDisplayItemVirtualKey,
   getTurnIdByDisplayIndex,
@@ -384,6 +385,41 @@ describe('getTurnTimelineNode', () => {
     expect(getTurnTimelineNode(item(makeUserMessage('user')))).toMatchObject({
       kind: 'none',
     });
+  });
+});
+
+describe('getSessionTimelineSignature', () => {
+  it('keeps streaming text updates from invalidating the timeline cache', () => {
+    const before = getSessionTimelineSignature([
+      makeUserMessage('u1'),
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'partial',
+        isStreaming: true,
+      },
+    ]);
+    const during = getSessionTimelineSignature([
+      makeUserMessage('u1'),
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'partial with more tokens',
+        isStreaming: true,
+      },
+    ]);
+    const complete = getSessionTimelineSignature([
+      makeUserMessage('u1'),
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'partial with more tokens',
+        isStreaming: false,
+      },
+    ]);
+
+    expect(during).toBe(before);
+    expect(complete).not.toBe(before);
   });
 });
 
