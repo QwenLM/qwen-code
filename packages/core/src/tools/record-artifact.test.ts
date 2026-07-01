@@ -94,5 +94,21 @@ describe('RecordArtifactTool', () => {
         url: 'https://example.com/resource',
       }),
     ).toThrow(/unsafe markup/);
+
+    expect(() =>
+      tool.build({
+        title: 'External style',
+        description: '<style>body{display:none}</style>',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/unsafe markup/);
+
+    expect(() =>
+      tool.build({
+        title: 'Entity payload',
+        description: '&#x3c;script&#x3e;',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/unsafe markup/);
   });
 });
