@@ -10589,6 +10589,31 @@ describe('createServeApp', () => {
       });
     });
 
+    it('requires mutation auth before updating metadata', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge,
+      });
+
+      const noAuth = await request(app)
+        .patch('/session/session-A/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ displayName: 'blocked' });
+      expect(noAuth.status).toBe(401);
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+
+      const authed = await request(app)
+        .patch('/session/session-A/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ displayName: 'allowed' });
+      expect(authed.status).toBe(200);
+      expect(bridge.updateMetadataCalls).toHaveLength(1);
+      expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
+        displayName: 'allowed',
+      });
+    });
+
     it('passes client identity context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
