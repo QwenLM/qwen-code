@@ -258,6 +258,26 @@ describe('FeishuChannel', () => {
       expect(result).toBe('Content');
     });
 
+    it('strips terminal lifecycle labels', () => {
+      for (const label of [
+        '已完成',
+        '已取消',
+        '已失败，请重试',
+        '已停止生成',
+      ]) {
+        const card = {
+          body: {
+            elements: [
+              { tag: 'markdown', content: `Content\n---\n*${label}*` },
+            ],
+          },
+        };
+        const result = extractCardText(card);
+        expect(result).not.toContain(label);
+        expect(result).toBe('Content');
+      }
+    });
+
     it('returns undefined for empty card', () => {
       const result = extractCardText({});
       expect(result).toBeUndefined();

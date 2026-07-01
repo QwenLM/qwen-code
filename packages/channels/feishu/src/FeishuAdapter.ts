@@ -566,8 +566,11 @@ export class FeishuChannel extends ChannelBase {
     }
 
     let text = lines.join('\n').trim();
-    // Strip streaming indicator
-    text = text.replace(/\n---\n\*(?:生成中|运行中)\.\.\.\*$/, '');
+    // Strip lifecycle status labels
+    text = text.replace(
+      /\n---\n\*(?:(?:生成中|运行中)(?:\.\.\.)?|已完成|已取消|已失败，请重试|已停止生成)\*$/,
+      '',
+    );
     // Strip greeting prefix like "好的，<at id=xxx></at>\n\n"
     text = text.replace(/^好的，<at[^>]*><\/at>\s*\n*/, '');
     return text.trim() || undefined;

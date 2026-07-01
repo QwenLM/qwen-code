@@ -17,9 +17,9 @@ export interface ChannelIdentityConfig {
 }
 
 export interface ChannelRuntimeIdentity {
-  id: string;
-  displayName: string;
-  description?: string;
+  readonly id: string;
+  readonly displayName: string;
+  readonly description?: string;
 }
 
 export type ChannelMemoryScopeMode = 'metadata-only';
@@ -30,8 +30,8 @@ export interface ChannelMemoryScopeConfig {
 }
 
 export interface ChannelRuntimeMemoryScope {
-  namespace: string;
-  mode: ChannelMemoryScopeMode;
+  readonly namespace: string;
+  readonly mode: ChannelMemoryScopeMode;
 }
 
 export interface GroupConfig {
@@ -143,12 +143,14 @@ interface ChannelTaskLifecycleBase {
   memoryScope: ChannelRuntimeMemoryScope;
 }
 
+export type SanitizedToolCallEvent = Omit<ToolCallEvent, 'rawInput'>;
+
 export type ChannelTaskLifecycleEvent =
   | (ChannelTaskLifecycleBase & { type: 'started' })
   | (ChannelTaskLifecycleBase & { type: 'text_chunk'; chunk: string })
-  | (Omit<ChannelTaskLifecycleBase, 'messageId'> & {
+  | (ChannelTaskLifecycleBase & {
       type: 'tool_call';
-      toolCall: ToolCallEvent;
+      toolCall: SanitizedToolCallEvent;
     })
   | (ChannelTaskLifecycleBase & {
       type: 'cancelled';
