@@ -92,13 +92,15 @@ jobs:
           FORCED_ISSUE: '${{ inputs.issue_number }}'
           FORCED_PR: '${{ inputs.pr_number }}'
           EVENT_NAME: '${{ github.event_name }}'
+          GITHUB_TOKEN: '${{ github.token }}'
           BUG_LABEL: 'type/bug'
           ISSUE_LABEL: '${{ github.event.label.name }}'
           ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
           ISSUE_STATE: '${{ github.event.issue.state }}'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
-          SENDER_ASSOC: '${{ github.event.sender.author_association }}'
+          REPO: '${{ github.repository }}'
+          SENDER_LOGIN: '${{ github.event.sender.login }}'
           SCHEDULE: '${{ github.event.schedule }}'
         run: |-
           DO_ISSUE=false
@@ -122,11 +124,16 @@ jobs:
                 issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                 label_is_trigger=false
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" ]] && label_is_trigger=true
-                sender_is_trusted="$(jq -r --arg assoc "${SENDER_ASSOC}" 'index($assoc) != null' <<< "${TRUSTED_ASSOC}")"
+                sender_permission=''
+                sender_is_trusted=false
+                if [[ -n "${SENDER_LOGIN}" ]]; then
+                  sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2> /dev/null || true)"
+                  [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
+                fi
                 if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_bug}" == 'true' && "${issue_is_ready}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
                   DO_ISSUE=true
                 else
-                  echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} trigger_label=${label_is_trigger} sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                 fi
               fi
               ;;

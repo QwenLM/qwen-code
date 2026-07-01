@@ -68,10 +68,16 @@ describe('qwen-autofix workflow', () => {
       "ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'",
     );
     expect(workflow).toContain(
-      "SENDER_ASSOC: '${{ github.event.sender.author_association }}'",
+      "SENDER_LOGIN: '${{ github.event.sender.login }}'",
     );
     expect(workflow).toContain(
-      'sender_is_trusted="$(jq -r --arg assoc "${SENDER_ASSOC}"',
+      'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
+    );
+    expect(workflow).toContain("${sender_permission}\" == 'write'");
+    expect(workflow).toContain("${sender_permission}\" == 'maintain'");
+    expect(workflow).toContain("${sender_permission}\" == 'admin'");
+    expect(workflow).toContain(
+      "sender_permission='${sender_permission:-none}'",
     );
     expect(workflow).toContain(
       'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
@@ -98,6 +104,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain(
       "contains(github.event.issue.labels.*.name, 'status/ready-for-agent')",
     );
+    expect(workflow).not.toContain('github.event.sender.author_association');
   });
 
   it('checks unattended filtering uses maintainer association gates', () => {
