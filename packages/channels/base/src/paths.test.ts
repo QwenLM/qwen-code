@@ -42,7 +42,7 @@ describe('channels/base paths – getGlobalQwenDir', () => {
 
   it('treats bare tilde (~) as home directory', () => {
     process.env['QWEN_HOME'] = '~';
-    expect(getGlobalQwenDir()).toBe(os.homedir());
+    expect(getGlobalQwenDir()).toBe(path.normalize(os.homedir()));
   });
 });
 
@@ -53,7 +53,7 @@ describe('channels/base paths – resolvePath', () => {
   });
 
   it('expands bare tilde (~) to home directory', () => {
-    expect(resolvePath('~')).toBe(os.homedir());
+    expect(resolvePath('~')).toBe(path.normalize(os.homedir()));
   });
 
   it('expands POSIX-style tilde (~/x)', () => {

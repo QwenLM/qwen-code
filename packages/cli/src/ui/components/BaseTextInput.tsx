@@ -23,6 +23,7 @@ import type { ReactNode } from 'react';
 import { useCallback, useInsertionEffect, useRef } from 'react';
 import { Box, Text, type DOMElement, useBoxMetrics, useCursor } from 'ink';
 import type { TextBuffer } from './shared/text-buffer.js';
+import { TextInputMouseController } from './shared/TextInputMouseController.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
@@ -81,6 +82,8 @@ export interface BaseTextInputProps {
    * When not provided, lines are rendered as plain text with cursor overlay.
    */
   renderLine?: (opts: RenderLineOptions) => ReactNode;
+  /** Enable click-to-position-cursor (alternate-screen / ui.useTerminalBuffer mode). */
+  mouseEnabled?: boolean;
 }
 
 // ─── Default line renderer ──────────────────────────────────
@@ -197,6 +200,7 @@ export const BaseTextInput = ({
   topRightLabel,
   isActive = true,
   renderLine = defaultRenderLine,
+  mouseEnabled = false,
 }: BaseTextInputProps): ReactNode => {
   // ── Keyboard handling ──
 
@@ -313,6 +317,7 @@ export const BaseTextInput = ({
 
   // ── Physical cursor positioning for IME ──
   const boxRef = useRef<DOMElement | null>(null);
+  const linesRef = useRef<DOMElement | null>(null);
   const { hasMeasured } = useBoxMetrics(boxRef);
   const { setCursorPosition } = useCursor();
   const cursorPosition = getPhysicalCursorPosition(boxRef.current, {
@@ -346,6 +351,13 @@ export const BaseTextInput = ({
 
   return (
     <Box ref={boxRef} flexDirection="column">
+      {mouseEnabled && isActive && (
+        <TextInputMouseController
+          linesRef={linesRef}
+          buffer={buffer}
+          visibleLineCount={linesToRender.length}
+        />
+      )}
       <Text color={resolvedBorderColor} wrap="truncate-end">
         {topBorderLine}
       </Text>
@@ -360,7 +372,7 @@ export const BaseTextInput = ({
         {resolvedPrefix}
         {/* No background fill: the input area blends into the terminal's own
             background so it stays consistent across terminals and themes. */}
-        <Box flexGrow={1} flexDirection="column">
+        <Box flexGrow={1} flexDirection="column" ref={linesRef}>
           {buffer.text.length === 0 && placeholder ? (
             showCursor ? (
               <Text>

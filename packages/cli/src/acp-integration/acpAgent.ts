@@ -20,6 +20,7 @@ import {
   findProviderById,
   getAllGeminiMdFilenames,
   getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   getScopedEnvContents,
@@ -60,6 +61,8 @@ import {
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
+  runManagedRememberByAgent,
+  matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -78,6 +81,7 @@ import type {
   SendSdkMcpMessage,
   DiscoveredMCPResource,
   DiscoveredMCPPrompt,
+  WorkspaceRememberContextMode,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -153,6 +157,7 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
+import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -233,6 +238,7 @@ import {
   type ClientMcpOverWsRuntimeConfig,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isValidServerName } from '../serve/validate-server-name.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
 import {
   collectContextData,
   formatContextUsageText,
@@ -243,6 +249,8 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 // Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
+// Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
+const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
 function collapseForkDirective(directive: string, maxLength: number): string {
   const oneLine = directive.replace(/\s+/g, ' ').trim();
@@ -5388,6 +5396,79 @@ class QwenAgent implements Agent {
         return this.buildWorkspaceExtensionsStatus(
           this.config,
         ) as unknown as Record<string, unknown>;
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
+        return {
+          available: this.config.isManagedMemoryAvailable(),
+        };
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember: {
+        const content = params['content'];
+        if (typeof content !== 'string' || !content.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing content',
+          );
+        }
+        if (Buffer.byteLength(content, 'utf8') > MAX_REMEMBER_CONTENT_BYTES) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Content exceeds maximum size',
+          );
+        }
+        const rawContextMode = params['contextMode'] ?? 'workspace';
+        if (rawContextMode !== 'workspace' && rawContextMode !== 'clean') {
+          throw RequestError.invalidParams(undefined, 'Invalid contextMode');
+        }
+        const contextMode: WorkspaceRememberContextMode = rawContextMode;
+        if (!this.config.isManagedMemoryAvailable()) {
+          throw new RequestError(
+            -32009,
+            'Managed memory is unavailable for this daemon workspace',
+            { errorKind: 'managed_memory_unavailable' },
+          );
+        }
+
+        const childSignal = AbortSignal.timeout(
+          WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
+        );
+        try {
+          const result = await runManagedRememberByAgent({
+            config: this.config,
+            projectRoot: this.config.getProjectRoot(),
+            content: content.trim(),
+            contextMode,
+            abortSignal: childSignal,
+          });
+          return result as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof RequestError) {
+            throw err;
+          }
+          if (childSignal.aborted) {
+            throw new RequestError(
+              -32099,
+              'Workspace memory remember timed out',
+              { errorKind: 'remember_timeout' },
+            );
+          }
+          const code = extractRememberErrorCode(err);
+          if (code === 'managed_memory_unavailable') {
+            throw new RequestError(
+              -32009,
+              'Managed memory is unavailable for this daemon workspace',
+              { errorKind: 'managed_memory_unavailable' },
+            );
+          }
+          throw new RequestError(
+            -32099,
+            err instanceof Error && err.message
+              ? err.message
+              : 'Workspace memory remember failed',
+            {
+              errorKind: code,
+            },
+          );
+        }
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
         // Single-server MCP restart with budget pre-check. Soft skips
         // return structured 200 responses; hard errors propagate as
@@ -5596,23 +5677,34 @@ class QwenAgent implements Agent {
 
         if (action === 'enable') {
           const settings = loadSettings(this.config.getTargetDir());
+          let settingsChanged = false;
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded || [];
-            if (currentExcluded.includes(serverName)) {
-              settings.setValue(
-                scope,
-                'mcp.excluded',
-                currentExcluded.filter((name: string) => name !== serverName),
-              );
+            const filtered = currentExcluded.filter(
+              (pattern: string) => pattern !== serverName,
+            );
+            if (filtered.length !== currentExcluded.length) {
+              settings.setValue(scope, 'mcp.excluded', filtered);
+              settingsChanged = true;
             }
           }
           const currentExcluded = this.config.getExcludedMcpServers() || [];
-          this.config.setExcludedMcpServers(
-            currentExcluded.filter((name: string) => name !== serverName),
+          const runtimeFiltered = currentExcluded.filter(
+            (pattern: string) => pattern !== serverName,
           );
+          let runtimeChanged = false;
+          if (runtimeFiltered.length !== currentExcluded.length) {
+            this.config.setExcludedMcpServers(runtimeFiltered);
+            runtimeChanged = true;
+          }
           await toolRegistry.discoverToolsForServer(serverName);
-          return { serverName, action, ok: true, changed: true };
+          return {
+            serverName,
+            action,
+            ok: true,
+            changed: settingsChanged || runtimeChanged,
+          };
         }
 
         if (action === 'disable') {
@@ -5635,18 +5727,27 @@ class QwenAgent implements Agent {
           }
           const scopeSettings = settings.forScope(targetScope).settings;
           const currentExcluded = scopeSettings.mcp?.excluded || [];
-          if (!currentExcluded.includes(serverName)) {
+          let settingsChanged = false;
+          if (!matchesAnyServerPattern(serverName, currentExcluded)) {
             settings.setValue(targetScope, 'mcp.excluded', [
               ...currentExcluded,
               serverName,
             ]);
+            settingsChanged = true;
           }
           const runtimeExcluded = this.config.getExcludedMcpServers() || [];
-          if (!runtimeExcluded.includes(serverName)) {
+          let runtimeChanged = false;
+          if (!matchesAnyServerPattern(serverName, runtimeExcluded)) {
             this.config.setExcludedMcpServers([...runtimeExcluded, serverName]);
+            runtimeChanged = true;
           }
           await toolRegistry.disableMcpServer(serverName);
-          return { serverName, action, ok: true, changed: true };
+          return {
+            serverName,
+            action,
+            ok: true,
+            changed: settingsChanged || runtimeChanged,
+          };
         }
 
         if (action === 'clear-auth') {
@@ -7630,6 +7731,19 @@ class QwenAgent implements Agent {
       config.getSessionId(),
       this.clientCapabilities.fs,
       config.getFileSystemService(),
+      {
+        // SYNC: Mirrors ReadFileTool's default allowed local roots, including
+        // auto-memory roots, so ACP-local read fallback follows the same policy.
+        localReadRoots: [
+          config.storage.getProjectTempDir(),
+          path.join(config.storage.getProjectDir(), 'subagents'),
+          Storage.getGlobalTempDir(),
+          getAutoMemoryRoot(config.getTargetDir()),
+          getUserAutoMemoryRoot(),
+          ...config.storage.getUserSkillsDirs(),
+          Storage.getUserExtensionsDir(),
+        ],
+      },
     );
     config.setFileSystemService(acpFileSystemService);
   }

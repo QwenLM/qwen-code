@@ -197,6 +197,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_providers',
   'auth_provider_install',
   'workspace_memory',
+  'workspace_memory_remember',
   'workspace_agents',
   'workspace_agent_generate',
   'workspace_env',
@@ -354,6 +355,17 @@ interface FakeBridgeOpts {
     message: string,
     context?: BridgeClientRequestContext,
   ) => { accepted: boolean };
+  getPendingPromptsImpl?: (sessionId: string) => ReadonlyArray<{
+    promptId: string;
+    text: string;
+    queuedAt: number;
+    state: 'queued' | 'running';
+    originatorClientId?: string;
+  }>;
+  removePendingPromptImpl?: (
+    sessionId: string,
+    promptId: string,
+  ) => { removed: boolean };
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
@@ -533,6 +545,14 @@ interface FakeBridgeOpts {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ) => Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  workspaceMemoryRememberImpl?: (request: {
+    content: string;
+    contextMode: 'workspace' | 'clean';
+  }) => Promise<{
+    summary?: string;
+    filesTouched: string[];
+    touchedScopes: Array<'user' | 'project'>;
+  }>;
   daemonStatusSnapshotImpl?: () => BridgeDaemonStatusSnapshot;
 }
 
@@ -645,6 +665,10 @@ interface FakeBridge extends AcpSessionBridge {
     directive: string;
     context?: BridgeClientRequestContext;
   }>;
+  workspaceMemoryRememberCalls: Array<{
+    content: string;
+    contextMode: 'workspace' | 'clean';
+  }>;
   setToolEnabledCalls: Array<{
     toolName: string;
     enabled: boolean;
@@ -699,6 +723,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ?? (() => ({ accepted: true }));
+  const getPendingPromptsCalls: string[] = [];
+  const getPendingPromptsImpl = opts.getPendingPromptsImpl ?? (() => []);
+  const removePendingPromptCalls: Array<{
+    sessionId: string;
+    promptId: string;
+  }> = [];
+  const removePendingPromptImpl =
+    opts.removePendingPromptImpl ?? (() => ({ removed: true }));
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
@@ -726,6 +758,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
+    [];
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
@@ -761,6 +795,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     }));
   const promptImpl =
     opts.promptImpl ?? (async () => ({ stopReason: 'end_turn' }));
+  const workspaceMemoryRememberImpl =
+    opts.workspaceMemoryRememberImpl ??
+    (async () => ({
+      summary: 'remembered',
+      filesTouched: [],
+      touchedScopes: [],
+    }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
   const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
@@ -1140,6 +1181,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     shellCalls,
     generateSessionRecapCalls,
     forkCalls,
+    workspaceMemoryRememberCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1395,6 +1437,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return launchSessionForkAgentImpl(sessionId, directive, context);
     },
+    async runWorkspaceMemoryRemember(request) {
+      workspaceMemoryRememberCalls.push(request);
+      return workspaceMemoryRememberImpl(request);
+    },
+    async isWorkspaceMemoryRememberAvailable() {
+      return true;
+    },
     enqueueMidTurnMessage(sessionId, message, context) {
       enqueueMidTurnCalls.push({
         sessionId,
@@ -1402,6 +1451,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return enqueueMidTurnImpl(sessionId, message, context);
+    },
+    getPendingPrompts(sessionId) {
+      getPendingPromptsCalls.push(sessionId);
+      return getPendingPromptsImpl(sessionId);
+    },
+    removePendingPrompt(sessionId, promptId) {
+      removePendingPromptCalls.push({ sessionId, promptId });
+      return removePendingPromptImpl(sessionId, promptId);
     },
     async executeShellCommand(sessionId, command, signal, context) {
       shellCalls.push({
@@ -3241,14 +3298,15 @@ describe('createServeApp', () => {
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
         const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const maxExtensionOperationHistory = 3;
         const app = createServeApp(
           { ...tokenOpts, workspace: WS_BOUND },
           undefined,
-          { bridge },
+          { bridge, maxExtensionOperationHistory },
         );
         const operationIds: string[] = [];
 
-        for (let i = 0; i < 101; i += 1) {
+        for (let i = 0; i <= maxExtensionOperationHistory; i += 1) {
           const res = await request(app)
             .post('/workspace/extensions/install')
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
@@ -3296,7 +3354,7 @@ describe('createServeApp', () => {
       } finally {
         restore();
       }
-    });
+    }, 15_000);
 
     it('returns 404 for unknown extension operation ids', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -5128,6 +5186,141 @@ describe('createServeApp', () => {
         { message: 'hi' },
         'rogue',
       );
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+    });
+  });
+
+  describe('GET /session/:id/pending-prompts', () => {
+    const pendingApp = (bridge: FakeBridge) =>
+      createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+    it('200 with pending prompts list', async () => {
+      const bridge = fakeBridge({
+        getPendingPromptsImpl: () => [
+          {
+            promptId: 'p1',
+            text: 'running prompt',
+            queuedAt: 1000,
+            state: 'running',
+          },
+          {
+            promptId: 'p2',
+            text: 'waiting prompt',
+            queuedAt: 2000,
+            state: 'queued',
+          },
+        ],
+      });
+      const res = await request(pendingApp(bridge))
+        .get('/session/s-1/pending-prompts')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body.pendingPrompts).toHaveLength(2);
+      expect(res.body.pendingPrompts[0]?.promptId).toBe('p1');
+      expect(res.body.pendingPrompts[1]?.state).toBe('queued');
+    });
+
+    it('200 with empty list when no prompts pending', async () => {
+      const bridge = fakeBridge();
+      const res = await request(pendingApp(bridge))
+        .get('/session/s-1/pending-prompts')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body.pendingPrompts).toEqual([]);
+    });
+
+    it('404 for unknown session', async () => {
+      const bridge = fakeBridge({
+        getPendingPromptsImpl: () => {
+          throw new SessionNotFoundError('unknown');
+        },
+      });
+      const res = await request(pendingApp(bridge))
+        .get('/session/unknown/pending-prompts')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(404);
+    });
+
+    it('400 when bridge throws InvalidClientIdError', async () => {
+      const bridge = fakeBridge({
+        getPendingPromptsImpl: () => {
+          throw new InvalidClientIdError('s-1', 'rogue');
+        },
+      });
+      const res = await request(pendingApp(bridge))
+        .get('/session/s-1/pending-prompts')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'rogue');
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+    });
+  });
+
+  describe('DELETE /session/:id/pending-prompts/:promptId', () => {
+    const removeApp = (bridge: FakeBridge) =>
+      createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+    it('200 { removed: true } when prompt exists', async () => {
+      const bridge = fakeBridge({
+        removePendingPromptImpl: () => ({ removed: true }),
+      });
+      const res = await request(removeApp(bridge))
+        .delete('/session/s-1/pending-prompts/p-42')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ removed: true });
+    });
+
+    it('200 { removed: false } when promptId not found', async () => {
+      const bridge = fakeBridge({
+        removePendingPromptImpl: () => ({ removed: false }),
+      });
+      const res = await request(removeApp(bridge))
+        .delete('/session/s-1/pending-prompts/no-such')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ removed: false });
+    });
+
+    it('404 for unknown session', async () => {
+      const bridge = fakeBridge({
+        removePendingPromptImpl: () => {
+          throw new SessionNotFoundError('unknown');
+        },
+      });
+      const res = await request(removeApp(bridge))
+        .delete('/session/unknown/pending-prompts/p-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(404);
+    });
+
+    it('400 when bridge throws InvalidClientIdError', async () => {
+      const bridge = fakeBridge({
+        removePendingPromptImpl: () => {
+          throw new InvalidClientIdError('s-1', 'rogue');
+        },
+      });
+      const res = await request(removeApp(bridge))
+        .delete('/session/s-1/pending-prompts/p-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'rogue');
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_client_id');
     });
@@ -8328,12 +8521,17 @@ describe('createServeApp', () => {
       expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
     });
 
-    it('400 invalid_server_name when name is a reserved JS property', async () => {
-      for (const name of ['__proto__', 'constructor', 'prototype']) {
+    it.each([
+      ['__proto__', '%5F%5Fproto%5F%5F'],
+      ['constructor', 'constructor'],
+      ['prototype', 'prototype'],
+    ] as const)(
+      '400 invalid_server_name when name is a reserved JS property: %s',
+      async (_name, pathSegment) => {
         const bridge = fakeBridge({ knownClientIds: ['client-1'] });
         const app = createServeApp(tokenOpts, undefined, { bridge });
         const res = await auth(
-          request(app).delete(`/workspace/mcp/servers/${name}`),
+          request(app).delete(`/workspace/mcp/servers/${pathSegment}`),
         )
           .set('X-Qwen-Client-Id', 'client-1')
           .send();
@@ -8341,8 +8539,8 @@ describe('createServeApp', () => {
         expect(res.body.code).toBe('invalid_server_name');
         expect(res.body.error).toContain('reserved');
         expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
-      }
-    });
+      },
+    );
 
     it('401 auth_required when no bearer token (strict gate)', async () => {
       const bridge = fakeBridge();
@@ -8800,7 +8998,8 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/session/session-A/cancel')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'client-1');
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
       expect(res.status).toBe(204);
       expect(bridge.cancelCalls[0]?.context).toEqual({
         clientId: 'client-1',
@@ -8838,7 +9037,8 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
         .delete('/session/session-A')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
       expect(res.status).toBe(204);
       expect(bridge.closeCalls).toHaveLength(1);
       expect(bridge.closeCalls[0]?.sessionId).toBe('session-A');
@@ -8850,7 +9050,8 @@ describe('createServeApp', () => {
       const res = await request(app)
         .delete('/session/session-A')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'client-1');
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
       expect(res.status).toBe(204);
       expect(bridge.closeCalls[0]?.context).toEqual({
         clientId: 'client-1',
@@ -8866,7 +9067,8 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
         .delete('/session/missing')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
     });
@@ -8881,7 +9083,8 @@ describe('createServeApp', () => {
       const res = await request(app)
         .delete('/session/session-A')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'bad-client');
+        .set('X-Qwen-Client-Id', 'bad-client')
+        .send();
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_client_id');
     });
@@ -13089,6 +13292,24 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       } finally {
         await localHandle.close();
       }
+    });
+
+    it('does not abort an accepted prompt when the response closes', async () => {
+      const bridge = fakeBridge({
+        promptImpl: () => new Promise<PromptResponse>(() => {}),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'queued' }] });
+
+      expect(res.status).toBe(202);
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
     });
 
     it('fires the server-side deadline and aborts the bridge signal', async () => {

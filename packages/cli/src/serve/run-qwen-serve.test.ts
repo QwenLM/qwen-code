@@ -10,9 +10,11 @@ import * as fs from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import express from 'express';
 import {
   createLazyBridgeProxy,
   extractContextFilename,
+  formatChannelWorkerDaemonUrl,
   InvalidPolicyConfigError,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
@@ -20,6 +22,8 @@ import {
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
+import { isLoopbackBind } from './loopback-binds.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -28,6 +32,11 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import type {
+  ChannelWorkerSnapshot,
+  CreateChannelWorkerSupervisorOptions,
+} from './channel-worker-supervisor.js';
+import type { ServiceInfo } from '../commands/channel/pidfile.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -43,6 +52,22 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   permissionPolicy: 'first-responder',
   sessions: [],
 };
+
+function makeRuntimeBridge(): HttpAcpBridge {
+  return {
+    spawnOrAttach: vi.fn(),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+    killAllSync: vi.fn(),
+    getSession: vi.fn(),
+    getAllSessions: vi.fn().mockReturnValue([]),
+    publishWorkspaceEvent: vi.fn(),
+    getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+    resume: vi.fn(),
+    preheat: vi.fn().mockResolvedValue(undefined),
+    getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+    isChannelLive: vi.fn().mockReturnValue(true),
+  } as unknown as HttpAcpBridge;
+}
 
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
   () => [] as Array<Record<string, unknown>>,
@@ -128,6 +153,28 @@ describe('extractContextFilename (#4297 fold-in 7 P2-1 helper)', () => {
     expect(extractContextFilename(42)).toBeUndefined();
     expect(extractContextFilename(true)).toBeUndefined();
     expect(extractContextFilename({ fileName: 'AGENTS.md' })).toBeUndefined();
+  });
+});
+
+describe('formatChannelWorkerDaemonUrl', () => {
+  it.each(['', '0.0.0.0', '::', '[::]'])(
+    'uses loopback when the daemon binds wildcard host %j',
+    (host) => {
+      expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+        'http://127.0.0.1:4170',
+      );
+    },
+  );
+
+  it('formats concrete IPv6 hosts for URLs', () => {
+    expect(formatChannelWorkerDaemonUrl('::1', 4170)).toBe('http://[::1]:4170');
+  });
+
+  it('preserves and accepts concrete IPv4 loopback hosts in 127/8', () => {
+    expect(formatChannelWorkerDaemonUrl('127.0.0.2', 4170)).toBe(
+      'http://127.0.0.2:4170',
+    );
+    expect(isLoopbackBind('127.0.0.2')).toBe(true);
   });
 });
 
@@ -708,19 +755,7 @@ describe('runQwenServe runtime startup failures', () => {
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
       telemetryPromise,
     );
-    const bridge = {
-      spawnOrAttach: vi.fn(),
-      shutdown: vi.fn().mockResolvedValue(undefined),
-      killAllSync: vi.fn(),
-      getSession: vi.fn(),
-      getAllSessions: vi.fn().mockReturnValue([]),
-      publishWorkspaceEvent: vi.fn(),
-      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
-      resume: vi.fn(),
-      preheat: vi.fn().mockResolvedValue(undefined),
-      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
-      isChannelLive: vi.fn().mockReturnValue(true),
-    } as unknown as HttpAcpBridge;
+    const bridge = makeRuntimeBridge();
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
       bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
     );
@@ -749,6 +784,664 @@ describe('runQwenServe runtime startup failures', () => {
         enabled: false,
         sensitiveSpanAttributeMaxLength: 1024 * 1024,
       });
+      await handle.close();
+    }
+  });
+
+  it('keeps health responsive before starting deferred runtime work', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-first-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const resolveTelemetrySettings = vi
+      .spyOn(qwenCore, 'resolveTelemetrySettings')
+      .mockResolvedValue({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+        daemonLogBaseDir: logBaseDir,
+      },
+    );
+
+    let closed = false;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(resolveTelemetrySettings).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
+      const healthRes = await fetch(`${handle.url}/health`);
+      expect(healthRes.status).toBe(200);
+      expect(await healthRes.json()).toEqual({ status: 'ok' });
+
+      await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
+        timeout: 500,
+      });
+      expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      await handle.close();
+      closed = true;
+
+      const daemonDir = path.join(logBaseDir, 'daemon');
+      const [logFile] = fs
+        .readdirSync(daemonDir)
+        .filter((fileName) => fileName.endsWith('.log'));
+      expect(logFile).toBeDefined();
+      const logContent = fs.readFileSync(
+        path.join(daemonDir, logFile!),
+        'utf8',
+      );
+      expect(logContent).toContain(
+        'deferred runtime: health timer fired, starting',
+      );
+    } finally {
+      if (!closed) {
+        await handle.close();
+      }
+    }
+  });
+
+  it('starts deferred runtime once for duplicate health probes', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-dedupe-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      expect(createBridge).not.toHaveBeenCalled();
+      const [firstHealthRes, secondHealthRes] = await Promise.all([
+        fetch(`${handle.url}/health`),
+        fetch(`${handle.url}/health`),
+      ]);
+      expect(firstHealthRes.status).toBe(200);
+      expect(secondHealthRes.status).toBe(200);
+      expect(await firstHealthRes.json()).toEqual({ status: 'ok' });
+      expect(await secondHealthRes.json()).toEqual({ status: 'ok' });
+
+      await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
+        timeout: 500,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('starts deferred runtime for the first runtime route and serves that request', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-route-start-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const app = express();
+      app.post('/session', (_req, res) => {
+        res.status(201).json({ sessionId: 'session-1' });
+      });
+      return app;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      expect(createBridge).not.toHaveBeenCalled();
+      const res = await fetch(`${handle.url}/session`, { method: 'POST' });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ sessionId: 'session-1' });
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('rejects unauthenticated deferred runtime routes before starting runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-route-auth-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const app = express();
+      app.post('/session', (_req, res) => {
+        res.status(201).json({ sessionId: 'session-1' });
+      });
+      return app;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const res = await fetch(`${handle.url}/session`, { method: 'POST' });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: 'Unauthorized' });
+      expect(createBridge).not.toHaveBeenCalled();
+
+      const authorizedRes = await fetch(`${handle.url}/session`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer secret-token' },
+      });
+      expect(authorizedRes.status).toBe(201);
+      expect(await authorizedRes.json()).toEqual({ sessionId: 'session-1' });
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('allows deferred runtime CORS preflight without auth or runtime startup', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-preflight-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret-token',
+        allowOrigins: ['http://localhost:5173'],
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const res = await fetch(`${handle.url}/session/foo/prompt`, {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'http://localhost:5173',
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'authorization,content-type',
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe(
+        'http://localhost:5173',
+      );
+      expect(res.headers.get('access-control-allow-methods')).toContain('POST');
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not start deferred runtime for unsupported bootstrap route methods', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-method-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const res = await fetch(`${handle.url}/health`, { method: 'POST' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({
+        code: 'daemon_runtime_starting',
+      });
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves trailing-slash bootstrap health without waiting for deferred runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-trailing-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const res = await Promise.race([
+        fetch(`${handle.url}/health/`),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Trailing-slash health timed out')),
+            200,
+          ),
+        ),
+      ]);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: 'ok' });
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.close();
+    }
+  });
+
+  it('reports deferred runtime startup failure for the triggering runtime route', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-route-fail-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const res = await fetch(`${handle.url}/session`, { method: 'POST' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({
+        error: 'Daemon runtime failed to start',
+        code: 'daemon_runtime_failed',
+      });
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('starts deferred runtime on fallback when no health probe arrives', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-fallback-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      expect(createBridge).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(createBridge).toHaveBeenCalledTimes(1), {
+        timeout: 1500,
+      });
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not start deferred runtime after close before first health', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+        daemonLogBaseDir: logBaseDir,
+      },
+    );
+
+    await handle.close();
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    expect(createBridge).not.toHaveBeenCalled();
+    await expect(handle.runtimeReady).rejects.toThrow(
+      RUNTIME_STARTUP_CANCELLED_MESSAGE,
+    );
+    const daemonDir = path.join(logBaseDir, 'daemon');
+    const [logFile] = fs
+      .readdirSync(daemonDir)
+      .filter((fileName) => fileName.endsWith('.log'));
+    expect(logFile).toBeDefined();
+    const logContent = fs.readFileSync(path.join(daemonDir, logFile!), 'utf8');
+    expect(logContent).toContain(
+      'deferred runtime: cancelled, server closed before startup',
+    );
+  });
+
+  it('does not start deferred runtime after close following first health', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-after-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    const healthRes = await fetch(`${handle.url}/health`);
+    expect(healthRes.status).toBe(200);
+    expect(await healthRes.json()).toEqual({ status: 'ok' });
+
+    await handle.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(createBridge).not.toHaveBeenCalled();
+    await expect(handle.runtimeReady).rejects.toThrow(
+      RUNTIME_STARTUP_CANCELLED_MESSAGE,
+    );
+  });
+
+  it('does not cancel deferred runtime once startup is already running', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-close-running-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    const resolveTelemetrySettings = vi
+      .spyOn(qwenCore, 'resolveTelemetrySettings')
+      .mockReturnValue(telemetryPromise);
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    const healthRes = await fetch(`${handle.url}/health`);
+    expect(healthRes.status).toBe(200);
+    expect(await healthRes.json()).toEqual({ status: 'ok' });
+    await vi.waitFor(
+      () => expect(resolveTelemetrySettings).toHaveBeenCalledTimes(1),
+      { timeout: 500 },
+    );
+
+    const closePromise = handle.close();
+    resolveTelemetry?.({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    await closePromise;
+
+    expect(createBridge).toHaveBeenCalledTimes(1);
+    await expect(handle.runtimeReady).rejects.toThrow(
+      'Daemon runtime stopped before mounting.',
+    );
+  });
+
+  it('does not retry deferred runtime after startup failure and later health probe', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-health-fail-once-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const firstHealthRes = await fetch(`${handle.url}/health`);
+      expect(firstHealthRes.status).toBe(200);
+      expect(await firstHealthRes.json()).toEqual({ status: 'ok' });
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+
+      const secondHealthRes = await fetch(`${handle.url}/health`);
+      expect(secondHealthRes.status).toBe(503);
+      expect(await secondHealthRes.json()).toMatchObject({
+        status: 'degraded',
+        error: 'runtime boom',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(createBridge).toHaveBeenCalledTimes(1);
+    } finally {
       await handle.close();
     }
   });
@@ -1252,6 +1945,753 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
       extraArgs: ['--experimental-lsp'],
     });
+  });
+});
+
+describe('runQwenServe channel worker supervisor', () => {
+  let tmpDir: string | undefined;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = undefined;
+    }
+  });
+
+  function makeFakeBridge(onShutdown?: () => void): HttpAcpBridge {
+    return {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockImplementation(async () => {
+        onShutdown?.();
+      }),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
+    } as unknown as HttpAcpBridge;
+  }
+
+  function makeWorker(snapshot: ChannelWorkerSnapshot) {
+    return {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(() => snapshot),
+    };
+  }
+
+  function makePidfileDeps() {
+    return {
+      readServiceInfo: vi.fn<() => ServiceInfo | null>(() => null),
+      writeServeServiceInfo: vi.fn(),
+      reserveServeServiceInfo: vi.fn(),
+      removeServiceInfo: vi.fn(),
+      removeServeServiceInfo: vi.fn(() => true),
+    };
+  }
+
+  it('starts the channel worker after runtime mount and stops it before bridge shutdown', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-')),
+    );
+    const order: string[] = [];
+    const bridge = makeFakeBridge(() => order.push('bridge'));
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    worker.stop.mockImplementation(async () => {
+      order.push('worker');
+    });
+    const pidfile = makePidfileDeps();
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    expect(worker.start).toHaveBeenCalledTimes(1);
+    expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      servePid: process.pid,
+    });
+    expect(pidfile.writeServeServiceInfo).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      servePid: process.pid,
+      workerPid: 1234,
+    });
+
+    await handle.close();
+
+    expect(order).toEqual(['worker', 'bridge']);
+    expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('force-kills channel worker, bridge, and pidfile on a second shutdown signal', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-force-')),
+    );
+    let finishBridgeShutdown!: () => void;
+    const bridge = makeFakeBridge();
+    vi.mocked(bridge.shutdown).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishBridgeShutdown = resolve;
+        }),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      const signalListener = process
+        .rawListeners('SIGTERM')
+        .find((listener) => !existingSigtermListeners.has(listener)) as
+        | ((signal: NodeJS.Signals) => Promise<void>)
+        | undefined;
+      expect(signalListener).toBeDefined();
+
+      const firstSignal = signalListener!('SIGTERM');
+      await Promise.resolve();
+      const secondSignal = signalListener!('SIGTERM');
+      await secondSignal;
+
+      expect(worker.killAllSync).toHaveBeenCalled();
+      expect(bridge.killAllSync).toHaveBeenCalled();
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+
+      finishBridgeShutdown();
+      await firstSignal;
+    } finally {
+      finishBridgeShutdown?.();
+      await handle.close();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('removes serve-owned pidfile through the legacy fallback cleanup path', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-fallback-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    delete (pidfile as Partial<typeof pidfile>).removeServeServiceInfo;
+    pidfile.readServiceInfo.mockReturnValueOnce(null).mockReturnValue({
+      owner: 'serve',
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+      servePid: process.pid,
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    await handle.close();
+
+    expect(pidfile.removeServiceInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps non-serve-owned pidfiles in the legacy fallback cleanup path', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-fallback-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    delete (pidfile as Partial<typeof pidfile>).removeServeServiceInfo;
+    pidfile.readServiceInfo.mockReturnValueOnce(null).mockReturnValue({
+      owner: 'channel',
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    await handle.close();
+
+    expect(pidfile.removeServiceInfo).not.toHaveBeenCalled();
+  });
+
+  it('keeps serve running when worker pidfile metadata cannot be written', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-pidfile-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    pidfile.writeServeServiceInfo.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(worker.start).toHaveBeenCalled();
+      expect(pidfile.writeServeServiceInfo).toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('passes a loopback daemon URL to workers when serve binds a wildcard host', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-loopback-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    let workerOptions: CreateChannelWorkerSupervisorOptions | undefined;
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        token: 'test-token',
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn((opts) => {
+          workerOptions = opts;
+          return worker;
+        }),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      const port = new URL(handle.url).port;
+      expect(workerOptions?.daemonUrl).toBe(`http://127.0.0.1:${port}`);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not write a worker pidfile after runtime startup already timed out', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-timeout-')),
+    );
+    let releaseStart!: () => void;
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    worker.start.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        }),
+    );
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+        resolveOnListen: true,
+        runtimeStartupTimeoutMs: 1,
+      },
+    );
+
+    try {
+      await expect(
+        Promise.race([
+          handle.runtimeReady,
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error('runtimeReady did not settle')),
+              1000,
+            ),
+          ),
+        ]),
+      ).rejects.toThrow('Daemon runtime startup timed out after 1ms.');
+      releaseStart();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(pidfile.writeServeServiceInfo).not.toHaveBeenCalled();
+    } finally {
+      releaseStart?.();
+      await handle.close();
+    }
+  });
+
+  it('reports a warning when the ready channel worker exits', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-status-')),
+    );
+    const snapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    };
+    const worker = makeWorker(snapshot);
+    let onExit: CreateChannelWorkerSupervisorOptions['onExit'];
+    const channelWorkerSupervisorFactory = vi.fn(
+      (opts: CreateChannelWorkerSupervisorOptions) => {
+        onExit = opts.onExit;
+        return worker;
+      },
+    );
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory,
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      Object.assign(snapshot, {
+        state: 'exited',
+        exitCode: 1,
+        signal: null,
+        error: 'ipc failed',
+      });
+      onExit?.(snapshot);
+      const res = await fetch(`${handle.url}/daemon/status`);
+      const body = await res.json();
+
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+      expect(body).toMatchObject({
+        status: 'warning',
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: 'channel_worker_exited',
+            severity: 'warning',
+            message: 'Channel worker is exited (pid=1234, code=1): ipc failed.',
+          }),
+        ]),
+        runtime: {
+          channelWorker: {
+            enabled: true,
+            state: 'exited',
+            pid: 1234,
+            channels: ['telegram'],
+            exitCode: 1,
+            error: 'ipc failed',
+          },
+        },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('fails serve startup when the worker exits before ready', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-fail-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      channels: ['telegram'],
+      exitCode: 1,
+    });
+    worker.start.mockRejectedValueOnce(new Error('worker failed before ready'));
+
+    const pidfile = makePidfileDeps();
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge,
+          channelWorkerSupervisorFactory: vi.fn(() => worker),
+          channelServicePidfile: pidfile,
+        },
+      ),
+    ).rejects.toThrow('worker failed before ready');
+
+    expect(worker.stop).toHaveBeenCalled();
+    expect(bridge.shutdown).toHaveBeenCalled();
+    expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('refuses to start when another channel service is already running', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-busy-')),
+    );
+    const workerFactory = vi.fn(() =>
+      makeWorker({
+        enabled: true,
+        state: 'running',
+        pid: 1234,
+        channels: ['telegram'],
+      }),
+    );
+    const pidfile = makePidfileDeps();
+    pidfile.readServiceInfo.mockReturnValueOnce({
+      owner: 'serve',
+      pid: 9999,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+      servePid: 9999,
+    });
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge: makeFakeBridge(),
+          channelWorkerSupervisorFactory: workerFactory,
+          channelServicePidfile: pidfile,
+        },
+      ),
+    ).rejects.toThrow('Channel service is already running under qwen serve');
+
+    expect(workerFactory).not.toHaveBeenCalled();
+    expect(pidfile.reserveServeServiceInfo).not.toHaveBeenCalled();
+  });
+
+  it('retries channel pidfile reservation after an EEXIST stale file cleanup', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-stale-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const eexist = new Error('EEXIST') as NodeJS.ErrnoException;
+    eexist.code = 'EEXIST';
+    pidfile.reserveServeServiceInfo
+      .mockImplementationOnce(() => {
+        throw eexist;
+      })
+      .mockImplementationOnce(() => undefined);
+    pidfile.readServiceInfo.mockReturnValueOnce(null).mockReturnValueOnce(null);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    await handle.close();
+
+    expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledTimes(2);
+    expect(pidfile.writeServeServiceInfo).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      servePid: process.pid,
+      workerPid: 1234,
+    });
+  });
+
+  it('removes the channel pidfile reservation when listener startup fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-listen-')),
+    );
+    const listenError = new Error('listen failed') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    const fakeServer = createServer();
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      listen: vi.fn(() => {
+        setImmediate(() => fakeServer.emit('error', listenError));
+        return fakeServer;
+      }),
+    } as unknown as express.Application);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge: makeFakeBridge(),
+          channelWorkerSupervisorFactory: vi.fn(() => worker),
+          channelServicePidfile: pidfile,
+        },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      servePid: process.pid,
+    });
+    expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('does not remove the channel pidfile reservation for handled uncaught exceptions', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-crash-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const existingMonitorListeners = new Set(
+      process.rawListeners('uncaughtExceptionMonitor'),
+    );
+    const uncaughtExceptionHandler = () => {};
+    process.on('uncaughtException', uncaughtExceptionHandler);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+        channels: ['telegram'],
+        servePid: process.pid,
+      });
+      const monitorListeners = process.rawListeners(
+        'uncaughtExceptionMonitor',
+      ) as Array<(error: Error, origin: 'uncaughtException') => void>;
+      const newMonitorListeners = monitorListeners.filter(
+        (listener) => !existingMonitorListeners.has(listener),
+      );
+      expect(newMonitorListeners).toHaveLength(1);
+      for (const listener of newMonitorListeners) {
+        listener(new Error('boom'), 'uncaughtException');
+      }
+
+      expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalledWith(
+        process.pid,
+      );
+    } finally {
+      process.removeListener('uncaughtException', uncaughtExceptionHandler);
+      await handle.close();
+    }
+  });
+
+  it('removes the channel pidfile reservation for unhandled uncaught exceptions', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-unhandled-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const existingMonitorListeners = new Set(
+      process.rawListeners('uncaughtExceptionMonitor'),
+    );
+    const originalListenerCount = process.listenerCount.bind(process);
+    const listenerCountSpy = vi
+      .spyOn(process, 'listenerCount')
+      .mockImplementation(
+        (...args: Parameters<typeof process.listenerCount>) => {
+          const [eventName] = args;
+          if (eventName === 'uncaughtException') {
+            return 0;
+          }
+          return originalListenerCount(...args);
+        },
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      const monitorListeners = process.rawListeners(
+        'uncaughtExceptionMonitor',
+      ) as Array<(error: Error, origin: 'uncaughtException') => void>;
+      const newMonitorListeners = monitorListeners.filter(
+        (listener) => !existingMonitorListeners.has(listener),
+      );
+      expect(newMonitorListeners).toHaveLength(1);
+      for (const listener of newMonitorListeners) {
+        listener(new Error('boom'), 'uncaughtException');
+      }
+
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+    } finally {
+      listenerCountSpy.mockRestore();
+      await handle.close();
+    }
   });
 });
 

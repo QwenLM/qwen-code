@@ -632,4 +632,16 @@
   .sidebar {
     display: none;
   }
+
+  .sidebar.mobileOpen {
+    display: flex;
+    z-index: 50;
+    /* The width var is shared with the desktop resize handle and can be wider
+       than a phone viewport; cap it so the drawer never overflows the screen. */
+    max-width: 100vw;
+  }
+
+  .resizeHandle {
+    display: none;
+  }
 }

@@ -842,6 +842,16 @@ const SETTINGS_SCHEMA = {
               'Whether to collapse history by default when resuming a session.',
             showInDialog: false,
           },
+          collapsePreviewCount: {
+            type: 'number',
+            label: 'Collapse Preview Count',
+            category: 'UI',
+            requiresRestart: false,
+            default: 0,
+            description:
+              'Number of most recent user turns to keep visible when collapsing history on resume. 0 collapses all restored history by default; -1 shows all restored history.',
+            showInDialog: false,
+          },
         },
       },
       showLineNumbers: {
@@ -1011,7 +1021,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
       shellOutputMaxLines: {
@@ -2416,7 +2426,8 @@ const SETTINGS_SCHEMA = {
         // restart-required.
         requiresRestart: false,
         default: undefined as string[] | undefined,
-        description: 'A list of MCP servers to allow.',
+        description:
+          'A list of MCP servers to allow. Supports glob patterns (e.g. "*puppeteer*").',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
@@ -2429,7 +2440,8 @@ const SETTINGS_SCHEMA = {
         // restart-required.
         requiresRestart: false,
         default: undefined as string[] | undefined,
-        description: 'A list of MCP servers to exclude.',
+        description:
+          'A list of MCP servers to exclude. Supports glob patterns (e.g. "*puppeteer*"). Takes precedence over mcp.allowed.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
