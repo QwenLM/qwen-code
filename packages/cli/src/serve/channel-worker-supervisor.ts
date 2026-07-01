@@ -16,6 +16,12 @@ const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
 const MAX_WORKER_LOG_BUFFER_LENGTH = 64 * 1024;
+const ANSI_CSI_SEQUENCE_RE = new RegExp(
+  `${String.fromCharCode(0x1b)}\\[[0-?]*[ -/]*[@-~]`,
+  'g',
+);
+const WORKER_LOG_INVISIBLE_RE = /[\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
+const WORKER_LOG_CONTROL_RE = /\p{Cc}/gu;
 
 export interface ChannelWorkerRestartPolicy {
   maxRestarts: number;
@@ -256,7 +262,7 @@ function escapeRegExp(value: string): string {
 
 function sensitiveEnvValues(env: NodeJS.ProcessEnv): string[] {
   const sensitiveKey =
-    /TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|PASSWORD|PASSWD|PASSPHRASE|AUTH|SESSION|DSN|CONNECTION_STRING/i;
+    /(^|_)(TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|PASSWORD|PASSWD|PASSPHRASE|BASIC_AUTH|AUTH_TOKEN|AUTHORIZATION|SESSION_SECRET|SESSION_TOKEN|SESSION_KEY|SESSION_COOKIE|DSN|CONNECTION_STRING)($|_)/i;
   return Object.entries(env)
     .filter(([key, value]) => sensitiveKey.test(key) && value !== undefined)
     .map(([, value]) => value!)
@@ -287,11 +293,10 @@ function redactWorkerLogLine(
 }
 
 function normalizeWorkerLogLineForRedaction(line: string): string {
-  return line.replace(
-    // eslint-disable-next-line no-control-regex
-    /[\u0000-\u001f\u007f-\u009f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g,
-    '',
-  );
+  return line
+    .replace(ANSI_CSI_SEQUENCE_RE, '')
+    .replace(WORKER_LOG_INVISIBLE_RE, '')
+    .replace(WORKER_LOG_CONTROL_RE, '');
 }
 
 function attachWorkerLogStream(
@@ -350,7 +355,6 @@ function attachWorkerLogStream(
     }
     if (discardingOversizedLineRemainder) {
       buffer = '';
-      discardingOversizedLineRemainder = false;
       return;
     }
     flushOversizedBuffer();
@@ -596,9 +600,17 @@ export function createChannelWorkerSupervisor(
         terminatingBeforeReady = true;
         const exited = waitForExit(startedChild, 2_000);
         startedChild.kill('SIGTERM');
-        void exited.then((didExit) => {
+        void exited.then(async (didExit) => {
           if (!didExit && child === startedChild && !exitObserved) {
+            const killed = waitForExit(startedChild, 2_000);
             startedChild.kill('SIGKILL');
+            if (!(await killed) && child === startedChild && !exitObserved) {
+              child = undefined;
+              if (kind === 'restart' && !stopping) {
+                scheduleRestart();
+                notifyExit(opts.onExit, snapshotCopy());
+              }
+            }
           }
         });
       };
