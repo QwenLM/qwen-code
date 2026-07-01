@@ -92,7 +92,18 @@ function isDeepSeekAnthropicProvider(
   return model.includes('deepseek');
 }
 
-type ClaudeModelFamily = 'opus' | 'sonnet' | 'haiku' | 'fable' | 'mythos';
+// Single source of truth for the Claude family list. Both the `ClaudeModelFamily`
+// union and the model-id regex are derived from this array, so adding a family
+// updates the type and the parser together — a maintainer can't update one and
+// silently leave the other (and the `as ClaudeModelFamily` cast) stale.
+const CLAUDE_MODEL_FAMILIES = [
+  'opus',
+  'sonnet',
+  'haiku',
+  'fable',
+  'mythos',
+] as const;
+type ClaudeModelFamily = (typeof CLAUDE_MODEL_FAMILIES)[number];
 
 interface ParsedClaudeModelVersion {
   family: ClaudeModelFamily;
@@ -127,7 +138,11 @@ function parseClaudeModelVersion(
   const match = model
     .toLowerCase()
     .match(
-      /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?/,
+      new RegExp(
+        `claude-(${CLAUDE_MODEL_FAMILIES.join(
+          '|',
+        )})-(\\d+)(?:-(\\d{1,2})(?!\\d))?`,
+      ),
     );
   if (!match) {
     return null;
@@ -771,8 +786,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
       // DeepSeek's anthropic-compatible output_config.effort accepts only
       // high/max. Mirror the DeepSeek OpenAI adapter (deepseek.ts): low/medium
       // lift to high and xhigh groups to max, so a low/medium request is not
-      // passed through verbatim (which the endpoint would 400 on).
-      return effort === 'xhigh' || effort === 'max' ? 'max' : 'high';
+      // passed through verbatim (which the endpoint would 400 on). Warn once
+      // when the requested tier is remapped — mirroring the real-Anthropic
+      // clamp path below — so a `/effort low` silently running at `high` is
+      // visible in debug logs.
+      const mapped: ReasoningEffort =
+        effort === 'xhigh' || effort === 'max' ? 'max' : 'high';
+      if (mapped !== effort && !this.effortClampWarned) {
+        debugLogger.warn(
+          `reasoning.effort='${effort}' is not accepted by the DeepSeek ` +
+            `anthropic-compatible endpoint; using '${mapped}'.`,
+        );
+        this.effortClampWarned = true;
+      }
+      return mapped;
     }
     // Real Anthropic: clamp the requested tier to what this model actually
     // accepts. Opus 4.7/4.8 and the 5.x families take xhigh/max natively;
