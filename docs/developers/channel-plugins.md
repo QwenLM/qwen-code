@@ -16,6 +16,15 @@ ChannelBase  →  calls your sendMessage() with the agent's response
 
 Migration note for existing TypeScript plugins: if your adapter constructor or factory explicitly types `bridge` as `AcpBridge`, change that annotation to `ChannelAgentBridge` and keep using only the methods exposed by that contract. JavaScript plugins are unaffected at runtime, and standalone `qwen channel start` still passes the current `AcpBridge` implementation.
 
+## Runtime Modes
+
+The same plugin adapter can be hosted by either channel runtime:
+
+- `qwen channel start [name]` is the standalone ACP-backed service. It still uses `AcpBridge` and remains the stable command for running channels outside a daemon.
+- `qwen serve --channel <name>` and repeatable `--channel` flags start an experimental daemon-managed channel worker. `--channel all` starts all configured channels. The worker is owned by `qwen serve`, connects to that daemon through the SDK, and passes adapters a `ChannelAgentBridge` facade backed by `DaemonChannelBridge`.
+
+Daemon-managed channels inherit the daemon's lifecycle and status reporting. They are intentionally out-of-process so adapter or platform SDK failures do not crash the daemon. The daemon is still bound to one workspace, so every selected channel config must use a `cwd` that resolves to the daemon workspace.
+
 ## The Plugin Object
 
 Your extension entry point exports a `plugin` conforming to `ChannelPlugin`:
@@ -83,6 +92,8 @@ export class MyChannel extends ChannelBase {
 ```
 
 Most adapters should pass `options` through unchanged. If an adapter creates its own `SessionRouter` and passes that router to `super()`, set `registerBridgeEvents: true` in `ChannelBaseOptions` so `ChannelBase` still receives `toolCall` and `sessionDied` events directly. Leave it unset for routers supplied by the channel gateway.
+
+If your adapter exposes shell-command behavior, check that `bridge.shellCommand` exists before enabling it. Daemon-managed workers omit that optional method unless the daemon advertises the `session_shell_command` capability.
 
 ## The Envelope
 

@@ -23,6 +23,8 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionLspStatus,
@@ -478,6 +480,20 @@ export class DaemonSessionClient {
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
+    return await this.client.getPendingPrompts(this.sessionId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async removePendingPrompt(
+    promptId: string,
+  ): Promise<DaemonRemovePendingPromptResult> {
+    return await this.client.removePendingPrompt(this.sessionId, promptId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

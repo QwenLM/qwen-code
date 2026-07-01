@@ -14,6 +14,8 @@ import type {
   DaemonForkSessionResult,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
@@ -233,6 +235,15 @@ export interface SendPromptOptions {
   retry?: boolean;
 }
 
+export interface SubmitPromptOptions extends SendPromptOptions {
+  sessionId?: string;
+  signal?: AbortSignal;
+}
+
+export interface PendingPromptActionOptions {
+  sessionId?: string;
+}
+
 export interface DaemonPromptImage {
   data: string;
   mimeType?: string;
@@ -259,8 +270,22 @@ export interface DaemonTodoList {
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
 }
 
+export interface SubmitPromptResult {
+  promptId: string;
+}
+
 export interface DaemonSessionActions {
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
+  /**
+   * Non-blocking prompt submission. POSTs to the daemon and returns
+   * immediately with the `promptId`. The daemon queues the prompt in its
+   * FIFO if a turn is already running. Use this during streaming to
+   * enqueue prompts without waiting for the current turn to complete.
+   */
+  submitPrompt(
+    text: string,
+    options?: SubmitPromptOptions,
+  ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
   setApprovalMode(
@@ -318,6 +343,13 @@ export interface DaemonSessionActions {
     message: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonMidTurnMessageResult>;
+  getPendingPrompts(
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonPendingPromptsResult>;
+  removePendingPrompt(
+    promptId: string,
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
   cancelTask(

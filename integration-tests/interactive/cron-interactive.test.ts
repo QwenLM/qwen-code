@@ -66,7 +66,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     const afterPrompt = finalScreen.slice(
       finalScreen.lastIndexOf('Cron: PONG7742'),
     );
-    expect(afterPrompt).toContain('✦');
+    expect(afterPrompt).toContain('◆');
   });
 
   it('user input takes priority over cron', { timeout: 180_000 }, async () => {

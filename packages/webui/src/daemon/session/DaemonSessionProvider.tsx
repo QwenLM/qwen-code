@@ -68,6 +68,10 @@ import {
   parseSidechannelMidTurnInjected,
   publishSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
+import {
+  isPendingPromptEvent,
+  publishPendingPromptEvent,
+} from '../pendingPromptVersion.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -828,6 +832,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // Keep the sidechannel for queue dedupe, but still normalize the
                 // event below so chat UIs can render the inserted-message status.
                 publishSidechannelMidTurnInjected(midTurnInjected);
+              }
+              if (isPendingPromptEvent(event)) {
+                publishPendingPromptEvent(event);
+                if (event.type === 'pending_prompt_started') {
+                  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                  setPromptStatus('waiting');
+                }
               }
               const normalizedUiEvents = normalizeAndFilterEvent(
                 event,

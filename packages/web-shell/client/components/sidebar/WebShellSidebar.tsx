@@ -36,6 +36,7 @@ interface WebShellSidebarProps {
   onNewSession: () => Promise<boolean> | boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
+  mobileOpen?: boolean;
 }
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -175,6 +176,7 @@ export function WebShellSidebar({
   onNewSession,
   onLoadSession,
   onError,
+  mobileOpen,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -754,6 +756,7 @@ export function WebShellSidebar({
         styles.sidebar,
         collapsed && styles.collapsed,
         isResizing && styles.resizing,
+        mobileOpen && styles.mobileOpen,
       )}
       aria-label={t('sidebar.label')}
       style={sidebarStyle}
@@ -937,15 +940,17 @@ export function WebShellSidebar({
           </span>
           {!collapsed && <span>{t('sidebar.settings')}</span>}
         </button>
-        <button
-          className={styles.collapseButton}
-          type="button"
-          title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
-          aria-label={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
-          onClick={() => onCollapsedChange(!collapsed)}
-        >
-          <IconCollapse collapsed={collapsed} />
-        </button>
+        {!mobileOpen && (
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
+            aria-label={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
+            onClick={() => onCollapsedChange(!collapsed)}
+          >
+            <IconCollapse collapsed={collapsed} />
+          </button>
+        )}
       </div>
       <div
         className={styles.resizeHandle}

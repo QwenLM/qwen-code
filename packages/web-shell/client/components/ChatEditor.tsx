@@ -61,7 +61,8 @@ interface ChatEditorProps {
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
-  onPopQueuedMessages?: () => string | null;
+  onPopQueuedMessages?: () => boolean;
+  onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   currentModel?: string;
   chatWidthMode?: '1000' | 'wide';
@@ -1220,6 +1221,7 @@ export const ChatEditor = memo(
 
     // Model display label
     const modelLabel = getModelDisplayName(currentModel);
+    const showCancelButton = isRunning && !core.hasContent;
 
     return (
       <div className={styles.editorShell}>
@@ -1555,7 +1557,7 @@ export const ChatEditor = memo(
                 )}
                 <button
                   className={
-                    isPreparing || isRunning
+                    isPreparing || showCancelButton
                       ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                           cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                         }`
@@ -1564,7 +1566,7 @@ export const ChatEditor = memo(
                   disabled={
                     isPreparing
                       ? true
-                      : isRunning
+                      : showCancelButton
                         ? !onCancel
                         : core.disabled || !core.hasContent
                   }
@@ -1573,7 +1575,7 @@ export const ChatEditor = memo(
                     if (isPreparing) {
                       return;
                     }
-                    if (isRunning) {
+                    if (showCancelButton) {
                       onCancel?.();
                       return;
                     }
@@ -1582,7 +1584,7 @@ export const ChatEditor = memo(
                   aria-label={
                     isPreparing
                       ? t('common.loading')
-                      : isRunning
+                      : showCancelButton
                         ? cancelArmed
                           ? t('stream.cancelArmed')
                           : t('stream.cancel')
@@ -1596,7 +1598,7 @@ export const ChatEditor = memo(
                 >
                   {isPreparing ? (
                     <LoadingIcon />
-                  ) : isRunning ? (
+                  ) : showCancelButton ? (
                     cancelArmed ? (
                       <span className={styles.escLabel} aria-hidden="true">
                         Esc

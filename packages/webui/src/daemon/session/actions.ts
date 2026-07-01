@@ -12,6 +12,7 @@ import type {
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptSummary,
   DaemonRewindResult,
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
@@ -279,6 +280,60 @@ export function createDaemonSessionActions({
           setPromptStatus('idle');
         }
       }
+    },
+
+    async submitPrompt(text, options) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Prompt failed',
+        'send_prompt',
+      );
+      if (options?.sessionId && session.sessionId !== options.sessionId) {
+        throw new Error('Session changed before prompt submission');
+      }
+      const normalizedImages: Array<{ data: string; mimeType: string }> = (
+        options?.images ?? []
+      ).map((img) => ({
+        data: img.data,
+        mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
+      }));
+      if (options?.optimisticUserMessage !== false) {
+        store.appendLocalUserMessage(text, normalizedImages);
+      }
+      const promptRequest: Record<string, unknown> = {
+        prompt: toDaemonPromptContent(text, normalizedImages),
+      };
+      if (options?.retry) {
+        promptRequest['retry'] = true;
+      }
+      const accepted = await session.submitPrompt(
+        promptRequest as Parameters<typeof session.submitPrompt>[0],
+      );
+      if (options?.signal?.aborted) {
+        await session
+          .removePendingPrompt(accepted.promptId)
+          .catch((err: unknown) => {
+            console.warn(
+              '[submitPrompt] removePendingPrompt failed after abort',
+              err,
+            );
+            addNotice({
+              severity: 'error',
+              category: 'user_action',
+              operation: 'send_prompt',
+              code: 'daemon.send_prompt.pending_cleanup_failed',
+              message:
+                'Prompt was accepted after cancellation but could not be removed from the queue.',
+              debugMessage: err instanceof Error ? err.message : String(err),
+              recoverable: true,
+            });
+          });
+        throw (
+          options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+        );
+      }
+      return { promptId: accepted.promptId };
     },
 
     async cancel() {
@@ -824,6 +879,28 @@ export function createDaemonSessionActions({
         }
         return { accepted: false };
       }
+    },
+
+    async getPendingPrompts(opts) {
+      const session = sessionRef.current;
+      if (!session)
+        return { pendingPrompts: [] as DaemonPendingPromptSummary[] };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        throw new Error('Session changed before pending prompts refresh');
+      }
+      return await session.getPendingPrompts();
+    },
+
+    async removePendingPrompt(promptId: string, opts) {
+      const session = sessionRef.current;
+      if (!session) return { removed: false };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        return await session.client.removePendingPrompt(
+          opts.sessionId,
+          promptId,
+        );
+      }
+      return await session.removePendingPrompt(promptId);
     },
 
     async sendShellCommand(command: string) {

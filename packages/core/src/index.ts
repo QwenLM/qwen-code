@@ -275,6 +275,7 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/const.js';
+export * from './memory/remember.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.
@@ -346,6 +347,7 @@ export {
   logExtensionDisable,
   logExtensionEnable,
   logIdeConnection,
+  logLoopDetected,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
@@ -360,6 +362,7 @@ export {
   ExtensionUninstallEvent,
   IdeConnectionEvent,
   IdeConnectionType,
+  LoopDetectedEvent,
   LoopType,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,

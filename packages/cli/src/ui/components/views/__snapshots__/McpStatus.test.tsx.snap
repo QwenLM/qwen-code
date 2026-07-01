@@ -1,12 +1,12 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`McpStatus > renders correctly when discovery is in progress 1`] = `
-"⏳ MCP servers are starting up (0 initializing)...
+"◌ MCP servers are starting up (0 initializing)...
 Note: First startup may take longer. Tool availability will update automatically.
 
 Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool)
+● server-1 - Ready (1 tool)
 A test server
   Tools:
   - tool-1
@@ -17,20 +17,20 @@ A test server
 exports[`McpStatus > renders correctly with a blocked server 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool)
+● server-1 - Ready (1 tool)
 A test server
   Tools:
   - tool-1
     A test tool
 
-🔴 server-1 (from test-extension) - Blocked
+● server-1 (from test-extension) - Blocked
 "
 `;
 
 exports[`McpStatus > renders correctly with a connected server 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool)
+● server-1 - Ready (1 tool)
 A test server
   Tools:
   - tool-1
@@ -41,7 +41,8 @@ A test server
 exports[`McpStatus > renders correctly with a connecting server 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool)
+◐ server-1 - Starting... (first startup may take longer)
+ (tools and prompts will appear when ready)
 A test server
   Tools:
   - tool-1
@@ -52,7 +53,7 @@ A test server
 exports[`McpStatus > renders correctly with a disconnected server 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool)
+● server-1 - Ready (1 tool)
 A test server
   Tools:
   - tool-1
@@ -63,7 +64,7 @@ A test server
 exports[`McpStatus > renders correctly with authenticated OAuth status 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool) (OAuth)
+● server-1 - Ready (1 tool) (OAuth)
 A test server
   Tools:
   - tool-1
@@ -74,7 +75,7 @@ A test server
 exports[`McpStatus > renders correctly with expired OAuth status 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool) (OAuth expired)
+● server-1 - Ready (1 tool) (OAuth expired)
 A test server
   Tools:
   - tool-1
@@ -85,7 +86,7 @@ A test server
 exports[`McpStatus > renders correctly with parametersJsonSchema 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool)
+● server-1 - Ready (1 tool)
 A test server
   Tools:
   - tool-1
@@ -105,7 +106,7 @@ A test server
 exports[`McpStatus > renders correctly with prompts 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool, 1 prompt)
+● server-1 - Ready (1 tool, 1 prompt)
 A test server
   Tools:
   - tool-1
@@ -119,7 +120,7 @@ A test server
 exports[`McpStatus > renders correctly with schema enabled 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool)
+● server-1 - Ready (1 tool)
 A test server
   Tools:
   - tool-1
@@ -139,14 +140,14 @@ A test server
 exports[`McpStatus > renders correctly with tips enabled 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool)
+● server-1 - Ready (1 tool)
 A test server
   Tools:
   - tool-1
     A test tool
 
 
-💡 Tips:
+★ Tips:
   - Use /mcp desc to show server and tool descriptions
   - Use /mcp schema to show tool parameter schemas
   - Use /mcp nodesc to hide descriptions
@@ -157,7 +158,7 @@ A test server
 exports[`McpStatus > renders correctly with unauthenticated OAuth status 1`] = `
 "Configured MCP servers:
 
-🟢 server-1 - Ready (1 tool) (OAuth not authenticated)
+● server-1 - Ready (1 tool) (OAuth not authenticated)
 A test server
   Tools:
   - tool-1
