@@ -2301,6 +2301,36 @@ export default {
     'Failed to authenticate with Coding Plan: {{error}}',
   '中国 (China)': '中国 (China)',
   '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  'Get or set any setting by dot-path key':
+    'Get or set any setting by dot-path key',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    'Invalid boolean value: "{{value}}". Use "true" or "false".',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    'Cannot toggle a number setting. Provide a value: key=<number>.',
+  'Invalid number value: "{{value}}".': 'Invalid number value: "{{value}}".',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    'Cannot toggle a string setting. Provide a value: key=<value>.',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    'Cannot toggle an enum setting. Provide one of: {{options}}.',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    'Invalid enum value: "{{value}}". Valid values: {{options}}.',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
+  'Unsupported setting type: "{{type}}".':
+    'Unsupported setting type: "{{type}}".',
+  'Available settings:': 'Available settings:',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?',
+  'Unknown setting key: "{{key}}".': 'Unknown setting key: "{{key}}".',
+  'Failed to set "{{key}}": {{error}}': 'Failed to set "{{key}}": {{error}}',
+  'Set {{key}} = {{value}}': 'Set {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '(This setting requires a restart to take effect.)',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '(Security-sensitive setting — verify you are not exposing credentials.)',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.',
+  '(empty)': '(empty)',
   Global: 'Global',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Select region for Coding Plan:',

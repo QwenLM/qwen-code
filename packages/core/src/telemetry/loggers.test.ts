@@ -95,6 +95,7 @@ import type {
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import * as uiTelemetry from './uiTelemetry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 describe('loggers', () => {
   const mockLogger = {
@@ -505,6 +506,30 @@ describe('loggers', () => {
       logApiResponse(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('suppresses chatRecordingService writes inside hidden runs', () => {
+      const mockRecordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => false,
+        getChatRecordingService: () => ({
+          recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+        }),
+      } as unknown as Config;
+
+      const event = new ApiResponseEvent(
+        'resp-id',
+        'test-model',
+        50,
+        'user_query',
+      );
+      runWithChatRecordingSuppressed(() => {
+        logApiResponse(configWithRecording, event);
+      });
+
+      expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+      expect(mockUiEvent.addEvent).toHaveBeenCalled();
     });
   });
 

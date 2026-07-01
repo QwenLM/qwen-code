@@ -590,6 +590,35 @@ export default {
   'checking...': '檢查中...',
   'not updatable': '不可更新',
   error: '錯誤',
+  'Get or set any setting by dot-path key':
+    '透過點號路徑鍵查看或設定任意設定項',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    '無效的布林值："{{value}}"。請使用 "true" 或 "false"。',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    '無法切換數字類型的設定。請提供值：key=<number>。',
+  'Invalid number value: "{{value}}".': '無效的數字值："{{value}}"。',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    '無法切換字串類型的設定。請提供值：key=<value>。',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    '無法切換列舉類型的設定。請提供以下選項之一：{{options}}。',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    '無效的列舉值："{{value}}"。有效值：{{options}}。',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    '"{{type}}" 類型的設定無法透過 /config 修改。請直接編輯 settings.json。',
+  'Unsupported setting type: "{{type}}".': '不支援的設定類型："{{type}}"。',
+  'Available settings:': '可用設定：',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    '未知的設定鍵："{{key}}"。您是不是想設定 "{{suggestion}}"？',
+  'Unknown setting key: "{{key}}".': '未知的設定鍵："{{key}}"。',
+  'Failed to set "{{key}}": {{error}}': '設定 "{{key}}" 失敗：{{error}}',
+  'Set {{key}} = {{value}}': '已設定 {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '（此設定需要重新啟動才能生效。）',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '（安全敏感設定 — 請確認您沒有洩露憑證。）',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    '出於安全原因，禁止透過 /config 將 tools.approvalMode 設定為 "yolo"。如果您了解相關風險，請直接編輯 settings.json。',
+  '(empty)': '(空)',
   'View and edit Qwen Code settings': '查看和編輯 Qwen Code 設置',
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':

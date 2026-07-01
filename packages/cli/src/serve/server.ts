@@ -47,6 +47,10 @@ import {
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
 import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
+import {
+  mountWorkspaceMemoryRememberRoutes,
+  WorkspaceRememberTaskLane,
+} from './workspace-remember.js';
 import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { createHealthDemoRoutes } from './routes/health-demo.js';
@@ -531,6 +535,7 @@ export function createServeApp(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   const acpHandleRef: { current?: AcpHttpHandle } = {};
+  const workspaceRememberLane = new WorkspaceRememberTaskLane(bridge);
 
   // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
   // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
@@ -577,6 +582,13 @@ export function createServeApp(
   mountWorkspaceMemoryRoutes(app, {
     bridge,
     boundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceMemoryRememberRoutes(app, {
+    bridge,
+    lane: workspaceRememberLane,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
@@ -787,6 +799,7 @@ export function createServeApp(
         ? parseAllowOriginPatterns(opts.allowOrigins)
         : undefined,
     sessionShellCommandEnabled,
+    workspaceRememberLane,
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
