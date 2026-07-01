@@ -2337,7 +2337,7 @@ export function App({
             return true;
           }
           if (cmd === 'rewind') {
-            if (!requireActiveSessionForLocalCommand()) return true;
+            if (!requireActiveSessionForLocalCommand()) return false;
             setShowRewindDialog(true);
             return true;
           }
@@ -2349,7 +2349,7 @@ export function App({
           }
           if (cmd === 'fork') {
             if (promptBlocked) return blockLocalCommandDuringTurn();
-            if (!requireActiveSessionForLocalCommand()) return true;
+            if (!requireActiveSessionForLocalCommand()) return false;
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
               pushToast('error', t('fork.empty'));
@@ -2449,12 +2449,13 @@ export function App({
               }
               return true;
             }
+            if (prompt) setIsPreparingPrompt(true);
             sessionActions
               .setApprovalMode('plan')
               .then(() => {
                 setPendingMode('plan');
                 if (prompt) {
-                  sendPrompt(prompt, images, {
+                  return sendPrompt(prompt, images, {
                     clearComposerOnPromptStart: true,
                   }).catch((error: unknown) =>
                     reportError(error, 'Failed to send plan prompt'),
@@ -2463,6 +2464,9 @@ export function App({
               })
               .catch((error: unknown) => {
                 reportError(error, t('mode.plan'));
+              })
+              .finally(() => {
+                if (prompt) setIsPreparingPrompt(false);
               });
             return prompt ? false : true;
           }
@@ -2793,7 +2797,7 @@ export function App({
               pushToast('error', t('rename.empty'));
               return true;
             }
-            if (!requireActiveSessionForLocalCommand()) return true;
+            if (!requireActiveSessionForLocalCommand()) return false;
             sessionActions
               .renameSession(displayName)
               .then(() => {
@@ -2835,7 +2839,7 @@ export function App({
             let statsView: StatsView = 'overview';
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
-            if (!requireActiveSessionForLocalCommand()) return true;
+            if (!requireActiveSessionForLocalCommand()) return false;
             if (echoOrDeferLocalCommand(text, images)) return true;
             sessionActions
               .getStats()
@@ -2979,7 +2983,7 @@ export function App({
         }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        if (!requireActiveSessionForLocalCommand()) return true;
+        if (!requireActiveSessionForLocalCommand()) return false;
         sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
           reportError(error, 'Failed to execute shell command');
         });
