@@ -3280,6 +3280,53 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('does not emit tool call lifecycle events after cancellation', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+      (bridge as unknown as EventEmitter).emit('toolCall', {
+        sessionId,
+        toolCallId: 'tool-after-cancel',
+        name: 'read_file',
+        args: { path: 'README.md' },
+      });
+      resolvePrompt('late');
+      await prompt;
+
+      expect(ch.toolCalls).toEqual([
+        {
+          chatId: 'chat1',
+          event: expect.objectContaining({
+            toolCallId: 'tool-after-cancel',
+          }),
+        },
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-cancel',
+        }),
+        expect.objectContaining({
+          type: 'cancelled',
+          reason: 'cancel_command',
+          messageId: 'm-cancel',
+        }),
+      ]);
+    });
+
     it('emits cancellation lifecycle event for /clear', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {

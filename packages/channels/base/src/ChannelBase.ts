@@ -169,11 +169,13 @@ export abstract class ChannelBase {
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     const target = this.router.getTarget(event.sessionId);
     if (target) {
-      this.emitTaskLifecycle({
-        ...this.lifecycleBase(target.chatId, event.sessionId),
-        type: 'tool_call',
-        toolCall: event,
-      });
+      if (!this.activePrompts.get(event.sessionId)?.cancelled) {
+        this.emitTaskLifecycle({
+          ...this.lifecycleBase(target.chatId, event.sessionId),
+          type: 'tool_call',
+          toolCall: event,
+        });
+      }
       this.onToolCall(target.chatId, event);
     }
   };
