@@ -9946,7 +9946,7 @@ describe('createServeApp', () => {
         sessionId: sid,
       });
       expect(loadRes.body.error).toContain(
-        'exists in both active and archived directories',
+        'Delete the session with POST /sessions/delete',
       );
       expect(bridge.loadCalls).toHaveLength(0);
     });

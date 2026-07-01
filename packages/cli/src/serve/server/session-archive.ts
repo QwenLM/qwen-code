@@ -322,7 +322,9 @@ export async function unarchiveDaemonSessions(params: {
 
       if (unarchiveIds.length > 0) {
         try {
-          const result = await service.unarchiveSessions(unarchiveIds);
+          const result = await service.unarchiveSessions(unarchiveIds, {
+            knownLocation: 'archived',
+          });
           unarchived.push(...result.unarchived);
           alreadyActive.push(...result.alreadyActive);
           notFound.push(...result.notFound);

@@ -1226,6 +1226,23 @@ describe('SessionService', () => {
       );
     });
 
+    it('should skip location reads when unarchiving known archived sessions', async () => {
+      mockArchivedSessionOnly();
+      const getLocationSpy = vi.spyOn(sessionService, 'getSessionLocation');
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        knownLocation: 'archived',
+      });
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(getLocationSpy).not.toHaveBeenCalled();
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
     it('should recreate active chats directory before moving archived sessions', async () => {
       mockArchivedSessionOnly();
 

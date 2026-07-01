@@ -1179,7 +1179,7 @@ Response:
 - `409` — `restore_in_progress` (a `session/resume` for the same id is already in flight). `Retry-After: 5`. Same-action races (two concurrent `session/load` for the same id) coalesce — exactly one returns `attached: false`, the rest return `attached: true` with the same `state`.
 - `409` — `session_archived` when the id exists only under `chats/archive/`; call `POST /sessions/unarchive` before `load` or `resume`.
 - `409` — `session_archiving` when archive or unarchive is in flight for the same id. `Retry-After: 5`.
-- `409` — `session_conflict` when the id exists in both `chats/` and `chats/archive/`; delete the session or manually clean up the duplicate files before loading.
+- `409` — `session_conflict` when the id exists in both `chats/` and `chats/archive/`; delete the session with `POST /sessions/delete` before loading.
 
 ### `POST /session/:id/resume`
 

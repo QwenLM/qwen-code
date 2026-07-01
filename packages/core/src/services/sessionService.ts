@@ -147,6 +147,10 @@ export interface UnarchiveSessionsResult {
   errors: Array<{ sessionId: string; error: Error }>;
 }
 
+export interface UnarchiveSessionsOptions {
+  knownLocation?: 'archived';
+}
+
 export interface SessionServiceOptions {
   onWarning?: (message: string) => void;
 }
@@ -1121,6 +1125,7 @@ export class SessionService {
 
   async unarchiveSessions(
     sessionIds: string[],
+    options: UnarchiveSessionsOptions = {},
   ): Promise<UnarchiveSessionsResult> {
     const unarchived: string[] = [];
     const alreadyActive: string[] = [];
@@ -1129,17 +1134,19 @@ export class SessionService {
 
     for (const sessionId of [...new Set(sessionIds)]) {
       try {
-        const location = await this.getSessionLocation(sessionId);
-        if (location === undefined) {
-          notFound.push(sessionId);
-          continue;
-        }
-        if (location === 'active') {
-          alreadyActive.push(sessionId);
-          continue;
-        }
-        if (location === 'conflict') {
-          throw new Error(`Session archive conflict: ${sessionId}`);
+        if (options.knownLocation !== 'archived') {
+          const location = await this.getSessionLocation(sessionId);
+          if (location === undefined) {
+            notFound.push(sessionId);
+            continue;
+          }
+          if (location === 'active') {
+            alreadyActive.push(sessionId);
+            continue;
+          }
+          if (location === 'conflict') {
+            throw new Error(`Session archive conflict: ${sessionId}`);
+          }
         }
 
         const sourcePath = this.getSessionFilePath(sessionId, 'archived');

@@ -80,7 +80,7 @@ export class SessionConflictError extends Error {
   constructor(sessionId: string) {
     super(
       `Session "${sessionId}" exists in both active and archived directories. ` +
-        `Delete the session or manually clean up the duplicate files before loading.`,
+        `Delete the session with POST /sessions/delete before loading.`,
     );
     this.name = 'SessionConflictError';
     this.sessionId = sessionId;
