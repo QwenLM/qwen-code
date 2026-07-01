@@ -562,9 +562,7 @@ describe('BackgroundAgentResumeService', () => {
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
-    expect(registry.get(agentId)?.result).toBe(
-      'Resume completed successfully',
-    );
+    expect(registry.get(agentId)?.result).toBe('Resume completed successfully');
   });
 
   it('stores a fallback when resumed output has no model-visible text', async () => {

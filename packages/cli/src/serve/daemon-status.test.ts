@@ -16,6 +16,7 @@ import {
   buildDaemonStatusResponse,
   type BuildDaemonStatusOptions,
 } from './daemon-status.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
 
@@ -76,6 +77,79 @@ describe('buildDaemonStatusResponse', () => {
         expect.objectContaining({ code: 'acp_channel_down' }),
         expect.objectContaining({ code: 'rate_limit_hits' }),
       ]),
+    });
+  });
+
+  it('reports failed channel worker snapshots in runtime status', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'failed',
+          channels: ['telegram'],
+          pid: 1234,
+          error: 'ipc failed',
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_exited',
+          severity: 'warning',
+          message: 'Channel worker is failed (pid=1234): ipc failed.',
+          section: 'runtime.channelWorker',
+        }),
+      ]),
+      runtime: {
+        channelWorker: {
+          enabled: true,
+          state: 'failed',
+          channels: ['telegram'],
+          pid: 1234,
+          error: 'ipc failed',
+        },
+      },
+    });
+  });
+
+  it('warns when a running channel worker only connected part of its requested channels', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          requestedChannels: ['telegram', 'feishu', 'dingtalk'],
+          pid: 1234,
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_partial_connect',
+          severity: 'warning',
+          message:
+            'Channel worker connected 1/3 channel(s). Failed: feishu, dingtalk.',
+          section: 'runtime.channelWorker',
+        }),
+      ]),
+      runtime: {
+        channelWorker: {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          requestedChannels: ['telegram', 'feishu', 'dingtalk'],
+          pid: 1234,
+        },
+      },
     });
   });
 
@@ -234,6 +308,7 @@ interface MakeOptionsInput {
   toolsStatus?: unknown;
   hooksStatus?: unknown;
   extensionsStatus?: unknown;
+  channelWorkerSnapshot?: ChannelWorkerSnapshot;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -288,6 +363,9 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     supportedDeviceFlowProviders: ['qwen-oauth'],
     deviceFlowRegistry: registry,
     sessionShellCommandEnabled: false,
+    ...(input.channelWorkerSnapshot
+      ? { getChannelWorkerSnapshot: () => input.channelWorkerSnapshot! }
+      : {}),
   };
 }
 

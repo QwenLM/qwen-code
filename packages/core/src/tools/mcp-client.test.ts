@@ -38,6 +38,7 @@ import {
   listMcpResources,
   MCPServerStatus,
   McpClient,
+  discoverTools,
   populateMcpServerCommand,
   removeMCPServerStatus,
   removeMCPStatusChangeListener,
@@ -53,6 +54,7 @@ const mockDebugLogger = vi.hoisted(() => ({
   warn: vi.fn(),
 }));
 const ORIGINAL_ENV = process.env;
+const TEST_MCP_TOOL_IDLE_TIMEOUT_MS = 300000;
 
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
@@ -75,6 +77,7 @@ vi.mock('../utils/debugLogger.js', () => ({
  */
 function cfgWithResources(): Config {
   return {
+    getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
     getResourceRegistry: () => ({
       registerResource: vi.fn(),
       removeResourcesByServer: vi.fn(),
@@ -991,6 +994,31 @@ describe('mcp-client', () => {
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
     });
 
+    it('marks discovered tools alwaysLoad when the MCP server config requests it', async () => {
+      const mockedClient = {
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'chrome_tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const tools = await discoverTools(
+        'chrome-devtools',
+        {
+          command: 'test-command',
+          alwaysLoadTools: true,
+        },
+        mockedClient,
+        cfgWithResources(),
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0].alwaysLoad).toBe(true);
+    });
+
     it('discoverAndReturn with { applyConfigFilters: false } ignores config filters and trust for shared pool snapshots', async () => {
       const mockedClient = {
         connect: vi.fn(),
@@ -1251,6 +1279,7 @@ describe('mcp-client', () => {
       const registerResource = vi.fn();
       const removeResourcesByServer = vi.fn();
       const cfg = {
+        getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
         getResourceRegistry: () => ({
           registerResource,
           removeResourcesByServer,
@@ -1304,6 +1333,7 @@ describe('mcp-client', () => {
       const registerResource = vi.fn();
       const removeResourcesByServer = vi.fn();
       const cfg = {
+        getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
         getResourceRegistry: () => ({
           registerResource,
           removeResourcesByServer,

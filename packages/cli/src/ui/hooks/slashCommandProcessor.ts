@@ -963,6 +963,7 @@ export const useSlashCommandProcessor = (
                     type: 'submit_prompt',
                     content,
                     onComplete: result.onComplete,
+                    modelOverride: result.modelOverride,
                   };
                 }
                 case 'confirm_shell_commands': {

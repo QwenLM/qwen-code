@@ -1680,6 +1680,47 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('archiveSessionsData / unarchiveSessionsData', () => {
+    it('POSTs to /sessions/archive with sessionIds in body and returns result', async () => {
+      const result = {
+        archived: ['s-1'],
+        alreadyArchived: ['s-2'],
+        notFound: [],
+        errors: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.archiveSessionsData(['s-1', 's-2']);
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/sessions/archive');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1', 's-2'],
+      });
+    });
+
+    it('POSTs to /sessions/unarchive with sessionIds in body and returns result', async () => {
+      const result = {
+        unarchived: ['s-1'],
+        alreadyActive: ['s-2'],
+        notFound: [],
+        errors: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.unarchiveSessionsData(
+        ['s-1', 's-2'],
+        'client-1',
+      );
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/sessions/unarchive');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1', 's-2'],
+      });
+    });
+  });
+
   describe('updateSessionMetadata', () => {
     it('sends PATCH to /session/:id/metadata and returns effective metadata', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1841,6 +1882,28 @@ describe('DaemonClient', () => {
       expect(calls.map((call) => call.url)).toEqual([
         'http://daemon/workspace/%2Fwork%2Fa/sessions?size=50',
       ]);
+    });
+
+    it('passes archiveState when listing archived sessions', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [
+            {
+              sessionId: 's-archived',
+              workspaceCwd: '/work/a',
+              isArchived: true,
+            },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const sessions = await client.listWorkspaceSessions('/work/a', {
+        archiveState: 'archived',
+      });
+      expect(sessions[0]?.isArchived).toBe(true);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&archiveState=archived',
+      );
     });
 
     it('throws on non-2xx (e.g. 400 from a relative path)', async () => {
@@ -3395,6 +3458,60 @@ describe('DaemonClient', () => {
           content: 'x',
         }),
       ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+
+    it('POSTs /workspace/memory/remember and forwards context mode/client id', async () => {
+      const reply = {
+        taskId: 'remember-1',
+        status: 'queued' as const,
+        contextMode: 'clean' as const,
+        createdAt: '2026-06-26T00:00:00.000Z',
+        updatedAt: '2026-06-26T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rememberWorkspaceMemory('remember this', {
+          contextMode: 'clean',
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/remember');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        content: 'remember this',
+        contextMode: 'clean',
+      });
+    });
+
+    it('GETs /workspace/memory/remember/:taskId', async () => {
+      const reply = {
+        taskId: 'remember/a b',
+        status: 'completed' as const,
+        contextMode: 'workspace' as const,
+        createdAt: '2026-06-26T00:00:00.000Z',
+        updatedAt: '2026-06-26T00:00:01.000Z',
+        result: {
+          summary: 'saved',
+          filesTouched: ['/mem/MEMORY.md'],
+          touchedScopes: ['project' as const],
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryRememberTask('remember/a b', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/remember/remember%2Fa%20b',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
     });
 
     it('GETs /workspace/agents (list) and /workspace/agents/:id (detail)', async () => {

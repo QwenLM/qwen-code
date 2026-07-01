@@ -14,6 +14,7 @@ import type {
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 const TELEGRAM_BOT_COMMANDS = [
@@ -37,6 +38,8 @@ export class TelegramChannel extends ChannelBase {
   private bot: Bot;
   private botId: number = 0;
   private botUsername: string = '';
+  private hasConnectedOnce = false;
+  private signalHandlersRegistered = false;
 
   constructor(
     name: string,
@@ -45,14 +48,7 @@ export class TelegramChannel extends ChannelBase {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
-    const botConfig = this.proxy
-      ? {
-          client: {
-            baseFetchConfig: { agent: new HttpsProxyAgent(this.proxy) },
-          },
-        }
-      : undefined;
-    this.bot = new Bot(config.token, botConfig);
+    this.bot = this.createBot();
     this.registerCommand('start', async (envelope) => {
       await this.sendMessage(envelope.chatId, TELEGRAM_START_MESSAGE);
       return true;
@@ -60,11 +56,34 @@ export class TelegramChannel extends ChannelBase {
     this.registerCancelCommand();
   }
 
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    return target.threadId === undefined || /^\d+$/u.test(target.threadId);
+  }
+
+  private createBot(): Bot {
+    const botConfig = this.proxy
+      ? {
+          client: {
+            baseFetchConfig: { agent: new HttpsProxyAgent(this.proxy) },
+          },
+        }
+      : undefined;
+    return new Bot(this.config.token, botConfig);
+  }
+
   private getFileUrl(filePath: string): string {
     return `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
   }
 
   async connect(): Promise<void> {
+    if (this.hasConnectedOnce) {
+      this.bot = this.createBot();
+    }
+    this.hasConnectedOnce = true;
     const botInfo = await this.bot.api.getMe();
     this.botId = botInfo.id;
     this.botUsername = botInfo.username ?? '';
@@ -237,8 +256,11 @@ export class TelegramChannel extends ChannelBase {
       );
     });
 
-    process.once('SIGINT', () => this.bot.stop());
-    process.once('SIGTERM', () => this.bot.stop());
+    if (!this.signalHandlersRegistered) {
+      process.once('SIGINT', () => this.bot.stop());
+      process.once('SIGTERM', () => this.bot.stop());
+      this.signalHandlersRegistered = true;
+    }
   }
 
   private async registerBotCommands(): Promise<void> {
@@ -274,16 +296,39 @@ export class TelegramChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendTelegramMessage(chatId, text);
+  }
+
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    await this.sendTelegramMessage(target.chatId, text, target.threadId);
+  }
+
+  private async sendTelegramMessage(
+    chatId: string,
+    text: string,
+    threadId?: string,
+  ): Promise<void> {
     const html = telegramFormat(text);
     const chunks = splitHtmlForTelegram(html);
+    const options =
+      threadId === undefined
+        ? { parse_mode: 'HTML' as const }
+        : { parse_mode: 'HTML' as const, message_thread_id: Number(threadId) };
     for (const chunk of chunks) {
       try {
-        await this.bot.api.sendMessage(chatId, chunk, {
-          parse_mode: 'HTML',
-        });
+        await this.bot.api.sendMessage(chatId, chunk, options);
       } catch {
         // Fallback to plain text for the failed chunk only
-        await this.bot.api.sendMessage(chatId, chunk.replace(/<[^>]*>/g, ''));
+        await this.bot.api.sendMessage(
+          chatId,
+          chunk.replace(/<[^>]*>/g, ''),
+          threadId === undefined
+            ? undefined
+            : { message_thread_id: Number(threadId) },
+        );
       }
     }
   }
@@ -300,6 +345,7 @@ export class TelegramChannel extends ChannelBase {
     msg: {
       from: { id: number; first_name: string; last_name?: string };
       chat: { id: number; type: string };
+      message_thread_id?: number;
       reply_to_message?: { from?: { id: number }; text?: string };
     },
     text: string,
@@ -343,6 +389,10 @@ export class TelegramChannel extends ChannelBase {
         msg.from.first_name +
         (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
       chatId: String(msg.chat.id),
+      threadId:
+        typeof msg.message_thread_id === 'number'
+          ? String(msg.message_thread_id)
+          : undefined,
       text: cleanText,
       isGroup,
       isMentioned,

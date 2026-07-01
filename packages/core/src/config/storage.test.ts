@@ -190,7 +190,7 @@ describe('Storage – getRuntimeBaseDir / setRuntimeBaseDir', () => {
 
   it('handles bare tilde (~) as home directory', () => {
     Storage.setRuntimeBaseDir('~');
-    expect(Storage.getRuntimeBaseDir()).toBe(os.homedir());
+    expect(Storage.getRuntimeBaseDir()).toBe(path.normalize(os.homedir()));
   });
 });
 
@@ -578,7 +578,7 @@ describe('Storage – QWEN_HOME env var', () => {
 
   it('handles bare tilde (~) as home directory in QWEN_HOME', () => {
     process.env['QWEN_HOME'] = '~';
-    expect(Storage.getGlobalQwenDir()).toBe(os.homedir());
+    expect(Storage.getGlobalQwenDir()).toBe(path.normalize(os.homedir()));
   });
 
   it('QWEN_HOME and QWEN_RUNTIME_DIR are independent', () => {
