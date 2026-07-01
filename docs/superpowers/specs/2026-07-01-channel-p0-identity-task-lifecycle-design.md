@@ -171,7 +171,7 @@ export type ChannelTaskLifecycleEvent =
       chatId: string;
       sessionId: string;
       messageId?: string;
-      reason: 'cancel_command' | 'clear' | 'steer';
+      reason: 'cancel_command' | 'clear' | 'steer' | 'timeout';
       identity: ChannelRuntimeIdentity;
       memoryScope: ChannelRuntimeMemoryScope;
     }

@@ -212,8 +212,8 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
-    this.identity = this.resolveIdentity(name, config);
-    this.memoryScope = this.resolveMemoryScope(name, config);
+    this.identity = Object.freeze(this.resolveIdentity(name, config));
+    this.memoryScope = Object.freeze(this.resolveMemoryScope(name, config));
     this.channelMemory = options?.channelMemory;
     this.groupHistory = new GroupHistoryStore(
       options?.groupHistoryPath ??
@@ -282,9 +282,9 @@ export abstract class ChannelBase {
     active: ActivePrompt,
     sessionId: string,
     reason: 'cancel_command' | 'clear' | 'steer' | 'timeout',
-  ): boolean {
+  ): void {
     if (active.cancellationEmitted) {
-      return false;
+      return;
     }
     active.cancellationEmitted = true;
     this.emitTaskLifecycle({
@@ -292,7 +292,6 @@ export abstract class ChannelBase {
       type: 'cancelled',
       reason,
     });
-    return true;
   }
 
   private resolveIdentity(
@@ -333,7 +332,7 @@ export abstract class ChannelBase {
       'Memory scope:',
       `- namespace: ${sanitizeQuotedText(this.memoryScope.namespace, 128)}`,
       `- mode: ${this.memoryScope.mode}`,
-      '- storage isolation: not enforced by this version.',
+      '- data from other channels must not be shared.',
     ];
     return [...identityLines, '', ...memoryLines].join('\n');
   }
@@ -359,8 +358,8 @@ export abstract class ChannelBase {
       chatId,
       sessionId,
       ...(messageId ? { messageId } : {}),
-      identity: { ...this.identity },
-      memoryScope: { ...this.memoryScope },
+      identity: this.identity,
+      memoryScope: this.memoryScope,
     };
   }
 
