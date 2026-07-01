@@ -298,17 +298,19 @@ export class WeixinChannel extends ChannelBase {
   private startTyping(chatId: string): void {
     if (this.activeTypingChats.has(chatId)) return;
     this.activeTypingChats.add(chatId);
-    this.setTyping(chatId, true).catch(() => {
-      this.activeTypingChats.delete(chatId);
+    void this.setTyping(chatId, true).then((started) => {
+      if (!started) {
+        this.activeTypingChats.delete(chatId);
+      }
     });
   }
 
   private stopTyping(chatId: string): void {
     if (!this.activeTypingChats.delete(chatId)) return;
-    this.setTyping(chatId, false).catch(() => {});
+    void this.setTyping(chatId, false);
   }
 
-  private async setTyping(userId: string, typing: boolean): Promise<void> {
+  private async setTyping(userId: string, typing: boolean): Promise<boolean> {
     try {
       let ticket = typingTickets.get(userId);
       if (!ticket) {
@@ -324,15 +326,17 @@ export class WeixinChannel extends ChannelBase {
           typingTickets.set(userId, ticket);
         }
       }
-      if (!ticket) return;
+      if (!ticket) return false;
 
       await sendTyping(this.baseUrl, this.token, {
         ilink_user_id: userId,
         typing_ticket: ticket,
         status: typing ? TypingStatus.TYPING : TypingStatus.CANCEL,
       });
+      return true;
     } catch {
       // Typing is best-effort — don't fail the message flow
+      return false;
     }
   }
 }

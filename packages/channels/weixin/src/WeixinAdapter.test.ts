@@ -1,5 +1,19 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+const apiMocks = vi.hoisted(() => ({
+  getConfig: vi.fn(),
+  sendTyping: vi.fn(),
+}));
+
+vi.mock('./api.js', async () => {
+  const actual = await vi.importActual<typeof import('./api.js')>('./api.js');
+  return {
+    ...actual,
+    getConfig: apiMocks.getConfig,
+    sendTyping: apiMocks.sendTyping,
+  };
+});
+
 import { WeixinChannel } from './WeixinAdapter.js';
 import type {
   ChannelAgentBridge,
@@ -43,6 +57,11 @@ function createChannel(
 }
 
 describe('WeixinChannel', () => {
+  beforeEach(() => {
+    apiMocks.getConfig.mockReset();
+    apiMocks.sendTyping.mockReset();
+  });
+
   it('maps lifecycle start and terminal events to typing state', () => {
     const channel = createChannel();
     const setTyping = vi.fn().mockResolvedValue(undefined);
@@ -66,5 +85,41 @@ describe('WeixinChannel', () => {
     expect(setTyping).toHaveBeenNthCalledWith(1, 'user-1', true);
     expect(setTyping).toHaveBeenNthCalledWith(2, 'user-1', false);
     expect(setTyping).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears failed start typing state so a later started event can retry', async () => {
+    const channel = createChannel();
+    const chatId = 'user-retry';
+    const activeTypingChats = (
+      channel as unknown as { activeTypingChats: Set<string> }
+    ).activeTypingChats;
+
+    apiMocks.getConfig.mockResolvedValue({ typing_ticket: 'ticket-1' });
+    apiMocks.sendTyping
+      .mockRejectedValueOnce(new Error('send failed'))
+      .mockResolvedValueOnce({});
+
+    const baseEvent = {
+      channelName: 'weixin',
+      chatId,
+      sessionId: 'session-2',
+      messageId: 'message-2',
+      identity: { id: 'channel:weixin', displayName: 'weixin' },
+      memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
+    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+
+    await vi.waitFor(() => {
+      expect(apiMocks.sendTyping).toHaveBeenCalledTimes(1);
+      expect(activeTypingChats.has(chatId)).toBe(false);
+    });
+
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+
+    await vi.waitFor(() => {
+      expect(apiMocks.sendTyping).toHaveBeenCalledTimes(2);
+      expect(activeTypingChats.has(chatId)).toBe(true);
+    });
   });
 });
