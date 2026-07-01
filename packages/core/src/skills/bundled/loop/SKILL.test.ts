@@ -105,4 +105,15 @@ describe('bundled loop skill', () => {
     expect(body).toContain('`<<loop.md-dynamic>>`');
     expect(body).toContain('`<<loop.md>>`');
   });
+
+  it('documents autonomous mode and routes a bare /loop to it', () => {
+    const { body } = loadLoopSkill();
+
+    expect(body).toContain('## Autonomous mode');
+    expect(body).toContain('`<<autonomous-loop-dynamic>>`');
+    expect(body).toContain('`<<autonomous-loop>>`');
+    // Empty input now enters autonomous mode, not a usage message.
+    expect(body).toContain('the **autonomous path**');
+    expect(body).toContain('You are a steward, not an initiator');
+  });
 });

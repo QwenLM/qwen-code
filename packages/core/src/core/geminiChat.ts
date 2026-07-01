@@ -33,6 +33,7 @@ import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
   ESCALATED_MAX_TOKENS,
+  parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
@@ -292,6 +293,12 @@ interface TryCompressOptions {
    * on the user's stated concern.
    */
   customInstructions?: string;
+  /**
+   * Output tokens reserved by the model (e.g. max_tokens / escalated limit).
+   * Threaded to the compression service so the cheap-gate computes
+   * thresholds against the real available input budget.
+   */
+  reservedOutputTokens?: number;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -1552,6 +1559,7 @@ export class GeminiChat {
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
+      reservedOutputTokens: options?.reservedOutputTokens,
       signal,
     });
 
@@ -1746,6 +1754,32 @@ export class GeminiChat {
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
     let userContentAdded = false;
+
+    // Compute the output budget the model can actually use. Declared at
+    // function level so the reactive-compression path inside the generator
+    // closure can also access it.
+    //
+    // The subagent path sets params.config.maxOutputTokens explicitly; the
+    // interactive path leaves it undefined but will escalate to
+    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) on MAX_TOKENS.
+    // Pre-reserving that space prevents the dead zone between the adjusted
+    // auto threshold and an unadjusted hard threshold (issue #5950).
+    const cgConfigForThresholds = this.config.getContentGeneratorConfig();
+    const parsedEnvMaxTokensForThreshold = parsePositiveIntegerEnvValue(
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+    );
+    const hasUserMaxTokensOverrideForThreshold =
+      (cgConfigForThresholds?.samplingParams?.max_tokens !== undefined &&
+        cgConfigForThresholds?.samplingParams?.max_tokens !== null) ||
+      parsedEnvMaxTokensForThreshold !== undefined;
+    const effectiveReservedOutput: number =
+      params.config?.maxOutputTokens ??
+      (hasUserMaxTokensOverrideForThreshold
+        ? (cgConfigForThresholds?.samplingParams?.max_tokens ??
+          parsedEnvMaxTokensForThreshold ??
+          0)
+        : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
+
     try {
       // The send-lock above is held but the generator's `finally` (which
       // resolves it) has not run yet. Any setup error before returning the
@@ -1774,9 +1808,12 @@ export class GeminiChat {
       // force=true already bypasses that breaker, while hard-rescue itself is
       // bounded by hardRescueFailureCount so persistent pre-send rescue
       // failures fall through to reactive overflow after a few strikes.
-      const contextLimit =
-        this.config.getContentGeneratorConfig()?.contextWindowSize ??
-        DEFAULT_TOKEN_LIMIT;
+      const rawContextLimit =
+        cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
+      const contextLimit = Math.max(
+        0,
+        rawContextLimit - effectiveReservedOutput,
+      );
       const { hard } = computeThresholds(
         contextLimit,
         this.config.getAutoCompactThreshold(),
@@ -1844,6 +1881,7 @@ export class GeminiChat {
             // classified correctly while the pending user message preserves
             // any active tool-call / response pairing.
             trigger: shouldForceFromHard ? 'auto' : undefined,
+            reservedOutputTokens: effectiveReservedOutput,
           },
         );
       }
@@ -1995,10 +2033,13 @@ export class GeminiChat {
         // Max output tokens escalation: when no user/env override is set and
         // the model hits MAX_TOKENS, retry once with the escalated limit.
         let maxTokensEscalated = false;
+        const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
+          process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+        );
         const hasUserMaxTokensOverride =
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
             cgConfig?.samplingParams?.max_tokens !== null) ||
-          !!process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+          parsedEnvMaxTokens !== undefined;
 
         let lastFinishReason: string | undefined;
 
@@ -2233,6 +2274,7 @@ export class GeminiChat {
                     {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
                       trigger: 'auto',
+                      reservedOutputTokens: effectiveReservedOutput,
                     },
                   );
 
@@ -2776,7 +2818,8 @@ export class GeminiChat {
       const text =
         message.parts
           ?.filter(
-            (part): part is { text: string } => typeof part.text === 'string',
+            (part): part is { text: string } =>
+              typeof part.text === 'string' && !part.thought,
           )
           .map((part) => part.text)
           .join('') ?? '';

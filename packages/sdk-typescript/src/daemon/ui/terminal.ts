@@ -103,7 +103,9 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'workspace.memory.changed':
       return terminalLine(
         'memory',
-        `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
+        event.scope === 'managed'
+          ? (event.source ?? 'managed_memory')
+          : `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
         '36',
       );
     case 'workspace.agent.changed':

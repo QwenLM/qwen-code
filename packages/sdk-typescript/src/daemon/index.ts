@@ -28,16 +28,17 @@ export type {
   DaemonTransportType,
 } from './DaemonTransport.js';
 export type { RestSseTransport } from './RestSseTransport.js';
-// negotiateTransport + ACP transport classes live in their own files to
-// break the static import chain from this barrel, keeping the browser
-// bundle under budget.  Monorepo consumers import from source paths:
-//   import { negotiateTransport } from '../../sdk-typescript/src/daemon/negotiateTransport.js';
-//   import { AcpWsTransport }     from '../../sdk-typescript/src/daemon/AcpWsTransport.js';
-//   import { AcpHttpTransport }   from '../../sdk-typescript/src/daemon/AcpHttpTransport.js';
-//   import { AutoReconnectTransport } from '../../sdk-typescript/src/daemon/AutoReconnectTransport.js';
-// Deep package exports are intentionally omitted: the SDK barrel does not
-// re-export these classes, and the package's `files` field ships only
-// `dist/` which does not include per-module entry points for them.
+// negotiateTransport + the concrete ACP transport classes are intentionally
+// NOT re-exported here: a static import chain from this barrel would pull
+// their framing/SSE code into the budget-checked browser bundle (see
+// `scripts/build.js` MAX_DAEMON_BROWSER_BUNDLE_BYTES). They ship instead
+// behind the opt-in `@qwen-code/sdk/daemon/transports` subpath
+// (`./transports.ts`), so REST-only consumers stay tree-shaken while
+// consumers who want resumable ACP-over-HTTP get a first-class import:
+//   import { negotiateTransport, AcpHttpTransport }
+//     from '@qwen-code/sdk/daemon/transports';
+// The `NegotiateTransportOptions` *type* stays available from this barrel
+// for backward compatibility (type-only, no bundle cost).
 export type { NegotiateTransportOptions } from './negotiateTransport.js';
 export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
 export type { TransportFactory } from './AutoReconnectTransport.js';
@@ -57,6 +58,9 @@ export {
   asKnownDaemonEvent,
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
   createDaemonAuthState,
   createDaemonSessionViewState,
   isDaemonEventType,
@@ -228,6 +232,8 @@ export type {
   DaemonMcpChildRefusedBatchEvent,
   DaemonMcpGuardrailEvent,
   DaemonMcpRefusedServer,
+  DaemonFileMemoryChangedData,
+  DaemonManagedMemoryChangedData,
   DaemonMemoryChangedData,
   DaemonMemoryChangedEvent,
   DaemonModelSwitchedData,
@@ -256,6 +262,13 @@ export type {
   DaemonSessionMetadataUpdatedEvent,
   DaemonMidTurnMessageInjectedData,
   DaemonMidTurnMessageInjectedEvent,
+  DaemonPendingPromptAddedData,
+  DaemonPendingPromptAddedEvent,
+  DaemonPendingPromptStartedData,
+  DaemonPendingPromptStartedEvent,
+  DaemonPendingPromptCompletedData,
+  DaemonPendingPromptCompletedEvent,
+  DaemonPendingPromptEvent,
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
@@ -315,6 +328,9 @@ export type {
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptSummary,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -345,6 +361,7 @@ export type {
   DaemonWorkspaceTrustState,
   DaemonWorkspaceTrustStatus,
   DaemonAvailableCommand,
+  DaemonArchiveSessionsResult,
   DaemonCapabilities,
   DaemonContextCategoryBreakdown,
   DaemonContextFileScope,
@@ -367,6 +384,7 @@ export type {
   ForkSessionRequest,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionArchiveState,
   DaemonAuthProviderId,
   DaemonAuthProviderBaseUrlOption,
   DaemonAuthProviderCatalog,
@@ -423,6 +441,11 @@ export type {
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceMemoryRememberContextMode,
+  DaemonWorkspaceMemoryRememberOptions,
+  DaemonWorkspaceMemoryRememberResult,
+  DaemonWorkspaceMemoryRememberTask,
+  DaemonWorkspaceMemoryRememberTaskStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProviderCurrent,
   DaemonWorkspaceProviderModel,
@@ -434,6 +457,7 @@ export type {
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonUnarchiveSessionsResult,
   DaemonCommandHookConfig,
   DaemonFunctionHookConfig,
   DaemonHookConfig,

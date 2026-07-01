@@ -1,14 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FeishuChannel } from './FeishuAdapter.js';
-import type { ChannelConfig, AcpBridge } from '@qwen-code/channel-base';
+import type {
+  ChannelAgentBridge,
+  ChannelConfig,
+  SessionTarget,
+} from '@qwen-code/channel-base';
 
-function createMockBridge(): AcpBridge {
+function createMockBridge(): ChannelAgentBridge {
   return {
-    prompt: vi.fn().mockResolvedValue(undefined),
+    prompt: vi.fn().mockResolvedValue(''),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     on: vi.fn(),
     off: vi.fn(),
-  } as unknown as AcpBridge;
+    availableCommands: [],
+    newSession: vi.fn().mockResolvedValue('session-1'),
+    loadSession: vi.fn().mockImplementation((id: string) => id),
+  } as unknown as ChannelAgentBridge;
 }
 
 function createConfig(overrides?: Partial<ChannelConfig>): ChannelConfig {
@@ -35,6 +42,20 @@ function createChannel(
   return new FeishuChannel('test', config, bridge);
 }
 
+class TestableFeishuChannel extends FeishuChannel {
+  pushLoop(target: SessionTarget, text: string): Promise<void> {
+    return this.pushProactive(target, text);
+  }
+}
+
+function createTestableChannel(
+  configOverrides?: Partial<ChannelConfig>,
+): TestableFeishuChannel {
+  const config = createConfig(configOverrides);
+  const bridge = createMockBridge();
+  return new TestableFeishuChannel('test', config, bridge);
+}
+
 // Access private methods for unit testing
 function getPrivateMethod<T>(instance: unknown, method: string): T {
   return (instance as Record<string, unknown>)[method] as T;
@@ -52,6 +73,12 @@ describe('FeishuChannel', () => {
       expect(() => createChannel({ clientSecret: undefined })).toThrow(
         /requires clientId.*clientSecret/,
       );
+    });
+
+    it('supports proactive loop messages', () => {
+      const channel = createChannel();
+
+      expect(channel.supportsProactiveSend()).toBe(true);
     });
   });
 
@@ -392,7 +419,7 @@ describe('FeishuChannel', () => {
       });
 
       // Mock bridge
-      const bridge = getPrivateMethod<AcpBridge>(channel, 'bridge');
+      const bridge = getPrivateMethod<ChannelAgentBridge>(channel, 'bridge');
       const cancelSessionSpy = vi
         .spyOn(bridge, 'cancelSession')
         .mockResolvedValue(undefined);
@@ -779,6 +806,91 @@ describe('FeishuChannel', () => {
         expect.stringContaining('Cannot send: no access token'),
       );
       stderrSpy.mockRestore();
+    });
+
+    it('rejects proactive sends when token is unavailable', async () => {
+      const channel = createTestableChannel();
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await expect(
+        channel.pushLoop(
+          {
+            channelName: 'test',
+            senderId: 'ou_user',
+            chatId: 'oc_chat_id',
+          },
+          'hello',
+        ),
+      ).rejects.toThrow('Feishu sendMessage failed: no access token');
+
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot send: no access token'),
+      );
+      stderrSpy.mockRestore();
+    });
+
+    it('rejects proactive sends when Feishu returns an error', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('server down', { status: 500 }),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await expect(
+        channel.pushLoop(
+          {
+            channelName: 'test',
+            senderId: 'ou_user',
+            chatId: 'oc_chat_id',
+          },
+          'hello',
+        ),
+      ).rejects.toThrow('Feishu sendMessage failed: HTTP 500');
+
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('sendMessage failed: HTTP 500'),
+      );
+      stderrSpy.mockRestore();
+    });
+
+    it('sends proactive loop output to direct chats', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('{}', { status: 200 }),
+      );
+
+      await channel.pushLoop(
+        {
+          channelName: 'test',
+          senderId: 'ou_user',
+          chatId: 'oc_chat_id',
+        },
+        'loop result',
+      );
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/im/v1/messages?receive_id_type=chat_id'),
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            Authorization: 'Bearer tenant-token',
+          }),
+          body: expect.stringContaining('"receive_id":"oc_chat_id"'),
+        }),
+      );
+      fetchSpy.mockRestore();
     });
   });
 

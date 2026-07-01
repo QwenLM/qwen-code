@@ -18,6 +18,7 @@ import {
   isInSafeToolAllowlist,
   shouldFirePermissionDeniedForAutoMode,
   passesAcceptEditsFastPath,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
@@ -1362,6 +1363,68 @@ describe('shouldRunAutoModeForCall', () => {
 
   it('returns false for unknown tool names when not in AUTO', () => {
     expect(shouldRunAutoModeForCall(ApprovalMode.DEFAULT, 'unknown_tool')).toBe(
+      false,
+    );
+  });
+});
+
+// ─── shouldClassifyAllShellForAutoMode ────────────────────────────────────
+
+describe('shouldClassifyAllShellForAutoMode', () => {
+  function configWithClassifyAllShell(enabled: boolean): Config {
+    return {
+      getAutoModeSettings: () => ({ classifyAllShell: enabled }),
+    } as unknown as Config;
+  }
+
+  it('returns true for Shell when classifyAllShell is enabled', () => {
+    expect(
+      shouldClassifyAllShellForAutoMode(
+        ToolNames.SHELL,
+        configWithClassifyAllShell(true),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true for Monitor when classifyAllShell is enabled', () => {
+    expect(
+      shouldClassifyAllShellForAutoMode(
+        ToolNames.MONITOR,
+        configWithClassifyAllShell(true),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns false for Shell when classifyAllShell is disabled', () => {
+    expect(
+      shouldClassifyAllShellForAutoMode(
+        ToolNames.SHELL,
+        configWithClassifyAllShell(false),
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false for non-shell tools even when classifyAllShell is enabled', () => {
+    for (const tool of [
+      ToolNames.EDIT,
+      ToolNames.WRITE_FILE,
+      ToolNames.READ_FILE,
+      ToolNames.WEB_FETCH,
+    ]) {
+      expect(
+        shouldClassifyAllShellForAutoMode(
+          tool,
+          configWithClassifyAllShell(true),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('returns false when classifyAllShell is undefined (default)', () => {
+    const config = {
+      getAutoModeSettings: () => ({}),
+    } as unknown as Config;
+    expect(shouldClassifyAllShellForAutoMode(ToolNames.SHELL, config)).toBe(
       false,
     );
   });

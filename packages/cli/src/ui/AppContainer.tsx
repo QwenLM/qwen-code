@@ -629,10 +629,13 @@ export const AppContainer = (props: AppContainerProps) => {
         const rawItems = buildResumedHistoryItems(resumedSessionData, config);
         const collapseOnResume =
           settings.merged.ui?.history?.collapseOnResume ?? false;
+        const collapsePreviewCount =
+          settings.merged.ui?.history?.collapsePreviewCount ?? 0;
 
         const historyItems = applyCollapsePolicyAndSummary(
           rawItems,
           collapseOnResume,
+          collapsePreviewCount,
         );
         historyManager.loadHistory(historyItems);
 
@@ -1534,6 +1537,24 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const performMemoryRefresh = useCallback(async () => {
+    // Safe mode: skip all context file loading, matching refreshHierarchicalMemory()
+    if (config.isSafeMode()) {
+      config.setUserMemory('');
+      config.setGeminiMdFileCount(0);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry([], config.getWorkingDir()),
+      );
+      setGeminiMdFileCount(0);
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: 'Safe mode active — skipping context file refresh.',
+        },
+        Date.now(),
+      );
+      return;
+    }
+
     historyManager.addItem(
       {
         type: MessageType.INFO,
@@ -2685,12 +2706,23 @@ export const AppContainer = (props: AppContainerProps) => {
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
+  // `staticExtraHeight` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
+  // *inline* streaming/pending message may grow before it commits to <Static>;
+  // they do NOT reserve blank rows under the composer. In legacy mode completed
+  // history lives in <Static> (terminal scrollback) and the composer flows to
+  // the very bottom of the output. VP mode owns the whole viewport in the React
+  // tree, so to match that bottom spacing the composer must reach the bottom
+  // too — reserve nothing. (controlsHeight is measured one frame late, so a
+  // composer that grows can briefly overshoot by a row before the re-measure
+  // corrects, the same way legacy mode lets the terminal scroll on growth.)
+  const mainContentHeightReservation = useTerminalBuffer
+    ? 0
+    : staticExtraHeight + MAIN_CONTENT_HEIGHT_RESERVATION;
   const availableTerminalHeight = Math.max(
     0,
     terminalHeight -
       controlsHeight -
-      staticExtraHeight -
-      MAIN_CONTENT_HEIGHT_RESERVATION -
+      mainContentHeightReservation -
       tabBarHeight,
   );
 
@@ -3061,7 +3093,7 @@ export const AppContainer = (props: AppContainerProps) => {
           historyManager.addItem(
             {
               type: MessageType.ERROR,
-              text: `❌ Migration failed: ${getErrorMessage(error)}`,
+              text: `✗ Migration failed: ${getErrorMessage(error)}`,
             },
             Date.now(),
           );

@@ -13,24 +13,17 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import type {
+  AvailableCommand,
+  ChannelAgentBridge,
+  ToolCallEvent,
+} from './ChannelAgentBridge.js';
+export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
   cwd: string;
   model?: string;
-}
-
-export interface AvailableCommand {
-  name: string;
-  description: string;
-  input?: { hint: string } | null;
-  /**
-   * Aliases the agent's parser also accepts for this command (e.g. `summarize`
-   * for `compress`). Carried over the wire in `_meta.altNames`; lifted here by
-   * readAvailableCommandAltNames so attribution can recognize an aliased command
-   * and not prefix it (which would stop it from parsing).
-   */
-  altNames?: string[];
 }
 
 /**
@@ -59,16 +52,7 @@ export function readAvailableCommandAltNames(
   return names.length > 0 ? names : undefined;
 }
 
-export interface ToolCallEvent {
-  sessionId: string;
-  toolCallId: string;
-  kind: string;
-  title: string;
-  status: string;
-  rawInput?: Record<string, unknown>;
-}
-
-export class AcpBridge extends EventEmitter {
+export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private child: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
   private options: AcpBridgeOptions;
@@ -113,6 +97,8 @@ export class AcpBridge extends EventEmitter {
       process.stderr.write(
         `[AcpBridge] Process exited (code=${code}, signal=${signal})\n`,
       );
+      // Do not emit sessionDied here: a full ACP process exit is handled by
+      // channel start crash recovery, which reloads the persisted sessions.
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);

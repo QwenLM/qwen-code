@@ -300,6 +300,9 @@ reason inline and decide whether to switch to Ask Permissions Mode for that step
         "deny": ["Any network call to intranet.example.com"],
       },
       "environment": ["Open-source monorepo; commits are signed"],
+      // Optional: route ALL shell commands (including read-only ones like
+      // ls, cat) through the classifier for defense-in-depth.
+      // "classifyAllShell": true,
     },
   },
 }

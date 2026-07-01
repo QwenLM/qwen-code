@@ -135,6 +135,19 @@ export interface ChangeSessionCwdResult {
   warnings: string[];
 }
 
+export type BridgeWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+
+export interface BridgeWorkspaceMemoryRememberRequest {
+  content: string;
+  contextMode: BridgeWorkspaceMemoryRememberContextMode;
+}
+
+export interface BridgeWorkspaceMemoryRememberResult {
+  summary?: string;
+  filesTouched: string[];
+  touchedScopes: Array<'user' | 'project'>;
+}
+
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
 export interface BridgeSessionSummary {
   sessionId: string;
@@ -144,6 +157,7 @@ export interface BridgeSessionSummary {
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  isArchived?: boolean;
 }
 
 export interface SessionMetadataUpdate {
@@ -153,6 +167,8 @@ export interface SessionMetadataUpdate {
 export interface CloseSessionOpts {
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
+  /** Require the ACP child to acknowledge session close before resolving. */
+  requireAgentClose?: boolean;
 }
 
 export interface BridgeClientRequestContext {
@@ -256,6 +272,35 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
  */
 export interface MidTurnQueueEntry {
   text: string;
+  originatorClientId?: string;
+}
+
+/**
+ * Internal record for a prompt accepted into the per-session FIFO queue.
+ * Lives on `SessionEntry.pendingPromptList` so the daemon can report
+ * pending prompts and let callers remove specific items. The
+ * `abortController` is wired to the caller's signal (if any) so
+ * `removePendingPrompt` can cancel a queued-but-not-yet-started prompt.
+ */
+export interface PendingPromptEntry {
+  promptId: string;
+  queuedAt: number;
+  originatorClientId?: string;
+  text: string;
+  abortController: AbortController;
+  state: 'queued' | 'running';
+}
+
+/**
+ * Public projection of `PendingPromptEntry` returned by
+ * `getPendingPrompts` and the HTTP API. Omits the internal
+ * `abortController` and raw prompt content blocks.
+ */
+export interface PendingPromptSummary {
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  state: 'queued' | 'running';
   originatorClientId?: string;
 }
 
@@ -376,6 +421,29 @@ export interface AcpSessionBridge {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<PromptResponse>;
+
+  /**
+   * Return the pending prompt queue for a session. Includes the currently
+   * running prompt (state `'running'`) and any prompts waiting in the FIFO
+   * (state `'queued'`). Throws `SessionNotFoundError` for unknown ids.
+   */
+  getPendingPrompts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): readonly PendingPromptSummary[];
+
+  /**
+   * Remove a specific prompt from the pending queue. For `queued` prompts,
+   * aborts them so the FIFO skips dispatch. For `running` prompts, aborts
+   * the in-flight turn (equivalent to cancel). Returns `{ removed: false }`
+   * when the promptId is not found. Throws `SessionNotFoundError` for
+   * unknown session ids.
+   */
+  removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    context?: BridgeClientRequestContext,
+  ): { removed: boolean };
 
   /**
    * Cancel the in-flight prompt on the session. Throws
@@ -507,6 +575,22 @@ export interface AcpSessionBridge {
     params?: Record<string, unknown>,
     opts?: { timeoutMs?: number },
   ): Promise<T>;
+
+  /**
+   * Run a hidden workspace-level managed-memory remember task. This
+   * ensures the ACP child exists but must not create/load/resume an ACP
+   * session or touch the per-session prompt queue.
+   */
+  runWorkspaceMemoryRemember(
+    request: BridgeWorkspaceMemoryRememberRequest,
+  ): Promise<BridgeWorkspaceMemoryRememberResult>;
+
+  /**
+   * Check whether the ACP child can run managed-memory remember for the
+   * current workspace. Used by HTTP POST to return a synchronous 409 in
+   * bare/unavailable modes without creating a session.
+   */
+  isWorkspaceMemoryRememberAvailable(): Promise<boolean>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.
@@ -776,7 +860,11 @@ export interface AcpSessionBridge {
         toolCount: number;
         originatorClientId: string;
       }
-    | { name: string; skipped: true; reason: 'budget_warning_only' }
+    | {
+        name: string;
+        skipped: true;
+        reason: 'budget_warning_only' | 'runtime_name_conflict';
+      }
   >;
 
   /**

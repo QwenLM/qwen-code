@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TelegramChannel } from './TelegramAdapter.js';
 import type {
-  AcpBridge,
+  ChannelAgentBridge,
   ChannelConfig,
   Envelope,
 } from '@qwen-code/channel-base';
@@ -9,6 +9,7 @@ import type {
 type TestTelegramMessage = {
   from: { id: number; first_name: string; last_name?: string };
   chat: { id: number; type: string };
+  message_thread_id?: number;
   reply_to_message?: { from?: { id: number }; text?: string };
 };
 
@@ -34,6 +35,16 @@ class TestTelegramChannel extends TelegramChannel {
       }
     ).buildEnvelope(msg, text, entities);
   }
+
+  pushTestProactive(
+    target: { chatId: string; threadId?: string },
+    text: string,
+  ) {
+    return this.pushProactive(
+      { channelName: 'telegram', senderId: '1', ...target },
+      text,
+    );
+  }
 }
 
 const config: ChannelConfig = {
@@ -54,7 +65,7 @@ function createChannel(
   return new TestTelegramChannel(
     'telegram',
     { ...config, ...configOverrides },
-    {} as AcpBridge,
+    {} as ChannelAgentBridge,
     {
       router: router as never,
     },
@@ -111,6 +122,12 @@ describe('TelegramChannel', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it('supports proactive loop messages', () => {
+    const channel = createChannel();
+
+    expect(channel.supportsProactiveSend()).toBe(true);
   });
 
   it('clears active typing intervals on disconnect', () => {
@@ -215,6 +232,36 @@ describe('TelegramChannel', () => {
     expect(directCommand.isMentioned).toBe(false);
     expect(addressedCommand.isMentioned).toBe(true);
     expect(otherBotCommand.isMentioned).toBe(false);
+  });
+
+  it('preserves Telegram forum topic ids in envelopes', () => {
+    const channel = createChannel();
+
+    const topicMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'supergroup' },
+        message_thread_id: 42,
+      },
+      'topic message',
+    );
+
+    expect(topicMessage.threadId).toBe('42');
+  });
+
+  it('sends proactive messages back to the Telegram forum topic', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    await channel.pushTestProactive(
+      { chatId: '2', threadId: '42' },
+      'topic response',
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith('2', expect.any(String), {
+      parse_mode: 'HTML',
+      message_thread_id: 42,
+    });
   });
 
   it('does not let bare bot commands pass mention-gated groups', async () => {

@@ -54,6 +54,7 @@ const createMockConfig = (overrides = {}) => ({
   getProjectRoot: vi.fn(() => '/test/project'),
   getSessionId: vi.fn(() => 'test-session'),
   getMemoryManager: vi.fn(createMockMemoryManager),
+  isSafeMode: vi.fn(() => false),
   ...overrides,
 });
 
@@ -138,7 +139,7 @@ describe('<Footer />', () => {
       120,
       createMockUIState({ workflowKeywordActive: true }),
     );
-    expect(lastFrame()).toContain('workflow active');
+    expect(lastFrame()).toContain('▷ workflow active');
   });
 
   it('hides the "workflow active" indicator by default', () => {

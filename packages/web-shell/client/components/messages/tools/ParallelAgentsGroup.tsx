@@ -37,7 +37,8 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
   const parts: string[] = [];
   const taskExec = getTaskExecutionRecord(agent.rawOutput);
   const stats = taskExec?.['executionSummary'] as
-    Record<string, unknown> | undefined;
+    | Record<string, unknown>
+    | undefined;
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDuration(stats['totalDurationMs'])
@@ -137,13 +138,15 @@ export function ParallelAgentsGroup({
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
-        <span className={styles.summaryIcon} aria-hidden="true">
-          {summaryStatus === 'failed' ? (
+        {summaryStatus === 'failed' ? (
+          <span className={styles.summaryStatus}>
             <StatusIcon status={summaryStatus} />
-          ) : (
+          </span>
+        ) : (
+          <span className={styles.summaryIcon} aria-hidden="true">
             <ToolGroupIcon />
-          )}
-        </span>
+          </span>
+        )}
         <span
           className={
             hasRunning

@@ -108,7 +108,13 @@ export const Footer: React.FC = () => {
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
-      node: <Text color={theme.status.success}>🔒 {sandboxInfo}</Text>,
+      node: <Text color={theme.status.success}>{sandboxInfo}</Text>,
+    });
+  }
+  if (config.isSafeMode()) {
+    rightItems.push({
+      key: 'safe-mode',
+      node: <Text color={theme.status.warning}>⚠ Safe Mode</Text>,
     });
   }
   if (debugMode) {
@@ -118,7 +124,7 @@ export const Footer: React.FC = () => {
     });
   }
   // Dream tasks now surface via the BackgroundTasksPill (e.g. "1 dream")
-  // alongside the other background-task kinds. The previous `✦ dreaming`
+  // alongside the other background-task kinds. The previous `◆ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
   if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
@@ -214,7 +220,7 @@ export const Footer: React.FC = () => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (
             <Text color={theme.text.accent} wrap="truncate">
-              {`⚙ ${t('workflow active')}`}
+              {`▷ ${t('workflow active')}`}
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>
