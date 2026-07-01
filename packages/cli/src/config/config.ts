@@ -1951,6 +1951,7 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand:
       bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
+    mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
     pendingMcpServers,
