@@ -230,6 +230,29 @@ function renderIndexBlock(
   ];
 }
 
+function buildIndexSections(
+  memoryDir: string,
+  indexContent: string | null | undefined,
+  userSection: UserAutoMemorySection | undefined,
+  teamSection: TeamAutoMemorySection | undefined,
+): string[] {
+  const sections: string[] = [];
+  if (userSection !== undefined) {
+    sections.push(
+      ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
+      '',
+    );
+  }
+  sections.push(...renderIndexBlock(memoryDir, indexContent));
+  if (teamSection !== undefined) {
+    sections.push(
+      '',
+      ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
+    );
+  }
+  return sections;
+}
+
 export interface BuildMemoryPromptOptions {
   forceFullProtocol?: boolean;
 }
@@ -289,9 +312,9 @@ export function buildManagedAutoMemoryPrompt(
       '## Memory types',
       '',
       "- **user** — the user's role, goals, responsibilities, and knowledge (always user-scoped)",
-      '- **feedback** — guidance on how to approach work: corrections AND confirmed approaches',
-      '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git',
-      '- **reference** — pointers to where information lives in external systems',
+      '- **feedback** — guidance on how to approach work: corrections AND confirmed approaches (default user; project only for project-wide conventions)',
+      '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git (always project-scoped)',
+      '- **reference** — pointers to where information lives in external systems (default project; user when the resource is personal)',
     ];
 
     const condensedSave = multiTier
@@ -322,31 +345,26 @@ export function buildManagedAutoMemoryPrompt(
           ...MEMORY_FRONTMATTER_EXAMPLE,
           '',
           `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\`. Each entry: one line, under ~150 chars: \`- [Title](file.md) — one-line hook\`.`,
+          '- Never write memory content directly into MEMORY.md — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
         ];
 
-    const indexSections: string[] = [];
-    if (userSection !== undefined) {
-      indexSections.push(
-        ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
-        '',
-      );
-    }
-    indexSections.push(...renderIndexBlock(memoryDir, indexContent));
-    if (teamSection !== undefined) {
-      indexSections.push(
-        '',
-        ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
-      );
-    }
+    const indexSections = buildIndexSections(
+      memoryDir,
+      indexContent,
+      userSection,
+      teamSection,
+    );
 
     const condensedDoNotSave = [
       '## Do not save',
       '',
       '- Code patterns, architecture, or file paths (read the project instead)',
       '- Git history or debugging solutions',
-      '- MCP tool schemas or raw failed tool-call transcripts',
+      '- MCP tool names, schemas, or failed call transcripts (save only confirmed durable workarounds or warnings)',
       '- Ephemeral task state or current conversation context',
       '- Content already in QWEN.md or AGENTS.md',
+      '',
+      'These exclusions apply even when the user explicitly asks you to save.',
     ];
 
     const condensedLines = [
@@ -355,6 +373,7 @@ export function buildManagedAutoMemoryPrompt(
       ...condensedIntro,
       '',
       'Your memory is currently empty. When you learn something worth remembering across conversations, save it using the process below.',
+      'If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.',
       '',
       ...condensedTypes,
       '',
@@ -416,20 +435,12 @@ export function buildManagedAutoMemoryPrompt(
         '- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.',
       ];
 
-  const indexSections: string[] = [];
-  if (userSection !== undefined) {
-    indexSections.push(
-      ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
-      '',
-    );
-  }
-  indexSections.push(...renderIndexBlock(memoryDir, indexContent));
-  if (teamSection !== undefined) {
-    indexSections.push(
-      '',
-      ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
-    );
-  }
+  const indexSections = buildIndexSections(
+    memoryDir,
+    indexContent,
+    userSection,
+    teamSection,
+  );
 
   const lines = [
     '# auto memory',
