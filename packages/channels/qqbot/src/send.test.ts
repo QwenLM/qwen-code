@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ChannelAgentBridge } from '@qwen-code/channel-base';
+import type {
+  ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
+} from '@qwen-code/channel-base';
 import { isValidChatId, hasMarkdownSyntax, splitText } from './QQChannel.js';
 
 const {
@@ -827,6 +830,72 @@ describe('sendMessage', () => {
       'test-token',
       { content: 'a'.repeat(500), msg_type: 0, msg_id: 'msg-789', msg_seq: 2 },
     );
+  });
+});
+
+describe('lifecycle status hooks', () => {
+  function makeChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('keeps prompt lifecycle hooks as explicit no-ops', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      onPromptStart: (
+        chatId: string,
+        sessionId: string,
+        messageId?: string,
+      ) => void;
+      onPromptEnd: (
+        chatId: string,
+        sessionId: string,
+        messageId?: string,
+      ) => void;
+    };
+
+    expect(() => {
+      chp.onPromptStart('test-chat-id', 'session-1', 'msg-1');
+      chp.onPromptEnd('test-chat-id', 'session-1', 'msg-1');
+    }).not.toThrow();
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not synthesize task lifecycle status messages', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      onTaskLifecycle: (event: ChannelTaskLifecycleEvent) => void;
+    };
+
+    expect(() => {
+      chp.onTaskLifecycle({
+        chatId: 'test-chat-id',
+        sessionId: 'session-1',
+        taskId: 'task-1',
+        status: 'running',
+      } as ChannelTaskLifecycleEvent);
+    }).not.toThrow();
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 });
 
