@@ -3,9 +3,12 @@
 exports[`SettingsDialog > Snapshot Tests > should render default state correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -25,9 +28,12 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 exports[`SettingsDialog > Snapshot Tests > should render focused on scope selector 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -47,9 +53,12 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 exports[`SettingsDialog > Snapshot Tests > should render with accessibility settings enabled 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -69,9 +78,12 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 exports[`SettingsDialog > Snapshot Tests > should render with all boolean settings disabled 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -91,9 +103,12 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 exports[`SettingsDialog > Snapshot Tests > should render with different scope selected (System) 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -113,9 +128,12 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 exports[`SettingsDialog > Snapshot Tests > should render with different scope selected (Workspace) 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -135,9 +153,12 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 exports[`SettingsDialog > Snapshot Tests > should render with file filtering settings configured 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -157,9 +178,12 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and number settings 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -179,9 +203,12 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 exports[`SettingsDialog > Snapshot Tests > should render with tools and security settings 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
@@ -201,9 +228,12 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 exports[`SettingsDialog > Snapshot Tests > should render with various boolean settings enabled 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  Settings    Status    Stats   (↑ to switch tabs)                                                │
 │                                                                                                  │
-│ ▲                                                                                                │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ ⌕ Search settings…                                                                           │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                  │
 │ ● Tool Approval Mode                                                             Ask permissions │
 │   Language: UI                                                         Auto (detect from system) │
 │   Language: Model                                                                           auto │
