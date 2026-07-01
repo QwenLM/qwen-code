@@ -6,7 +6,7 @@
   padding: 10px 0px;
   font-size: 13px;
   color: var(--muted-foreground);
-  margin-top: -20px;
+  margin-top: 0px;
 }
 
 .spinner {

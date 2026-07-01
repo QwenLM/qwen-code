@@ -211,6 +211,23 @@ export interface DaemonSessionSummary {
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  isArchived?: boolean;
+}
+
+export type DaemonSessionArchiveState = 'active' | 'archived';
+
+export interface DaemonArchiveSessionsResult {
+  archived: string[];
+  alreadyArchived: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: string }>;
+}
+
+export interface DaemonUnarchiveSessionsResult {
+  unarchived: string[];
+  alreadyActive: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: string }>;
 }
 
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
@@ -1526,7 +1543,7 @@ export type DaemonRuntimeMcpAddResult =
   | {
       readonly name: string;
       readonly skipped: true;
-      readonly reason: 'budget_warning_only';
+      readonly reason: 'budget_warning_only' | 'runtime_name_conflict';
     };
 
 /**

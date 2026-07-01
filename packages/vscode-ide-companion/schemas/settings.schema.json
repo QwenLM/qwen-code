@@ -936,6 +936,11 @@
               "items": {
                 "type": "string"
               }
+            },
+            "classifyAllShell": {
+              "description": "Route ALL shell commands through the auto-mode classifier, including read-only commands that would otherwise be auto-approved. Provides defense-in-depth for production environments.",
+              "type": "boolean",
+              "default": false
             }
           }
         }
@@ -1136,6 +1141,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "toolIdleTimeoutMs": {
+          "description": "Idle timeout in milliseconds for MCP tool calls. If the MCP server does not produce any response or progress update within this time, the call is aborted. Default: 300000 (5 minutes). Can be overridden via QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.",
+          "type": "number",
+          "default": 300000,
+          "minimum": 10000,
+          "maximum": 3600000
         }
       }
     },
