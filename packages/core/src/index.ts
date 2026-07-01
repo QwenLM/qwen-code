@@ -197,6 +197,28 @@ export {
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export type { DurableCronTask } from './services/cronTasksFile.js';
+export {
+  type ScheduledTask,
+  type TaskSchedule,
+  type TaskRuntimeState,
+  type TaskNotify,
+  sanitizeTaskId,
+  getTaskDir,
+  getTaskManifestPath,
+  getTaskStatePath,
+  getTaskRunsDir,
+  parseTaskManifest,
+  serializeTaskManifest,
+  readTask,
+  writeTask,
+  readState,
+  writeState,
+  updateState,
+  isTaskEnabled,
+  // Aliased at the root to avoid colliding with the generic task-tool exports.
+  listTasks as listScheduledTasks,
+  deleteTask as deleteScheduledTask,
+} from './services/schedule/task-store.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';

@@ -22,6 +22,7 @@ const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
+const SCHEDULED_TASKS_DIR_NAME = 'scheduled-tasks';
 
 function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
   const relativePath = path.relative(parentPath, childPath);
@@ -304,6 +305,15 @@ export class Storage {
 
   static getGlobalArenaDir(): string {
     return path.join(Storage.getGlobalQwenDir(), ARENA_DIR_NAME);
+  }
+
+  /**
+   * Global store for `/schedule` daemon tasks — one directory per task
+   * (`<taskId>/SKILL.md` + `<taskId>/state.json`). Global (not per-project)
+   * so a single list spans every project; each task carries its own `cwd`.
+   */
+  static getScheduledTasksDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), SCHEDULED_TASKS_DIR_NAME);
   }
 
   getQwenDir(): string {
