@@ -185,8 +185,13 @@ export abstract class ChannelBase {
     if (target) {
       const active = this.activePrompts.get(event.sessionId);
       if (active && !active.cancelled) {
-        const safeToolCall = { ...event };
-        delete safeToolCall.rawInput;
+        const safeToolCall: ToolCallEvent = {
+          sessionId: event.sessionId,
+          toolCallId: event.toolCallId,
+          kind: event.kind,
+          title: sanitizeLogText(event.title, 80),
+          status: event.status,
+        };
         this.emitTaskLifecycle({
           ...this.lifecycleBase(target.chatId, event.sessionId),
           type: 'tool_call',
@@ -559,8 +564,14 @@ export abstract class ChannelBase {
         if (options.shouldContinue && !(await options.shouldContinue())) {
           throw new ChannelLoopSkippedError('loop dropped before delivery');
         }
-        if (response) {
+        if (promptState.cancelled) {
+          throw new ChannelLoopSkippedError('loop cancelled before delivery');
+        }
+        if (response && !promptState.cancelled) {
           await this.pushProactive(job.target, response);
+        }
+        if (promptState.cancelled) {
+          throw new ChannelLoopSkippedError('loop cancelled before delivery');
         }
         this.emitTaskLifecycle({
           ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
@@ -836,9 +847,11 @@ export abstract class ChannelBase {
           },
         );
       active.cancelRequested = cancelRequested;
+      active.cancelled = true;
 
       const cancelSucceeded = await cancelRequested;
       if (!cancelSucceeded) {
+        active.cancelled = false;
         await this.sendMessage(
           envelope.chatId,
           'Failed to cancel current request.',
@@ -846,7 +859,6 @@ export abstract class ChannelBase {
         return true;
       }
 
-      active.cancelled = true;
       this.stopActiveStreaming(active, activeSessionId, 'cancel');
       this.collectBuffers.delete(activeSessionId);
       this.emitTaskCancellation(active, activeSessionId, 'cancel_command');

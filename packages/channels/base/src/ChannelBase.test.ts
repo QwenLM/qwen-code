@@ -4502,8 +4502,9 @@ describe('ChannelBase', () => {
           (bridge as unknown as EventEmitter).emit('toolCall', {
             sessionId: sid,
             toolCallId: 'tool-1',
-            name: 'read_file',
-            args: { path: 'README.md' },
+            kind: 'read_file',
+            title: 'Read README.md',
+            status: 'running',
           });
           return Promise.resolve('done');
         },
@@ -4556,7 +4557,9 @@ describe('ChannelBase', () => {
           (bridge as unknown as EventEmitter).emit('toolCall', {
             sessionId: sid,
             toolCallId: 'tool-1',
-            name: 'run_shell_command',
+            kind: 'run_shell_command',
+            title: `Run shell command: echo $SECRET\n${'x'.repeat(100)}`,
+            status: 'running',
             rawInput: { command: 'echo $SECRET' },
           });
           return Promise.resolve('done');
@@ -4573,10 +4576,15 @@ describe('ChannelBase', () => {
         type: 'tool_call',
         toolCall: expect.objectContaining({
           toolCallId: 'tool-1',
-          name: 'run_shell_command',
+          kind: 'run_shell_command',
+          status: 'running',
         }),
       });
       expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
+      expect(lifecycleToolCall!.toolCall.title).not.toContain('\n');
+      expect(
+        Array.from(lifecycleToolCall!.toolCall.title).length,
+      ).toBeLessThanOrEqual(81);
       expect(ch.toolCalls[0]!.event).toMatchObject({
         rawInput: { command: 'echo $SECRET' },
       });
@@ -4644,6 +4652,47 @@ describe('ChannelBase', () => {
           expect.objectContaining({ type: 'completed' }),
         ]),
       );
+    });
+
+    it('does not emit completed while cancel command is still awaiting bridge cancellation', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      resolvePrompt('late response');
+      await prompt;
+      resolveCancel();
+      await cancel;
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Cancelled current request.' },
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'm-cancel' }),
+        expect.objectContaining({
+          type: 'cancelled',
+          reason: 'cancel_command',
+          messageId: 'm-cancel',
+        }),
+      ]);
     });
 
     it('emits one cancellation lifecycle event for repeated /cancel commands', async () => {
@@ -7880,6 +7929,64 @@ describe('ChannelBase', () => {
       await expect(loopRun).rejects.toThrow('loop cancelled before delivery');
 
       expect(ch.proactive).toEqual([]);
+    });
+
+    it('does not push a loop response cancelled while waiting for delivery authorization', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        'loop response',
+      );
+      let resolveShouldContinue!: (value: boolean) => void;
+      const shouldContinue = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockImplementationOnce(
+          () =>
+            new Promise<boolean>((resolve) => {
+              resolveShouldContinue = resolve;
+            }),
+        );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt(
+        {
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        },
+        { shouldContinue },
+      );
+      await vi.waitFor(() => expect(shouldContinue).toHaveBeenCalledTimes(2));
+
+      await ch.handleInbound(envelope({ text: '/cancel', senderId: 'alice' }));
+      resolveShouldContinue(true);
+
+      await expect(loopRun).rejects.toThrow('loop cancelled before delivery');
+      expect(ch.proactive).toEqual([]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'cancelled',
+          messageId: 'job-1',
+          reason: 'cancel_command',
+        }),
+      ]);
     });
 
     it('fails the loop when proactive delivery fails', async () => {
