@@ -6,7 +6,13 @@
 
 import type { Content, Part } from '@google/genai';
 import { describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -71,8 +77,10 @@ describe('prepareImagePayloadsForRequest', () => {
     expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
       'new-shot',
     ]);
+    expect(prepared).toHaveLength(history.length);
     expect(prepared.at(-1)?.role).toBe('user');
-    expect(prepared.at(-1)?.parts?.[0]?.text).toContain(
+    expect(prepared.at(-1)?.parts?.[0]?.text).toBe('continue');
+    expect(prepared.at(-1)?.parts?.[1]?.text).toContain(
       'Recent images reattached',
     );
   });
@@ -119,6 +127,42 @@ describe('prepareImagePayloadsForRequest', () => {
       expect(existsSync(stored.path!)).toBe(true);
       expect(readFileSync(stored.path!).toString('base64')).toBe(data);
       expect(store.get(stored.id)).toEqual(stored);
+    } finally {
+      rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to in-memory storage when the cache directory cannot be written', () => {
+    const cacheDir = path.join(
+      mkdtempSync(path.join(tmpdir(), 'qwen-image-cache-parent-')),
+      'not-a-directory',
+    );
+    writeFileSync(cacheDir, '');
+    try {
+      const store = new FileSystemImagePayloadStore(cacheDir);
+
+      const stored = store.put({
+        inlineData: { mimeType: 'image/png', data: 'shot' },
+      });
+
+      expect(stored.path).toBeUndefined();
+      expect(store.get(stored.id)).toEqual(stored);
+    } finally {
+      rmSync(path.dirname(cacheDir), { recursive: true, force: true });
+    }
+  });
+
+  it('caps filesystem extensions derived from malformed MIME subtypes', () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), 'qwen-image-cache-'));
+    try {
+      const store = new FileSystemImagePayloadStore(cacheDir);
+
+      const stored = store.put({
+        inlineData: { mimeType: `image/${'x'.repeat(300)}`, data: 'shot' },
+      });
+
+      expect(path.extname(stored.path!).slice(1)).toHaveLength(16);
+      expect(existsSync(stored.path!)).toBe(true);
     } finally {
       rmSync(cacheDir, { recursive: true, force: true });
     }

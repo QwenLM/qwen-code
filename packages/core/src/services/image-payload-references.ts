@@ -9,6 +9,8 @@ import type { Part } from '@google/genai';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
+import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
 export interface StoredImagePayload {
   id: string;
@@ -23,10 +25,6 @@ export interface ImagePayloadStore {
   put(part: Part): StoredImagePayload;
   get(id: string): StoredImagePayload | undefined;
 }
-
-type FunctionResponseWithParts = NonNullable<Part['functionResponse']> & {
-  parts?: Part[];
-};
 
 interface CollectedImage {
   stored: StoredImagePayload;
@@ -56,17 +54,25 @@ export class FileSystemImagePayloadStore implements ImagePayloadStore {
     const cached = this.images.get(stored.id);
     if (cached) return cached;
 
-    mkdirSync(this.cacheDir, { recursive: true });
-    const filePath = path.join(
-      this.cacheDir,
-      `${stored.id}.${extensionForMime(stored.mimeType)}`,
-    );
-    if (!existsSync(filePath)) {
-      writeFileSync(filePath, stored.data, { encoding: 'base64', mode: 0o600 });
+    try {
+      mkdirSync(this.cacheDir, { recursive: true, mode: 0o700 });
+      const filePath = path.join(
+        this.cacheDir,
+        `${stored.id}.${extensionForMime(stored.mimeType)}`,
+      );
+      if (!existsSync(filePath)) {
+        writeFileSync(filePath, stored.data, {
+          encoding: 'base64',
+          mode: 0o600,
+        });
+      }
+      const withPath = { ...stored, path: filePath };
+      this.images.set(withPath.id, withPath);
+      return withPath;
+    } catch {
+      this.images.set(stored.id, stored);
+      return stored;
     }
-    const withPath = { ...stored, path: filePath };
-    this.images.set(withPath.id, withPath);
-    return withPath;
   }
 
   get(id: string): StoredImagePayload | undefined {
@@ -116,20 +122,22 @@ export function prepareImagePayloadsForRequest(
     return transformed;
   }
 
-  return [
-    ...transformed,
+  const reattachParts: Part[] = [
     {
-      role: 'user',
-      parts: [
-        {
-          text:
-            'Recent images reattached for visual context: ' +
-            [...reattachById.keys()].map((id) => `Image #${id}`).join(', '),
-        },
-        ...[...reattachById.values()].map(storedImageToPart),
-      ],
+      text:
+        'Recent images reattached for visual context: ' +
+        [...reattachById.keys()].map((id) => `Image #${id}`).join(', '),
     },
+    ...[...reattachById.values()].map(storedImageToPart),
   ];
+
+  const last = transformed.at(-1);
+  if (last?.role === 'user') {
+    last.parts = [...(last.parts ?? []), ...reattachParts];
+    return transformed;
+  }
+
+  return [...transformed, { role: 'user', parts: reattachParts }];
 }
 
 function transformPart(
@@ -144,13 +152,13 @@ function transformPart(
   }
 
   if (part.functionResponse) {
-    const response = part.functionResponse as FunctionResponseWithParts;
-    if (!response.parts) return part;
+    const nestedParts = getFunctionResponseParts(part);
+    if (!nestedParts) return part;
     return {
       ...part,
       functionResponse: {
-        ...response,
-        parts: response.parts.map((nested) =>
+        ...part.functionResponse,
+        parts: nestedParts.map((nested) =>
           transformPart(nested, store, collected),
         ),
       },
@@ -205,13 +213,8 @@ function storedImageToPart(stored: StoredImagePayload): Part {
   };
 }
 
-function approxBase64Bytes(base64: string): number {
-  if (base64.length === 0) return 0;
-  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
-  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
-}
-
 function extensionForMime(mimeType: string): string {
   const subtype = mimeType.split('/')[1]?.toLowerCase() || 'bin';
-  return subtype.replace(/[^a-z0-9_-]/g, '') || 'bin';
+  const cleaned = subtype.replace(/[^a-z0-9_-]/g, '') || 'bin';
+  return cleaned.slice(0, 16);
 }

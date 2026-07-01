@@ -1574,7 +1574,8 @@ describe('GeminiChat', async () => {
       expect(serialized?.match(/"data":"new-shot"/g)).toHaveLength(1);
       expect(contents.at(-1)).toEqual({
         role: 'user',
-        parts: [
+        parts: expect.arrayContaining([
+          { text: 'continue' },
           {
             text: expect.stringContaining('Recent images reattached'),
           },
@@ -1585,7 +1586,7 @@ describe('GeminiChat', async () => {
               displayName: undefined,
             },
           },
-        ],
+        ]),
       });
     });
 
