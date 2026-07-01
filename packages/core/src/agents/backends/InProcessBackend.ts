@@ -11,8 +11,10 @@
  * This enables Arena to work without tmux or any external terminal multiplexer.
  */
 
+import path from 'node:path';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ApprovalMode, Config } from '../../config/config.js';
+import { Storage } from '../../config/storage.js';
 import { type ContentGenerator } from '../../core/contentGenerator.js';
 import type { RuntimeContentGeneratorView } from '../runtime/agent-context.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
@@ -104,6 +106,7 @@ export class InProcessBackend implements Backend {
     const perAgent = await runWithContext(() =>
       createPerAgentConfig(
         this.runtimeContext,
+        config.agentId,
         config.cwd,
         inProcessConfig.runtimeConfig.modelConfig.model,
         inProcessConfig.authOverrides,
@@ -460,6 +463,7 @@ export class InProcessBackend implements Backend {
  */
 async function createPerAgentConfig(
   base: Config,
+  agentId: string,
   cwd: string,
   modelId?: string,
   authOverrides?: InProcessSpawnConfig['authOverrides'],
@@ -492,6 +496,11 @@ async function createPerAgentConfig(
     override.getWorkingDir = () => cwd;
     override.getTargetDir = () => cwd;
     override.getProjectRoot = () => cwd;
+    override.getPlanFilePath = () => {
+      const sessionId = Storage.sanitizePlanSessionId(base.getSessionId());
+      const scopedAgentId = Storage.sanitizePlanSessionId(agentId);
+      return path.join(base.getPlansDir(), `${sessionId}-${scopedAgentId}.md`);
+    };
 
     const agentWorkspace = new WorkspaceContext(cwd);
     override.getWorkspaceContext = () => agentWorkspace;

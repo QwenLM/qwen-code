@@ -133,6 +133,7 @@ function createMockConfig() {
     getModel: vi.fn().mockReturnValue('test-model'),
     getToolRegistry: vi.fn().mockReturnValue(registry),
     getSessionId: vi.fn().mockReturnValue('test-session'),
+    getPlansDir: vi.fn().mockReturnValue('/tmp/plans'),
     getApprovalMode: vi.fn().mockReturnValue(DEFAULT_MODE),
     getPrePlanMode: vi.fn().mockReturnValue(DEFAULT_MODE),
     getPlanGateState: vi.fn().mockReturnValue(undefined),
@@ -620,6 +621,34 @@ describe('InProcessBackend', () => {
     expect(agentContext.getPrePlanMode()).toBe(DEFAULT_MODE);
     expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
     expect(parentConfig.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('uses a teammate-scoped plan file path in per-agent config', async () => {
+    const parentConfig = createMockConfig() as unknown as {
+      getPlanFilePath: ReturnType<typeof vi.fn>;
+    };
+    parentConfig.getPlanFilePath = vi
+      .fn()
+      .mockReturnValue('/tmp/plans/test-session.md');
+    const backendWithParentMode = new InProcessBackend(parentConfig as never);
+    await backendWithParentMode.init();
+
+    await backendWithParentMode.spawnAgent(createSpawnConfig('agent-1'));
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const lastCall = MockAgentCore.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+
+    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
+    const agentContext = runtimeContext as unknown as {
+      getPlanFilePath: () => string;
+    };
+    expect(agentContext.getPlanFilePath()).toBe(
+      '/tmp/plans/test-session-agent-1.md',
+    );
+    expect(agentContext.getPlanFilePath()).not.toBe(
+      parentConfig.getPlanFilePath(),
+    );
   });
 
   it('keeps Config approval-mode safety checks on per-agent config', async () => {

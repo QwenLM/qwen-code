@@ -495,6 +495,14 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       };
     }
 
+    try {
+      this.config.savePlan(plan);
+    } catch (error) {
+      debugLogger.warn(
+        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     const feedback = decision.message
       ? ` Leader note: ${decision.message}`
       : '';

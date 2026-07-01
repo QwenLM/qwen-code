@@ -487,7 +487,9 @@ describe('ExitPlanModeTool', () => {
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.DEFAULT,
       );
-      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockConfig.savePlan).toHaveBeenCalledWith(
+        'Teammate implementation plan',
+      );
       expect(result.llmContent).toContain('Leader approved');
       expect(result.returnDisplay).toEqual({
         type: 'plan_summary',
