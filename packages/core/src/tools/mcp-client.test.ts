@@ -54,6 +54,7 @@ const mockDebugLogger = vi.hoisted(() => ({
   warn: vi.fn(),
 }));
 const ORIGINAL_ENV = process.env;
+const TEST_MCP_TOOL_IDLE_TIMEOUT_MS = 300000;
 
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
@@ -76,11 +77,11 @@ vi.mock('../utils/debugLogger.js', () => ({
  */
 function cfgWithResources(): Config {
   return {
+    getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
     getResourceRegistry: () => ({
       registerResource: vi.fn(),
       removeResourcesByServer: vi.fn(),
     }),
-    getMcpToolIdleTimeoutMs: () => undefined,
   } as unknown as Config;
 }
 
@@ -1278,11 +1279,11 @@ describe('mcp-client', () => {
       const registerResource = vi.fn();
       const removeResourcesByServer = vi.fn();
       const cfg = {
+        getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
         getResourceRegistry: () => ({
           registerResource,
           removeResourcesByServer,
         }),
-        getMcpToolIdleTimeoutMs: () => undefined,
       } as unknown as Config;
       const mockedClient = {
         connect: vi.fn(),
@@ -1332,11 +1333,11 @@ describe('mcp-client', () => {
       const registerResource = vi.fn();
       const removeResourcesByServer = vi.fn();
       const cfg = {
+        getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
         getResourceRegistry: () => ({
           registerResource,
           removeResourcesByServer,
         }),
-        getMcpToolIdleTimeoutMs: () => undefined,
       } as unknown as Config;
       const mockedClient = {
         connect: vi.fn(),
