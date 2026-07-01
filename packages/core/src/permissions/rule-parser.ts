@@ -262,37 +262,75 @@ export function toolMatchesRuleToolName(
 export function parseRule(raw: string): PermissionRule {
   const trimmed = raw.trim();
 
-  // Handle legacy `:*` suffix (deprecated, equivalent to ` *`)
-  // e.g. "Bash(git:*)" → "Bash(git *)"
-  const normalized = trimmed.replace(/:(\*)/, ' $1');
-
-  const openParen = normalized.indexOf('(');
+  const openParen = trimmed.indexOf('(');
 
   if (openParen === -1) {
     // Simple tool name rule (no specifier)
-    const canonicalName = resolveToolName(normalized);
+    const canonicalName = resolveToolName(trimmed);
     return {
       raw: trimmed,
       toolName: canonicalName,
     };
   }
 
-  const toolPart = normalized.substring(0, openParen).trim();
+  const toolPart = trimmed.substring(0, openParen).trim();
 
-  if (!normalized.endsWith(')')) {
+  if (!trimmed.endsWith(')')) {
     // Malformed: unbalanced parentheses — mark as invalid so it never matches.
     return { raw: trimmed, toolName: resolveToolName(toolPart), invalid: true };
   }
 
-  const specifier = normalized.substring(openParen + 1, normalized.length - 1);
+  let rawSpecifier = trimmed.substring(openParen + 1, trimmed.length - 1);
   const canonicalName = resolveToolName(toolPart);
-  const specifierKind = specifier ? getSpecifierKind(canonicalName) : undefined;
+
+  // Handle legacy `:*` suffix for command specifiers (deprecated, equivalent to ` *`)
+  // e.g. "Bash(git:*)" → specifier becomes "git *"
+  // Only applies to command-type specifiers to avoid interfering with key:value syntax
+  const specifierKind = rawSpecifier
+    ? getSpecifierKind(canonicalName)
+    : undefined;
+  if (specifierKind === 'command' && rawSpecifier.endsWith(':*')) {
+    rawSpecifier = rawSpecifier.slice(0, -2) + ' *';
+  }
+
+  // For literal specifier kind, extract `key:value` param matchers.
+  // Comma-separated: `Agent(coder,model:opus,type:*)` →
+  //   specifier = "coder", toolParamMatchers = [{model,opus},{type,*}]
+  let specifier: string | undefined = rawSpecifier;
+  let toolParamMatchers:
+    | Array<{ key: string; valuePattern: string }>
+    | undefined;
+
+  if (specifierKind === 'literal' && rawSpecifier.includes(':')) {
+    const parts = rawSpecifier.split(',').map((p) => p.trim());
+    const plainParts: string[] = [];
+    const matchers: Array<{ key: string; valuePattern: string }> = [];
+
+    for (const part of parts) {
+      const colonIdx = part.indexOf(':');
+      if (colonIdx > 0) {
+        const key = part.substring(0, colonIdx).trim();
+        const valuePattern = part.substring(colonIdx + 1).trim();
+        if (key && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+          matchers.push({ key, valuePattern });
+          continue;
+        }
+      }
+      plainParts.push(part);
+    }
+
+    if (matchers.length > 0) {
+      toolParamMatchers = matchers;
+      specifier = plainParts.join(',').trim() || undefined;
+    }
+  }
 
   return {
     raw: trimmed,
     toolName: canonicalName,
     specifier,
     specifierKind,
+    toolParamMatchers,
   };
 }
 
@@ -994,6 +1032,7 @@ export function matchesRule(
   domain?: string,
   pathContext?: PathMatchContext,
   specifier?: string,
+  toolParams?: Record<string, unknown>,
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -1015,53 +1054,80 @@ export function matchesRule(
     return false;
   }
 
-  // ── No specifier → match any invocation of the tool ──────────────────
-  if (!rule.specifier) {
+  // ── No specifier and no param matchers → match any invocation ────────
+  if (!rule.specifier && !rule.toolParamMatchers?.length) {
     return true;
   }
 
   // ── Specifier matching (kind-dependent) ──────────────────────────────
   const kind = rule.specifierKind ?? getSpecifierKind(rule.toolName);
 
-  switch (kind) {
-    case 'command': {
-      if (command === undefined) {
-        return false;
-      }
-      return matchesCommandPattern(rule.specifier, command);
-    }
+  let specifierMatched = true;
 
-    case 'path': {
-      if (filePath === undefined) {
-        return false;
+  if (rule.specifier) {
+    switch (kind) {
+      case 'command': {
+        if (command === undefined) {
+          return false;
+        }
+        specifierMatched = matchesCommandPattern(rule.specifier, command);
+        break;
       }
-      const ctx = pathContext ?? {
-        projectRoot: process.cwd(),
-        cwd: process.cwd(),
-      };
-      return matchesPathPattern(
-        rule.specifier,
-        filePath,
-        ctx.projectRoot,
-        ctx.cwd,
-      );
-    }
 
-    case 'domain': {
-      if (domain === undefined) {
-        return false;
+      case 'path': {
+        if (filePath === undefined) {
+          return false;
+        }
+        const ctx = pathContext ?? {
+          projectRoot: process.cwd(),
+          cwd: process.cwd(),
+        };
+        specifierMatched = matchesPathPattern(
+          rule.specifier,
+          filePath,
+          ctx.projectRoot,
+          ctx.cwd,
+        );
+        break;
       }
-      return matchesDomainPattern(rule.specifier, domain);
-    }
 
-    case 'literal':
-    default: {
-      // Literal/exact matching (for Skill names, Agent subagent types, etc.)
-      const value = command ?? specifier;
-      if (value !== undefined) {
-        return value === rule.specifier;
+      case 'domain': {
+        if (domain === undefined) {
+          return false;
+        }
+        specifierMatched = matchesDomainPattern(rule.specifier, domain);
+        break;
       }
-      return false;
+
+      case 'literal':
+      default: {
+        const value = command ?? specifier;
+        specifierMatched = value !== undefined && value === rule.specifier;
+        break;
+      }
     }
   }
+
+  if (!specifierMatched) {
+    return false;
+  }
+
+  // ── Tool param matching (key:value syntax) ───────────────────────────
+  if (rule.toolParamMatchers?.length) {
+    if (!toolParams) {
+      return false;
+    }
+    for (const matcher of rule.toolParamMatchers) {
+      const actualValue = toolParams[matcher.key];
+      if (actualValue === undefined || actualValue === null) {
+        return false;
+      }
+      const actualStr = String(actualValue);
+      if (!matchesCommandPattern(matcher.valuePattern, actualStr)) {
+        return false;
+      }
+    }
+  }
+
+  return true;
 }

@@ -877,6 +877,208 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__chrome__navigate')).toBe(false);
     expect(matchesRule(rule, 'mcp__other__use_browser')).toBe(false);
   });
+
+  // ─── Tool(param:value) syntax ───────────────────────────────────────────────
+
+  it('parseRule extracts key:value param matchers', async () => {
+    const r = parseRule('Agent(model:opus)');
+    expect(r.toolName).toBe('agent');
+    expect(r.specifier).toBeUndefined();
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+    ]);
+  });
+
+  it('parseRule extracts multiple key:value pairs', async () => {
+    const r = parseRule('Agent(model:opus,type:code)');
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+      { key: 'type', valuePattern: 'code' },
+    ]);
+  });
+
+  it('parseRule handles mixed specifier and param matchers', async () => {
+    const r = parseRule('Agent(coder,model:opus)');
+    expect(r.specifier).toBe('coder');
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+    ]);
+  });
+
+  it('parseRule supports wildcard in value pattern', async () => {
+    const r = parseRule('Agent(model:*)');
+    expect(r.toolParamMatchers).toEqual([{ key: 'model', valuePattern: '*' }]);
+  });
+
+  it('parseRule does not treat WebFetch domain: as key:value', async () => {
+    const r = parseRule('WebFetch(domain:example.com)');
+    expect(r.specifierKind).toBe('domain');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('parseRule preserves legacy :* for command specifiers', async () => {
+    const r = parseRule('Bash(git:*)');
+    expect(r.specifier).toBe('git *');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('matchesRule matches tool with param matcher', async () => {
+    const rule = parseRule('Agent(model:opus)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('matchesRule fails when toolParams missing for param matcher rule', async () => {
+    const rule = parseRule('Agent(model:opus)');
+    expect(matchesRule(rule, 'agent')).toBe(false);
+  });
+
+  it('matchesRule supports wildcard value pattern', async () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'agent')).toBe(false); // no toolParams
+  });
+
+  it('matchesRule requires all param matchers to match', async () => {
+    const rule = parseRule('Agent(model:opus,type:code)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+          type: 'code',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+          type: 'chat',
+        },
+      ),
+    ).toBe(false);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(false); // missing 'type' param
+  });
+
+  it('matchesRule handles mixed specifier and param matchers', async () => {
+    const rule = parseRule('Agent(coder,model:opus)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'coder',
+        { model: 'opus' },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'coder',
+        { model: 'sonnet' },
+      ),
+    ).toBe(false); // param mismatch
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'explore',
+        { model: 'opus' },
+      ),
+    ).toBe(false); // specifier mismatch
+  });
 });
 
 // ─── PermissionManager ──────────────────────────────────────────────────────
