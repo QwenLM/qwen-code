@@ -248,11 +248,25 @@ const WS_READ_METHODS = new Set([
 function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
   if (!localPort) return false;
   const parsed = new URL(origin);
+  // Both schemes: under `--tls-cert/--tls-key` the loopback ACP client
+  // speaks https, so its Origin header carries `https://`.
   const allowed = new Set([
     `http://localhost:${localPort}`,
     `http://127.0.0.1:${localPort}`,
     `http://[::1]:${localPort}`,
+    `https://localhost:${localPort}`,
+    `https://127.0.0.1:${localPort}`,
+    `https://[::1]:${localPort}`,
   ]);
+  // RFC 7230 §5.4: browsers omit the port in the Origin header when it
+  // matches the scheme default (http→80, https→443). Accept the port-less
+  // forms so the check doesn't fail on default ports.
+  if (localPort === 80 || localPort === 443) {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
+      allowed.add(`http://${host}`);
+      allowed.add(`https://${host}`);
+    }
+  }
   return allowed.has(parsed.origin.toLowerCase());
 }
 
@@ -966,6 +980,17 @@ export function mountAcpHttp(
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        // RFC 7230 §5.4: browsers omit the port suffix when it matches the
+        // scheme default (http→80, https→443). On TLS/port 443 the browser
+        // sends `Host: localhost`, which won't match `localhost:443` and
+        // every WS upgrade is rejected. Mirror the REST host allowlist
+        // (auth.ts) and accept the port-less forms on default ports.
+        if (localPort === 80 || localPort === 443) {
+          allowed.add('localhost');
+          allowed.add('127.0.0.1');
+          allowed.add('[::1]');
+          allowed.add('host.docker.internal');
+        }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
