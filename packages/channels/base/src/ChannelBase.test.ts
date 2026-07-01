@@ -435,14 +435,34 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('No active session');
     });
 
-    it('/reset and /new are aliases for /clear', async () => {
-      for (const cmd of ['/reset', '/new']) {
-        const ch = createChannel();
-        await ch.handleInbound(envelope());
-        ch.sent = [];
-        await ch.handleInbound(envelope({ text: cmd }));
-        expect(ch.sent[0]!.text).toContain('Session cleared');
-      }
+    it('/reset is an alias for /clear (DM)', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope());
+      ch.sent = [];
+      await ch.handleInbound(envelope({ text: '/reset' }));
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+    });
+
+    it('/new bypasses shared session confirmation', async () => {
+      // /new starts a fresh session for everyone — it is additive like /help,
+      // not destructive like /clear, so it must NOT require "confirm".
+      // /clear in the same shared session SHOULD still ask for confirm.
+      const ch = createChannel({ sessionScope: 'thread', groupPolicy: 'open' });
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+      // Establish a shared session first.
+      await ch.handleInbound({ ...g, text: 'hello' });
+      ch.sent = [];
+
+      // /new should work immediately (no confirm prompt).
+      await ch.handleInbound({ ...g, text: '/new' });
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+      ch.sent = [];
+
+      // Re-establish the session and verify /clear still asks for confirm.
+      await ch.handleInbound({ ...g, text: 'hello' });
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/clear' });
+      expect(ch.sent[0]!.text).toContain('/clear confirm');
     });
 
     it('/status shows session info', async () => {
