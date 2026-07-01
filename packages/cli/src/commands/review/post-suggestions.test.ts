@@ -21,6 +21,7 @@ const {
   readFileSyncMock,
   writeFileSyncMock,
   unlinkSyncMock,
+  mkdirSyncMock,
   writeStdoutLineMock,
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
@@ -30,6 +31,7 @@ const {
   readFileSyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
   unlinkSyncMock: vi.fn(),
+  mkdirSyncMock: vi.fn(),
   writeStdoutLineMock: vi.fn(),
 }));
 
@@ -47,6 +49,7 @@ vi.mock('node:fs', async (importOriginal) => {
     readFileSync: readFileSyncMock,
     writeFileSync: writeFileSyncMock,
     unlinkSync: unlinkSyncMock,
+    mkdirSync: mkdirSyncMock,
   };
   return { ...mock, default: mock };
 });
@@ -177,5 +180,34 @@ describe('runPostSuggestions', () => {
 
     await expect(runPostSuggestions(baseArgs)).rejects.toThrow('gh api failed');
     expect(unlinkSyncMock).toHaveBeenCalledWith('/tmp/out.json.payload.json');
+  });
+
+  it('throws a diagnostic error when gh returns non-JSON output (POST)', async () => {
+    ghApiAllMock.mockReturnValue([]);
+    ghMock.mockReturnValue('<html>502 Bad Gateway</html>');
+
+    await expect(runPostSuggestions(baseArgs)).rejects.toThrow(
+      'gh api returned unparseable output for POST on PR #42',
+    );
+  });
+
+  it('throws a diagnostic error when gh returns non-JSON output (PATCH)', async () => {
+    ghApiAllMock.mockReturnValue([comment(99, 'qwen-bot', bodyWithMarker)]);
+    ghMock.mockReturnValue('rate limited, try again later');
+
+    await expect(runPostSuggestions(baseArgs)).rejects.toThrow(
+      'gh api returned unparseable output for PATCH on PR #42',
+    );
+  });
+
+  it('ensures the output directory exists before writing', async () => {
+    ghApiAllMock.mockReturnValue([]);
+    ghMock.mockReturnValue(JSON.stringify({ id: 200 }));
+
+    await runPostSuggestions({ ...baseArgs, out: '/tmp/nested/dir/out.json' });
+
+    expect(mkdirSyncMock).toHaveBeenCalledWith('/tmp/nested/dir', {
+      recursive: true,
+    });
   });
 });
