@@ -63,7 +63,13 @@ function isProcessAlive(pid: number): boolean {
 
 let activeDaemon: ScheduleDaemon | null = null;
 
-export async function runScheduleDaemon(): Promise<never> {
+export interface DaemonStartOptions {
+  forceSandbox?: boolean;
+}
+
+export async function runScheduleDaemon(
+  options: DaemonStartOptions = {},
+): Promise<never> {
   // Prevent concurrent daemons
   const existingPid = readPidFile();
   if (existingPid !== null && isProcessAlive(existingPid)) {
@@ -75,7 +81,9 @@ export async function runScheduleDaemon(): Promise<never> {
 
   writePidFile();
 
-  const daemon = new ScheduleDaemon();
+  const daemon = new ScheduleDaemon({
+    forceSandbox: options.forceSandbox ?? false,
+  });
   activeDaemon = daemon;
 
   // Graceful shutdown on signals
@@ -173,7 +181,9 @@ function getStderrLogPath(): string {
  * Start the daemon in background mode.
  * Spawns a detached child process that runs the daemon in foreground mode.
  */
-export async function startDaemonInBackground(): Promise<void> {
+export async function startDaemonInBackground(
+  options: DaemonStartOptions = {},
+): Promise<void> {
   // Check if already running
   const existingPid = readPidFile();
   if (existingPid !== null && isProcessAlive(existingPid)) {
@@ -193,16 +203,18 @@ export async function startDaemonInBackground(): Promise<void> {
     throw new Error('Cannot determine CLI entry point for background daemon');
   }
 
+  // Build args
+  const args = [cliEntry, 'schedule', 'daemon', 'start', '--foreground'];
+  if (options.forceSandbox) {
+    args.push('--force-sandbox');
+  }
+
   // Spawn detached child process
-  const child = spawn(
-    process.execPath,
-    [cliEntry, 'schedule', 'daemon', 'start', '--foreground'],
-    {
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env },
-    },
-  );
+  const child = spawn(process.execPath, args, {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env },
+  });
 
   // Redirect output to log files
   const stdoutLog = fs.createWriteStream(getStdoutLogPath(), { flags: 'a' });

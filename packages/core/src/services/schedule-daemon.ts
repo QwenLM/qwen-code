@@ -16,9 +16,15 @@ import {
   readScheduleTask,
   listScheduleTasks,
   writeScheduleRunRecord,
+  updateScheduleTask,
   type ScheduleTask,
 } from './schedule-task-store.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  ChannelRegistry,
+  type TaskNotification,
+  type ChannelConfig,
+} from './channels/index.js';
 
 const debugLogger = createDebugLogger('SCHEDULE_DAEMON');
 
@@ -45,6 +51,10 @@ export interface DaemonStatus {
   lastFireTimes: Array<{ taskId: string; lastFiredAt: string }>;
 }
 
+export interface DaemonOptions {
+  forceSandbox?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Binary resolution
 // ---------------------------------------------------------------------------
@@ -66,9 +76,13 @@ export class ScheduleDaemon {
   private activeFires = new Map<string, ActiveFire>();
   private jobToTaskId = new Map<string, string>();
   private loadedTasks = new Map<string, ScheduleTask>();
+  private forceSandbox: boolean;
+  private channelRegistry: ChannelRegistry;
 
-  constructor() {
+  constructor(options: DaemonOptions = {}) {
     this.scheduler = new CronScheduler(null);
+    this.forceSandbox = options.forceSandbox ?? false;
+    this.channelRegistry = new ChannelRegistry();
   }
 
   // -----------------------------------------------------------------------
@@ -91,7 +105,7 @@ export class ScheduleDaemon {
 
     this.state = 'running';
     debugLogger.info(
-      `ScheduleDaemon started with ${this.loadedTasks.size} task(s)`,
+      `ScheduleDaemon started with ${this.loadedTasks.size} task(s)${this.forceSandbox ? ' (forced sandbox)' : ''}`,
     );
   }
 
@@ -105,7 +119,9 @@ export class ScheduleDaemon {
       if (fire.child.exitCode === null) {
         fire.child.kill('SIGTERM');
         try {
-          await once(fire.child, 'exit', { signal: AbortSignal.timeout(5_000) });
+          await once(fire.child, 'exit', {
+            signal: AbortSignal.timeout(5_000),
+          });
         } catch {
           fire.child.kill('SIGKILL');
         }
@@ -187,15 +203,47 @@ export class ScheduleDaemon {
 
   private registerTask(task: ScheduleTask): void {
     const { definition } = task;
-    const job = this.scheduler.create(
-      definition.schedule.cron,
-      definition.prompt,
-      true,
-    );
-    job.expiresAt = Infinity;
 
-    this.jobToTaskId.set(job.id, definition.taskId);
-    this.loadedTasks.set(definition.taskId, task);
+    // Handle fireAt (one-shot) tasks
+    if (definition.schedule.fireAt) {
+      const fireAtDate = new Date(definition.schedule.fireAt);
+      const now = new Date();
+
+      // If fireAt is in the past, skip registration
+      if (fireAtDate <= now) {
+        debugLogger.info(
+          `ScheduleDaemon: skipping past fireAt task ${definition.taskId} (${definition.name})`,
+        );
+        return;
+      }
+
+      // Calculate delay in milliseconds
+      const delayMs = fireAtDate.getTime() - now.getTime();
+
+      // Schedule a one-shot timeout
+      setTimeout(() => {
+        void this.fireTask(task, 'fireAt');
+      }, delayMs);
+
+      this.loadedTasks.set(definition.taskId, task);
+      debugLogger.info(
+        `ScheduleDaemon: registered fireAt task ${definition.taskId} (${definition.name}) for ${definition.schedule.fireAt}`,
+      );
+      return;
+    }
+
+    // Handle cron tasks
+    if (definition.schedule.cron) {
+      const job = this.scheduler.create(
+        definition.schedule.cron,
+        definition.prompt,
+        true,
+      );
+      job.expiresAt = Infinity;
+
+      this.jobToTaskId.set(job.id, definition.taskId);
+      this.loadedTasks.set(definition.taskId, task);
+    }
   }
 
   private async onFire(job: CronJob): Promise<void> {
@@ -205,21 +253,41 @@ export class ScheduleDaemon {
     const task = this.loadedTasks.get(taskId);
     if (!task) return;
 
+    await this.fireTask(task, 'cron', job.id);
+  }
+
+  private async fireTask(
+    task: ScheduleTask,
+    trigger: 'cron' | 'fireAt',
+    jobId?: string,
+  ): Promise<void> {
+    const { definition } = task;
+
     if (this.activeFires.size >= MAX_CONCURRENT_FIRES) {
       debugLogger.warn(
         `ScheduleDaemon: max concurrent fires (${MAX_CONCURRENT_FIRES}) reached, ` +
-          `skipping fire for task ${taskId}`,
+          `skipping fire for task ${definition.taskId}`,
       );
       return;
     }
 
-    const { definition } = task;
+    // Apply forced sandbox if enabled
+    let approvalMode = definition.approvalMode;
+    if (this.forceSandbox) {
+      // Downgrade privileged modes to safer alternatives
+      if (approvalMode === 'auto' || approvalMode === 'yolo') {
+        approvalMode = 'default';
+        debugLogger.warn(
+          `ScheduleDaemon: forced sandbox mode, downgrading approval from ${definition.approvalMode} to ${approvalMode} for task ${definition.taskId}`,
+        );
+      }
+    }
 
     const args = [
       '-p',
       definition.prompt,
       '--approval-mode',
-      definition.approvalMode,
+      approvalMode,
       '--output-format',
       'stream-json',
       '--max-walls-time',
@@ -228,9 +296,12 @@ export class ScheduleDaemon {
     if (definition.model) {
       args.push('--model', definition.model);
     }
+    if (this.forceSandbox || definition.sandbox) {
+      args.push('--sandbox');
+    }
 
     debugLogger.info(
-      `ScheduleDaemon: firing task ${taskId} (${definition.name})`,
+      `ScheduleDaemon: firing task ${definition.taskId} (${definition.name}) via ${trigger}`,
     );
 
     const startedAt = new Date();
@@ -241,19 +312,20 @@ export class ScheduleDaemon {
       shell: false,
     });
 
+    const fireId = jobId || `fireAt-${definition.taskId}-${Date.now()}`;
     const fire: ActiveFire = {
       child,
-      taskId,
-      jobId: job.id,
+      taskId: definition.taskId,
+      jobId: fireId,
       startedAt,
     };
-    this.activeFires.set(job.id, fire);
+    this.activeFires.set(fireId, fire);
 
     child.on('error', (err) => {
       debugLogger.error(
-        `ScheduleDaemon: failed to spawn task ${taskId}: ${err.message}`,
+        `ScheduleDaemon: failed to spawn task ${definition.taskId}: ${err.message}`,
       );
-      this.activeFires.delete(job.id);
+      this.activeFires.delete(fireId);
     });
 
     let stdout = '';
@@ -272,18 +344,71 @@ export class ScheduleDaemon {
       const [exitCode] = (await once(child, 'exit')) as [number | null];
       const endedAt = new Date();
 
-      await writeScheduleRunRecord(taskId, {
+      await writeScheduleRunRecord(definition.taskId, {
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
         exitCode,
         outputSummary: stdout.slice(0, 500).trim(),
       });
+
+      // If this was a fireAt task, disable it after execution
+      if (trigger === 'fireAt') {
+        await updateScheduleTask(definition.taskId, { enabled: false });
+        debugLogger.info(
+          `ScheduleDaemon: fireAt task ${definition.taskId} completed and disabled`,
+        );
+      }
+
+      // Send channel notifications
+      await this.sendNotification(definition, {
+        taskId: definition.taskId,
+        taskName: definition.name,
+        status: exitCode === 0 ? 'success' : 'failure',
+        startedAt: startedAt.toISOString(),
+        endedAt: endedAt.toISOString(),
+        exitCode,
+        outputSummary: stdout.slice(0, 500).trim(),
+        error: exitCode !== 0 ? `Exit code: ${exitCode}` : undefined,
+      });
     } catch (err) {
       debugLogger.warn(
-        `ScheduleDaemon: error waiting for task ${taskId}: ${err}`,
+        `ScheduleDaemon: error waiting for task ${definition.taskId}: ${err}`,
       );
     } finally {
-      this.activeFires.delete(job.id);
+      this.activeFires.delete(fireId);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Channel notifications
+  // -----------------------------------------------------------------------
+
+  private async sendNotification(
+    definition: ScheduleTask['definition'],
+    notification: TaskNotification,
+  ): Promise<void> {
+    // Register channels from task definition if any
+    const channels = (definition as unknown as Record<string, unknown>)[
+      'channels'
+    ] as ChannelConfig[] | undefined;
+
+    if (channels && channels.length > 0) {
+      const registry = new ChannelRegistry();
+      const channelInstances = ChannelRegistry.createChannels(channels);
+      for (const ch of channelInstances) {
+        registry.register(ch);
+      }
+      await registry.sendToAll(notification);
+    }
+  }
+
+  /**
+   * Register channels for this daemon instance (used by CLI).
+   */
+  registerChannels(configs: ChannelConfig[]): void {
+    for (const config of configs) {
+      const channel = ChannelRegistry.createChannel(config);
+      this.channelRegistry.register(channel);
     }
   }
 }

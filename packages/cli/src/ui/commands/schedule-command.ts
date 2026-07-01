@@ -116,16 +116,16 @@ export const scheduleCommand: SlashCommand = {
       const value = parts.slice(2).join(' ');
 
       const updates: Record<string, unknown> = {};
-      if (field === 'name') updates.name = value;
-      else if (field === 'cron') updates.cron = value;
-      else if (field === 'prompt') updates.prompt = value;
-      else if (field === 'cwd') updates.cwd = value;
-      else if (field === 'description') updates.description = value;
-      else if (field === 'model') updates.model = value;
-      else if (field === 'approvalMode') updates.approvalMode = value;
-      else if (field === 'enable') updates.enabled = value === 'true';
-      else if (field === 'disable') updates.enabled = value !== 'true';
-      else if (field === 'sandbox') updates.sandbox = value === 'true';
+      if (field === 'name') updates['name'] = value;
+      else if (field === 'cron') updates['cron'] = value;
+      else if (field === 'prompt') updates['prompt'] = value;
+      else if (field === 'cwd') updates['cwd'] = value;
+      else if (field === 'description') updates['description'] = value;
+      else if (field === 'model') updates['model'] = value;
+      else if (field === 'approvalMode') updates['approvalMode'] = value;
+      else if (field === 'enable') updates['enabled'] = value === 'true';
+      else if (field === 'disable') updates['enabled'] = value !== 'true';
+      else if (field === 'sandbox') updates['sandbox'] = value === 'true';
       else {
         return {
           type: 'message',

@@ -262,6 +262,7 @@ export * from './utils/safe-mode.js';
 export * from './utils/toolResultDisplayCompaction.js';
 export * from './services/schedule-task-store.js';
 export * from './services/schedule-daemon.js';
+export * from './services/channels/index.js';
 
 // ============================================================================
 // Managed Auto-Memory
@@ -477,7 +478,7 @@ export * from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
 export * from './utils/forkedAgent.js';
 export * from './utils/sideQuery.js';
-export * from './utils/naturalLanguageCron.js';
+export * from './utils/natural-language-cron.js';
 
 // ============================================================================
 // OAuth & Authentication

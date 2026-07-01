@@ -31,9 +31,15 @@ const daemonStartCommand: CommandModule = {
         hidden: true,
         description:
           'Internal flag: run in foreground mode (used by background spawning)',
+      })
+      .option('force-sandbox', {
+        type: 'boolean',
+        default: false,
+        description: 'Force sandbox mode for all tasks (security enhancement)',
       }),
   handler: async (argv) => {
     const background = argv['background'] as boolean;
+    const forceSandbox = argv['force-sandbox'] as boolean;
 
     if (background) {
       // Start in background mode
@@ -41,7 +47,7 @@ const daemonStartCommand: CommandModule = {
         '../schedule/run-schedule-daemon.js'
       );
       try {
-        await startDaemonInBackground();
+        await startDaemonInBackground({ forceSandbox });
         writeStderrLine('Schedule daemon started in background.');
         writeStderrLine('Logs: ~/.qwen/logs/schedule-daemon.log');
         writeStderrLine('Stop: qwen schedule daemon stop');
@@ -58,7 +64,7 @@ const daemonStartCommand: CommandModule = {
         '../schedule/run-schedule-daemon.js'
       );
       try {
-        await runScheduleDaemon();
+        await runScheduleDaemon({ forceSandbox });
       } catch (err) {
         writeStderrLine(
           `qwen schedule daemon: ${err instanceof Error ? err.message : String(err)}`,
@@ -151,6 +157,11 @@ const createCommand: CommandModule = {
         type: 'string',
         description: 'Cron expression (5-field, local time)',
       })
+      .option('fire-at', {
+        type: 'string',
+        description:
+          'One-shot execution time (ISO 8601, e.g. 2026-07-01T14:00:00Z)',
+      })
       .option('prompt', {
         type: 'string',
         description: 'Prompt to execute on each fire',
@@ -196,15 +207,19 @@ const createCommand: CommandModule = {
       .check((argv) => {
         const hasTemplate = argv['template'] !== undefined;
         const hasNl = argv['nl'] !== undefined;
+        const hasFireAt = argv['fire-at'] !== undefined;
         const hasExplicit =
           argv.name !== undefined &&
-          argv.cron !== undefined &&
+          (argv.cron !== undefined || hasFireAt) &&
           argv.prompt !== undefined;
 
         if (!hasTemplate && !hasNl && !hasExplicit) {
           throw new Error(
-            'Either provide --name, --cron, and --prompt, or use --template, or use --nl for natural language',
+            'Either provide --name, --cron (or --fire-at), and --prompt, or use --template, or use --nl for natural language',
           );
+        }
+        if (argv.cron !== undefined && hasFireAt) {
+          throw new Error('Cannot specify both --cron and --fire-at');
         }
         return true;
       }),
@@ -220,7 +235,8 @@ const createCommand: CommandModule = {
       let taskParams: {
         name: string;
         description?: string;
-        cron: string;
+        cron?: string;
+        fireAt?: string;
         cwd?: string;
         model?: string;
         approvalMode: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
@@ -230,6 +246,7 @@ const createCommand: CommandModule = {
 
       const templateName = argv['template'] as string | undefined;
       const nlSchedule = argv['nl'] as string | undefined;
+      const fireAt = argv['fire-at'] as string | undefined;
 
       if (templateName) {
         // Use template
@@ -252,7 +269,7 @@ const createCommand: CommandModule = {
         writeStderrLine(`Using template: ${templateName}`);
       } else if (nlSchedule) {
         // Use natural language
-        if (!argv.name || !argv.prompt) {
+        if (!argv['name'] || !argv['prompt']) {
           throw new Error(
             'When using --nl, you must also provide --name and --prompt',
           );
@@ -262,10 +279,10 @@ const createCommand: CommandModule = {
           `Parsed schedule: ${parsed.description} (${parsed.cron})`,
         );
         taskParams = {
-          name: argv.name as string,
+          name: argv['name'] as string,
           description: argv['description'] as string | undefined,
           cron: parsed.cron,
-          prompt: argv.prompt as string,
+          prompt: argv['prompt'] as string,
           approvalMode: argv['approval-mode'] as
             | 'plan'
             | 'default'
@@ -277,11 +294,12 @@ const createCommand: CommandModule = {
           model: argv['model'] as string | undefined,
         };
       } else {
-        // Explicit parameters
+        // Explicit parameters (cron or fireAt)
         taskParams = {
           name: argv['name'] as string,
           description: argv['description'] as string | undefined,
-          cron: argv['cron'] as string,
+          cron: argv['cron'] as string | undefined,
+          fireAt,
           cwd: argv['cwd'] as string | undefined,
           model: argv['model'] as string | undefined,
           approvalMode: argv['approval-mode'] as
@@ -464,18 +482,19 @@ const updateCommand: CommandModule = {
     const taskId = argv['taskId'] as string;
 
     const updates: Record<string, unknown> = {};
-    if (argv.name !== undefined) updates.name = argv.name;
-    if (argv.cron !== undefined) updates.cron = argv.cron;
-    if (argv.prompt !== undefined) updates.prompt = argv.prompt;
-    if (argv.cwd !== undefined) updates.cwd = argv.cwd;
-    if (argv.description !== undefined) updates.description = argv.description;
-    if (argv.model !== undefined) updates.model = argv.model;
+    if (argv['name'] !== undefined) updates['name'] = argv['name'];
+    if (argv['cron'] !== undefined) updates['cron'] = argv['cron'];
+    if (argv['prompt'] !== undefined) updates['prompt'] = argv['prompt'];
+    if (argv['cwd'] !== undefined) updates['cwd'] = argv['cwd'];
+    if (argv['description'] !== undefined)
+      updates['description'] = argv['description'];
+    if (argv['model'] !== undefined) updates['model'] = argv['model'];
     if (argv['approval-mode'] !== undefined) {
-      updates.approvalMode = argv['approval-mode'];
+      updates['approvalMode'] = argv['approval-mode'];
     }
-    if (argv.enable !== undefined) updates.enabled = true;
-    if (argv.disable !== undefined) updates.enabled = false;
-    if (argv.sandbox !== undefined) updates.sandbox = argv.sandbox;
+    if (argv['enable'] !== undefined) updates['enabled'] = true;
+    if (argv['disable'] !== undefined) updates['enabled'] = false;
+    if (argv['sandbox'] !== undefined) updates['sandbox'] = argv['sandbox'];
 
     try {
       const task = await updateScheduleTask(taskId, updates);
@@ -604,6 +623,324 @@ const logsCommand: CommandModule = {
 };
 
 // ---------------------------------------------------------------------------
+// service (group)
+// ---------------------------------------------------------------------------
+
+const serviceInstallCommand: CommandModule = {
+  command: 'install',
+  describe:
+    'Install the schedule daemon as a system service (auto-start on boot)',
+  handler: async () => {
+    const { getServiceManager } = await import(
+      '../schedule/service-managers/index.js'
+    );
+
+    try {
+      const manager = await getServiceManager();
+      const available = await manager.isAvailable();
+      if (!available) {
+        writeStderrLine(
+          `Error: ${manager.name} is not available on this system.`,
+        );
+        process.exit(1);
+      }
+
+      await manager.install();
+      writeStderrLine(`Schedule daemon installed as ${manager.name} service.`);
+      writeStderrLine(
+        'The daemon will now start automatically on system boot.',
+      );
+    } catch (err) {
+      writeStderrLine(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+    process.exit(0);
+  },
+};
+
+const serviceUninstallCommand: CommandModule = {
+  command: 'uninstall',
+  describe: 'Remove the schedule daemon system service',
+  handler: async () => {
+    const { getServiceManager } = await import(
+      '../schedule/service-managers/index.js'
+    );
+
+    try {
+      const manager = await getServiceManager();
+      await manager.uninstall();
+      writeStderrLine(`Schedule daemon service removed.`);
+      writeStderrLine('The daemon will no longer start automatically on boot.');
+    } catch (err) {
+      writeStderrLine(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+    process.exit(0);
+  },
+};
+
+const serviceStatusCommand: CommandModule = {
+  command: 'status',
+  describe: 'Show system service status',
+  handler: async () => {
+    const { getServiceManager } = await import(
+      '../schedule/service-managers/index.js'
+    );
+
+    try {
+      const manager = await getServiceManager();
+      const status = await manager.status();
+
+      writeStderrLine(`Service manager: ${manager.name}`);
+      writeStderrLine(`  Installed: ${status.installed ? 'yes' : 'no'}`);
+      writeStderrLine(`  Running:   ${status.running ? 'yes' : 'no'}`);
+      writeStderrLine(`  Enabled:   ${status.enabled ? 'yes' : 'no'}`);
+      if (status.pid) {
+        writeStderrLine(`  PID:       ${status.pid}`);
+      }
+    } catch (err) {
+      writeStderrLine(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+    process.exit(0);
+  },
+};
+
+const serviceStartCommand: CommandModule = {
+  command: 'start',
+  describe: 'Start the system service',
+  handler: async () => {
+    const { getServiceManager } = await import(
+      '../schedule/service-managers/index.js'
+    );
+
+    try {
+      const manager = await getServiceManager();
+      await manager.start();
+      writeStderrLine('Service started.');
+    } catch (err) {
+      writeStderrLine(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+    process.exit(0);
+  },
+};
+
+const serviceStopCommand: CommandModule = {
+  command: 'stop',
+  describe: 'Stop the system service',
+  handler: async () => {
+    const { getServiceManager } = await import(
+      '../schedule/service-managers/index.js'
+    );
+
+    try {
+      const manager = await getServiceManager();
+      await manager.stop();
+      writeStderrLine('Service stopped.');
+    } catch (err) {
+      writeStderrLine(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+    process.exit(0);
+  },
+};
+
+const serviceCommand: CommandModule = {
+  command: 'service',
+  describe: 'Manage the schedule daemon system service',
+  builder: (yargs: Argv) =>
+    yargs
+      .command(serviceInstallCommand)
+      .command(serviceUninstallCommand)
+      .command(serviceStatusCommand)
+      .command(serviceStartCommand)
+      .command(serviceStopCommand)
+      .demandCommand(1, 'You need at least one command before continuing.')
+      .version(false),
+  handler: () => {},
+};
+
+// ---------------------------------------------------------------------------
+// webhook (group)
+// ---------------------------------------------------------------------------
+
+const webhookStartCommand: CommandModule = {
+  command: 'start',
+  describe: 'Start the webhook server for event triggers',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        default: 8080,
+        describe: 'Port to listen on',
+      })
+      .option('host', {
+        type: 'string',
+        default: '127.0.0.1',
+        describe: 'Host to bind to',
+      }),
+  handler: async (argv) => {
+    const { WebhookServer } = await import('../schedule/webhook-server.js');
+    const { listScheduleTasks } = await import('@qwen-code/qwen-code-core');
+
+    const port = argv['port'] as number;
+    const host = argv['host'] as string;
+
+    // Load tasks with webhook triggers
+    const tasks = await listScheduleTasks();
+    const triggers: Array<{
+      path: string;
+      method: 'POST' | 'GET' | 'PUT';
+      taskId: string;
+    }> = [];
+
+    for (const task of tasks) {
+      const taskTriggers = (
+        task.definition as unknown as Record<string, unknown>
+      )['triggers'] as
+        | Array<{ type: string; path: string; method: string }>
+        | undefined;
+      if (taskTriggers) {
+        for (const trigger of taskTriggers) {
+          if (trigger.type === 'webhook') {
+            triggers.push({
+              path: trigger.path,
+              method: (trigger.method || 'POST') as 'POST' | 'GET' | 'PUT',
+              taskId: task.definition.taskId,
+            });
+          }
+        }
+      }
+    }
+
+    if (triggers.length === 0) {
+      writeStderrLine(
+        'No webhook triggers configured. Add triggers to your tasks first.',
+      );
+      process.exit(1);
+    }
+
+    const server = new WebhookServer({
+      port,
+      host,
+      triggers,
+      onTrigger: async (taskId: string, _payload: unknown) => {
+        const { spawn } = await import('node:child_process');
+        const task = await import('@qwen-code/qwen-code-core').then((m) =>
+          m.readScheduleTask(taskId),
+        );
+        if (!task) {
+          writeStderrLine(`Task ${taskId} not found`);
+          return;
+        }
+
+        writeStderrLine(
+          `[Webhook] Triggering task ${task.definition.name} (${taskId})`,
+        );
+        // Spawn the task execution
+        const child = spawn(
+          process.execPath,
+          [process.argv[1], 'schedule', 'run', taskId],
+          { stdio: 'inherit' },
+        );
+
+        child.on('exit', (code) => {
+          writeStderrLine(
+            `[Webhook] Task ${taskId} completed with exit code ${code}`,
+          );
+        });
+      },
+    });
+
+    try {
+      await server.start();
+      writeStderrLine(`Webhook server started on http://${host}:${port}`);
+      writeStderrLine(`Registered ${triggers.length} trigger(s):`);
+      for (const t of triggers) {
+        writeStderrLine(`  ${t.method} ${t.path} → ${t.taskId}`);
+      }
+      writeStderrLine('Press Ctrl+C to stop.');
+
+      // Keep process alive
+      process.on('SIGINT', async () => {
+        await server.stop();
+        process.exit(0);
+      });
+    } catch (err) {
+      writeStderrLine(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+  },
+};
+
+const webhookStopCommand: CommandModule = {
+  command: 'stop',
+  describe: 'Stop the webhook server',
+  handler: async () => {
+    // In a real implementation, this would signal the running webhook server
+    // For now, we just inform the user
+    writeStderrLine(
+      'Webhook server stop requested. Send SIGINT to the running process.',
+    );
+    process.exit(0);
+  },
+};
+
+const webhookStatusCommand: CommandModule = {
+  command: 'status',
+  describe: 'Show webhook server status',
+  handler: async () => {
+    const { listScheduleTasks } = await import('@qwen-code/qwen-code-core');
+
+    const tasks = await listScheduleTasks();
+    let triggerCount = 0;
+
+    for (const task of tasks) {
+      const taskTriggers = (
+        task.definition as unknown as Record<string, unknown>
+      )['triggers'] as Array<{ type: string }> | undefined;
+      if (taskTriggers) {
+        triggerCount += taskTriggers.filter((t) => t.type === 'webhook').length;
+      }
+    }
+
+    writeStderrLine(`Webhook triggers configured: ${triggerCount}`);
+    if (triggerCount === 0) {
+      writeStderrLine(
+        'No webhook triggers found. Add triggers to your tasks to enable webhook support.',
+      );
+    }
+    process.exit(0);
+  },
+};
+
+const webhookCommand: CommandModule = {
+  command: 'webhook',
+  describe: 'Manage webhook server for event triggers',
+  builder: (yargs: Argv) =>
+    yargs
+      .command(webhookStartCommand)
+      .command(webhookStopCommand)
+      .command(webhookStatusCommand)
+      .demandCommand(1, 'You need at least one command before continuing.')
+      .version(false),
+  handler: () => {},
+};
+
+// ---------------------------------------------------------------------------
 // schedule (top-level group)
 // ---------------------------------------------------------------------------
 
@@ -613,6 +950,8 @@ export const scheduleCommand: CommandModule = {
   builder: (yargs: Argv) =>
     yargs
       .command(daemonCommand)
+      .command(serviceCommand)
+      .command(webhookCommand)
       .command(createCommand)
       .command(listCommand)
       .command(deleteCommand)

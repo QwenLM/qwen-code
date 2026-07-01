@@ -12,7 +12,10 @@ import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-import { parse as parseYaml, stringify as stringifyYaml } from '../utils/yaml-parser.js';
+import {
+  parse as parseYaml,
+  stringify as stringifyYaml,
+} from '../utils/yaml-parser.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { parseCron, nextFireTime } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
@@ -58,7 +61,8 @@ export interface ScheduleTaskDefinition {
   name: string;
   description?: string;
   schedule: {
-    cron: string;
+    cron?: string;
+    fireAt?: string;
     enabled: boolean;
   };
   cwd: string;
@@ -130,7 +134,9 @@ function frontmatterToDefinition(
   const description =
     typeof fm['description'] === 'string' ? fm['description'] : undefined;
   const cron =
-    typeof schedule['cron'] === 'string' ? schedule['cron'] : '0 9 * * *';
+    typeof schedule['cron'] === 'string' ? schedule['cron'] : undefined;
+  const fireAt =
+    typeof schedule['fireAt'] === 'string' ? schedule['fireAt'] : undefined;
   const enabled =
     typeof schedule['enabled'] === 'boolean' ? schedule['enabled'] : true;
   const cwd = typeof fm['cwd'] === 'string' ? fm['cwd'] : process.cwd();
@@ -141,14 +147,13 @@ function frontmatterToDefinition(
   const approvalMode = validateApprovalMode(fm['approvalMode']);
   const notify: 'next-session' =
     fm['notify'] === 'next-session' ? 'next-session' : 'next-session';
-  const sandbox =
-    typeof fm['sandbox'] === 'boolean' ? fm['sandbox'] : false;
+  const sandbox = typeof fm['sandbox'] === 'boolean' ? fm['sandbox'] : false;
 
   return {
     taskId,
     name,
     description,
-    schedule: { cron, enabled },
+    schedule: { cron, fireAt, enabled },
     cwd,
     model,
     approvalMode,
@@ -179,7 +184,6 @@ function definitionToFrontmatter(def: ScheduleTaskDefinition): string {
   const fm: Record<string, unknown> = {
     name: def.name,
     schedule: {
-      cron: def.schedule.cron,
       enabled: def.schedule.enabled,
     },
     cwd: def.cwd,
@@ -187,6 +191,13 @@ function definitionToFrontmatter(def: ScheduleTaskDefinition): string {
     notify: def.notify,
     sandbox: def.sandbox,
   };
+  if (def.schedule.cron)
+    fm['schedule'] = { ...(fm['schedule'] as object), cron: def.schedule.cron };
+  if (def.schedule.fireAt)
+    fm['schedule'] = {
+      ...(fm['schedule'] as object),
+      fireAt: def.schedule.fireAt,
+    };
   if (def.description) fm['description'] = def.description;
   if (def.model) fm['model'] = def.model;
 
@@ -201,7 +212,8 @@ function definitionToFrontmatter(def: ScheduleTaskDefinition): string {
 export async function createScheduleTask(params: {
   name: string;
   description?: string;
-  cron: string;
+  cron?: string;
+  fireAt?: string;
   cwd?: string;
   model?: string;
   approvalMode?: ScheduleTaskDefinition['approvalMode'];
@@ -209,8 +221,27 @@ export async function createScheduleTask(params: {
   sandbox?: boolean;
   prompt: string;
 }): Promise<ScheduleTask> {
-  parseCron(params.cron);
-  nextFireTime(params.cron, new Date());
+  // Validate that either cron or fireAt is provided, but not both
+  if (!params.cron && !params.fireAt) {
+    throw new Error('Either cron or fireAt must be provided');
+  }
+  if (params.cron && params.fireAt) {
+    throw new Error('Cannot specify both cron and fireAt');
+  }
+
+  // Validate cron if provided
+  if (params.cron) {
+    parseCron(params.cron);
+    nextFireTime(params.cron, new Date());
+  }
+
+  // Validate fireAt if provided
+  if (params.fireAt) {
+    const fireAtDate = new Date(params.fireAt);
+    if (isNaN(fireAtDate.getTime())) {
+      throw new Error(`Invalid fireAt date: ${params.fireAt}`);
+    }
+  }
 
   const cwd = params.cwd ?? process.cwd();
   if (!fsSync.existsSync(cwd)) {
@@ -222,7 +253,11 @@ export async function createScheduleTask(params: {
     taskId,
     name: params.name,
     description: params.description,
-    schedule: { cron: params.cron, enabled: true },
+    schedule: {
+      cron: params.cron,
+      fireAt: params.fireAt,
+      enabled: true,
+    },
     cwd,
     model: params.model,
     approvalMode: params.approvalMode ?? 'auto',
@@ -239,13 +274,19 @@ export async function createScheduleTask(params: {
 
   const dir = getTaskDir(taskId);
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(getSkillMdPath(taskId), definitionToFrontmatter(definition), 'utf-8');
+  await fs.writeFile(
+    getSkillMdPath(taskId),
+    definitionToFrontmatter(definition),
+    'utf-8',
+  );
   await atomicWriteJSON(getStateJsonPath(taskId), state);
 
   return { definition, state };
 }
 
-export async function readScheduleTask(taskId: string): Promise<ScheduleTask | null> {
+export async function readScheduleTask(
+  taskId: string,
+): Promise<ScheduleTask | null> {
   const skillPath = getSkillMdPath(taskId);
   const statePath = getStateJsonPath(taskId);
 
@@ -324,7 +365,8 @@ export async function updateScheduleTask(
   if (updates.enabled !== undefined) def.schedule.enabled = updates.enabled;
   if (updates.cwd !== undefined) def.cwd = updates.cwd;
   if (updates.model !== undefined) def.model = updates.model;
-  if (updates.approvalMode !== undefined) def.approvalMode = updates.approvalMode;
+  if (updates.approvalMode !== undefined)
+    def.approvalMode = updates.approvalMode;
   if (updates.notify !== undefined) def.notify = updates.notify;
   if (updates.sandbox !== undefined) def.sandbox = updates.sandbox;
   if (updates.prompt !== undefined) def.prompt = updates.prompt.trim();
@@ -380,7 +422,9 @@ export async function writeScheduleRunRecord(
   await atomicWriteJSON(statePath, state);
 }
 
-export async function getScheduleRunRecords(taskId: string): Promise<RunRecord[]> {
+export async function getScheduleRunRecords(
+  taskId: string,
+): Promise<RunRecord[]> {
   const statePath = getStateJsonPath(taskId);
   try {
     const raw = await fs.readFile(statePath, 'utf-8');
@@ -398,7 +442,6 @@ export async function getScheduleRunRecords(taskId: string): Promise<RunRecord[]
 
 export function formatScheduleTaskSummary(task: ScheduleTask): string {
   const { definition, state } = task;
-  const display = humanReadableCron(definition.schedule.cron);
   const status = definition.schedule.enabled ? 'enabled' : 'disabled';
   const lastFired = state.lastFiredAt
     ? `last: ${new Date(state.lastFiredAt).toLocaleString()}`
@@ -407,11 +450,21 @@ export function formatScheduleTaskSummary(task: ScheduleTask): string {
   const model = definition.model ? ` model=${definition.model}` : '';
   const mode = ` approval=${definition.approvalMode}`;
 
+  let scheduleInfo: string;
+  if (definition.schedule.fireAt) {
+    scheduleInfo = `fireAt: ${definition.schedule.fireAt} (one-shot)`;
+  } else if (definition.schedule.cron) {
+    const display = humanReadableCron(definition.schedule.cron);
+    scheduleInfo = `cron: ${definition.schedule.cron} (${display})`;
+  } else {
+    scheduleInfo = 'schedule: unknown';
+  }
+
   return [
     `${definition.taskId}  ${status}`,
     `  name: ${definition.name}`,
     definition.description ? `  desc: ${definition.description}` : null,
-    `  cron: ${definition.schedule.cron} (${display})`,
+    `  ${scheduleInfo}`,
     `  cwd: ${definition.cwd}`,
     `  ${lastFired}  ${runs}${model}${mode}`,
   ]
