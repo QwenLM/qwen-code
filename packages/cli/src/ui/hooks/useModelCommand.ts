@@ -6,7 +6,7 @@
 
 import { useState, useCallback } from 'react';
 
-export type ModelDialogPersistScope = 'workspace' | 'user';
+type ModelDialogPersistScope = 'workspace' | 'user';
 
 interface UseModelCommandReturn {
   isModelDialogOpen: boolean;

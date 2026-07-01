@@ -1583,8 +1583,6 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': '选择模型',
-  'Select Model (this project)': '选择模型（当前项目）',
-  'Select Model (global)': '选择模型（全局）',
   ' (this project)': '（当前项目）',
   ' (global)': '（全局）',
   'API Key': 'API Key',

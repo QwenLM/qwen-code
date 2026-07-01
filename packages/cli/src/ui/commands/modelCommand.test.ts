@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { modelCommand } from './modelCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { SettingScope } from '../../config/settings.js';
 import {
   AuthType,
   type ContentGeneratorConfig,
@@ -1997,6 +1998,44 @@ describe('modelCommand', () => {
         type: 'message',
         content: expect.stringContaining('(this project)'),
       });
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'fastModel',
+        'qwen3-coder-flash',
+      );
+    });
+
+    it('should persist to global scope with --global', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+      } as unknown as LoadedSettings;
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAllConfiguredModels = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen3-coder-flash', voiceOnly: false, fastOnly: true },
+        ]);
+      cfg.setFastModel = vi.fn();
+      const result = await modelCommand.action!(
+        ctx,
+        '--global --fast qwen3-coder-flash',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        content: expect.stringContaining('(global)'),
+      });
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'fastModel',
+        'qwen3-coder-flash',
+      );
     });
 
     it('should show scope suffix in main model confirmation', async () => {
@@ -2026,6 +2065,11 @@ describe('modelCommand', () => {
         type: 'message',
         content: expect.stringContaining('(this project)'),
       });
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'model.name',
+        'qwen-max',
+      );
     });
 
     it('should not include persistScope when no scope flag is given', async () => {

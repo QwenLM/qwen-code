@@ -47,19 +47,23 @@ const VISION_MODEL_CONFIGURATION_HINT =
 function parseScopeFlags(args: string): {
   scopeOverride: SettingScope | undefined;
   remaining: string;
+  hasProject: boolean;
+  hasGlobal: boolean;
 } {
   let scopeOverride: SettingScope | undefined;
   let remaining = args;
+  const hasProject = /(?:^|\s)--project(?:\s|$)/.test(remaining);
+  const hasGlobal = /(?:^|\s)--global(?:\s|$)/.test(remaining);
 
-  if (/(?:^|\s)--project(?:\s|$)/.test(remaining)) {
+  if (hasProject) {
     scopeOverride = SettingScope.Workspace;
     remaining = remaining.replace(/(?:^|\s)--project(?:\s|$)/, ' ').trim();
-  } else if (/(?:^|\s)--global(?:\s|$)/.test(remaining)) {
+  } else if (hasGlobal) {
     scopeOverride = SettingScope.User;
     remaining = remaining.replace(/(?:^|\s)--global(?:\s|$)/, ' ').trim();
   }
 
-  return { scopeOverride, remaining };
+  return { scopeOverride, remaining, hasProject, hasGlobal };
 }
 
 function resolveScope(
@@ -267,7 +271,7 @@ export const modelCommand: SlashCommand = {
     );
   },
   argumentHint:
-    '[--fast|--voice|--vision|--project|--global] [<model-id>] | <model-id> <prompt>',
+    '[--fast|--voice|--vision] [--project|--global] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -347,7 +351,22 @@ export const modelCommand: SlashCommand = {
 
     // Parse --project / --global scope flags first, then process the rest
     const rawArgs = context.invocation?.args?.trim() || actionArgs.trim();
-    const { scopeOverride, remaining: args } = parseScopeFlags(rawArgs);
+    const {
+      scopeOverride,
+      remaining: args,
+      hasProject,
+      hasGlobal,
+    } = parseScopeFlags(rawArgs);
+    // Reject mutually exclusive scope flags
+    if (hasProject && hasGlobal) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Cannot use both --project and --global. Choose one scope flag.',
+        ),
+      };
+    }
     const scopeSuffix =
       scopeOverride === SettingScope.Workspace
         ? t(' (this project)')
@@ -675,6 +694,25 @@ export const modelCommand: SlashCommand = {
             ),
           };
         }
+        // Scope flags are silently consumed by parseScopeFlags but the inline
+        // prompt path doesn't persist the model. Reject the combination to avoid
+        // surprising the user with a "(this project)" confirmation that never
+        // took effect.
+        if (scopeOverride) {
+          const scopeFlag = hasProject
+            ? '--project'
+            : hasGlobal
+              ? '--global'
+              : '';
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              "Cannot combine {{flag}} with an inline prompt. Run '/model {{flag}} {{model}}' first, then send your prompt.",
+              { flag: scopeFlag },
+            ),
+          };
+        }
         // The per-turn override reuses the active provider's endpoint and
         // credentials and only swaps the model id; it cannot rebuild
         // baseUrl/envKey for a different provider. So the target must resolve to
@@ -735,7 +773,10 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: `Current model: ${currentModel}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.`,
+        content: t(
+          'Current model: {{model}}\nUse "/model <model-id>" to switch models, "/model --fast <model-id>" to set the fast model, "/model --project <model-id>" to persist to project settings, or "/model --global <model-id>" to persist to user settings.',
+          { model: currentModel },
+        ),
       };
     }
 

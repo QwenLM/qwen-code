@@ -1441,8 +1441,6 @@ export default {
   'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
     '無效的 QWEN_DEFAULT_AUTH_TYPE 值："{{value}}"。有效值為：{{validValues}}',
   'Select Model': '選擇模型',
-  'Select Model (this project)': '選擇模型（當前專案）',
-  'Select Model (global)': '選擇模型（全域）',
   ' (this project)': '（當前專案）',
   ' (global)': '（全域）',
   'API Key': 'API Key',

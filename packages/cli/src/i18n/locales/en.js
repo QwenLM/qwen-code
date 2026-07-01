@@ -1688,8 +1688,6 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': 'Select Model',
-  'Select Model (this project)': 'Select Model (this project)',
-  'Select Model (global)': 'Select Model (global)',
   ' (this project)': ' (this project)',
   ' (global)': ' (global)',
   'API Key': 'API Key',

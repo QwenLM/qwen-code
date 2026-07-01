@@ -217,12 +217,11 @@ function handleModelSwitchSuccess({
       text:
         `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
         `\n` +
-        `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}` +
+        `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
         `\n` +
         `Base URL: ${baseUrl}` +
         `\n` +
-        `API key: ${maskedKey}` +
-        scopeSuffix,
+        `API key: ${maskedKey}`,
     },
     Date.now(),
   );

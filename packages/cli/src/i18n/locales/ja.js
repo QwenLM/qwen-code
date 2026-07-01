@@ -1739,6 +1739,12 @@ export default {
   'ANTHROPIC_BASE_URL environment variable not found.':
     '環境変数 ANTHROPIC_BASE_URL が見つかりません。',
   'Invalid auth method selected.': '無効な認証方式が選択されました。',
+  ' (this project)': ' (このプロジェクト)',
+  ' (global)': ' (グローバル)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'モデルの選択をプロジェクト設定に永続化（ワークスペーススコープ）',
+  'Persist the model selection to the user settings (global scope)':
+    'モデルの選択をユーザー設定に永続化（グローバルスコープ）',
   'API Key': 'API Key',
   '(default)': '(デフォルト)',
   '(not set)': '(未設定)',
