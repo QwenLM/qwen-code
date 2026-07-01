@@ -48,9 +48,9 @@ export function VoiceIndicator({
             <Text color="gray">{'  ' + t('listening…')}</Text>
           </>
         ) : status === 'refining' ? (
-          <Text color="yellow">{'✦ ' + t('refining…')}</Text>
+          <Text color="yellow">{'◆ ' + t('refining…')}</Text>
         ) : (
-          <Text color="yellow">{'✦ ' + t('transcribing…')}</Text>
+          <Text color="yellow">{'◆ ' + t('transcribing…')}</Text>
         )}
       </Box>
       {interimText ? (

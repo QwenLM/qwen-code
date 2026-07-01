@@ -8,8 +8,15 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { Config as ConfigImpl, ApprovalMode } from '../config/config.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
+import {
+  AgentEventType,
+  type AgentEventEmitter,
+} from '../agents/runtime/agent-events.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
-import type { ModelConfig } from '../agents/runtime/agent-types.js';
+import type {
+  ModelConfig,
+  PromptConfig,
+} from '../agents/runtime/agent-types.js';
 import { runForkedAgent } from './forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
@@ -76,19 +83,27 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
   // doesn't reliably forward `export *` re-exports through `...actual`,
   // and stubbing the full surface manually is brittle.
   function captureAgentHeadlessConfig(): {
-    captured: { config: Config | undefined };
+    captured: {
+      config: Config | undefined;
+      promptConfig: PromptConfig | undefined;
+    };
     restore: () => void;
   } {
-    const captured: { config: Config | undefined } = { config: undefined };
+    const captured: {
+      config: Config | undefined;
+      promptConfig: PromptConfig | undefined;
+    } = { config: undefined, promptConfig: undefined };
     const spy = vi
       .spyOn(AgentHeadless, 'create')
       .mockImplementation(
         async (
           _name: string,
           config: Config,
+          promptConfig: PromptConfig,
           ..._rest: unknown[]
         ): Promise<AgentHeadless> => {
           captured.config = config;
+          captured.promptConfig = promptConfig;
           return {
             execute: vi.fn().mockResolvedValue(undefined),
             getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
@@ -99,6 +114,55 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
       );
     return { captured, restore: () => spy.mockRestore() };
   }
+
+  it('does not treat empty extraHistory as caller-owned initial messages by default', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const { captured, restore } = captureAgentHeadlessConfig();
+    try {
+      await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+        extraHistory: [],
+      });
+    } finally {
+      restore();
+    }
+
+    expect(captured.promptConfig?.initialMessages).toBeUndefined();
+  });
+
+  it('can preserve empty extraHistory when the caller intentionally owns history', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const { captured, restore } = captureAgentHeadlessConfig();
+    try {
+      await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+        extraHistory: [],
+        preserveEmptyExtraHistory: true,
+      });
+    } finally {
+      restore();
+    }
+
+    expect(captured.promptConfig?.initialMessages).toEqual([]);
+  });
 
   it('passes a Config with the rebuilt-registry marker and YOLO approval mode to AgentHeadless.create', async () => {
     const parent = new ConfigImpl(baseParams);
@@ -140,6 +204,7 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parent as any).toolRegistry = parentRegistry;
+
     const createSpy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
       async (): Promise<AgentHeadless> =>
         ({
@@ -166,6 +231,139 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
       expect(result.finalText).toBe('done');
     } finally {
       createSpy.mockRestore();
+    }
+  });
+
+  it.each([AgentTerminateMode.MAX_TURNS, AgentTerminateMode.LOOP_DETECTED])(
+    'reports %s as failed',
+    async (terminateMode) => {
+      const parent = new ConfigImpl(baseParams);
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (parent as any).toolRegistry = parentRegistry;
+
+      const createSpy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+        async (): Promise<AgentHeadless> =>
+          ({
+            execute: vi.fn().mockResolvedValue(undefined),
+            getTerminateMode: vi.fn().mockReturnValue(terminateMode),
+            getFinalText: vi.fn().mockReturnValue('stopped'),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          }) as any,
+      );
+
+      try {
+        const result = await runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        });
+
+        expect(result.status).toBe('failed');
+        expect(result.terminateReason).toBe(terminateMode);
+      } finally {
+        createSpy.mockRestore();
+      }
+    },
+  );
+
+  it('reports filesWritten from successful mutating tool results only', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async () => {
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'read-1',
+              name: ToolNames.READ_FILE,
+              args: { file_path: '/repo/README.md' },
+              description: 'read',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'read-1',
+              name: ToolNames.READ_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              args: { file_path: '/repo/outside.md' },
+              description: 'edit',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              success: false,
+              timestamp: Date.now(),
+            });
+          }),
+          getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+          getFinalText: vi.fn().mockReturnValue('done'),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+      });
+
+      expect(result.filesTouched).toEqual([
+        '/repo/README.md',
+        '/repo/.qwen/memories/project.md',
+        '/repo/outside.md',
+      ]);
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
     }
   });
 
