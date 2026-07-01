@@ -23,11 +23,24 @@ const DAEMON_LOCK_FILENAME = 'daemon.lock';
 export interface DaemonLockHandle {
   path: string;
   pid: number;
+  /** Distinguishes daemon instances that share a pid (e.g. two in one test
+   * process, or a reload) so one never steals another's live lock. */
+  lockId: string;
 }
 
 interface LockContent {
   pid: number;
+  lockId?: string;
   startedAt: number;
+}
+
+function generateLockId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 12; i++) {
+    id += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return id;
 }
 
 export function getDaemonLockPath(): string {
@@ -51,7 +64,11 @@ async function readLock(lockPath: string): Promise<LockContent | null> {
     const raw = await fs.readFile(lockPath, 'utf8');
     const parsed = JSON.parse(raw) as Partial<LockContent>;
     if (typeof parsed.pid === 'number') {
-      return { pid: parsed.pid, startedAt: parsed.startedAt ?? 0 };
+      return {
+        pid: parsed.pid,
+        lockId: typeof parsed.lockId === 'string' ? parsed.lockId : undefined,
+        startedAt: parsed.startedAt ?? 0,
+      };
     }
     return null;
   } catch {
@@ -68,20 +85,29 @@ export async function acquireDaemonLock(): Promise<DaemonLockHandle | null> {
   await fs.mkdir(dir, { recursive: true });
   const lockPath = getDaemonLockPath();
   const pid = process.pid;
-  const payload = JSON.stringify({ pid, startedAt: Date.now() });
+  const lockId = generateLockId();
+  const payload = JSON.stringify({ pid, lockId, startedAt: Date.now() });
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       await fs.writeFile(lockPath, payload, { flag: 'wx' });
-      debugLogger.debug(`Acquired daemon lock (pid ${pid})`);
-      return { path: lockPath, pid };
+      debugLogger.debug(`Acquired daemon lock (pid ${pid}, lockId ${lockId})`);
+      return { path: lockPath, pid, lockId };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
 
     const holder = await readLock(lockPath);
-    if (holder && holder.pid !== pid && isProcessAlive(holder.pid)) {
-      debugLogger.debug(`Daemon lock held by live pid ${holder.pid}`);
+    // Refuse if a live process holds it — unless it's this exact handle's own
+    // leftover (same pid AND lockId), which only a retry within this call can
+    // hit. A different lockId on our own pid means another daemon instance in
+    // this process legitimately owns it.
+    const isOurLeftover =
+      holder != null && holder.pid === pid && holder.lockId === lockId;
+    if (holder && isProcessAlive(holder.pid) && !isOurLeftover) {
+      debugLogger.debug(
+        `Daemon lock held by live pid ${holder.pid} (lockId ${holder.lockId ?? '?'})`,
+      );
       return null;
     }
     // Stale (dead holder), malformed, or our own leftover — steal and retry.
@@ -98,7 +124,14 @@ export async function releaseDaemonLock(
   handle: DaemonLockHandle,
 ): Promise<void> {
   const holder = await readLock(handle.path);
-  if (holder && holder.pid !== handle.pid) return;
+  // Only unlink if we still own it (same pid AND lockId) — a lock replaced by
+  // another instance must be left intact.
+  if (
+    holder &&
+    (holder.pid !== handle.pid || holder.lockId !== handle.lockId)
+  ) {
+    return;
+  }
   await fs.unlink(handle.path).catch(() => {});
   debugLogger.debug(`Released daemon lock (pid ${handle.pid})`);
 }

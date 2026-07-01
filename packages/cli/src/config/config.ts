@@ -61,6 +61,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
+import { scheduleCommand } from '../commands/schedule.js';
 import { sessionsCommand } from '../commands/sessions.js';
 
 // UUID v4 regex pattern for validation
@@ -1046,6 +1047,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
+    // Register `qwen schedule daemon` (local always-on scheduled tasks)
+    .command(scheduleCommand)
     // Register sessions subcommands
     .command(sessionsCommand);
 
