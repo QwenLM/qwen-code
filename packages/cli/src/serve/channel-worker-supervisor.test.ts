@@ -1215,6 +1215,38 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('resumes worker log forwarding after bounded oversized tail discard', async () => {
+    const child = new FakeChild();
+    child.stderr = new EventEmitter();
+    const onLog = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onLog,
+    });
+
+    const started = supervisor.start();
+    child.stderr.emit('data', Buffer.from('x'.repeat(70_000)));
+    child.stderr.emit('data', Buffer.from('discarded tail'.repeat(6000)));
+    child.stderr.emit('data', Buffer.from('resumed line\n'));
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    expect(onLog).toHaveBeenCalledTimes(2);
+    expect(onLog).toHaveBeenLastCalledWith({
+      stream: 'stderr',
+      line: 'resumed line',
+    });
+  });
+
   it('handles long non-url worker log lines while applying credential redaction', async () => {
     const child = new FakeChild();
     child.stderr = new EventEmitter();

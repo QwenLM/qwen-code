@@ -16,6 +16,7 @@ const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
 const MAX_WORKER_LOG_BUFFER_LENGTH = 64 * 1024;
+const MAX_WORKER_LOG_DISCARDED_REMAINDER_LENGTH = MAX_WORKER_LOG_BUFFER_LENGTH;
 const ANSI_CSI_SEQUENCE_RE = new RegExp(
   `${String.fromCharCode(0x1b)}\\[[0-?]*[ -/]*[@-~]`,
   'g',
@@ -341,6 +342,7 @@ function attachWorkerLogStream(
   if (!stream) return () => {};
   let buffer = '';
   let discardingOversizedLineRemainder = false;
+  let discardedOversizedLineRemainderLength = 0;
   const redactWorkerLogLineForStream = createWorkerLogRedactor({
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     workerEnv: opts.workerEnv,
@@ -366,6 +368,7 @@ function attachWorkerLogStream(
     flushLine(buffer);
     buffer = '';
     discardingOversizedLineRemainder = true;
+    discardedOversizedLineRemainderLength = 0;
   };
   stream.on('data', (chunk) => {
     buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
@@ -382,9 +385,18 @@ function attachWorkerLogStream(
         flushLine(line);
       }
       discardingOversizedLineRemainder = false;
+      discardedOversizedLineRemainderLength = 0;
     }
     if (discardingOversizedLineRemainder) {
+      discardedOversizedLineRemainderLength += buffer.length;
       buffer = '';
+      if (
+        discardedOversizedLineRemainderLength >=
+        MAX_WORKER_LOG_DISCARDED_REMAINDER_LENGTH
+      ) {
+        discardingOversizedLineRemainder = false;
+        discardedOversizedLineRemainderLength = 0;
+      }
       return;
     }
     flushOversizedBuffer();
