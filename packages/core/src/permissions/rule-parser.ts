@@ -312,8 +312,17 @@ export function parseRule(raw: string): PermissionRule {
         const key = part.substring(0, colonIdx).trim();
         const valuePattern = part.substring(colonIdx + 1).trim();
         if (key && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+          if (valuePattern === '') {
+            debugLogger.warn(
+              `Empty valuePattern in rule "${trimmed}": key="${key}" will only match empty strings. Use "*" to match any value.`,
+            );
+          }
           matchers.push({ key, valuePattern });
           continue;
+        } else if (key && !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+          debugLogger.warn(
+            `Invalid key "${key}" in rule "${trimmed}": keys must match /^[a-zA-Z_][a-zA-Z0-9_]*$/. Hyphens and dots are not supported.`,
+          );
         }
       }
       plainParts.push(part);
@@ -323,6 +332,14 @@ export function parseRule(raw: string): PermissionRule {
       toolParamMatchers = matchers;
       specifier = plainParts.join(',').trim() || undefined;
     }
+  } else if (
+    specifierKind !== 'literal' &&
+    rawSpecifier.includes(':') &&
+    !rawSpecifier.startsWith('domain:')
+  ) {
+    debugLogger.warn(
+      `key:value syntax is only supported for literal-specifier tools (got ${specifierKind} for "${canonicalName}")`,
+    );
   }
 
   return {
@@ -484,11 +501,19 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
       return [displayName];
 
     case 'literal':
-    default:
-      if (ctx.specifier) {
-        return [`${displayName}(${ctx.specifier})`];
+    default: {
+      const parts: string[] = [];
+      if (ctx.specifier) parts.push(ctx.specifier);
+      if (ctx.toolParams) {
+        for (const [k, v] of Object.entries(ctx.toolParams)) {
+          if (typeof v === 'string' || typeof v === 'number') {
+            parts.push(`${k}:${v}`);
+          }
+        }
       }
+      if (parts.length > 0) return [`${displayName}(${parts.join(',')})`];
       return [displayName];
+    }
   }
 }
 
@@ -764,6 +789,34 @@ export function matchesCommandPattern(
     return new RegExp(regex, 's').test(normalizedCommand);
   } catch {
     return normalizedCommand === pattern;
+  }
+}
+
+/**
+ * Match a parameter value against a pattern.
+ * Unlike matchesCommandPattern, this uses simple glob matching without
+ * shell-specific semantics (no prefix+space matching, no variable stripping).
+ * Supports `*` as wildcard for any substring.
+ */
+function matchesParamValuePattern(pattern: string, value: string): boolean {
+  if (pattern === '*') {
+    return true;
+  }
+  if (!pattern.includes('*')) {
+    return value === pattern;
+  }
+  // Convert glob pattern to regex: escape special chars, replace * with .*
+  const regexStr =
+    '^' +
+    pattern
+      .split('*')
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+      .join('.*') +
+    '$';
+  try {
+    return new RegExp(regexStr).test(value);
+  } catch {
+    return value === pattern;
   }
 }
 
@@ -1046,7 +1099,47 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    return matchesMcpPattern(rule.toolName, canonicalCtxToolName);
+    if (!matchesMcpPattern(rule.toolName, canonicalCtxToolName)) {
+      return false;
+    }
+    // MCP tools matched by name; now check param matchers if present
+    if (rule.toolParamMatchers?.length) {
+      if (!toolParams) {
+        debugLogger.debug(
+          `Param matcher rule "${rule.raw}" skipped: no toolParams`,
+        );
+        return false;
+      }
+      for (const matcher of rule.toolParamMatchers) {
+        if (!Object.hasOwn(toolParams, matcher.key)) {
+          debugLogger.debug(
+            `Param matcher failed: rule="${rule.raw}" key=${matcher.key} expected="${matcher.valuePattern}" actual=missing`,
+          );
+          return false;
+        }
+        const actualValue = toolParams[matcher.key];
+        if (actualValue === undefined || actualValue === null) {
+          debugLogger.debug(
+            `Param matcher failed: rule="${rule.raw}" key=${matcher.key} expected="${matcher.valuePattern}" actual=null/undefined`,
+          );
+          return false;
+        }
+        if (typeof actualValue !== 'string' && typeof actualValue !== 'number') {
+          debugLogger.debug(
+            `Param matcher skipped: rule="${rule.raw}" key=${matcher.key} value is ${typeof actualValue}`,
+          );
+          return false;
+        }
+        const actualStr = String(actualValue);
+        if (!matchesParamValuePattern(matcher.valuePattern, actualStr)) {
+          debugLogger.debug(
+            `Param matcher failed: rule="${rule.raw}" key=${matcher.key} expected="${matcher.valuePattern}" actual="${actualStr}"`,
+          );
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   // ── Standard tool name matching (with meta-category support) ─────────
@@ -1115,15 +1208,36 @@ export function matchesRule(
   // ── Tool param matching (key:value syntax) ───────────────────────────
   if (rule.toolParamMatchers?.length) {
     if (!toolParams) {
+      debugLogger.debug(
+        `Param matcher rule "${rule.raw}" skipped: no toolParams`,
+      );
       return false;
     }
     for (const matcher of rule.toolParamMatchers) {
+      if (!Object.hasOwn(toolParams, matcher.key)) {
+        debugLogger.debug(
+          `Param matcher failed: rule="${rule.raw}" key=${matcher.key} expected="${matcher.valuePattern}" actual=missing`,
+        );
+        return false;
+      }
       const actualValue = toolParams[matcher.key];
       if (actualValue === undefined || actualValue === null) {
+        debugLogger.debug(
+          `Param matcher failed: rule="${rule.raw}" key=${matcher.key} expected="${matcher.valuePattern}" actual=null/undefined`,
+        );
+        return false;
+      }
+      if (typeof actualValue !== 'string' && typeof actualValue !== 'number') {
+        debugLogger.debug(
+          `Param matcher skipped: rule="${rule.raw}" key=${matcher.key} value is ${typeof actualValue}`,
+        );
         return false;
       }
       const actualStr = String(actualValue);
-      if (!matchesCommandPattern(matcher.valuePattern, actualStr)) {
+      if (!matchesParamValuePattern(matcher.valuePattern, actualStr)) {
+        debugLogger.debug(
+          `Param matcher failed: rule="${rule.raw}" key=${matcher.key} expected="${matcher.valuePattern}" actual="${actualStr}"`,
+        );
         return false;
       }
     }
