@@ -2110,8 +2110,8 @@ export abstract class ChannelBase {
         shouldPrependSessionContext = true;
         this.instructedSessions.add(sessionId);
       }
+      const sessionContext: string[] = [];
       if (shouldPrependSessionContext) {
-        const context: string[] = [];
         let memoryText: string | undefined;
         if (
           this.channelMemory &&
@@ -2135,15 +2135,12 @@ export abstract class ChannelBase {
           }
         }
         if (memoryText) {
-          context.push(
+          sessionContext.push(
             `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
           );
         }
         if (this.config.instructions) {
-          context.push(this.config.instructions);
-        }
-        if (context.length > 0) {
-          promptText = `${context.join('\n\n')}\n\n${promptText}`;
+          sessionContext.push(this.config.instructions);
         }
       }
       if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
@@ -2156,9 +2153,8 @@ export abstract class ChannelBase {
         promptText,
         groupHistoryEntries,
       );
-      if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-        promptToSend = `${this.config.instructions}\n\n${promptToSend}`;
-        this.instructedSessions.add(sessionId);
+      if (sessionContext.length > 0) {
+        promptToSend = `${sessionContext.join('\n\n')}\n\n${promptToSend}`;
       }
       // Register this prompt as active
       let doneResolve: () => void = () => {};
