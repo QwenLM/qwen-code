@@ -3322,6 +3322,74 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/close falls back to the shared gate for its own in-flight prompt', async () => {
+    let promptStarted!: () => void;
+    let promptAborted!: () => void;
+    const promptStartedPromise = new Promise<void>((resolve) => {
+      promptStarted = resolve;
+    });
+    const promptAbortedPromise = new Promise<void>((resolve) => {
+      promptAborted = resolve;
+    });
+    bridge.promptBehavior = async (_s, _q, signal) => {
+      promptStarted();
+      if (signal === undefined) throw new Error('missing prompt signal');
+      await new Promise<void>((resolve) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            promptAborted();
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      return { stopReason: 'cancelled' };
+    };
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 230,
+      method: 'session/new',
+      params: {},
+    });
+    expect(await connReader.next()).toMatchObject({ id: 230 });
+    const sessionStream = await openStream(connId, 'sess-1');
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 231,
+      method: 'session/prompt',
+      params: {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'hold shared gate' }],
+      },
+    });
+    await promptStartedPromise;
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 232,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+
+    await promptAbortedPromise;
+    const frames = [await connReader.next(), await connReader.next()];
+    expect(frames).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 231 }),
+        expect.objectContaining({ id: 232, result: {} }),
+      ]),
+    );
+    expect(bridge.closedSessions).toEqual(['sess-1']);
+    connReader.close();
+    await sessionStream.body?.cancel().catch(() => {});
+  });
+
   it('session/close reaches the bridge + replies on the conn stream', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
