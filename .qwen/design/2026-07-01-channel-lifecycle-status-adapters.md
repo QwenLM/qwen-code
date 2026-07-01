@@ -50,7 +50,7 @@ hook and maps the event into the platform's existing native status surface.
 | Lifecycle event | Telegram | Weixin | DingTalk | Feishu |
 | --- | --- | --- | --- | --- |
 | `started` | Start typing. | Start typing. | Add eye reaction. | Show/update card as running. |
-| `text_chunk` | Ignore. | Ignore. | Ignore. | Append/update streamed content. |
+| `text_chunk` | Ignore. | Ignore. | Ignore. | Ignore in the lifecycle hook. Content streaming stays on the existing response/card stream path. |
 | `tool_call` | Ignore. | Ignore. | Ignore. | Ignore for UI. |
 | `completed` | Stop typing. | Stop typing. | Recall eye reaction. | Mark card completed. |
 | `cancelled` | Stop typing. | Stop typing. | Recall eye reaction. | Mark card cancelled. |
@@ -93,8 +93,11 @@ state explicit in card content:
 | Cancelled | `已取消` |
 | Failed | `已失败，请重试` |
 
-The card still streams answer content as it does today. `tool_call` remains
-hidden from the card UI in this scope.
+The card still streams answer content as it does today through the existing
+response/card stream hook. Lifecycle `text_chunk` is not consumed directly by
+the adapter in this scope, which supersedes the earlier adapter-local idea of
+using lifecycle chunks to append card content. `tool_call` remains hidden from
+the card UI in this scope.
 
 The markdown/card helper can accept a minimal status label option if needed, but
 should not grow into a generic rendering framework.
@@ -135,7 +138,8 @@ Add focused unit coverage in the affected channel packages:
 - DingTalk: lifecycle `started` attaches the eye reaction; terminal events
   recall it; no terminal emoji is sent.
 - Feishu: running, completed, cancelled, and failed card states render the
-  expected labels; `tool_call` does not add UI output.
+  expected labels; lifecycle `text_chunk` remains owned by the existing stream
+  path rather than the lifecycle hook; `tool_call` does not add UI output.
 
 Verification should run package-local Vitest commands for the touched adapters,
 then project build and typecheck before the PR is submitted.
