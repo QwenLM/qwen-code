@@ -805,6 +805,27 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return major > 4 || (major === 4 && minor >= 6);
   }
 
+  /**
+   * Whether the model rejects the manual `thinking: { type: 'enabled',
+   * budget_tokens: N }` shape with a 400. Opus 4.7+ and every 5.x family
+   * (Fable 5, Mythos 5, Sonnet 5, …) dropped manual extended thinking in favor
+   * of adaptive thinking, so a budget-tokens-shaped request errors on those
+   * models — they must use `{ type: 'adaptive' }` with `output_config.effort`
+   * instead (https://platform.claude.com/docs/en/build-with-claude/effort).
+   * Opus 4.5/4.6 and Sonnet 4.6 still accept `budget_tokens` (deprecated on
+   * 4.6), and unknown/unversioned ids keep the manual escape hatch, so both
+   * return false. Shares `parseClaudeModelVersion` with the effort/adaptive
+   * gates so the version rules can't drift.
+   */
+  private modelRejectsManualThinking(): boolean {
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
+    );
+    if (!parsed) return false;
+    const { major, minor } = parsed;
+    return major > 4 || (major === 4 && minor >= 7);
+  }
+
   private buildThinkingConfig(
     request: GenerateContentParameters,
     effectiveEffort: ReasoningEffort | undefined,
@@ -819,22 +840,25 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return undefined;
     }
 
-    // Explicit budget_tokens is an escape hatch from the effort ladder:
-    // honor exactly what the user asked for. This deliberately does NOT
-    // re-clamp the value to track the (possibly clamped) effort label —
-    // a user who set `{ effort: 'max', budget_tokens: 128_000 }` against
-    // real api.anthropic.com will see `output_config.effort: 'high'`
-    // (clamped) but `thinking.budget_tokens: 128_000` (preserved). That
-    // wire-shape mismatch is intentional: the clamp protects against
-    // unknown-enum 400s on the effort field, but the budget field is
-    // just an integer the server accepts within its context window, so
-    // an explicit override stays explicit. The default ladder below is
-    // what stays consistent with the clamped effort.
+    // Explicit budget_tokens is an escape hatch from the effort ladder: honor
+    // exactly what the user asked for, without re-clamping to track the
+    // (possibly clamped) effort label — the budget field is just an integer the
+    // server accepts within its context window, so an explicit override stays
+    // explicit. This only applies to models that still accept the manual
+    // `{ type: 'enabled', budget_tokens }` shape (Opus 4.5/4.6, Sonnet 4.6,
+    // older 4.x, and unknown/unversioned ids). Opus 4.7+ and every 5.x family
+    // reject manual thinking with a 400 and require adaptive thinking, so on
+    // those models the budget is dropped and `output_config.effort` governs
+    // thinking depth instead
+    // (https://platform.claude.com/docs/en/build-with-claude/effort).
     //
-    // Checked before the adaptive-thinking branch so an explicit budget
-    // isn't silently dropped on Claude 4.6+ models — adaptive omits
+    // Checked before the adaptive-thinking branch so an explicit budget isn't
+    // silently dropped on models that DO still honor it — adaptive omits
     // `budget_tokens` entirely, which would discard the user override.
-    if (reasoning?.budget_tokens !== undefined) {
+    if (
+      reasoning?.budget_tokens !== undefined &&
+      !this.modelRejectsManualThinking()
+    ) {
       return {
         type: 'enabled',
         budget_tokens: reasoning.budget_tokens,

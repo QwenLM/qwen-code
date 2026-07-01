@@ -1787,17 +1787,32 @@ describe('AnthropicContentGenerator', () => {
         });
       });
 
-      it('honors explicit reasoning.budget_tokens before falling back to adaptive', async () => {
-        // Explicit budget_tokens is a user escape hatch — adaptive thinking
-        // would otherwise silently drop the user-supplied value because the
-        // adaptive shape carries no budget field. The explicit branch must
-        // run first.
+      it('honors explicit reasoning.budget_tokens on models that still accept manual thinking (e.g. claude-opus-4-6)', async () => {
+        // Explicit budget_tokens is a user escape hatch on models that still
+        // accept the manual `{ type: 'enabled', budget_tokens }` shape (Opus
+        // 4.5/4.6, Sonnet 4.6): adaptive thinking would otherwise silently drop
+        // the user-supplied value because the adaptive shape carries no budget
+        // field. The explicit branch must run first for these models.
+        expect(
+          await thinkingFor('claude-opus-4-6', {
+            effort: 'medium',
+            budget_tokens: 42_000,
+          }),
+        ).toEqual({ type: 'enabled', budget_tokens: 42_000 });
+      });
+
+      it('drops manual budget_tokens for adaptive-only models that reject it (e.g. claude-opus-4-7)', async () => {
+        // Opus 4.7+ and every 5.x family reject the manual
+        // `{ type: 'enabled', budget_tokens }` shape with a 400 and require
+        // adaptive thinking, so an explicit budget must be dropped in favor of
+        // adaptive thinking + output_config.effort rather than shipped verbatim
+        // (https://platform.claude.com/docs/en/build-with-claude/effort).
         expect(
           await thinkingFor('claude-opus-4-7', {
             effort: 'medium',
             budget_tokens: 42_000,
           }),
-        ).toEqual({ type: 'enabled', budget_tokens: 42_000 });
+        ).toEqual({ type: 'adaptive' });
       });
 
       it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {
