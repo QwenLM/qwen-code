@@ -718,6 +718,12 @@ export class IdeClient {
     const fileRegex = /^\d+\.lock$/;
     let lockFiles: string[];
     try {
+      await fs.promises.stat(ideDir);
+    } catch {
+      // Directory does not exist — normal for CLI-only users, skip silently.
+      return [];
+    }
+    try {
       lockFiles = (await fs.promises.readdir(ideDir))
         .map((file) => file.toString())
         .filter((file) => fileRegex.test(file));
