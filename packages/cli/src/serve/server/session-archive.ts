@@ -4,9 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { Storage, type SessionService } from '@qwen-code/qwen-code-core';
+import { SessionService } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   SessionArchivedError,
@@ -30,8 +28,6 @@ export interface DaemonUnarchiveSessionsResult {
   notFound: string[];
   errors: Array<{ sessionId: string; error: unknown }>;
 }
-
-const SESSION_JSONL_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();
@@ -92,40 +88,19 @@ export class SessionArchiveCoordinator {
   }
 }
 
-export function assertSessionLoadable(
+export async function assertSessionLoadable(
   workspaceCwd: string,
   sessionId: string,
-): void {
-  const location = getSessionLocationByPath(workspaceCwd, sessionId);
+): Promise<void> {
+  const location = await new SessionService(workspaceCwd).getSessionLocation(
+    sessionId,
+  );
   if (location === 'archived') {
     throw new SessionArchivedError(sessionId);
   }
   if (location === 'conflict') {
     throw new SessionConflictError(sessionId);
   }
-}
-
-function getSessionLocationByPath(
-  workspaceCwd: string,
-  sessionId: string,
-): 'active' | 'archived' | 'conflict' | undefined {
-  if (!SESSION_JSONL_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
-    return undefined;
-  }
-
-  const chatsDir = path.join(
-    new Storage(workspaceCwd).getProjectDir(),
-    'chats',
-  );
-  const active = fs.existsSync(path.join(chatsDir, `${sessionId}.jsonl`));
-  const archived = fs.existsSync(
-    path.join(chatsDir, 'archive', `${sessionId}.jsonl`),
-  );
-
-  if (active && archived) return 'conflict';
-  if (active) return 'active';
-  if (archived) return 'archived';
-  return undefined;
 }
 
 function isSessionNotFoundError(err: unknown): boolean {
@@ -135,20 +110,20 @@ function isSessionNotFoundError(err: unknown): boolean {
   );
 }
 
-interface ArchiveSessionBuckets {
+interface SessionLocationBuckets {
   active: string[];
-  alreadyArchived: string[];
+  archived: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: unknown }>;
 }
 
-async function classifyArchiveSessionIds(
+async function classifySessionLocations(
   service: SessionService,
   sessionIds: string[],
-): Promise<ArchiveSessionBuckets> {
-  const result: ArchiveSessionBuckets = {
+): Promise<SessionLocationBuckets> {
+  const result: SessionLocationBuckets = {
     active: [],
-    alreadyArchived: [],
+    archived: [],
     notFound: [],
     errors: [],
   };
@@ -169,7 +144,7 @@ async function classifyArchiveSessionIds(
     if (location === undefined) {
       result.notFound.push(sessionId);
     } else if (location === 'archived') {
-      result.alreadyArchived.push(sessionId);
+      result.archived.push(sessionId);
     } else if (location === 'conflict') {
       result.errors.push({
         sessionId,
@@ -251,17 +226,17 @@ export async function archiveDaemonSessions(params: {
   const notFound: string[] = [];
   const errors: Array<{ sessionId: string; error: unknown }> = [];
 
-  const initial = await classifyArchiveSessionIds(service, uniqueSessionIds);
+  const initial = await classifySessionLocations(service, uniqueSessionIds);
   const activeIds = initial.active;
-  alreadyArchived.push(...initial.alreadyArchived);
+  alreadyArchived.push(...initial.archived);
   notFound.push(...initial.notFound);
   errors.push(...initial.errors);
 
   if (activeIds.length > 0) {
     await coordinator.runExclusiveMany(activeIds, async () => {
-      const locked = await classifyArchiveSessionIds(service, activeIds);
+      const locked = await classifySessionLocations(service, activeIds);
       const closableIds = locked.active;
-      alreadyArchived.push(...locked.alreadyArchived);
+      alreadyArchived.push(...locked.archived);
       notFound.push(...locked.notFound);
       errors.push(...locked.errors);
 
@@ -325,29 +300,46 @@ export async function unarchiveDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
 }): Promise<DaemonUnarchiveSessionsResult> {
   const { sessionIds, service, coordinator } = params;
+  const uniqueSessionIds = [...new Set(sessionIds)];
   const unarchived: string[] = [];
   const alreadyActive: string[] = [];
   const notFound: string[] = [];
   const errors: Array<{ sessionId: string; error: unknown }> = [];
 
-  await coordinator.runExclusiveMany(sessionIds, async () => {
-    try {
-      const result = await service.unarchiveSessions(sessionIds);
-      unarchived.push(...result.unarchived);
-      alreadyActive.push(...result.alreadyActive);
-      notFound.push(...result.notFound);
-      errors.push(...result.errors);
-    } catch (err) {
-      // The service reports normal per-session failures in `result.errors`.
-      // Reaching this catch means the batch could not produce a result at all.
-      for (const sessionId of sessionIds) {
-        errors.push({ sessionId, error: err });
+  const initial = await classifySessionLocations(service, uniqueSessionIds);
+  const archivedIds = initial.archived;
+  alreadyActive.push(...initial.active);
+  notFound.push(...initial.notFound);
+  errors.push(...initial.errors);
+
+  if (archivedIds.length > 0) {
+    await coordinator.runExclusiveMany(archivedIds, async () => {
+      const locked = await classifySessionLocations(service, archivedIds);
+      const unarchiveIds = locked.archived;
+      alreadyActive.push(...locked.active);
+      notFound.push(...locked.notFound);
+      errors.push(...locked.errors);
+
+      if (unarchiveIds.length > 0) {
+        try {
+          const result = await service.unarchiveSessions(unarchiveIds);
+          unarchived.push(...result.unarchived);
+          alreadyActive.push(...result.alreadyActive);
+          notFound.push(...result.notFound);
+          errors.push(...result.errors);
+        } catch (err) {
+          // The service reports normal per-session failures in `result.errors`.
+          // Reaching this catch means the batch could not produce a result at all.
+          for (const sessionId of unarchiveIds) {
+            errors.push({ sessionId, error: err });
+          }
+        }
       }
-    }
-  });
+    });
+  }
 
   logSessionArchiveResult('unarchive', {
-    requested: sessionIds,
+    requested: uniqueSessionIds,
     changed: unarchived,
     already: alreadyActive,
     notFound,

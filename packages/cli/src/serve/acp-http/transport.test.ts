@@ -3141,6 +3141,63 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('_qwen/session/heartbeat does not wait for archive gate', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440130';
+      await writeStoredSession(sessionId);
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      bridge.closeSession = async (sid: string) => {
+        bridge.closedSessions.push(sid);
+        closeStarted();
+        await closeReleasedPromise;
+      };
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 220,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      expect(await reader.next()).toMatchObject({ id: 220 });
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 221,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      await closeStartedPromise;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 222,
+        method: '_qwen/session/heartbeat',
+        params: { sessionId },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 222,
+        result: { sessionId: 'sess-1' },
+      });
+
+      releaseClose();
+      expect(await reader.next()).toMatchObject({
+        id: 221,
+        result: { archived: [sessionId], errors: [] },
+      });
+      reader.close();
+    });
+  });
+
   it('session/load allows concurrent restores for the same session', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440126';

@@ -92,7 +92,7 @@ export class SessionArchivingError extends Error {
 
   constructor(sessionId: string) {
     super(
-      `Session "${sessionId}" is locked by another operation; retry later.`,
+      `Session "${sessionId}" is being archived or unarchived; retry later.`,
     );
     this.name = 'SessionArchivingError';
     this.sessionId = sessionId;

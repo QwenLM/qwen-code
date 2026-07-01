@@ -245,7 +245,7 @@ export function registerSessionRoutes(
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
-            assertSessionLoadable(cwd, sessionId);
+            await assertSessionLoadable(cwd, sessionId);
             return action === 'load'
               ? await bridge.loadSession({
                   sessionId,

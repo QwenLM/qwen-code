@@ -2636,16 +2636,6 @@ class QwenAgent implements Agent {
       );
     }
 
-    try {
-      await session.getConfig().getToolRegistry()?.stop();
-    } catch (err) {
-      debugLogger.debug(
-        `Session ${sessionId} tool registry stop during close failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-
     let flushError: unknown;
     try {
       await session.getConfig().getChatRecordingService()?.flush();
@@ -2658,14 +2648,24 @@ class QwenAgent implements Agent {
       );
     }
 
+    if (flushError !== undefined && opts?.requireFlush === true) {
+      throw flushError;
+    }
+
+    try {
+      await session.getConfig().getToolRegistry()?.stop();
+    } catch (err) {
+      debugLogger.debug(
+        `Session ${sessionId} tool registry stop during close failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
     unregisterGoalHook(session.getConfig(), sessionId);
     this.mcpPool?.releaseSession(sessionId);
     uiTelemetryService.removeSession(sessionId);
     this.sessions.delete(sessionId);
-
-    if (flushError !== undefined && opts?.requireFlush === true) {
-      throw flushError;
-    }
   }
 
   disposeSessions(): void {

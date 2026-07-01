@@ -1010,7 +1010,7 @@ export class AcpDispatcher {
           const restored = await this.archiveCoordinator.runSharedMany(
             [sessionId],
             async () => {
-              assertSessionLoadable(cwd, sessionId);
+              await assertSessionLoadable(cwd, sessionId);
               return method === 'session/load'
                 ? await this.bridge.loadSession({
                     sessionId,
@@ -1736,13 +1736,12 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/heartbeat`: {
           const sessionId = String(params['sessionId'] ?? '');
-          await this.withMutableOwned(conn, sessionId, id, async () => {
-            const result = this.bridge.recordHeartbeat(
-              sessionId,
-              this.sessionCtx(conn, sessionId, loopback),
-            );
-            this.replyConn(conn, id, result as unknown);
-          });
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = this.bridge.recordHeartbeat(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, result as unknown);
           return;
         }
 

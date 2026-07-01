@@ -1860,7 +1860,7 @@ export async function loadCliConfig(
       argv['sessionId'],
     );
     if (exists) {
-      const message = `Error: Session Id ${argv['sessionId']} is already in use.`;
+      const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       writeStderrLine(message);
       process.exit(1);
     }
