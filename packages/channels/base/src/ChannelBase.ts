@@ -189,9 +189,9 @@ export abstract class ChannelBase {
         const safeToolCall: ToolCallEvent = {
           sessionId: event.sessionId,
           toolCallId: event.toolCallId,
-          kind: event.kind,
+          kind: sanitizeLogText(event.kind, 20),
           title: sanitizeLogText(event.title, 80),
-          status: event.status,
+          status: sanitizeLogText(event.status, 20),
         };
         this.emitTaskLifecycle({
           ...this.lifecycleBase(target.chatId, event.sessionId),
