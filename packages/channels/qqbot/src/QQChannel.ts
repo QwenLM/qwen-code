@@ -1545,7 +1545,8 @@ export class QQChannel extends ChannelBase {
     chatId?: string,
   ): string {
     const selfMention = mentions?.find((m) => m.is_you);
-    if (!selfMention?.id) return '';
+    if (!selfMention || (!selfMention.id && !selfMention.member_openid))
+      return '';
     // For QQ group messages, use member_openid (group-specific OPENID)
     // instead of id (global OPENID) for proper reply routing.
     const botOpenId = selfMention.member_openid || selfMention.id;
@@ -1877,7 +1878,7 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isAtBot, isSlash, cleanText, text, senderName } = result;
+    const { isSlash, cleanText, text, senderName } = result;
 
     if (policy === 'keyword') {
       const triggers = (this.qqConfig.keywordTriggers ?? []).filter(
@@ -1904,8 +1905,8 @@ export class QQChannel extends ChannelBase {
       senderName,
       messageId: event.id,
       isGroup: true,
-      isMentioned: isAtBot,
-      isReplyToBot: isAtBot,
+      isMentioned: true,
+      isReplyToBot: false,
       alreadyPrefixed: !isSlash || undefined,
     }).catch((err: unknown) => {
       process.stderr.write(
