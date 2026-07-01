@@ -13,6 +13,21 @@ import {
 import { sanitizeLogText } from '@qwen-code/channel-base';
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
+const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
+const MAX_WORKER_LOG_LINE_LENGTH = 4096;
+const MAX_WORKER_LOG_BUFFER_LENGTH = 64 * 1024;
+
+export interface ChannelWorkerRestartPolicy {
+  maxRestarts: number;
+  windowMs: number;
+  delaysMs: number[];
+}
+
+const DEFAULT_RESTART_POLICY: ChannelWorkerRestartPolicy = {
+  maxRestarts: 3,
+  windowMs: 5 * 60_000,
+  delaysMs: [1_000, 5_000, 15_000],
+};
 
 export type ChannelWorkerState =
   | 'disabled'
@@ -32,6 +47,12 @@ export interface ChannelWorkerSnapshot {
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
   error?: string;
+  restartCount?: number;
+  lastExitAt?: string;
+  lastRestartAt?: string;
+  nextRestartAt?: string;
+  lastHeartbeatAt?: string;
+  staleHeartbeatAt?: string;
 }
 
 export interface ChannelWorkerSupervisor {
@@ -44,6 +65,8 @@ export interface ChannelWorkerSupervisor {
 export interface ChannelWorkerChild {
   pid?: number;
   killed?: boolean;
+  stdout?: WorkerLogStream;
+  stderr?: WorkerLogStream;
   kill(signal?: NodeJS.Signals | number): boolean;
   on(event: 'message', listener: (message: unknown) => void): this;
   removeListener(event: 'message', listener: (message: unknown) => void): this;
@@ -61,9 +84,23 @@ export type SpawnChannelWorker = (
   options: {
     cwd: string;
     env: NodeJS.ProcessEnv;
-    stdio: ['ignore', 'inherit', 'inherit', 'ipc'];
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'];
   },
 ) => ChannelWorkerChild;
+
+export interface ChannelWorkerLogEntry {
+  stream: 'stdout' | 'stderr';
+  line: string;
+}
+
+export interface WorkerLogStream {
+  on(
+    event: 'data',
+    listener: (chunk: Buffer | string | Uint8Array) => void,
+  ): unknown;
+  on(event: 'end' | 'close', listener: () => void): unknown;
+  on(event: 'error', listener: (err: Error) => void): unknown;
+}
 
 export interface CreateChannelWorkerSupervisorOptions {
   cliEntryPath: string;
@@ -74,6 +111,10 @@ export interface CreateChannelWorkerSupervisorOptions {
   startupTimeoutMs?: number;
   spawnWorker?: SpawnChannelWorker;
   onExit?: (snapshot: ChannelWorkerSnapshot) => void;
+  onReady?: (snapshot: ChannelWorkerSnapshot) => void;
+  onLog?: (entry: ChannelWorkerLogEntry) => void;
+  restartPolicy?: ChannelWorkerRestartPolicy;
+  heartbeatTimeoutMs?: number;
 }
 
 function selectionChannelArgs(selection: ServeChannelSelection): string[] {
@@ -89,7 +130,7 @@ function defaultSpawnWorker(
   options: {
     cwd: string;
     env: NodeJS.ProcessEnv;
-    stdio: ['ignore', 'inherit', 'inherit', 'ipc'];
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'];
   },
 ): ChannelWorkerChild {
   const child = fork(argv[0]!, argv.slice(1), {
@@ -114,6 +155,18 @@ function isReadyMessage(message: unknown): message is {
   );
 }
 
+function isHeartbeatMessage(message: unknown): message is {
+  type: 'heartbeat';
+  pid?: number;
+  at?: string;
+} {
+  return (
+    typeof message === 'object' &&
+    message !== null &&
+    (message as { type?: unknown }).type === 'heartbeat'
+  );
+}
+
 function requestedChannelNames(
   selection: ServeChannelSelection,
 ): string[] | undefined {
@@ -132,6 +185,28 @@ function notifyExit(
     onExit?.(snapshot);
   } catch {
     // onExit is bookkeeping; worker exit handling must not crash the daemon.
+  }
+}
+
+function notifyReady(
+  onReady: ((snapshot: ChannelWorkerSnapshot) => void) | undefined,
+  snapshot: ChannelWorkerSnapshot,
+): void {
+  try {
+    onReady?.(snapshot);
+  } catch {
+    // onReady is bookkeeping; worker readiness must not crash the daemon.
+  }
+}
+
+function notifyLog(
+  onLog: ((entry: ChannelWorkerLogEntry) => void) | undefined,
+  entry: ChannelWorkerLogEntry,
+): void {
+  try {
+    onLog?.(entry);
+  } catch {
+    // onLog is bookkeeping; worker log forwarding must not crash the daemon.
   }
 }
 
@@ -175,19 +250,123 @@ function createWorkerEnv(opts: {
   return env;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sensitiveEnvValues(env: NodeJS.ProcessEnv): string[] {
+  const sensitiveKey =
+    /TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL/i;
+  return Object.entries(env)
+    .filter(([key, value]) => sensitiveKey.test(key) && value !== undefined)
+    .map(([, value]) => value!)
+    .filter((value) => value.length >= 4);
+}
+
+function redactWorkerLogLine(
+  line: string,
+  opts: { daemonToken?: string; workerEnv: NodeJS.ProcessEnv },
+): string {
+  let redacted = line.replace(
+    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s@]+)@([^\s]+)/gi,
+    '$1<redacted>@$3',
+  );
+  const secrets = new Set([
+    ...(opts.daemonToken && opts.daemonToken.length >= 4
+      ? [opts.daemonToken]
+      : []),
+    ...sensitiveEnvValues(opts.workerEnv),
+  ]);
+  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+    redacted = redacted.replace(
+      new RegExp(escapeRegExp(secret), 'g'),
+      '<redacted>',
+    );
+  }
+  return redacted;
+}
+
+function attachWorkerLogStream(
+  stream: WorkerLogStream | undefined,
+  streamName: ChannelWorkerLogEntry['stream'],
+  opts: {
+    daemonToken?: string;
+    workerEnv: NodeJS.ProcessEnv;
+    onLog?: (entry: ChannelWorkerLogEntry) => void;
+  },
+): () => void {
+  if (!stream) return () => {};
+  let buffer = '';
+  let discardingOversizedLine = false;
+  const flushLine = (line: string) => {
+    const redacted = redactWorkerLogLine(line, {
+      ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+      workerEnv: opts.workerEnv,
+    });
+    notifyLog(opts.onLog, {
+      stream: streamName,
+      line: sanitizeLogText(redacted, MAX_WORKER_LOG_LINE_LENGTH),
+    });
+  };
+  const flushPartial = () => {
+    if (buffer.length === 0) return;
+    flushLine(buffer);
+    buffer = '';
+  };
+  const flushOversizedBuffer = () => {
+    if (buffer.length <= MAX_WORKER_LOG_BUFFER_LENGTH) return;
+    flushLine(buffer);
+    buffer = '';
+    discardingOversizedLine = true;
+  };
+  stream.on('data', (chunk) => {
+    buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+    for (;;) {
+      const newlineIndex = buffer.search(/\r?\n/);
+      if (newlineIndex < 0) break;
+      const line = buffer.slice(0, newlineIndex);
+      const newlineLength =
+        buffer[newlineIndex] === '\r' && buffer[newlineIndex + 1] === '\n'
+          ? 2
+          : 1;
+      buffer = buffer.slice(newlineIndex + newlineLength);
+      if (!discardingOversizedLine) {
+        flushLine(line);
+      }
+      discardingOversizedLine = false;
+    }
+    if (discardingOversizedLine) {
+      buffer = '';
+      return;
+    }
+    flushOversizedBuffer();
+  });
+  stream.on('end', flushPartial);
+  stream.on('close', flushPartial);
+  stream.on('error', () => {
+    flushPartial();
+  });
+  return flushPartial;
+}
+
 export function createChannelWorkerSupervisor(
   opts: CreateChannelWorkerSupervisorOptions,
 ): ChannelWorkerSupervisor {
   const spawnWorker = opts.spawnWorker ?? defaultSpawnWorker;
+  const restartPolicy = opts.restartPolicy ?? DEFAULT_RESTART_POLICY;
+  const heartbeatTimeoutMs =
+    opts.heartbeatTimeoutMs ?? DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS;
   let child: ChannelWorkerChild | undefined;
   let snapshot: ChannelWorkerSnapshot = {
     enabled: true,
     state: 'disabled',
     channels: channelSelectionNames(opts.selection),
+    restartCount: 0,
   };
-  let ready = false;
   let stopping = false;
-  let exitNotified = false;
+  let restartTimer: NodeJS.Timeout | undefined;
+  let staleHeartbeatTimer: NodeJS.Timeout | undefined;
+  let restartAttemptTimes: number[] = [];
 
   const snapshotCopy = (): ChannelWorkerSnapshot => ({
     ...snapshot,
@@ -196,6 +375,37 @@ export function createChannelWorkerSupervisor(
       ? { requestedChannels: [...snapshot.requestedChannels] }
       : {}),
   });
+
+  const clearRestartTimer = () => {
+    if (!restartTimer) return;
+    clearTimeout(restartTimer);
+    restartTimer = undefined;
+  };
+
+  const clearStaleHeartbeatTimer = () => {
+    if (!staleHeartbeatTimer) return;
+    clearTimeout(staleHeartbeatTimer);
+    staleHeartbeatTimer = undefined;
+  };
+
+  const pruneRestartAttempts = (nowMs: number) => {
+    restartAttemptTimes = restartAttemptTimes.filter(
+      (attemptMs) => nowMs - attemptMs < restartPolicy.windowMs,
+    );
+  };
+
+  const canScheduleRestart = (nowMs: number): boolean => {
+    pruneRestartAttempts(nowMs);
+    return restartAttemptTimes.length < restartPolicy.maxRestarts;
+  };
+
+  const nextRestartDelayMs = (): number => {
+    const index = Math.min(
+      restartAttemptTimes.length,
+      restartPolicy.delaysMs.length - 1,
+    );
+    return restartPolicy.delaysMs[index] ?? 0;
+  };
 
   const setExited = (
     state: ChannelWorkerState,
@@ -208,6 +418,7 @@ export function createChannelWorkerSupervisor(
       state,
       exitCode: code,
       signal,
+      lastExitAt: new Date().toISOString(),
     };
     if (error) {
       next.error = error;
@@ -219,136 +430,295 @@ export function createChannelWorkerSupervisor(
     };
   };
 
+  const scheduleRestart = (): boolean => {
+    if (stopping) return false;
+    const nowMs = Date.now();
+    if (!canScheduleRestart(nowMs)) {
+      snapshot = {
+        ...snapshot,
+        state: 'failed',
+        error: snapshot.error ?? 'Channel worker restart budget exhausted.',
+        nextRestartAt: undefined,
+      };
+      return false;
+    }
+    const delayMs = nextRestartDelayMs();
+    const nextRestartAt = new Date(nowMs + delayMs).toISOString();
+    snapshot = {
+      ...snapshot,
+      nextRestartAt,
+    };
+    clearRestartTimer();
+    restartTimer = setTimeout(() => {
+      restartTimer = undefined;
+      void launch('restart').catch((err: unknown) => {
+        handleRestartFailure(err instanceof Error ? err.message : String(err));
+      });
+    }, delayMs);
+    restartTimer.unref();
+    return true;
+  };
+
+  const handleRestartFailure = (error: string) => {
+    snapshot = {
+      ...snapshot,
+      state: 'failed',
+      error: sanitizeWorkerError(error),
+    };
+    scheduleRestart();
+    notifyExit(opts.onExit, snapshotCopy());
+  };
+
+  const armStaleHeartbeatTimer = (startedChild: ChannelWorkerChild) => {
+    clearStaleHeartbeatTimer();
+    if (heartbeatTimeoutMs <= 0) return;
+    staleHeartbeatTimer = setTimeout(() => {
+      if (child !== startedChild || stopping) return;
+      snapshot = {
+        ...snapshot,
+        state: snapshot.state === 'running' ? 'running' : snapshot.state,
+        error: 'Channel worker heartbeat timed out.',
+        staleHeartbeatAt: new Date().toISOString(),
+      };
+      startedChild.kill('SIGKILL');
+    }, heartbeatTimeoutMs);
+    staleHeartbeatTimer.unref();
+  };
+
+  const launch = async (kind: 'initial' | 'restart'): Promise<void> => {
+    clearStaleHeartbeatTimer();
+    const argv = [
+      opts.cliEntryPath,
+      'channel',
+      'daemon-worker',
+      ...selectionChannelArgs(opts.selection),
+    ];
+    const env = createWorkerEnv({
+      daemonUrl: opts.daemonUrl,
+      workspace: opts.workspace,
+      ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+    });
+    const requestedChannels = requestedChannelNames(opts.selection);
+    const startedAt = new Date().toISOString();
+    snapshot = {
+      enabled: true,
+      state: 'starting',
+      channels: channelSelectionNames(opts.selection),
+      ...(requestedChannels ? { requestedChannels } : {}),
+      startedAt,
+      restartCount: snapshot.restartCount ?? 0,
+      ...(snapshot.lastExitAt ? { lastExitAt: snapshot.lastExitAt } : {}),
+      ...(snapshot.lastHeartbeatAt
+        ? { lastHeartbeatAt: snapshot.lastHeartbeatAt }
+        : {}),
+      ...(snapshot.staleHeartbeatAt
+        ? { staleHeartbeatAt: snapshot.staleHeartbeatAt }
+        : {}),
+    };
+    if (kind === 'restart') {
+      const nowMs = Date.now();
+      restartAttemptTimes.push(nowMs);
+      snapshot = {
+        ...snapshot,
+        restartCount: (snapshot.restartCount ?? 0) + 1,
+        lastRestartAt: new Date(nowMs).toISOString(),
+        nextRestartAt: undefined,
+      };
+    }
+
+    let startedChild: ChannelWorkerChild;
+    try {
+      startedChild = spawnWorker(process.execPath, argv, {
+        cwd: opts.workspace,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const error = sanitizeWorkerError(message);
+      snapshot = {
+        ...snapshot,
+        state: 'failed',
+        error,
+      };
+      if (kind === 'initial') throw new Error(error);
+      handleRestartFailure(message);
+      return;
+    }
+
+    child = startedChild;
+    const flushStdout = attachWorkerLogStream(startedChild.stdout, 'stdout', {
+      ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+      workerEnv: env,
+      onLog: opts.onLog,
+    });
+    const flushStderr = attachWorkerLogStream(startedChild.stderr, 'stderr', {
+      ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+      workerEnv: env,
+      onLog: opts.onLog,
+    });
+    const flushLogs = () => {
+      flushStdout();
+      flushStderr();
+    };
+    if (startedChild.pid !== undefined) {
+      snapshot = { ...snapshot, pid: startedChild.pid };
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let ready = false;
+      let exitObserved = false;
+      let startupTimer: NodeJS.Timeout | undefined;
+      const cleanupStartupTimer = () => {
+        if (!startupTimer) return;
+        clearTimeout(startupTimer);
+        startupTimer = undefined;
+      };
+      const cleanupLaunch = () => {
+        cleanupStartupTimer();
+        startedChild.removeListener('message', handleMessage);
+        clearStaleHeartbeatTimer();
+        flushLogs();
+      };
+      const failBeforeReady = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanupStartupTimer();
+        if (kind === 'initial') {
+          reject(err);
+        } else {
+          resolve();
+        }
+      };
+      const completeReady = (message: {
+        pid?: number;
+        channels?: string[];
+        requestedChannels?: string[];
+      }) => {
+        if (settled || child !== startedChild) return;
+        settled = true;
+        ready = true;
+        cleanupStartupTimer();
+        const next: ChannelWorkerSnapshot = {
+          ...snapshot,
+          state: 'running',
+          pid: message.pid ?? startedChild.pid,
+          channels:
+            message.channels && message.channels.length > 0
+              ? [...message.channels]
+              : [...snapshot.channels],
+        };
+        if (message.requestedChannels?.length) {
+          next.requestedChannels = [...message.requestedChannels];
+        }
+        snapshot = next;
+        armStaleHeartbeatTimer(startedChild);
+        notifyReady(opts.onReady, snapshotCopy());
+        resolve();
+      };
+      const handleHeartbeat = (message: { pid?: number; at?: string }) => {
+        if (!ready || child !== startedChild) return;
+        const currentPid = snapshot.pid ?? startedChild.pid;
+        if (message.pid !== undefined && currentPid !== undefined) {
+          if (message.pid !== currentPid) return;
+        }
+        snapshot = {
+          ...snapshot,
+          lastHeartbeatAt: message.at ?? new Date().toISOString(),
+        };
+        armStaleHeartbeatTimer(startedChild);
+      };
+      function handleMessage(message: unknown) {
+        if (child !== startedChild) return;
+        if (!ready && isReadyMessage(message)) {
+          completeReady(message);
+        } else if (isHeartbeatMessage(message)) {
+          handleHeartbeat(message);
+        }
+      }
+      function settleExit(code: number | null, signal: NodeJS.Signals | null) {
+        if (child !== startedChild) return;
+        exitObserved = true;
+        cleanupLaunch();
+        const state = ready ? 'exited' : 'failed';
+        const message = `Channel worker exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'}).`;
+        setExited(
+          state,
+          code,
+          signal,
+          snapshot.error ?? (ready ? undefined : sanitizeWorkerError(message)),
+        );
+        child = undefined;
+        if (ready && !stopping) {
+          scheduleRestart();
+          notifyExit(opts.onExit, snapshotCopy());
+        } else if (!ready && kind === 'restart' && !stopping) {
+          scheduleRestart();
+          notifyExit(opts.onExit, snapshotCopy());
+        }
+        if (!settled) {
+          failBeforeReady(new Error(snapshot.error ?? message));
+        }
+      }
+      function settleError(err: Error) {
+        if (child !== startedChild || exitObserved) return;
+        if (settled && ready) return;
+        snapshot = {
+          ...snapshot,
+          state: 'failed',
+          error: sanitizeWorkerError(err.message),
+        };
+        if (kind === 'restart') {
+          cleanupLaunch();
+          child = undefined;
+          startedChild.kill('SIGTERM');
+          scheduleRestart();
+          notifyExit(opts.onExit, snapshotCopy());
+        }
+        if (!settled) {
+          failBeforeReady(new Error(snapshot.error));
+        }
+      }
+      startupTimer = setTimeout(() => {
+        const timeoutMs =
+          opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
+        const error = `Channel worker did not become ready within ${timeoutMs}ms.`;
+        snapshot = {
+          ...snapshot,
+          state: 'failed',
+          error: sanitizeWorkerError(error),
+        };
+        failBeforeReady(new Error(error));
+        if (child === startedChild) {
+          if (kind === 'restart' && !stopping) {
+            cleanupLaunch();
+            child = undefined;
+            scheduleRestart();
+            notifyExit(opts.onExit, snapshotCopy());
+            startedChild.kill('SIGTERM');
+          } else {
+            child.kill('SIGTERM');
+          }
+        }
+      }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
+      startupTimer.unref();
+      startedChild.on('message', handleMessage);
+      startedChild.once('exit', settleExit);
+      startedChild.once('error', settleError);
+    });
+  };
+
   return {
     async start() {
       if (child) return;
-      ready = false;
       stopping = false;
-      exitNotified = false;
-      const argv = [
-        opts.cliEntryPath,
-        'channel',
-        'daemon-worker',
-        ...selectionChannelArgs(opts.selection),
-      ];
-      const env = createWorkerEnv({
-        daemonUrl: opts.daemonUrl,
-        workspace: opts.workspace,
-        ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
-      });
-      const requestedChannels = requestedChannelNames(opts.selection);
-      snapshot = {
-        enabled: true,
-        state: 'starting',
-        channels: channelSelectionNames(opts.selection),
-        ...(requestedChannels ? { requestedChannels } : {}),
-        startedAt: new Date().toISOString(),
-      };
-      child = spawnWorker(process.execPath, argv, {
-        cwd: opts.workspace,
-        env,
-        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-      });
-      if (child.pid !== undefined) {
-        snapshot = { ...snapshot, pid: child.pid };
-      }
-      const startedChild = child;
-
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        let exitObserved = false;
-        let startupTimer: NodeJS.Timeout | undefined;
-        function cleanupReadyWait() {
-          if (startupTimer) {
-            clearTimeout(startupTimer);
-            startupTimer = undefined;
-          }
-          startedChild.removeListener('message', settleReady);
-        }
-        function failBeforeReady(err: Error) {
-          if (settled) return;
-          settled = true;
-          cleanupReadyWait();
-          reject(err);
-        }
-        function settleReady(message: unknown) {
-          if (settled || !isReadyMessage(message)) return;
-          if (child !== startedChild) return;
-          settled = true;
-          ready = true;
-          cleanupReadyWait();
-          const next: ChannelWorkerSnapshot = {
-            ...snapshot,
-            state: 'running',
-            pid: message.pid ?? startedChild.pid,
-            channels:
-              message.channels && message.channels.length > 0
-                ? [...message.channels]
-                : [...snapshot.channels],
-          };
-          if (message.requestedChannels?.length) {
-            next.requestedChannels = [...message.requestedChannels];
-          }
-          snapshot = next;
-          resolve();
-        }
-        function settleExit(
-          code: number | null,
-          signal: NodeJS.Signals | null,
-        ) {
-          if (child !== startedChild) return;
-          exitObserved = true;
-          const state = ready ? 'exited' : 'failed';
-          const message = `Channel worker exited before ready (code=${code ?? 'null'}, signal=${signal ?? 'null'}).`;
-          setExited(
-            state,
-            code,
-            signal,
-            snapshot.error ??
-              (ready ? undefined : sanitizeWorkerError(message)),
-          );
-          if (ready && !stopping && !exitNotified) {
-            exitNotified = true;
-            notifyExit(opts.onExit, snapshotCopy());
-          }
-          if (!settled) {
-            failBeforeReady(new Error(snapshot.error ?? message));
-          }
-          child = undefined;
-        }
-        function settleError(err: Error) {
-          if (child !== startedChild || exitObserved) return;
-          if (settled && ready) return;
-          snapshot = {
-            ...snapshot,
-            state: 'failed',
-            error: sanitizeWorkerError(err.message),
-          };
-          if (!settled) {
-            failBeforeReady(new Error(snapshot.error));
-          }
-        }
-        startupTimer = setTimeout(() => {
-          const timeoutMs =
-            opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS;
-          const error = `Channel worker did not become ready within ${timeoutMs}ms.`;
-          snapshot = {
-            ...snapshot,
-            state: 'failed',
-            error: sanitizeWorkerError(error),
-          };
-          failBeforeReady(new Error(error));
-          if (child === startedChild) {
-            child.kill('SIGTERM');
-          }
-        }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
-        startupTimer.unref();
-        startedChild.on('message', settleReady);
-        startedChild.once('exit', settleExit);
-        startedChild.once('error', settleError);
-      });
+      clearRestartTimer();
+      await launch('initial');
     },
     async stop() {
+      clearRestartTimer();
+      clearStaleHeartbeatTimer();
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -388,10 +758,14 @@ export function createChannelWorkerSupervisor(
         (snapshot.state === 'failed' && hasObservedExit(snapshot)) ||
         snapshot.state === 'stopped'
       ) {
+        clearRestartTimer();
+        clearStaleHeartbeatTimer();
         return;
       }
       const preserveFailure =
         snapshot.state === 'failed' && !hasObservedExit(snapshot);
+      clearRestartTimer();
+      clearStaleHeartbeatTimer();
       stopping = true;
       child.kill('SIGKILL');
       child = undefined;

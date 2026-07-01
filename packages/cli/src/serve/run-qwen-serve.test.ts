@@ -1986,6 +1986,15 @@ describe('runQwenServe channel worker supervisor', () => {
     };
   }
 
+  function makeReadyWorkerFactory(worker: ReturnType<typeof makeWorker>) {
+    return vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
+      worker.start.mockImplementation(async () => {
+        opts.onReady?.(worker.snapshot());
+      });
+      return worker;
+    });
+  }
+
   function makePidfileDeps() {
     return {
       readServiceInfo: vi.fn<() => ServiceInfo | null>(() => null),
@@ -2024,7 +2033,7 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge,
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
         channelServicePidfile: pidfile,
       },
     );
@@ -2144,7 +2153,7 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge: makeFakeBridge(),
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
         channelServicePidfile: pidfile,
       },
     );
@@ -2184,7 +2193,7 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge: makeFakeBridge(),
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
         channelServicePidfile: pidfile,
       },
     );
@@ -2220,7 +2229,7 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge: makeFakeBridge(),
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
         channelServicePidfile: pidfile,
       },
     );
@@ -2231,6 +2240,118 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(pidfile.writeServeServiceInfo).toHaveBeenCalled();
     } finally {
       await handle.close();
+    }
+  });
+
+  it('updates the serve-owned pidfile when a restarted worker becomes ready', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-ready-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    let onReady: CreateChannelWorkerSupervisorOptions['onReady'];
+    const pidfile = makePidfileDeps();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn((opts) => {
+          onReady = opts.onReady;
+          return worker;
+        }),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      pidfile.writeServeServiceInfo.mockClear();
+      onReady?.({
+        enabled: true,
+        state: 'running',
+        pid: 5678,
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+        restartCount: 1,
+      });
+
+      expect(pidfile.writeServeServiceInfo).toHaveBeenCalledWith({
+        channels: ['telegram'],
+        servePid: process.pid,
+        workerPid: 5678,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('forwards channel worker log lines into the daemon log', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-log-')),
+    );
+    const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    let onLog: CreateChannelWorkerSupervisorOptions['onLog'];
+
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge: makeFakeBridge(),
+          channelWorkerSupervisorFactory: vi.fn((opts) => {
+            onLog = opts.onLog;
+            return worker;
+          }),
+          channelServicePidfile: makePidfileDeps(),
+        },
+      );
+
+      try {
+        onLog?.({ stream: 'stderr', line: 'adapter failed with <redacted>' });
+      } finally {
+        await handle.close();
+      }
+
+      const daemonDir = path.join(tmpDir, 'debug', 'daemon');
+      const logContent = fs
+        .readdirSync(daemonDir)
+        .filter((file) => file.endsWith('.log'))
+        .map((file) => fs.readFileSync(path.join(daemonDir, file), 'utf8'))
+        .join('\n');
+
+      expect(logContent).toContain(
+        'channel worker stderr: adapter failed with <redacted>',
+      );
+      expect(logContent).not.toContain('secret-token');
+    } finally {
+      if (originalRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+      }
     }
   });
 
@@ -2376,7 +2497,16 @@ describe('runQwenServe channel worker supervisor', () => {
       const res = await fetch(`${handle.url}/daemon/status`);
       const body = await res.json();
 
-      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+      expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalledWith(
+        process.pid,
+      );
+      const lastPidfileWrite =
+        pidfile.writeServeServiceInfo.mock.calls.at(-1)?.[0];
+      expect(lastPidfileWrite).toMatchObject({
+        channels: ['telegram'],
+        servePid: process.pid,
+      });
+      expect(lastPidfileWrite?.workerPid).toBeUndefined();
       expect(body).toMatchObject({
         status: 'warning',
         issues: expect.arrayContaining([
@@ -2513,7 +2643,7 @@ describe('runQwenServe channel worker supervisor', () => {
       },
       {
         bridge: makeFakeBridge(),
-        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
         channelServicePidfile: pidfile,
       },
     );

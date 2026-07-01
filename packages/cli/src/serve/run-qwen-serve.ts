@@ -1785,14 +1785,18 @@ export async function runQwenServe(
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
-  const writeChannelWorkerPidfile = (): void => {
+  const writeChannelWorkerPidfile = (
+    snapshot = channelWorker.snapshot(),
+    options: { clearWorkerPid?: boolean } = {},
+  ): void => {
     if (!opts.channelSelection || !channelServicePidfile) return;
-    const snapshot = channelWorker.snapshot();
     try {
       channelServicePidfile.writeServeServiceInfo({
         channels: snapshot.channels,
         servePid: process.pid,
-        workerPid: snapshot.pid,
+        ...(!options.clearWorkerPid && snapshot.pid !== undefined
+          ? { workerPid: snapshot.pid }
+          : {}),
       });
     } catch (err) {
       daemonLog.warn(
@@ -2305,13 +2309,24 @@ export async function runQwenServe(
             ...(token ? { daemonToken: token } : {}),
             workspace: boundWorkspace,
             selection: opts.channelSelection,
+            onReady: (snapshot) => {
+              writeChannelWorkerPidfile(snapshot);
+            },
+            onLog: ({ stream, line }) => {
+              const message = `channel worker ${stream}: ${line}`;
+              if (stream === 'stderr') {
+                daemonLog.warn(message);
+              } else {
+                daemonLog.info(message);
+              }
+            },
             onExit: (snapshot) => {
               daemonLog.warn(
                 `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
                   `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
                   `error=${snapshot.error ?? 'none'})`,
               );
-              removeCurrentServePidfile();
+              writeChannelWorkerPidfile(snapshot, { clearWorkerPid: true });
             },
           });
         }
@@ -2475,7 +2490,6 @@ export async function runQwenServe(
         if (opts.channelSelection) {
           await channelWorker.start();
           if (runtimeStartupSettled) return;
-          writeChannelWorkerPidfile();
         }
         if (runtimeStartupSettled) return;
         runtimeStartupSettled = true;

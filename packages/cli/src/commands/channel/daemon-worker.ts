@@ -502,6 +502,18 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       });
       removeEarlyShutdownHandlers();
 
+      const heartbeatTimer = setInterval(() => {
+        process.send?.({
+          type: 'heartbeat',
+          pid: process.pid,
+          at: new Date().toISOString(),
+        });
+      }, 15_000);
+      heartbeatTimer.unref();
+      const clearHeartbeat = () => {
+        clearInterval(heartbeatTimer);
+      };
+
       let shuttingDown = false;
       let exitCode = 0;
       let finish!: () => void;
@@ -513,6 +525,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           process.exit(1);
         } else {
           shuttingDown = true;
+          clearHeartbeat();
           try {
             await handle.close();
           } catch (err) {
@@ -526,6 +539,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
               `[Channel] daemon worker failed to shut down after ${safeReason}: ${safeMessage}`,
             );
           } finally {
+            clearHeartbeat();
             finish();
           }
         }
@@ -540,6 +554,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         void shutdown(pendingShutdownReason);
       }
       await finished;
+      clearHeartbeat();
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('disconnect', onDisconnect);

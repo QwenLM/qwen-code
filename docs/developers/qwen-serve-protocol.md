@@ -303,10 +303,11 @@ warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
 `mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`, and
-`workspace_status_unavailable`. During the short window after the listener is
-ready but before the full runtime is mounted, `/daemon/status` may report
-`daemon_runtime_starting`; if the async runtime mount fails, it reports
-`daemon_runtime_failed` while non-status runtime routes return `503`.
+`channel_worker_partial_connect`, and `workspace_status_unavailable`. During
+the short window after the listener is ready but before the full runtime is
+mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
+runtime mount fails, it reports `daemon_runtime_failed` while non-status
+runtime routes return `503`.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
@@ -314,6 +315,29 @@ not the channel-adapter worker. Daemon-managed channels use
 `running`, `exited`, `failed`, or `stopped`. When a worker reaches `running`
 and then exits, `/daemon/status` keeps the daemon online and reports warning
 issue code `channel_worker_exited`.
+
+Daemon-managed channel worker startup remains fail-fast: if `qwen serve
+--channel ...` cannot start a worker that reaches ready, serve startup fails.
+After a worker has reached ready, unexpected exits are restarted by the serve
+supervisor within a bounded policy: up to 3 restart attempts in a 5 minute
+window, with 1s, 5s, then 15s backoff. The worker sends IPC heartbeats every
+15s; if no heartbeat is observed for 45s, the supervisor treats the worker as
+stale, kills it, records `staleHeartbeatAt`, and uses the same restart path.
+
+`runtime.channelWorker` may include additive operational fields:
+`requestedChannels`, `pid`, `startedAt`, `exitCode`, `signal`, `error`,
+`restartCount`, `lastExitAt`, `lastRestartAt`, `nextRestartAt`,
+`lastHeartbeatAt`, and `staleHeartbeatAt`. `restartCount` is the lifetime
+number of restart attempts made by this serve process; a running worker with
+`restartCount > 0` is healthy unless another issue applies. A running worker
+whose `requestedChannels` include names missing from `channels` reports
+`channel_worker_partial_connect`.
+
+`qwen channel status` continues to read pidfile metadata. During a restart
+window the serve-owned pidfile remains reserved, but `workerPid` is omitted so
+clients do not display a stale worker process. Worker stdout/stderr are
+forwarded into the daemon log with bearer tokens, sensitive worker environment
+values, and proxy URL credentials redacted.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. `summary` omits

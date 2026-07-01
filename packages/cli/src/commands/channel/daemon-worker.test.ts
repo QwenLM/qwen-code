@@ -940,6 +940,102 @@ describe('daemonWorkerCommand', () => {
     }
   });
 
+  it('sends heartbeat messages while the daemon worker is live', async () => {
+    vi.useFakeTimers();
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'ready',
+            channels: ['telegram'],
+            requestedChannels: ['telegram'],
+            pid: process.pid,
+          }),
+        );
+      });
+      send.mockClear();
+
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat', pid: process.pid }),
+      );
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+
+      send.mockClear();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat' }),
+      );
+    } finally {
+      restoreSend();
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears heartbeat messages when parent IPC disconnects', async () => {
+    vi.useFakeTimers();
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'ready',
+            channels: ['telegram'],
+            requestedChannels: ['telegram'],
+            pid: process.pid,
+          }),
+        );
+      });
+
+      process.emit('disconnect');
+      send.mockClear();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat' }),
+      );
+
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+
+      send.mockClear();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'heartbeat' }),
+      );
+    } finally {
+      restoreSend();
+      vi.useRealTimers();
+    }
+  });
+
   it('honors a shutdown signal received during async setup', async () => {
     const exit = mockProcessExitNoThrow();
     const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);

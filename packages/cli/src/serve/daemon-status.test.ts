@@ -90,6 +90,9 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           pid: 1234,
           error: 'ipc failed',
+          restartCount: 2,
+          lastExitAt: '2026-07-01T01:00:00.000Z',
+          lastHeartbeatAt: '2026-07-01T00:59:50.000Z',
         },
       }),
     );
@@ -100,7 +103,8 @@ describe('buildDaemonStatusResponse', () => {
         expect.objectContaining({
           code: 'channel_worker_exited',
           severity: 'warning',
-          message: 'Channel worker is failed (pid=1234): ipc failed.',
+          message:
+            'Channel worker is failed (pid=1234, restarts=2, lastExitAt=2026-07-01T01:00:00.000Z, lastHeartbeatAt=2026-07-01T00:59:50.000Z): ipc failed.',
           section: 'runtime.channelWorker',
         }),
       ]),
@@ -111,6 +115,42 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           pid: 1234,
           error: 'ipc failed',
+          restartCount: 2,
+          lastExitAt: '2026-07-01T01:00:00.000Z',
+          lastHeartbeatAt: '2026-07-01T00:59:50.000Z',
+        },
+      },
+    });
+  });
+
+  it('does not warn for a running channel worker that restarted successfully', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          requestedChannels: ['telegram'],
+          pid: 2345,
+          restartCount: 1,
+          lastRestartAt: '2026-07-01T01:00:00.000Z',
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'ok',
+      issues: [],
+      runtime: {
+        channelWorker: {
+          enabled: true,
+          state: 'running',
+          pid: 2345,
+          restartCount: 1,
+          lastRestartAt: '2026-07-01T01:00:00.000Z',
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
         },
       },
     });
@@ -126,6 +166,8 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           requestedChannels: ['telegram', 'feishu', 'dingtalk'],
           pid: 1234,
+          restartCount: 1,
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
         },
       }),
     );
