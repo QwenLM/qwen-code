@@ -150,7 +150,17 @@ export async function appendChannelMemory(
     // proper-lockfile requires the target file to exist before locking it.
     const initialHandle = await fs.open(filePath, 'a+');
     await initialHandle.close();
-    const release = await lockfile.lock(filePath, LOCK_OPTIONS);
+    let release: () => Promise<void>;
+    try {
+      release = await lockfile.lock(filePath, LOCK_OPTIONS);
+    } catch (error) {
+      if (!isMissingFile(error)) {
+        throw error;
+      }
+      const retryHandle = await fs.open(filePath, 'a+');
+      await retryHandle.close();
+      release = await lockfile.lock(filePath, LOCK_OPTIONS);
+    }
     try {
       const handle = await fs.open(filePath, 'a+');
       try {

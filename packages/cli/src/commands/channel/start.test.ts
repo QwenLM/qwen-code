@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { ChannelBaseOptions } from '@qwen-code/channel-base';
 
 const mockSetGlobalDispatcher = vi.hoisted(() => vi.fn());
 const mockProxyAgent = vi.hoisted(() =>
@@ -13,6 +14,15 @@ const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
 const mockAppendChannelMemory = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
+const mockParseCron = vi.hoisted(() => vi.fn());
+const mockNextFireTime = vi.hoisted(() =>
+  vi.fn((cron: string) => {
+    if (cron === '0 0 31 2 *') {
+      throw new Error('No next fire time');
+    }
+    return new Date('2026-01-01T00:00:00.000Z');
+  }),
+);
 const mockLoadSettings = vi.hoisted(() => vi.fn());
 const mockGetExtensionManager = vi.hoisted(() => vi.fn());
 const mockReadServiceInfo = vi.hoisted(() => vi.fn());
@@ -51,6 +61,26 @@ const mockRouterRemoveSessionId = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreCreate = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreCreateForTarget = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreListForTarget = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreDisable = vi.hoisted(() => vi.fn());
+const mockChannelLoopStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    create: mockChannelLoopStoreCreate,
+    createForTarget: mockChannelLoopStoreCreateForTarget,
+    listForTarget: mockChannelLoopStoreListForTarget,
+    disable: mockChannelLoopStoreDisable,
+  })),
+);
+const mockChannelLoopSchedulerStart = vi.hoisted(() => vi.fn());
+const mockChannelLoopSchedulerStop = vi.hoisted(() => vi.fn());
+const mockChannelLoopScheduler = vi.hoisted(() =>
+  vi.fn((_options?: unknown) => ({
+    start: mockChannelLoopSchedulerStart,
+    stop: mockChannelLoopSchedulerStop,
+  })),
+);
 const mockSessionRouter = vi.hoisted(() =>
   vi.fn(() => ({
     clearAll: mockRouterClearAll,
@@ -70,7 +100,9 @@ vi.mock('undici', () => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   appendChannelMemory: mockAppendChannelMemory,
   clearChannelMemory: mockClearChannelMemory,
+  nextFireTime: mockNextFireTime,
   normalizeProxyUrl: mockNormalizeProxyUrl,
+  parseCron: mockParseCron,
   readChannelMemory: mockReadChannelMemory,
   Storage: {
     getGlobalQwenDir: mockStorageGetGlobalQwenDir,
@@ -108,6 +140,8 @@ vi.mock('./channel-registry.js', () => ({
 
 vi.mock('@qwen-code/channel-base', () => ({
   AcpBridge: mockAcpBridge,
+  ChannelLoopScheduler: mockChannelLoopScheduler,
+  ChannelLoopStore: mockChannelLoopStore,
   sanitizeLogText: mockSanitizeLogText,
   SessionRouter: mockSessionRouter,
 }));
@@ -155,11 +189,21 @@ beforeEach(() => {
   mockGetPlugin.mockResolvedValue({ createChannel: mockCreateChannel });
   mockLoadSettings.mockReturnValue({ merged: { channels: {} } });
   mockNormalizeProxyUrl.mockImplementation((url?: string) => url);
+  mockNextFireTime.mockImplementation((cron: string) => {
+    if (cron === '0 0 31 2 *') {
+      throw new Error('No next fire time');
+    }
+    return new Date('2026-01-01T00:00:00.000Z');
+  });
   mockParseChannelConfig.mockResolvedValue(mockParsedChannelConfig);
   mockReadServiceInfo.mockReturnValue(null);
   mockRouterGetTarget.mockReturnValue(undefined);
   mockRouterRestoreSessions.mockResolvedValue({ failed: 0, restored: 0 });
   mockStorageGetGlobalQwenDir.mockReturnValue('/tmp/qwen-home');
+  mockChannelLoopStoreCreate.mockResolvedValue({ id: 'job-1' });
+  mockChannelLoopStoreCreateForTarget.mockResolvedValue({ id: 'job-1' });
+  mockChannelLoopStoreListForTarget.mockResolvedValue([]);
+  mockChannelLoopStoreDisable.mockResolvedValue(true);
   delete process.env['HTTPS_PROXY'];
   delete process.env['https_proxy'];
   delete process.env['HTTP_PROXY'];
@@ -269,8 +313,60 @@ describe('startCommand.handler', () => {
       'telegram',
       mockParsedChannelConfig,
       expect.any(Object),
-      expect.objectContaining({ proxy: settingsProxy }),
+      expect.objectContaining({
+        proxy: settingsProxy,
+        loopController: expect.objectContaining({
+          create: expect.any(Function),
+          createForTarget: expect.any(Function),
+          listForTarget: expect.any(Function),
+          disable: expect.any(Function),
+          validateCron: expect.any(Function),
+          nextFireTime: expect.any(Function),
+        }),
+      }),
     );
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    const input = {
+      channelName: 'telegram',
+      target: {
+        channelName: 'telegram',
+        senderId: 'alice',
+        chatId: 'chat-1',
+        isGroup: false,
+      },
+      cwd: '/tmp/qwen-channel-test',
+      cron: '0 9 * * *',
+      prompt: 'post summary',
+      recurring: true,
+      createdBy: 'Alice',
+    };
+    expect(options?.loopController?.createForTarget).toBeDefined();
+    await options!.loopController!.createForTarget!(input, 3);
+    expect(mockChannelLoopStoreCreateForTarget).toHaveBeenCalledWith(input, 3);
+  });
+
+  it('rejects cron expressions that cannot fire', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    expect(() => options?.loopController?.validateCron('0 0 31 2 *')).toThrow();
   });
 
   it('cleans up a single channel when pidfile creation races', async () => {
@@ -547,6 +643,7 @@ describe('startCommand.handler', () => {
       const restartedBridge = mockAcpBridge.mock.results[1]!.value;
       expect(mockRouterSetBridge).toHaveBeenCalledWith(restartedBridge);
       expect(mockChannelSetBridge).toHaveBeenCalledWith(restartedBridge);
+      expect(mockChannelConnect).toHaveBeenCalledTimes(2);
 
       const sessionDiedCalls = mockBridgeOn.mock.calls.filter(
         ([eventName]) => eventName === 'sessionDied',
@@ -556,6 +653,9 @@ describe('startCommand.handler', () => {
         sessionId: string;
       }) => void;
       expect(mockBridgeOn.mock.invocationCallOrder.at(-2)).toBeLessThan(
+        mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
+      );
+      expect(mockChannelConnect.mock.invocationCallOrder[1]).toBeLessThan(
         mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
       );
 
@@ -702,6 +802,49 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('starts the scheduler with connected channels only', async () => {
+    const channels = {
+      first: { type: 'telegram' },
+      second: { type: 'telegram' },
+    };
+    const firstChannel = {
+      ...mockChannel,
+      connect: vi.fn().mockRejectedValue(new Error('first down')),
+    };
+    const secondChannel = {
+      ...mockChannel,
+      connect: vi.fn().mockResolvedValue(undefined),
+    };
+    mockCreateChannel.mockImplementation((name: string) =>
+      name === 'first' ? firstChannel : secondChannel,
+    );
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockImplementation(async (name: string) => ({
+      ...mockParsedChannelConfig,
+      cwd: `/tmp/${name}`,
+      model: 'shared-model',
+    }));
+    mockChannelLoopSchedulerStart.mockImplementationOnce(() => {
+      throw new Error('stop after scheduler setup');
+    });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow(
+        'stop after scheduler setup',
+      );
+    } finally {
+      processOnSpy.mockRestore();
+    }
+
+    const schedulerOptions = mockChannelLoopScheduler.mock.calls[0]?.[0] as
+      | { channels: Map<string, unknown> }
+      | undefined;
+    expect([...schedulerOptions!.channels.keys()]).toEqual(['second']);
+    expect(mockChannelLoopSchedulerStart).toHaveBeenCalledOnce();
+  });
   it('restarts all channels on shared bridge crash before restoring sessions', async () => {
     const channels = {
       first: { type: 'telegram' },

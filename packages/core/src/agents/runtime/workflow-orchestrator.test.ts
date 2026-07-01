@@ -41,6 +41,7 @@ const {
     promptConfigInitialMessages?: unknown[];
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
+    agentId?: string | null;
   }>,
   nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
@@ -134,6 +135,7 @@ vi.mock('./agent-headless.js', () => ({
         ctx: { get: (k: string) => unknown },
         signal?: AbortSignal,
       ) => {
+        const { getCurrentAgentId } = await import('./agent-context.js');
         created.push({
           name,
           prompt: ctx.get('task_prompt') as string,
@@ -142,6 +144,7 @@ vi.mock('./agent-headless.js', () => ({
           promptConfigInitialMessages: promptConfig.initialMessages,
           runConfig,
           toolConfig,
+          agentId: getCurrentAgentId(),
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -1095,6 +1098,7 @@ describe('createProductionDispatch', () => {
     expect(created.length).toBe(1);
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
+    expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
   });
 
   it('does not suppress env bootstrap with an empty initial history', async () => {
@@ -1164,13 +1168,16 @@ describe('createProductionDispatch', () => {
     });
   });
 
-  // T11: disallow SendMessage / ExitPlanMode to mirror upstream Tg8.
-  it('disallows SendMessage and ExitPlanMode for workflow subagents', async () => {
+  // T11: disallow SendMessage plus tools that break workflow return/cleanup
+  // contracts.
+  it('disallows workflow-only floor tools for workflow subagents', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
       'send_message',
+      'monitor',
+      'enter_plan_mode',
       'exit_plan_mode',
     ]);
   });
@@ -1179,20 +1186,19 @@ describe('createProductionDispatch', () => {
   // subagent terminates with a non-GOAL mode. Without this, `await agent(...)`
   // would resolve to '' on user cancel and the script would keep running.
   it.each([
-    ['CANCELLED', /terminate mode: CANCELLED/],
-    ['MAX_TURNS', /terminate mode: MAX_TURNS/],
-    ['TIMEOUT', /terminate mode: TIMEOUT/],
-    ['ERROR', /terminate mode: ERROR/],
-  ])(
-    'throws when subagent terminate mode is %s',
-    async (mode, expectedMessage) => {
-      nextTerminateMode.value = mode;
-      const dispatch = createProductionDispatch(fakeConfig());
-      await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
-        expectedMessage,
-      );
-    },
-  );
+    ['CANCELLED'],
+    ['MAX_TURNS'],
+    ['TIMEOUT'],
+    ['ERROR'],
+  ])('throws when subagent terminate mode is %s', async (mode) => {
+    nextTerminateMode.value = mode;
+    const dispatch = createProductionDispatch(fakeConfig());
+    await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
+      new RegExp(
+        `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+      ),
+    );
+  });
 
   // ── R1 (#1 + #3): token reporting across all terminate modes ──────────
 
@@ -1783,6 +1789,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeContextSame: boolean;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
+    executeAgentId?: string | null;
   };
 
   function fakeConfigWithMgr(opts: {
@@ -1869,6 +1876,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                 _ctx: unknown,
                 signal?: AbortSignal,
               ): Promise<void> => {
+                const { getCurrentAgentId } = await import(
+                  './agent-context.js'
+                );
+                call.executeAgentId = getCurrentAgentId();
                 if (outcome.runWithEmitter && options?.eventEmitter) {
                   outcome.runWithEmitter(
                     options.eventEmitter as {
@@ -1937,13 +1948,23 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const dispatch = createProductionDispatch(config);
-    const result = await dispatch('find foo', { agentType: 'Explore' });
+    const result = await dispatch('find foo', {
+      agentType: 'Explore',
+      label: 'explore-1',
+    });
     expect(result).toBe('explore-output');
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
-    // Workflow floor [SendMessage, ExitPlanMode] must be unioned in.
+    expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode] must
+    // be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
-      expect.arrayContaining(['send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+      ]),
     );
   });
 
@@ -2017,9 +2038,15 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     await dispatch('hi', { agentType: 'Permissive' });
     const disallowed = calls[0].config.disallowedTools ?? [];
-    // Union: Foo (from agentType) + send_message + exit_plan_mode (floor).
+    // Union: Foo (from agentType) + workflow-only floor.
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+      ]),
     );
   });
 
@@ -2413,7 +2440,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     });
     const disallowed = calls[0].config.disallowedTools ?? [];
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+      ]),
     );
   });
 
@@ -3016,7 +3049,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       await expect(
         dispatch('extract', { schema: { type: 'object' } }),
       ).rejects.toThrow(
-        new RegExp(`did not complete \\(terminate mode: ${mode}\\)\\.`),
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
       );
     },
   );

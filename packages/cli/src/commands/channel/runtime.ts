@@ -29,6 +29,10 @@ export function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
 }
 
+export function channelLoopPath(): string {
+  return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
+}
+
 export function loadChannelsConfig(
   cwd: string = process.cwd(),
   settings: LoadedSettings = loadSettings(cwd),

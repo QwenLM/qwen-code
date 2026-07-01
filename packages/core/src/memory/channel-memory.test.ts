@@ -7,7 +7,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import lockfile from 'proper-lockfile';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   appendChannelMemory,
   CHANNEL_MEMORY_FILE_NAME,
@@ -190,6 +191,39 @@ describe('channel memory', () => {
     await appendChannelMemory(target, 'after failure');
 
     await expect(readChannelMemory(target)).resolves.toBe('after failure\n');
+  });
+
+  it('retries append when the file disappears before locking', async () => {
+    const target: ChannelMemoryTarget = {
+      channelName: 'prod',
+      chatId: 'chat-1',
+    };
+    const filePath = getChannelMemoryFilePath(target);
+    const realLock = lockfile.lock.bind(lockfile);
+    let deletedBeforeLock = false;
+    const lockSpy = vi
+      .spyOn(lockfile, 'lock')
+      .mockImplementation(async (targetPath, options) => {
+        if (!deletedBeforeLock && targetPath === filePath) {
+          deletedBeforeLock = true;
+          fs.rmSync(filePath, { force: true });
+          throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        }
+        return realLock(targetPath, options);
+      });
+
+    try {
+      await expect(appendChannelMemory(target, 'after clear')).resolves.toEqual(
+        {
+          changed: true,
+          filePath,
+        },
+      );
+      await expect(readChannelMemory(target)).resolves.toBe('after clear\n');
+      expect(lockSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      lockSpy.mockRestore();
+    }
   });
 
   it('keeps concurrent appends within the maximum size', async () => {
