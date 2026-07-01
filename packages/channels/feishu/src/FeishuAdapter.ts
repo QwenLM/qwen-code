@@ -908,8 +908,8 @@ export class FeishuChannel extends ChannelBase {
               const prefix =
                 cs.atPrefix || this.msgToSenderName.get(inboundMsgId) || '';
               const stopText = prefix
-                ? `${prefix}\n\n*已停止生成*`
-                : '*已停止生成*';
+                ? `${prefix}\n\n*${this.stopLabelFor(cs.terminalStatus)}*`
+                : `*${this.stopLabelFor(cs.terminalStatus)}*`;
               this.updateCard(
                 result.messageId,
                 stopText,
@@ -997,6 +997,16 @@ export class FeishuChannel extends ChannelBase {
         return '已失败，请重试';
       default:
         return '运行中...';
+    }
+  }
+
+  private stopLabelFor(terminalStatus?: FeishuTerminalStatus): string {
+    switch (terminalStatus) {
+      case 'cancelled':
+      case 'failed':
+        return this.statusLabelFor(terminalStatus);
+      default:
+        return '已停止生成';
     }
   }
 
@@ -1234,8 +1244,8 @@ export class FeishuChannel extends ChannelBase {
                   this.msgToSenderName.get(messageId) ||
                   '';
                 const stopText = prefix
-                  ? `${prefix}\n\n*已停止生成*`
-                  : '*已停止生成*';
+                  ? `${prefix}\n\n*${this.stopLabelFor(cardState.terminalStatus)}*`
+                  : `*${this.stopLabelFor(cardState.terminalStatus)}*`;
                 this.updateCard(
                   result.messageId,
                   stopText,

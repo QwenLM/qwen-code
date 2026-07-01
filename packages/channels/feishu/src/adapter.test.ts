@@ -962,6 +962,158 @@ describe('FeishuChannel', () => {
 
       expect(updateCard.mock.calls[0]![1]).toContain('已取消');
     });
+
+    it('finalizes creating cards as failed instead of stopped after prompt end', async () => {
+      const channel = createChannel();
+      let resolveCreateCard:
+        | ((value: { success: boolean; messageId: string }) => void)
+        | undefined;
+      const createCardPromise = new Promise<{
+        success: boolean;
+        messageId: string;
+      }>((resolve) => {
+        resolveCreateCard = resolve;
+      });
+
+      const createStreamingCard = vi.fn().mockReturnValue(createCardPromise);
+      const updateCard = vi.fn().mockResolvedValue(true);
+      const addReaction = vi.fn().mockResolvedValue(undefined);
+      const removeReaction = vi.fn().mockResolvedValue(undefined);
+
+      (
+        channel as unknown as {
+          createStreamingCard: typeof createStreamingCard;
+          updateCard: typeof updateCard;
+          addReaction: typeof addReaction;
+          removeReaction: typeof removeReaction;
+        }
+      ).createStreamingCard = createStreamingCard;
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+      (channel as unknown as { addReaction: typeof addReaction }).addReaction =
+        addReaction;
+      (
+        channel as unknown as { removeReaction: typeof removeReaction }
+      ).removeReaction = removeReaction;
+
+      getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => void
+      >(channel, 'onPromptStart').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
+        channel,
+        'onTaskLifecycle',
+      ).call(channel, {
+        type: 'failed',
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_1',
+        messageId: 'inbound_1',
+        error: 'boom',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      });
+
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      resolveCreateCard?.({ success: true, messageId: 'om_valid_message_id' });
+
+      await vi.waitFor(() => {
+        expect(updateCard).toHaveBeenCalledTimes(1);
+      });
+
+      const rendered = updateCard.mock.calls[0]![1];
+      expect(rendered).toContain('已失败，请重试');
+      expect(rendered).not.toContain('已停止生成');
+    });
+
+    it('finalizes creating cards as cancelled instead of stopped after prompt end', async () => {
+      const channel = createChannel();
+      let resolveCreateCard:
+        | ((value: { success: boolean; messageId: string }) => void)
+        | undefined;
+      const createCardPromise = new Promise<{
+        success: boolean;
+        messageId: string;
+      }>((resolve) => {
+        resolveCreateCard = resolve;
+      });
+
+      const createStreamingCard = vi.fn().mockReturnValue(createCardPromise);
+      const updateCard = vi.fn().mockResolvedValue(true);
+      const addReaction = vi.fn().mockResolvedValue(undefined);
+      const removeReaction = vi.fn().mockResolvedValue(undefined);
+
+      (
+        channel as unknown as {
+          createStreamingCard: typeof createStreamingCard;
+          updateCard: typeof updateCard;
+          addReaction: typeof addReaction;
+          removeReaction: typeof removeReaction;
+        }
+      ).createStreamingCard = createStreamingCard;
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+      (channel as unknown as { addReaction: typeof addReaction }).addReaction =
+        addReaction;
+      (
+        channel as unknown as { removeReaction: typeof removeReaction }
+      ).removeReaction = removeReaction;
+
+      getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => void
+      >(channel, 'onPromptStart').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
+        channel,
+        'onTaskLifecycle',
+      ).call(channel, {
+        type: 'cancelled',
+        reason: 'cancel_command',
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_1',
+        messageId: 'inbound_1',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      });
+
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      resolveCreateCard?.({ success: true, messageId: 'om_valid_message_id' });
+
+      await vi.waitFor(() => {
+        expect(updateCard).toHaveBeenCalledTimes(1);
+      });
+
+      const rendered = updateCard.mock.calls[0]![1];
+      expect(rendered).toContain('已取消');
+      expect(rendered).not.toContain('已停止生成');
+    });
   });
 
   describe('onResponseComplete: stopped card cleanup', () => {
