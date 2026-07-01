@@ -20,6 +20,7 @@ import {
   canonicalizeWorkspace,
   InvalidClientIdError,
   PromptQueueFullError,
+  SessionArchivingError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -807,6 +808,9 @@ export function registerSessionRoutes(
       const removed: string[] = [];
       const notFound: string[] = [];
       const removeErrors: Array<{ sessionId: string; error: string }> = [];
+      for (const id of uniqueIds) {
+        archiveCoordinator.assertNotTransitioning(id);
+      }
       await Promise.all(
         uniqueIds.map(async (id) => {
           try {
@@ -854,6 +858,12 @@ export function registerSessionRoutes(
               }
             });
           } catch (err) {
+            if (
+              err instanceof SessionArchivingError &&
+              err.lockKind === 'exclusive'
+            ) {
+              throw err;
+            }
             const message = err instanceof Error ? err.message : String(err);
             writeStderrLine(
               `qwen serve: deleteSession failed for ${safeLogValue(id)}: ${safeLogValue(message)}`,

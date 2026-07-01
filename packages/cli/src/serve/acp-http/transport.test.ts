@@ -5783,6 +5783,59 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         reader.close();
       }
     });
+
+    it('_qwen/sessions/delete returns session_archiving during archive gate', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440132';
+        await writeStoredSession(sessionId);
+        let closeStarted!: () => void;
+        let releaseClose!: () => void;
+        const closeStartedPromise = new Promise<void>((resolve) => {
+          closeStarted = resolve;
+        });
+        const closeReleasedPromise = new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        });
+        bridge.closeSession = async (sid: string) => {
+          bridge.closedSessions.push(sid);
+          closeStarted();
+          await closeReleasedPromise;
+        };
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 72,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        await closeStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 73,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 73,
+          error: {
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseClose();
+        try {
+          expect(await reader.next()).toMatchObject({
+            id: 72,
+            result: expect.objectContaining({ archived: [sessionId] }),
+          });
+        } finally {
+          reader.close();
+        }
+      });
+    });
   });
 
   describe('auth methods', () => {

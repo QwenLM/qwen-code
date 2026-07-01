@@ -89,13 +89,18 @@ export class SessionConflictError extends Error {
 
 export class SessionArchivingError extends Error {
   readonly sessionId: string;
+  readonly lockKind: 'exclusive' | 'shared';
 
-  constructor(sessionId: string) {
+  constructor(
+    sessionId: string,
+    lockKind: 'exclusive' | 'shared' = 'exclusive',
+  ) {
     super(
       `Session "${sessionId}" is being archived or unarchived; retry later.`,
     );
     this.name = 'SessionArchivingError';
     this.sessionId = sessionId;
+    this.lockKind = lockKind;
   }
 }
 

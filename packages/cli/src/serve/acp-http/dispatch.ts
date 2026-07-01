@@ -36,6 +36,7 @@ import {
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
+  SessionArchivingError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceMismatchError,
@@ -3054,6 +3055,9 @@ export class AcpDispatcher {
           const notFound: string[] = [];
           const removeErrors: Array<{ sessionId: string; error: string }> = [];
           const svc = new SessionService(this.boundWorkspace);
+          for (const sid of ids) {
+            this.archiveCoordinator.assertNotTransitioning(sid);
+          }
           await Promise.all(
             ids.map(async (sid) => {
               try {
@@ -3102,6 +3106,12 @@ export class AcpDispatcher {
                   },
                 );
               } catch (err) {
+                if (
+                  err instanceof SessionArchivingError &&
+                  err.lockKind === 'exclusive'
+                ) {
+                  throw err;
+                }
                 const safeSessionId = logSafe(sid.slice(0, 8));
                 const safeMessage = logSafe(errMsg(err));
                 writeStderrLine(

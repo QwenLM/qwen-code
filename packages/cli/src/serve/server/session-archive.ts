@@ -47,7 +47,7 @@ export class SessionArchiveCoordinator {
     for (const sessionId of uniqueSessionIds) {
       this.assertNotTransitioning(sessionId);
       if ((this.shared.get(sessionId) ?? 0) > 0) {
-        throw new SessionArchivingError(sessionId);
+        throw new SessionArchivingError(sessionId, 'shared');
       }
     }
     for (const sessionId of uniqueSessionIds) {

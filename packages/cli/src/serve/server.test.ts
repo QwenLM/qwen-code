@@ -9626,6 +9626,54 @@ describe('createServeApp', () => {
       }
     });
 
+    it('returns session_archiving when batch delete races an archive gate', async () => {
+      const sid = 'eeee3333-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          closeStarted();
+          await closeReleasedPromise;
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const archivePromise = request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] })
+        .then((res) => res);
+      await closeStartedPromise;
+
+      const deleteRes = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+
+      releaseClose();
+      try {
+        expect(deleteRes.status).toBe(409);
+        expect(deleteRes.headers['retry-after']).toBe('5');
+        expect(deleteRes.body).toMatchObject({
+          code: 'session_archiving',
+          sessionId: sid,
+        });
+        await expect(archivePromise).resolves.toMatchObject({ status: 200 });
+      } finally {
+        await Promise.allSettled([archivePromise]);
+      }
+    });
+
     it('returns per-id errors when removeSession throws unexpectedly', async () => {
       const spy = vi
         .spyOn(SessionService.prototype, 'removeSession')
