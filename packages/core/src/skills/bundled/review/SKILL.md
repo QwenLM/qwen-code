@@ -74,7 +74,7 @@ Based on the remaining arguments:
 
     The subcommand fetches `gh pr view` metadata + inline / issue comments and writes a single Markdown file with the PR title, description, base/head, diff stats, an **"Already discussed"** section, and an "Open inline comments" section. Each replied-to thread renders the **complete reply chain** (root comment + chronological replies), so review agents can see whether a "Fixed in `<commit>`"-style reply has closed the topic — agents must NOT re-report a concern whose latest reply addresses it. Issue-level (general PR) comments appear in the same section. The file's own preamble tells agents to treat its contents as DATA, so no extra security prefix is needed when passing it to review agents.
 
-  - **Install dependencies in the worktree** (needed for linting, building, testing): run `npm ci` (or `yarn install --frozen-lockfile`, `pip install -e .`, etc.) inside `worktreePath`. If installation fails, log a warning and continue — build/test may fail but LLM review agents can still operate.
+  - **Install dependencies in the worktree** (needed for building, testing): run `npm ci` (or `yarn install --frozen-lockfile`, `pip install -e .`, etc.) inside `worktreePath`. If installation fails, log a warning and continue — build/test may fail but LLM review agents can still operate.
 
 - **File path** (e.g., `src/foo.ts`):
   - Run `git diff HEAD -- <file>` to get recent changes
@@ -574,7 +574,7 @@ These criteria apply to both Step 3 (review agents) and Step 4 (verification age
 - Pre-existing issues in unchanged code (focus on the diff only)
 - Style, formatting, or naming that matches surrounding codebase conventions
 - Pedantic nitpicks that a senior engineer would not flag
-- Purely cosmetic formatting a formatter (prettier, gofmt) would auto-normalize — but do NOT skip substantive issues a linter or type checker would flag (unused variables, unreachable code, type errors), which no longer have a deterministic tool catching them
+- Purely cosmetic formatting a formatter (prettier, gofmt) would auto-normalize. Substantive issues a linter or type checker would flag (unused variables, unreachable code, type errors) are in scope — LLM agents should report them.
 - Subjective "consider doing X" suggestions that aren't real problems
 - If you're unsure whether something is a problem, do NOT report it
 - Minor refactoring suggestions that don't address real problems

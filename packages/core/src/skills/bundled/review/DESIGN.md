@@ -150,7 +150,7 @@ Line-based classification was chosen because it's deterministic, cheap, and catc
 - ❌ Adds two extra API calls (`check-runs` + `statuses`) per APPROVE-bound submit; only relevant for the `APPROVE` path so the cost is negligible.
 - ❌ A genuinely flaky CI failure can downgrade what should have been an Approve. Mitigation: the body text directs the user to verify; they can always submit `APPROVE` manually after triaging.
 
-## Why the deterministic checks live as `qwen review` subcommands
+## Why presubmit and cleanup live as `qwen review` subcommands
 
 **Original behavior:** Step 7's three pre-submission checks (self-PR detection, CI status, existing-comment classification) and Step 9's cleanup were inlined in SKILL.md as `gh api` / `git` shell commands. The LLM ran each command itself, parsed the output, and applied the classification logic.
 
@@ -215,25 +215,25 @@ Key implementation detail: Step 7 must use the owner/repo extracted from the URL
 
 **Considered:**
 
-- **`.qwen/review-tools.md`**: Let projects define custom lint/build/test commands. Precise, but requires users to learn a new config format and maintain it.
+- **`.qwen/review-tools.md`**: Let projects define custom build/test commands. Precise, but requires users to learn a new config format and maintain it.
 - **Auto-discovery from CI config (chosen)**: Read `.github/workflows/*.yml`, `Makefile`, etc. to find what commands the project already runs in CI. Zero user effort.
 
 **Decision:** Auto-discovery. Every project already defines its tool chain in CI config. Reading those files leverages existing knowledge without asking users to duplicate it. The LLM is capable of parsing YAML workflow files and extracting the relevant commands. Falls back gracefully: if no CI config exists, the build/test discovery is simply skipped and LLM agents still review the diff.
 
 ## Rejected alternatives
 
-| Idea                                                         | Why rejected                                                                                                              |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `.qwen/review-tools.md` for custom tool config               | Requires users to learn a new format. Auto-discovery from CI config achieves the same result with zero user effort.       |
-| Use fast model for verification/reverse audit                | User requirement: quality first. Fast models may miss subtle issues.                                                      |
-| Reduce to 2 agents (like Gemini)                             | Loses dimensional focus. Gemini compensates with deterministic tasks; we already have those AND want higher LLM coverage. |
-| `mktemp` for temp files                                      | Over-engineering for a prompt. `{target}` suffix is sufficient for CLI concurrent sessions.                               |
-| Mermaid diagrams in docs                                     | Only renders on GitHub. ASCII diagrams are universally compatible.                                                        |
-| `gh pr checkout --detach` for worktree                       | It modifies the current working tree, defeating the purpose of worktree isolation.                                        |
-| Shell-like tokenizer for argument parsing                    | LLM handles quoted arguments naturally from conversation context.                                                         |
-| Model attribution via LLM self-identification                | Unreliable (hallucination risk). `{{model}}` template variable from `config.getModel()` is accurate.                      |
-| Verbose agent prompts (no length limit)                      | 9 long prompts exceed output token budget → model falls back to serial. Each prompt must be ≤200 words for parallel.      |
-| Relaxed parallel instruction ("if you can't fit 5, try 3+2") | Model always takes the fallback. Strict "MUST include all in one response" is required.                                   |
+| Idea                                                         | Why rejected                                                                                                         |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `.qwen/review-tools.md` for custom tool config               | Requires users to learn a new format. Auto-discovery from CI config achieves the same result with zero user effort.  |
+| Use fast model for verification/reverse audit                | User requirement: quality first. Fast models may miss subtle issues.                                                 |
+| Reduce to 2 agents (like Gemini)                             | Loses dimensional focus. We retain build/test (Agent 7) and want higher LLM coverage.                                |
+| `mktemp` for temp files                                      | Over-engineering for a prompt. `{target}` suffix is sufficient for CLI concurrent sessions.                          |
+| Mermaid diagrams in docs                                     | Only renders on GitHub. ASCII diagrams are universally compatible.                                                   |
+| `gh pr checkout --detach` for worktree                       | It modifies the current working tree, defeating the purpose of worktree isolation.                                   |
+| Shell-like tokenizer for argument parsing                    | LLM handles quoted arguments naturally from conversation context.                                                    |
+| Model attribution via LLM self-identification                | Unreliable (hallucination risk). `{{model}}` template variable from `config.getModel()` is accurate.                 |
+| Verbose agent prompts (no length limit)                      | 9 long prompts exceed output token budget → model falls back to serial. Each prompt must be ≤200 words for parallel. |
+| Relaxed parallel instruction ("if you can't fit 5, try 3+2") | Model always takes the fallback. Strict "MUST include all in one response" is required.                              |
 
 ## Token cost analysis
 
