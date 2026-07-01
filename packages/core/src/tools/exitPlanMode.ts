@@ -328,11 +328,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             };
           }
           case 'unavailable': {
-            // Gate is broken — fall back to DEFAULT mode so the user
-            // gets a real confirmation dialog on the next action,
-            // instead of trapping in plan mode with no escape hatch.
+            // Gate is broken — stay in PLAN mode but hand control to the user
+            // so the next exit_plan_mode call shows the normal confirmation
+            // dialog and requires explicit approval before execution.
+            gateState.gateMode = 'user_takeover';
             debugLogger.warn(
-              `Gate unavailable, falling back to DEFAULT mode: ${decision.reason}`,
+              `Gate unavailable, requiring user approval in PLAN mode: ${decision.reason}`,
             );
             return this.fallbackToUserDecision(plan);
           }
@@ -437,15 +438,13 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Gate unavailable fallback — switch to DEFAULT mode so the next
-   * action triggers a real user confirmation dialog. This breaks the
-   * gate trap while forcing the model to present the plan for approval
-   * rather than auto-executing in AUTO/YOLO.
+   * Gate unavailable fallback — fail closed by staying in PLAN mode and
+   * requiring explicit user approval before execution can proceed. The caller
+   * marks the gate as user_takeover first so the next exit_plan_mode call uses
+   * the normal confirmation dialog instead of re-running the automatic gate.
    */
   private fallbackToUserDecision(plan: string): ToolResult {
-    this.setApprovalModeSafely(ApprovalMode.DEFAULT);
-
-    // Save plan so it's on disk even if the model proceeds.
+    // Save plan so it's on disk while the session remains in plan mode.
     try {
       this.config.savePlan(plan);
     } catch (error) {
@@ -460,7 +459,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       returnDisplay: {
         type: 'plan_summary',
         message:
-          'Plan gate is unavailable. The plan has been saved — please confirm whether to execute it.',
+          'Plan gate is unavailable. The plan has been saved, and plan mode remains active until the user explicitly approves execution.',
         plan,
       },
     };
