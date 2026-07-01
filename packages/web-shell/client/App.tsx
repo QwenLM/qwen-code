@@ -104,10 +104,6 @@ import {
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
 import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
-import {
-  DAEMON_APPROVAL_MODES,
-  type DaemonApprovalMode,
-} from '@qwen-code/webui/daemon-react-sdk';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -125,6 +121,10 @@ import {
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
+import {
+  createAndAttachSessionForPrompt,
+  isDaemonApprovalMode,
+} from './sessionPreparation';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
@@ -596,10 +596,6 @@ function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
     `\nBase URL: ${summary.baseUrl}` +
     `\nAPI key: ${summary.apiKey}`
   );
-}
-
-function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
-  return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
 }
 
 function isEditToolPermission(request: PermissionRequest): boolean {
@@ -1262,30 +1258,12 @@ export function App({
           currentModelRef.current || connectionRef.current.currentModel;
         const modeId =
           currentModeRef.current || connectionRef.current.currentMode;
-        await (
-          sessionActions as typeof sessionActions & SessionActionsWithCreate
-        ).createSession();
-        await (
-          sessionActions as typeof sessionActions & SessionActionsWithCreate
-        ).attachSession();
-        if (modelId) {
-          await sessionActions.setModel(modelId).catch((error: unknown) => {
-            console.warn(
-              '[WebShell] failed to set model for new session:',
-              error,
-            );
-          });
-        }
-        if (modeId && isDaemonApprovalMode(modeId)) {
-          await sessionActions
-            .setApprovalMode(modeId)
-            .catch((error: unknown) => {
-              console.warn(
-                '[WebShell] failed to set approval mode for new session:',
-                error,
-              );
-            });
-        }
+        await createAndAttachSessionForPrompt({
+          sessionActions: sessionActions as typeof sessionActions &
+            SessionActionsWithCreate,
+          modelId,
+          modeId,
+        });
       })().finally(() => {
         createSessionPromiseRef.current = null;
       });
