@@ -21,10 +21,10 @@ describe('getConnectionAfterSessionClear', () => {
         clientId: 'client-a',
         displayName: 'Session A',
         tokenCount: 42,
-        commands: [{ name: 'old-command' }],
+        commands: [commandInfo('old-command')],
         skills: ['old-skill'],
-        supportedCommands: { commands: [] },
-        context: { tokens: 1, maxTokens: 10 },
+        supportedCommands: supportedCommandsStatus('session-a'),
+        context: contextStatus('session-a'),
         catchingUp: true,
         error: 'old error',
       } as DaemonConnectionState,
@@ -56,10 +56,10 @@ describe('getConnectionAfterSessionClear', () => {
         clientId: 'client-b',
         displayName: 'Session B',
         tokenCount: 7,
-        commands: [{ name: 'new-command' }],
+        commands: [commandInfo('new-command')],
         skills: ['new-skill'],
-        supportedCommands: { commands: [{ name: 'new-command' }] },
-        context: { tokens: 2, maxTokens: 20 },
+        supportedCommands: supportedCommandsStatus('session-b', 'new-command'),
+        context: contextStatus('session-b'),
         catchingUp: true,
         error: 'old error',
       } as DaemonConnectionState,
@@ -73,10 +73,10 @@ describe('getConnectionAfterSessionClear', () => {
       clientId: 'client-b',
       displayName: 'Session B',
       tokenCount: 7,
-      commands: [{ name: 'new-command' }],
+      commands: [commandInfo('new-command')],
       skills: ['new-skill'],
-      supportedCommands: { commands: [{ name: 'new-command' }] },
-      context: { tokens: 2, maxTokens: 20 },
+      supportedCommands: supportedCommandsStatus('session-b', 'new-command'),
+      context: contextStatus('session-b'),
       catchingUp: undefined,
       error: undefined,
     });
@@ -280,5 +280,40 @@ function createMockSession(sessionId: string) {
       closeSession: vi.fn(),
     },
     detach: vi.fn(async () => undefined),
+  };
+}
+
+function commandInfo(name: string) {
+  const raw = commandRaw(name);
+  return {
+    name,
+    description: '',
+    raw,
+  };
+}
+
+function commandRaw(name: string) {
+  return {
+    name,
+    description: '',
+    input: null,
+  };
+}
+
+function supportedCommandsStatus(sessionId: string, ...names: string[]) {
+  return {
+    v: 1 as const,
+    sessionId,
+    availableCommands: names.map(commandRaw),
+    availableSkills: [],
+  };
+}
+
+function contextStatus(sessionId: string) {
+  return {
+    v: 1 as const,
+    sessionId,
+    workspaceCwd: '/workspace',
+    state: {},
   };
 }
