@@ -6,7 +6,7 @@
 
 import { vi, describe, it, expect } from 'vitest';
 import { skillsCommand } from './skillsCommand.js';
-import type { SlashCommandActionReturn , type CommandContext  } from './types.js';
+import type { SlashCommandActionReturn, CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 interface FakeSkill {
@@ -151,6 +151,23 @@ describe('skillsCommand bare entry', () => {
     const lowIdx = content.indexOf('low');
     expect(highIdx).toBeLessThan(midIdx);
     expect(midIdx).toBeLessThan(lowIdx);
+  });
+
+  it('handles skills without description or level gracefully', async () => {
+    if (!skillsCommand.action) throw new Error('action missing');
+    const context = makeContext({
+      skills: [{ name: 'bare' }],
+      executionMode: 'acp',
+    });
+
+    const result = await skillsCommand.action(context, '');
+
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+    expect(content).toContain('bare');
+    expect(content).not.toMatch(/\(\s*\)/);
+    expect(content).not.toMatch(/\s{4,}$/m);
   });
 
   it('omits non-user-invocable skills from the non-interactive listing', async () => {

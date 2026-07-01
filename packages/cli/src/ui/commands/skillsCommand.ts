@@ -34,14 +34,21 @@ export const skillsCommand: SlashCommand = {
     // is the single entry for browsing, search, toggle, and skill launch.
     const skillManager = context.services.config?.getSkillManager();
     if (!skillManager) {
-      context.ui.addItem(
-        {
-          type: MessageType.ERROR,
-          text: t('Could not retrieve skill manager.'),
-        },
-        Date.now(),
-      );
-      return;
+      if (context.executionMode === 'interactive') {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Could not retrieve skill manager.'),
+          },
+          Date.now(),
+        );
+        return;
+      }
+      return {
+        type: 'message' as const,
+        messageType: 'error' as const,
+        content: t('Could not retrieve skill manager.'),
+      };
     }
 
     if (context.executionMode === 'interactive') {
@@ -83,9 +90,15 @@ export const skillsCommand: SlashCommand = {
         normalizeSkillPriority(b.priority) -
           normalizeSkillPriority(a.priority) || a.name.localeCompare(b.name),
     );
+    const sanitize = (text: string, max: number): string => {
+      const oneLine = text.replace(/[\r\n]+/g, ' ').trim();
+      return oneLine.length <= max
+        ? oneLine
+        : `${oneLine.slice(0, Math.max(0, max - 1))}…`;
+    };
     const lines = sortedSkills.map(
       (s) =>
-        `  - ${s.name}${s.description ? `  ${s.description}` : ''}` +
+        `  - ${s.name}${s.description ? `  ${sanitize(s.description, 80)}` : ''}` +
         `${s.level ? `  (${levelLabel(s.level)})` : ''}`,
     );
     return {
