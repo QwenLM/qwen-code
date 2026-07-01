@@ -1178,7 +1178,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
-  it('notifies onExit once when a ready worker emits error and exit', async () => {
+  it('terminates and notifies once when a ready worker emits error', async () => {
     const child = new FakeChild();
     const onExit = vi.fn();
     const supervisor = createChannelWorkerSupervisor({
@@ -1198,14 +1198,14 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
     child.emit('error', new Error('ipc failed'));
-    child.emit('exit', 1, null);
 
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(onExit).toHaveBeenCalledTimes(1);
     expect(onExit).toHaveBeenCalledWith(
       expect.objectContaining({
         state: 'exited',
-        exitCode: 1,
-        signal: null,
+        exitCode: null,
+        signal: 'SIGTERM',
       }),
     );
     expect(onExit.mock.calls[0]![0]).not.toHaveProperty('error');
@@ -1243,7 +1243,8 @@ describe('createChannelWorkerSupervisor', () => {
   });
 
   it('can still stop a ready worker after an error without exit', async () => {
-    const child = new FakeChild();
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
       daemonUrl: 'http://127.0.0.1:4170',
@@ -1262,6 +1263,7 @@ describe('createChannelWorkerSupervisor', () => {
     await started;
     child.emit('error', new Error('ipc failed'));
 
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
       state: 'running',
@@ -1269,17 +1271,22 @@ describe('createChannelWorkerSupervisor', () => {
     });
     expect(supervisor.snapshot()).not.toHaveProperty('error');
 
-    await supervisor.stop();
+    const stopped = supervisor.stop();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    await vi.advanceTimersByTimeAsync(2_000);
+    await stopped;
 
-    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
-      state: 'stopped',
+      state: 'failed',
+      signal: 'SIGKILL',
     });
   });
 
   it('force-kills a ready worker after a post-ready error without marking it failed', async () => {
-    const child = new FakeChild();
+    const child = new FakeChild(false);
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
       daemonUrl: 'http://127.0.0.1:4170',
@@ -1299,6 +1306,7 @@ describe('createChannelWorkerSupervisor', () => {
 
     supervisor.killAllSync();
 
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,

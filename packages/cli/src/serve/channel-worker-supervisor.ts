@@ -305,7 +305,7 @@ function attachWorkerLogStream(
 ): () => void {
   if (!stream) return () => {};
   let buffer = '';
-  let discardingOversizedLine = false;
+  let discardingOversizedLineRemainder = false;
   const flushLine = (line: string) => {
     const redacted = redactWorkerLogLine(
       normalizeWorkerLogLineForRedaction(line),
@@ -326,9 +326,11 @@ function attachWorkerLogStream(
   };
   const flushOversizedBuffer = () => {
     if (buffer.length <= MAX_WORKER_LOG_BUFFER_LENGTH) return;
+    // Keep one truncated entry for the huge logical line, then drop its tail
+    // until the next newline so a single worker write cannot flood daemon logs.
     flushLine(buffer);
     buffer = '';
-    discardingOversizedLine = true;
+    discardingOversizedLineRemainder = true;
   };
   stream.on('data', (chunk) => {
     buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
@@ -341,14 +343,14 @@ function attachWorkerLogStream(
           ? 2
           : 1;
       buffer = buffer.slice(newlineIndex + newlineLength);
-      if (!discardingOversizedLine) {
+      if (!discardingOversizedLineRemainder) {
         flushLine(line);
       }
-      discardingOversizedLine = false;
+      discardingOversizedLineRemainder = false;
     }
-    if (discardingOversizedLine) {
+    if (discardingOversizedLineRemainder) {
       buffer = '';
-      discardingOversizedLine = false;
+      discardingOversizedLineRemainder = false;
       return;
     }
     flushOversizedBuffer();
@@ -682,7 +684,10 @@ export function createChannelWorkerSupervisor(
       }
       function settleError(err: Error) {
         if (child !== startedChild || exitObserved) return;
-        if (settled && ready) return;
+        if (settled && ready) {
+          startedChild.kill('SIGTERM');
+          return;
+        }
         snapshot = {
           ...snapshot,
           state: 'failed',
