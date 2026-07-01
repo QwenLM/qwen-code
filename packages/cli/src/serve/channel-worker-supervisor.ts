@@ -295,23 +295,31 @@ function redactWorkerLogLine(
   line: string,
   opts: { daemonToken?: string; workerEnv: NodeJS.ProcessEnv },
 ): string {
-  let redacted = line.replace(
-    /\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/]*@)([^\s/]+)([^\s]*)/gi,
-    '$1<redacted>@$3$4',
-  );
-  const secrets = new Set([
-    ...(opts.daemonToken && opts.daemonToken.length >= 4
-      ? [opts.daemonToken]
-      : []),
-    ...sensitiveEnvValues(opts.workerEnv),
-  ]);
-  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
-    redacted = redacted.replace(
-      new RegExp(escapeRegExp(secret), 'g'),
-      '<redacted>',
+  return createWorkerLogRedactor(opts)(line);
+}
+
+function createWorkerLogRedactor(opts: WorkerLogRedactionOptions) {
+  const secretPatterns = [
+    ...new Set([
+      ...(opts.daemonToken && opts.daemonToken.length >= 4
+        ? [opts.daemonToken]
+        : []),
+      ...sensitiveEnvValues(opts.workerEnv),
+    ]),
+  ]
+    .sort((a, b) => b.length - a.length)
+    .map((secret) => new RegExp(escapeRegExp(secret), 'g'));
+
+  return (line: string): string => {
+    let redacted = line.replace(
+      /\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/]*@)([^\s/]+)([^\s]*)/gi,
+      '$1<redacted>@$3$4',
     );
-  }
-  return redacted;
+    for (const secretPattern of secretPatterns) {
+      redacted = redacted.replace(secretPattern, '<redacted>');
+    }
+    return redacted;
+  };
 }
 
 function normalizeWorkerLogLineForRedaction(line: string): string {
@@ -333,13 +341,13 @@ function attachWorkerLogStream(
   if (!stream) return () => {};
   let buffer = '';
   let discardingOversizedLineRemainder = false;
+  const redactWorkerLogLineForStream = createWorkerLogRedactor({
+    ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+    workerEnv: opts.workerEnv,
+  });
   const flushLine = (line: string) => {
-    const redacted = redactWorkerLogLine(
+    const redacted = redactWorkerLogLineForStream(
       normalizeWorkerLogLineForRedaction(line),
-      {
-        ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
-        workerEnv: opts.workerEnv,
-      },
     );
     notifyLog(opts.onLog, {
       stream: streamName,
