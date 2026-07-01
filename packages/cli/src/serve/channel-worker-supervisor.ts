@@ -268,7 +268,7 @@ function redactWorkerLogLine(
   opts: { daemonToken?: string; workerEnv: NodeJS.ProcessEnv },
 ): string {
   let redacted = line.replace(
-    /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/]*@)([^\s/]+)([^\s]*)/gi,
+    /\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/]*@)([^\s/]+)([^\s]*)/gi,
     '$1<redacted>@$3$4',
   );
   const secrets = new Set([

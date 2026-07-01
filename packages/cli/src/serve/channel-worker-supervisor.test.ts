@@ -943,6 +943,34 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('handles long non-url worker log lines while applying credential redaction', async () => {
+    const child = new FakeChild();
+    child.stderr = new EventEmitter();
+    const onLog = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onLog,
+    });
+
+    const started = supervisor.start();
+    child.stderr.emit('data', Buffer.from('a.'.repeat(33_000)));
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const firstLog = onLog.mock.calls[0]?.[0];
+    expect(firstLog).toMatchObject({ stream: 'stderr' });
+    expect(firstLog?.line).toHaveLength(4096);
+  });
+
   it('does not throw when worker log forwarding bookkeeping fails', async () => {
     const child = new FakeChild();
     child.stderr = new EventEmitter();
