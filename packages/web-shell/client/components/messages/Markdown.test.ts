@@ -117,7 +117,7 @@ describe('isSafeImageSrc', () => {
 });
 
 describe('Markdown enhanced tables', () => {
-  it('uses enhanced table controls when enabled', () => {
+  it('uses enhanced table rendering when configured', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -129,36 +129,15 @@ describe('Markdown enhanced tables', () => {
           { language: 'en' },
           createElement(Markdown, {
             content: '| A |\n| --- |\n| 1 |',
-            enhanceTables: true,
+            tableMode: 'advanced',
           }),
         ),
       );
     });
 
-    const toggle = container.querySelector('button');
-    expect(toggle).not.toBeNull();
-    expect(toggle?.getAttribute('aria-label')).toContain('advanced');
-
-    act(() => {
-      toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
     expect(container.textContent).toContain('Quick copy');
     expect(container.textContent).toContain('Details');
-
-    const toggleOff = container.querySelector(
-      'button[aria-label="Switch to basic table"]',
-    );
-    expect(toggleOff).not.toBeNull();
-    act(() => {
-      toggleOff?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    expect(container.textContent).not.toContain('Quick copy');
-    expect(container.querySelector('table')).not.toBeNull();
-    expect(
-      container.querySelector('button[aria-label="Switch to advanced table"]'),
-    ).not.toBeNull();
+    expect(container.querySelector('button[aria-label*="table"]')).toBeNull();
 
     act(() => root.unmount());
     container.remove();
@@ -194,16 +173,11 @@ describe('Markdown enhanced tables', () => {
             createElement(Markdown, {
               content: '| A |\n| --- |\n| 1 |',
               source: 'assistant',
-              enhanceTables: true,
+              tableMode: 'advanced',
             }),
           ),
         ),
       );
-    });
-
-    const toggle = container.querySelector('button');
-    act(() => {
-      toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     expect(container.textContent).toContain('Quick copy');
@@ -225,7 +199,7 @@ describe('Markdown enhanced tables', () => {
           { language: 'en' },
           createElement(Markdown, {
             content: '| A |\n| --- |\n| 1 |',
-            enhanceTables: false,
+            tableMode: 'basic',
           }),
         ),
       );
@@ -260,15 +234,10 @@ describe('Markdown enhanced tables', () => {
           { language: 'en' },
           createElement(Markdown, {
             content: '| A |\n| --- |\n| 1 |',
-            enhanceTables: true,
+            tableMode: 'advanced',
           }),
         ),
       );
-    });
-
-    const toggle = container.querySelector('button');
-    act(() => {
-      toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const table = container.querySelector('table');

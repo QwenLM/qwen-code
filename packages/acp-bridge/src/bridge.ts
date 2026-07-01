@@ -1993,13 +1993,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     ci: ChannelInfo | undefined,
     label: 'closeSession' | 'killSession',
+    opts?: { throwOnFailure?: boolean; requireFlush?: boolean },
   ): Promise<void> => {
-    if (!ci || ci.channel !== entry.channel) return;
+    if (!ci || ci.channel !== entry.channel) {
+      if (opts?.throwOnFailure === true) {
+        writeStderrLine(
+          `qwen serve: ${label} ACP session close channel unavailable ` +
+            `for session ${JSON.stringify(entry.sessionId)}; agent close skipped`,
+        );
+        throw new Error(
+          `ACP session close channel unavailable for ${entry.sessionId}`,
+        );
+      }
+      return;
+    }
     try {
       await Promise.race([
         withTimeout(
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
             sessionId: entry.sessionId,
+            ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
           }),
           initTimeoutMs,
           SERVE_CONTROL_EXT_METHODS.sessionClose,
@@ -2013,6 +2026,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             err instanceof Error ? err.message : err,
           )}`,
       );
+      if (opts?.throwOnFailure === true) {
+        throw err;
+      }
     }
   };
 
@@ -2711,15 +2727,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
       );
     }
+    const requireAgentClose = closeOpts?.requireAgentClose === true;
+    if (requireAgentClose) {
+      await notifyAgentSessionClose(entry, ci, 'closeSession', {
+        throwOnFailure: true,
+        requireFlush: true,
+      });
+    }
     if (ci && ci.channel === entry.channel) {
       ci.sessionIds.delete(sessionId);
     }
-    // Synchronous teardown block — intentionally diverges from killSession:
-    // tombstone + event publish + bus close all run BEFORE
-    // notifyAgentSessionClose, so concurrent callers see
-    // byId.get(sessionId) === undefined and throw SessionNotFoundError,
-    // and late agent frames arriving during the RPC are dropped by the
-    // closed bus.
+    // For normal close, tombstone + event publish + bus close run before the
+    // best-effort agent notification. Strict archive close is different: the
+    // agent flush must succeed before bridge state is removed, so a failed
+    // archive close can be retried against the same live session.
     permissionMediator.forgetSession(sessionId);
     entry.pendingPermissionIds.clear();
     if (entry.promptActive) {
@@ -2753,7 +2774,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `session_closed` is terminal. Close the bus before ACP cancel so any
     // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
-    await notifyAgentSessionClose(entry, ci, 'closeSession');
+    if (!requireAgentClose) {
+      await notifyAgentSessionClose(entry, ci, 'closeSession');
+    }
     try {
       await telemetry.withSpan(
         'session.close.cancel_active_prompt',

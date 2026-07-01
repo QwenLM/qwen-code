@@ -24,6 +24,7 @@ import {
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import {
   RPC,
   error as rpcError,
@@ -194,6 +195,7 @@ export interface MountAcpHttpOptions {
   allowedOrigins?: ParsedAllowOriginPatterns;
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
+  archiveCoordinator?: SessionArchiveCoordinator;
   /** Shared lane for sessionless workspace remember tasks. */
   workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
@@ -325,6 +327,7 @@ export function mountAcpHttp(
     opts.deviceFlowRegistry,
     opts.sessionShellCommandEnabled === true,
     registry,
+    opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
   );
   dispatcherRef.current = dispatcher;
 
