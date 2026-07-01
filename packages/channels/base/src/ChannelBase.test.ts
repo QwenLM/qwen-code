@@ -4600,9 +4600,9 @@ describe('ChannelBase', () => {
           (bridge as unknown as EventEmitter).emit('toolCall', {
             sessionId: sid,
             toolCallId: 'tool-1',
-            kind: 'run_shell_command',
+            kind: `run_shell_command\n${'k'.repeat(100)}`,
             title: `Run shell command: echo $SECRET\n${'x'.repeat(100)}`,
-            status: 'running',
+            status: `running\n${'s'.repeat(100)}`,
             rawInput: { command: 'echo $SECRET' },
           });
           return Promise.resolve('done');
@@ -4619,11 +4619,17 @@ describe('ChannelBase', () => {
         type: 'tool_call',
         toolCall: expect.objectContaining({
           toolCallId: 'tool-1',
-          kind: 'run_shell_command',
-          status: 'running',
         }),
       });
       expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
+      expect(lifecycleToolCall!.toolCall.kind).not.toContain('\n');
+      expect(lifecycleToolCall!.toolCall.status).not.toContain('\n');
+      expect(
+        Array.from(lifecycleToolCall!.toolCall.kind).length,
+      ).toBeLessThanOrEqual(21);
+      expect(
+        Array.from(lifecycleToolCall!.toolCall.status).length,
+      ).toBeLessThanOrEqual(21);
       expect(lifecycleToolCall!.toolCall.title).not.toContain('\n');
       expect(
         Array.from(lifecycleToolCall!.toolCall.title).length,
