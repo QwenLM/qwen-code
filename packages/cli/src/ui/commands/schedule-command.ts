@@ -61,6 +61,45 @@ function generateRunId(): string {
   return id;
 }
 
+function nlCreateReturn(request: string): SlashCommandActionReturn {
+  return {
+    type: 'submit_prompt',
+    content:
+      `Create a durable scheduled task (routine) from this request: "${request}".\n\n` +
+      'Use the schedule_create tool. Steps:\n' +
+      '- Infer a sensible schedule: a 5-field cron for recurring requests, or a one-shot ' +
+      'fireAt (ISO 8601) for "once/at/in N ..." requests. Prefer off-:00/:30 minutes for ' +
+      'approximate times.\n' +
+      '- Write a fully self-contained prompt: the task runs headless with NO memory of this ' +
+      'conversation, so restate the repo/cwd, goal, and success criteria.\n' +
+      '- Default cwd to the current working directory unless the user names another.\n' +
+      '- Pick a name (kebab-case) and a one-line description.\n' +
+      'Confirm the resolved schedule and details when you create it. Afterwards, remind the ' +
+      'user to run `qwen schedule daemon` if it is not already running.',
+  };
+}
+
+const createCommand: SlashCommand = {
+  name: 'create',
+  altNames: ['new', 'add'],
+  kind: CommandKind.BUILT_IN,
+  get description() {
+    return t('Create a scheduled task from a natural-language description');
+  },
+  action: (_context, args): SlashCommandActionReturn => {
+    const request = args.trim();
+    if (!request) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Usage: /schedule create <description>, e.g. `/schedule create review new PRs at 9am on weekdays`',
+      };
+    }
+    return nlCreateReturn(request);
+  },
+};
+
 const listCommand: SlashCommand = {
   name: 'list',
   kind: CommandKind.BUILT_IN,
@@ -147,12 +186,20 @@ export const scheduleCommand: SlashCommand = {
   get description() {
     return t('Create and manage local scheduled tasks (routines)');
   },
-  subCommands: [listCommand, runCommand, deleteCommand],
-  action: async (): Promise<SlashCommandActionReturn> => {
+  subCommands: [createCommand, listCommand, runCommand, deleteCommand],
+  action: async (_context, args): Promise<SlashCommandActionReturn> => {
+    // A bare `/schedule` shows usage; `/schedule <free text>` that isn't a
+    // subcommand is treated as a natural-language create request.
+    const request = args.trim();
+    if (request) {
+      return nlCreateReturn(request);
+    }
     const usage = [
       'Scheduled tasks (routines) run in the background via `qwen schedule daemon`.',
       '',
       'Subcommands:',
+      '  /schedule <description>   Create a task from natural language',
+      '  /schedule create <desc>   Same, explicit',
       '  /schedule list            List tasks',
       '  /schedule run <id>        Run a task once now',
       '  /schedule delete <id>     Delete a task',

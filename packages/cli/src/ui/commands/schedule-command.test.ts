@@ -117,4 +117,34 @@ describe('/schedule command', () => {
     expect(res.content).toContain('Subcommands');
     expect(res.content).toContain('[daily-review]');
   });
+
+  it('create subcommand turns NL into a schedule_create submit_prompt', async () => {
+    const ctx = createMockCommandContext();
+    const res = (await sub('create').action!(
+      ctx,
+      'review new PRs at 9am on weekdays',
+    )) as { type: string; content: string };
+    expect(res.type).toBe('submit_prompt');
+    expect(res.content).toContain('schedule_create');
+    expect(res.content).toContain('review new PRs at 9am on weekdays');
+  });
+
+  it('create without a description shows usage', async () => {
+    const res = await runAction(sub('create'), '');
+    expect(res.messageType).toBe('error');
+    expect(res.content).toContain('Usage');
+  });
+
+  it('parent action treats free text as a create request', async () => {
+    const ctx = createMockCommandContext();
+    const res = (await scheduleCommand.action!(
+      ctx,
+      'back up my notes nightly',
+    )) as {
+      type: string;
+      content: string;
+    };
+    expect(res.type).toBe('submit_prompt');
+    expect(res.content).toContain('back up my notes nightly');
+  });
 });

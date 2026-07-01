@@ -5800,6 +5800,14 @@ export class Config {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
       });
+      // Durable, daemon-run routines (survive with no session open). Gated on
+      // the same flag as the cron tools since it shares the scheduling family.
+      await registerLazy(ToolNames.SCHEDULE_CREATE, async () => {
+        const { ScheduleCreateTool } = await import(
+          '../tools/schedule-create.js'
+        );
+        return new ScheduleCreateTool(this);
+      });
       // Reuses the cron scheduler's session-only one-shot path, so it is
       // gated on the same flag as the cron tools.
       await registerLazy(ToolNames.LOOP_WAKEUP, async () => {
