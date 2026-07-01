@@ -556,6 +556,7 @@ function isTurnStartMessage(message: Message): boolean {
 function timelineDetailSnippetForMessage(message: Message): string {
   switch (message.role) {
     case 'thinking':
+      // Thinking content may include private model reasoning; keep details label-only.
       return SESSION_TIMELINE_KIND_LABEL.thought;
     case 'assistant':
       return compactTimelineText(message.content, 120);

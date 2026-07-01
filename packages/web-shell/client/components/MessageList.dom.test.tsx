@@ -417,8 +417,14 @@ describe('MessageList — turn collapse (DOM)', () => {
   });
 
   it('shows assistant actions on the final answer of a user_shell turn', () => {
-    const c = mount([userShellMsg('shell'), asstMsg('a1')]);
+    const c = mount([
+      userShellMsg('shell'),
+      asstMsg('mid'),
+      toolMsg('tool'),
+      asstMsg('a1'),
+    ]);
 
+    expect(assistantActions(c, 'mid')).toBe('false');
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 });
