@@ -1557,7 +1557,9 @@ export class GitWorktreeService {
     }
     if (!hooksPath) return;
 
-    const worktreeGit = simpleGit(worktreePath);
+    const worktreeGit = simpleGit(worktreePath, {
+      unsafe: { allowUnsafeHooksPath: true },
+    });
     let existing = '';
     try {
       // Saves the write subprocess when value already matches. The probe

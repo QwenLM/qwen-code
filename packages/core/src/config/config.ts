@@ -215,6 +215,27 @@ import {
 import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
+export function parseVisionModelSetting(setting: string | undefined):
+  | {
+      selector: string;
+      baseUrl?: string;
+    }
+  | undefined {
+  if (!setting) return undefined;
+  const nullIdx = setting.indexOf('\0');
+  if (nullIdx < 0) return { selector: setting };
+  const selector = setting.slice(0, nullIdx);
+  if (!selector) return undefined;
+  return {
+    selector,
+    baseUrl: setting.slice(nullIdx + 1) || undefined,
+  };
+}
+
+function formatVisionModelSettingForLog(setting: string): string {
+  return setting.replace(/\0/g, '\\0');
+}
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -339,6 +360,12 @@ export interface AutoModeSettings {
   };
   /** Environment / context lines injected into the classifier's system prompt. */
   environment?: string[];
+  /**
+   * When true, ALL shell commands are routed through the auto-mode
+   * classifier, including read-only commands that would otherwise be
+   * auto-approved. Default false.
+   */
+  classifyAllShell?: boolean;
 }
 
 export interface AccessibilitySettings {
@@ -731,6 +758,7 @@ export class MCPServerConfig {
      * `new MCPServerConfig(...)` call sites. See issue #4615.
      */
     readonly scope?: McpServerScope,
+    readonly alwaysLoadTools?: boolean,
   ) {}
 }
 
@@ -956,6 +984,13 @@ export interface ConfigParameters {
    */
   cliAllowedMcpServerNames?: string[];
   excludedMcpServers?: string[];
+  /**
+   * Idle timeout in milliseconds for MCP tool calls. If the MCP server does
+   * not produce any response or progress update within this time, the call
+   * is aborted. Default: 300000 (5 minutes). Can be overridden via
+   * QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.
+   */
+  mcpToolIdleTimeoutMs?: number;
   /**
    * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
    * (pending or rejected). These are loaded so they can be listed, but the
@@ -1386,6 +1421,7 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
    * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
@@ -1611,6 +1647,11 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
+    const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
+    this.mcpToolIdleTimeoutMs =
+      params.mcpToolIdleTimeoutMs ??
+      (Number.isFinite(parsedEnv) && parsedEnv >= 0 ? parsedEnv : 300000); // 5 minutes default
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -3043,18 +3084,26 @@ export class Config {
     | VisionBridgeModelSelection
     | undefined {
     if (!this.visionModel) return undefined;
+    const visionModelForLog = formatVisionModelSettingForLog(this.visionModel);
+    const parsedSetting = parseVisionModelSetting(this.visionModel);
+    if (!parsedSetting) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
+      );
+      return undefined;
+    }
     let selector;
     try {
-      selector = resolveModelId(this.visionModel);
+      selector = resolveModelId(parsedSetting.selector);
     } catch {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' could not be parsed; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
       );
       return undefined;
     }
     if (!selector) {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' resolved to no selector; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' resolved to no selector; falling back to auto-select`,
       );
       return undefined;
     }
@@ -3064,24 +3113,34 @@ export class Config {
     // the primary entry itself (the text-only model the bridge works around) —
     // via the provider-aware identity check so a cross-provider namesake stays
     // eligible.
-    const match = this.getAllConfiguredModels().find(
+    const matches = this.getAllConfiguredModels().filter(
       (m) =>
         m.id === selector.modelId &&
         (!selector.authType || m.authType === selector.authType) &&
+        (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
         !m.fastOnly &&
         !m.voiceOnly &&
         !this.isCurrentPrimaryModel(m),
     );
+    if (!parsedSetting.baseUrl && matches.length > 1) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' matched multiple configured endpoints; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    const match = matches[0];
     if (!match) {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' did not match a usable configured model ` +
+        `vision model pin '${visionModelForLog}' did not match a usable configured model ` +
           `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
       );
       return undefined;
     }
     return {
-      id: this.visionModel,
-      ...(match.baseUrl && { baseUrl: match.baseUrl }),
+      id: parsedSetting.selector,
+      ...((parsedSetting.baseUrl ?? match.baseUrl) && {
+        baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
+      }),
     };
   }
 
@@ -3822,6 +3881,10 @@ export class Config {
 
   setExcludedMcpServers(excluded: string[]): void {
     this.excludedMcpServers = excluded;
+  }
+
+  getMcpToolIdleTimeoutMs(): number {
+    return this.mcpToolIdleTimeoutMs;
   }
 
   isMcpServerDisabled(serverName: string): boolean {

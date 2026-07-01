@@ -77,20 +77,21 @@ function toWebSocketUrl(baseUrl: string): string {
 }
 
 /** Send any JSON message if the socket is open; swallow failures (close handles it). */
-function sendRaw(message: unknown): void {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
+function sendRaw(ws: WebSocket, message: unknown): void {
+  if (ws.readyState !== WebSocket.OPEN) {
     console.warn(LOG_PREFIX, 'sendRaw: socket not OPEN, dropping frame');
     return;
   }
   try {
-    socket.send(JSON.stringify(message));
+    ws.send(JSON.stringify(message));
   } catch (error) {
     console.warn(LOG_PREFIX, 'Failed to send:', error);
   }
 }
 
 /** Parse and route an inbound WS frame. */
-function onWsMessage(data: unknown): void {
+function onWsMessage(ws: WebSocket, data: unknown): void {
+  if (socket !== ws) return;
   let msg: Record<string, unknown>;
   try {
     msg = JSON.parse(String(data)) as Record<string, unknown>;
@@ -112,7 +113,7 @@ function onWsMessage(data: unknown): void {
         'ACP initialize failed; closing socket:',
         msg['error'],
       );
-      socket?.close();
+      ws.close();
     } else {
       console.log(LOG_PREFIX, 'ACP initialized; CDP tunnel ready');
     }
@@ -120,9 +121,9 @@ function onWsMessage(data: unknown): void {
   }
 
   // CDP-tunnel frames: route to the bridge, which drives the tab via
-  // chrome.debugger and pushes results/events back over this socket.
+  // chrome.debugger and pushes results/events back over the active socket.
   if (isCdpBridgeFrame(msg['type'])) {
-    handleCdpFrame(msg as { type?: unknown }, (frame) => sendRaw(frame));
+    handleCdpFrame(msg as { type?: unknown }, (frame) => sendRaw(ws, frame));
     return;
   }
   // Other frame types (chat/session traffic) aren't ours; ignore.
@@ -183,9 +184,13 @@ async function connect(): Promise<void> {
   socket = ws;
 
   ws.onopen = () => {
+    if (socket !== ws) {
+      ws.close();
+      return;
+    }
     reconnectDelay = RECONNECT_MIN_MS;
     console.log(LOG_PREFIX, 'Connected; sending ACP initialize');
-    sendRaw({
+    sendRaw(ws, {
       jsonrpc: '2.0',
       id: ACP_INIT_ID,
       method: 'initialize',
@@ -197,7 +202,7 @@ async function connect(): Promise<void> {
     });
   };
 
-  ws.onmessage = (event: MessageEvent) => onWsMessage(event.data);
+  ws.onmessage = (event: MessageEvent) => onWsMessage(ws, event.data);
 
   ws.onerror = (event: Event) => {
     console.warn(LOG_PREFIX, 'WebSocket error', event);
@@ -216,10 +221,9 @@ async function connect(): Promise<void> {
     // force-closed a stale socket after the extension already opened a new one,
     // that stale close must NOT detach the new connection's debugger — doing so
     // would yank the debugger banner and break the live `/cdp` client.
-    if (socket === ws) {
-      socket = null;
-      shutdownCdpBridge();
-    }
+    if (socket !== ws) return;
+    socket = null;
+    shutdownCdpBridge();
     scheduleReconnect();
   };
 }

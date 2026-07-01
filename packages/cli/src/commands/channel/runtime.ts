@@ -5,6 +5,7 @@ import type {
   SessionRouter,
   ChannelAgentBridge,
   ChannelBase,
+  ChannelBaseOptions,
   ChannelPlugin,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
@@ -26,6 +27,10 @@ export interface ParsedChannel {
 
 export function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
+}
+
+export function channelLoopPath(): string {
+  return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
 }
 
 export function loadChannelsConfig(
@@ -114,7 +119,7 @@ export async function createChannel(
   name: string,
   config: ParsedChannelConfig,
   bridge: ChannelAgentBridge,
-  options?: { router?: SessionRouter; proxy?: string },
+  options?: ChannelBaseOptions,
 ): Promise<ChannelBase> {
   const channelPlugin = await getPlugin(config.type);
   if (!channelPlugin) {

@@ -56,10 +56,25 @@ try {
 
   send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
   const tl = await wait(2);
+  if (tl.error) {
+    throw new Error(`tools/list failed: ${JSON.stringify(tl.error)}`);
+  }
   out.tools = (tl.result?.tools || []).length;
 
   send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_pages', arguments: {} } });
   const lp = await wait(3);
+  if (lp.error) {
+    throw new Error(`list_pages failed: ${JSON.stringify(lp.error)}`);
+  }
+  if (lp.result?.isError === true) {
+    const text = (lp.result.content || [])
+      .map((part) => part?.text)
+      .filter(Boolean)
+      .join('\n');
+    throw new Error(
+      `list_pages returned an MCP error: ${text || 'unknown error'}`,
+    );
+  }
   out.listPages = JSON.stringify(lp.result ?? lp.error).slice(0, 240);
 } catch (e) {
   out.error = e.message;
