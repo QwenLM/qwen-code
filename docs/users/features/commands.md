@@ -93,6 +93,7 @@ Commands for managing AI tools and models.
 | `/model --fast`   | Set a lighter model for prompt suggestions                                       | `/model --fast qwen3-coder-flash`                                                                         |
 | `/model --voice`  | Set the model used for voice transcription                                       | `/model --voice <model-id>`                                                                               |
 | `/model --vision` | Set the vision-bridge model used to transcribe images for a text-only main model | `/model --vision <model-id>`                                                                              |
+| `/effort`         | Set reasoning effort for thinking-capable models                                 | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
 | `/extensions`     | Manage extensions                                                                | `/extensions list`, `/extensions manage`                                                                  |
 | → `list`          | List installed extensions                                                        | `/extensions list`                                                                                        |
 | → `manage`        | Manage installed extensions (interactive)                                        | `/extensions manage`                                                                                      |

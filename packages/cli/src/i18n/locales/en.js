@@ -2375,6 +2375,8 @@ export default {
     'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
   'Exited plan mode. Previous approval mode restored.':
