@@ -126,6 +126,28 @@ describe('WebShellWithProviders top-level boundary', () => {
     expect(actionMocks.loadSession).not.toHaveBeenCalled();
   });
 
+  it('does not clear a deferred session created after an empty controlled render', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    connectionState = {};
+    act(() => {
+      root.render(<WebShellWithProviders activeSessionId={undefined} />);
+    });
+    await act(async () => {});
+
+    connectionState = { sessionId: 'created-session' };
+    act(() => {
+      root.render(<WebShellWithProviders activeSessionId={undefined} />);
+    });
+    await act(async () => {});
+
+    expect(actionMocks.clearSession).not.toHaveBeenCalled();
+    expect(actionMocks.loadSession).not.toHaveBeenCalled();
+  });
+
   it('catches a daemon-provider render crash instead of white-screening', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     workspaceShouldThrow = true;

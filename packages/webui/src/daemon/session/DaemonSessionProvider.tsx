@@ -420,12 +420,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const providerResult = await Promise.allSettled([
                 client.workspaceProviders(),
               ]);
+              if (providerResult[0].status === 'rejected') {
+                console.warn(
+                  '[DaemonSessionProvider] workspaceProviders failed in deferred connect:',
+                  providerResult[0].reason,
+                );
+              }
               const providers =
                 providerResult[0].status === 'fulfilled'
                   ? providerResult[0].value
                   : undefined;
               const providerModelStatus = mapProviderStatus(providers);
-              setConnection({
+              setConnection((current) => ({
+                ...current,
                 status: 'connected',
                 workspaceCwd: effectWorkspaceCwd,
                 models: providerModelStatus.models,
@@ -434,7 +441,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 contextWindow: providerModelStatus.contextWindow,
                 providers,
                 capabilities: caps,
-              });
+              }));
               return;
             }
             const restoreMethod =
@@ -680,7 +687,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             providers: providers ?? current.providers,
             supportedCommands: supportedCommands ?? current.supportedCommands,
             context: context ?? current.context,
-            capabilities,
+            capabilities: capabilities ?? current.capabilities,
             catchingUp:
               isSameSessionReconnect ||
               activeSession.lastEventId != null ||

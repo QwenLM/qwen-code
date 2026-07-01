@@ -424,6 +424,72 @@ describe('DaemonSessionProvider', () => {
     expect(connection).not.toHaveProperty('sessionId');
   });
 
+  it('warns when deferred workspace providers fail', async () => {
+    const error = new Error('providers unavailable');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.workspaceProviders.mockRejectedValueOnce(error);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      initialSessionId: undefined,
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/mock-workspace',
+      models: [],
+    });
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] workspaceProviders failed in deferred connect:',
+      error,
+    );
+  });
+
+  it('preserves a concurrently created session during deferred connect', async () => {
+    const providers = createDeferred<unknown>();
+    sdkMocks.workspaceProviders.mockReturnValueOnce(providers.promise);
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'created-session' }));
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      initialSessionId: undefined,
+    });
+    await act(async () => {
+      await actions?.createSession();
+    });
+    expect(connection).toMatchObject({ sessionId: 'created-session' });
+
+    providers.resolve({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      providers: [],
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'created-session',
+      clientId: 'client-1',
+    });
+  });
+
   it('can create a session after connecting without an initial session', async () => {
     sdkMocks.sessions.push(
       createMockSession({ sessionId: 'lazy-session' }),
@@ -461,6 +527,11 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('can send immediately after creating a session from the empty state', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      features: ['client_heartbeat'],
+    });
     const createdSession = createMockSession({
       sessionId: 'lazy-session',
       supportedCommands: vi.fn(async () => ({
@@ -518,6 +589,10 @@ describe('DaemonSessionProvider', () => {
       '/context',
     );
     expect(connection?.skills).toContain('review');
+    expect(connection?.capabilities).toMatchObject({
+      features: ['client_heartbeat'],
+    });
+    expect(createdSession.detach).not.toHaveBeenCalled();
 
     await act(async () => {
       result = providerActions.sendPrompt('hello');

@@ -2136,7 +2136,6 @@ export function App({
       const sendGoalPrompt = () => {
         const clearComposerOnPromptStart = !connectionRef.current.sessionId;
         sendPrompt(text, images, {
-          optimisticUserMessage: false,
           clearComposerOnPromptStart,
         }).catch((error: unknown) => {
           reportError(error, 'Failed to send /goal command');
@@ -2152,18 +2151,18 @@ export function App({
         }
         return handleBusyGoalClear(text);
       } else if (goalArg) {
-        store.appendLocalUserMessage(text);
         if (!sendToDaemon) {
+          store.appendLocalUserMessage(text);
           dispatchGoalSet(goalArg, Date.now());
           return true;
         }
         return sendGoalPrompt();
       }
 
-      store.appendLocalUserMessage(text);
       if (sendToDaemon) {
         return sendGoalPrompt();
       }
+      store.appendLocalUserMessage(text);
       return true;
     },
     [

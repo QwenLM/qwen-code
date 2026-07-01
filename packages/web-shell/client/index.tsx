@@ -31,20 +31,38 @@ function resolveBaseUrl(baseUrl: string | undefined): string {
 
 function ControlledSession({
   activeSessionId,
+  allowDeferredSessionAdoption,
   enabled,
 }: {
   activeSessionId?: string;
+  allowDeferredSessionAdoption: boolean;
   enabled: boolean;
 }) {
   const connection = useConnection();
   const actions = useActions();
   const pendingRequestRef = useRef<string | undefined>(undefined);
+  const observedSessionIdRef = useRef<string | undefined>(undefined);
+  const hasObservedSessionRef = useRef(false);
 
   useEffect(() => {
     if (!enabled) return;
 
     const currentSessionId = connection.sessionId;
+    const previousSessionId = observedSessionIdRef.current;
+    const hasObservedSession = hasObservedSessionRef.current;
+    observedSessionIdRef.current = currentSessionId;
+    hasObservedSessionRef.current = true;
     if (activeSessionId === currentSessionId) {
+      pendingRequestRef.current = undefined;
+      return;
+    }
+    if (
+      activeSessionId === undefined &&
+      currentSessionId &&
+      allowDeferredSessionAdoption &&
+      hasObservedSession &&
+      previousSessionId === undefined
+    ) {
       pendingRequestRef.current = undefined;
       return;
     }
@@ -76,7 +94,13 @@ function ControlledSession({
           pendingRequestRef.current = undefined;
         }
       });
-  }, [actions, activeSessionId, connection.sessionId, enabled]);
+  }, [
+    actions,
+    activeSessionId,
+    allowDeferredSessionAdoption,
+    connection.sessionId,
+    enabled,
+  ]);
 
   return null;
 }
@@ -158,6 +182,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
         >
           <ControlledSession
             activeSessionId={activeSessionId}
+            allowDeferredSessionAdoption={initialSessionId === undefined}
             enabled={controlsSession}
           />
           <App {...webShellProps} />
