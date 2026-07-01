@@ -1609,7 +1609,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
       const updateVisibility = () => {
         const width = el.getBoundingClientRect().width;
-        const nextVisible = width === 0 || width >= 1160;
+        const nextVisible = width >= 1160;
         setIsSessionTimelineVisible((prev) =>
           prev === nextVisible ? prev : nextVisible,
         );

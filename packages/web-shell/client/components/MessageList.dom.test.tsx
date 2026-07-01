@@ -139,6 +139,18 @@ const nextFrame = () =>
     () =>
       new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
   );
+const mockMessageListWidth = (width: number) =>
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    width,
+    height: 600,
+    top: 0,
+    right: width,
+    bottom: 600,
+    left: 0,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
 
 describe('MessageList — turn collapse (DOM)', () => {
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
@@ -223,6 +235,7 @@ describe('MessageList — turn collapse (DOM)', () => {
   });
 
   it('renders the session timeline in the left gutter without expanding turns', async () => {
+    const rectSpy = mockMessageListWidth(1200);
     const c = mount([
       userMsg('u1'),
       thinkingMsg('think1'),
@@ -270,9 +283,11 @@ describe('MessageList — turn collapse (DOM)', () => {
     ).toBeNull();
     expect(isCollapsed(c, 'g1')).toBe(true);
     expect(c.querySelector('[data-testid="turn-timeline-row"]')).toBeNull();
+    rectSpy.mockRestore();
   });
 
   it('clicks a session timeline entry to jump to its turn', async () => {
+    const rectSpy = mockMessageListWidth(1200);
     const scrollIntoView = vi
       .spyOn(Element.prototype, 'scrollIntoView')
       .mockImplementation(() => {});
@@ -296,22 +311,26 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
     scrollIntoView.mockRestore();
+    rectSpy.mockRestore();
   });
 
   it('hides the session timeline when the message list is narrow', async () => {
-    const rectSpy = vi
-      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-      .mockReturnValue({
-        width: 1000,
-        height: 600,
-        top: 0,
-        right: 1000,
-        bottom: 600,
-        left: 0,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      });
+    const rectSpy = mockMessageListWidth(1000);
+
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('hides the session timeline when the message list has no width', async () => {
+    const rectSpy = mockMessageListWidth(0);
 
     const c = mount([
       userMsg('u1'),
