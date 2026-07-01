@@ -751,6 +751,16 @@ export function mountAcpHttp(
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        // RFC 7230 §5.4: browsers omit the port in the Host header when
+        // it matches the scheme default (http→80, https→443). Mirror the
+        // REST hostAllowlist (auth.ts) so WS upgrades aren't rejected on
+        // default ports.
+        if (localPort === 80 || localPort === 443) {
+          allowed.add('localhost');
+          allowed.add('127.0.0.1');
+          allowed.add('[::1]');
+          allowed.add('host.docker.internal');
+        }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
