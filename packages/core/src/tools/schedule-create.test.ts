@@ -15,10 +15,15 @@ describe('ScheduleCreateTool', () => {
   let prevHome: string | undefined;
   let tool: ScheduleCreateTool;
 
+  let prevNoAutostart: string | undefined;
+
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'schedule-create-'));
     prevHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = tmpDir;
+    // Don't spawn a real background daemon from unit tests.
+    prevNoAutostart = process.env['QWEN_SCHEDULE_NO_AUTOSTART'];
+    process.env['QWEN_SCHEDULE_NO_AUTOSTART'] = '1';
     tool = new ScheduleCreateTool({
       getWorkingDir: () => '/tmp/default',
     } as unknown as Config);
@@ -27,6 +32,9 @@ describe('ScheduleCreateTool', () => {
   afterEach(async () => {
     if (prevHome === undefined) delete process.env['QWEN_HOME'];
     else process.env['QWEN_HOME'] = prevHome;
+    if (prevNoAutostart === undefined)
+      delete process.env['QWEN_SCHEDULE_NO_AUTOSTART'];
+    else process.env['QWEN_SCHEDULE_NO_AUTOSTART'] = prevNoAutostart;
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 

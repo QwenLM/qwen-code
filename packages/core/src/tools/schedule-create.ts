@@ -20,6 +20,10 @@ import {
   writeTask,
   type ScheduledTask,
 } from '../services/schedule/task-store.js';
+import {
+  ensureScheduleDaemonRunning,
+  type EnsureDaemonResult,
+} from '../services/schedule/ensure-daemon.js';
 
 export interface ScheduleCreateParams {
   name: string;
@@ -83,6 +87,10 @@ class ScheduleCreateInvocation extends BaseToolInvocation<
 
       await writeTask(task);
 
+      // Auto-start the daemon so a freshly created task actually fires without
+      // the user having to run `qwen schedule daemon` by hand.
+      const daemonState = await ensureScheduleDaemonRunning();
+
       const when = task.schedule.cron
         ? humanReadableCron(task.schedule.cron)
         : `once at ${task.schedule.fireAt}`;
@@ -90,8 +98,7 @@ class ScheduleCreateInvocation extends BaseToolInvocation<
       const returnDisplay = `${verb} scheduled task "${id}" (${when})`;
       const llmContent =
         `${verb} scheduled task "${id}" — ${when}, cwd ${task.cwd}, ` +
-        `approvalMode ${task.approvalMode}. It runs via the schedule daemon ` +
-        `(start it with \`qwen schedule daemon\` if not already running). ` +
+        `approvalMode ${task.approvalMode}. ${daemonNote(daemonState)} ` +
         `Manage with /schedule list|run|delete.`;
       return { llmContent, returnDisplay };
     } catch (error) {
@@ -102,6 +109,22 @@ class ScheduleCreateInvocation extends BaseToolInvocation<
         error: { message },
       };
     }
+  }
+}
+
+function daemonNote(state: EnsureDaemonResult): string {
+  switch (state) {
+    case 'started':
+      return 'Started the schedule daemon in the background — it will fire the task on schedule.';
+    case 'already-running':
+      return 'The schedule daemon is already running.';
+    case 'disabled':
+      return 'Auto-start is off (QWEN_SCHEDULE_NO_AUTOSTART); run `qwen schedule daemon` to fire it.';
+    case 'dev-manual':
+      return 'In dev, start the daemon in a separate terminal to fire it: `npm run dev -- schedule daemon`.';
+    case 'failed':
+    default:
+      return 'Could not auto-start the daemon; run `qwen schedule daemon` to fire it.';
   }
 }
 

@@ -55,10 +55,15 @@ you create it:
    above `auto` when the user asks for full autonomy.
 7. **model** / **sandbox** (optional) — per-task model id; run inside the sandbox.
 
-After creating, tell the user in one or two lines: what was scheduled, the
-human-readable cadence (or absolute one-shot time), and that it runs via the
-schedule daemon — remind them to start it with `qwen schedule daemon` if it is
-not already running. Manage tasks later with `/schedule list`, `/schedule run
+Creating a task **auto-starts the background daemon**, so you do not need to
+tell the user to run anything by hand. After creating, tell the user in one or
+two lines: what was scheduled, the human-readable cadence (or absolute one-shot
+time), and relay the daemon status from the tool result (started / already
+running). Only mention `qwen schedule daemon` if the tool reports auto-start was
+disabled or failed. Manage tasks later with `/schedule list`, `/schedule run
 <id>`, and `/schedule delete <id>`.
+
+Note: the daemon runs on this machine while it is powered on; it does not yet
+auto-restart after a reboot (that is a planned enhancement).
 
 ## Input

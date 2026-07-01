@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   acquireDaemonLock,
   getDaemonLockPath,
+  isDaemonRunning,
   releaseDaemonLock,
 } from './daemon-lock.js';
 
@@ -57,6 +58,15 @@ describe('schedule/daemon-lock', () => {
     await fs.writeFile(getDaemonLockPath(), 'not json');
     const handle = await acquireDaemonLock();
     expect(handle).not.toBeNull();
+  });
+
+  it('isDaemonRunning reflects a live vs dead holder', async () => {
+    expect(await isDaemonRunning()).toBe(false); // no lock
+    await fs.mkdir(path.dirname(getDaemonLockPath()), { recursive: true });
+    await fs.writeFile(getDaemonLockPath(), JSON.stringify({ pid: 1 }));
+    expect(await isDaemonRunning()).toBe(true); // pid 1 is alive
+    await fs.writeFile(getDaemonLockPath(), JSON.stringify({ pid: 2 ** 30 }));
+    expect(await isDaemonRunning()).toBe(false); // dead holder
   });
 
   it('release is a no-op when another process now owns the lock', async () => {

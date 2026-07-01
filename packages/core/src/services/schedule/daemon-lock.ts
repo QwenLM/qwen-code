@@ -77,6 +77,15 @@ async function readLock(lockPath: string): Promise<LockContent | null> {
 }
 
 /**
+ * Read-only check: is a schedule daemon currently running (lock held by a live
+ * process)? Used to decide whether to auto-start one. Does not modify the lock.
+ */
+export async function isDaemonRunning(): Promise<boolean> {
+  const holder = await readLock(getDaemonLockPath());
+  return holder != null && isProcessAlive(holder.pid);
+}
+
+/**
  * Attempts to become the sole scheduling daemon. Returns a handle on success,
  * or null if another live daemon already owns the lock.
  */

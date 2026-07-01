@@ -55,7 +55,16 @@ export function resolveQwenChildCommand(): {
 } {
   const override = process.env['QWEN_SCHEDULE_CHILD_BIN'];
   if (override) return { command: override, prefixArgs: [] };
-  return { command: process.execPath, prefixArgs: [process.argv[1] ?? ''] };
+  const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1] || '';
+  // Preserve the node flags this process was launched with so the child
+  // re-enters the CLI the same way — critically, the tsx loader in `npm run
+  // dev` (argv[1] is a .ts entry that plain node can't run) and `--expose-gc`
+  // in a packaged install. Drop `--inspect*` so the child doesn't fight the
+  // parent for the debugger port. (Same approach as acp-bridge/spawnChannel.)
+  const execArgs = process.execArgv.filter(
+    (a) => !/^--inspect(-brk)?($|=)/.test(a),
+  );
+  return { command: process.execPath, prefixArgs: [...execArgs, cliEntry] };
 }
 
 function buildArgs(ctx: FireContext, maxWallTime: string): string[] {
