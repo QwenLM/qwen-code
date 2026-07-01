@@ -52,11 +52,7 @@ describe('<TranscriptView />', () => {
 
   it('renders the frozen items with header and footer chrome', () => {
     const { lastFrame } = renderWithProviders(
-      <TranscriptView
-        items={items}
-        onClose={vi.fn()}
-        useAlternateScreen={false}
-      />,
+      <TranscriptView items={items} useAlternateScreen={false} />,
     );
     const frame = lastFrame();
     expect(frame).toContain('Transcript');
@@ -67,11 +63,7 @@ describe('<TranscriptView />', () => {
 
   it('renders thinking blocks expanded (fullDetail) — full text, not a summary', () => {
     const { lastFrame } = renderWithProviders(
-      <TranscriptView
-        items={items}
-        onClose={vi.fn()}
-        useAlternateScreen={false}
-      />,
+      <TranscriptView items={items} useAlternateScreen={false} />,
     );
     const frame = lastFrame();
     // The full thought text is shown (fullDetail forces expansion) rather than
@@ -86,7 +78,7 @@ describe('<TranscriptView />', () => {
   it('enters and exits the alternate screen by default (useAlternateScreen defaults to true)', () => {
     setTTY(true);
     const { unmount } = renderWithProviders(
-      <TranscriptView items={items} onClose={vi.fn()} />,
+      <TranscriptView items={items} />,
     );
     // The default path drives AlternateScreen with disabled=false, which writes
     // the enter-alt-screen escape on mount.
@@ -110,29 +102,11 @@ describe('<TranscriptView />', () => {
       { id: -2, type: 'gemini_content', text: 'second pending chunk' },
     ];
     const { lastFrame } = renderWithProviders(
-      <TranscriptView
-        items={withPending}
-        onClose={vi.fn()}
-        useAlternateScreen={false}
-      />,
+      <TranscriptView items={withPending} useAlternateScreen={false} />,
     );
     const frame = lastFrame();
     expect(frame).toContain('committed question');
     expect(frame).toContain('streaming pending reply');
     expect(frame).toContain('second pending chunk');
-  });
-
-  it('does not invoke onClose on its own — close keys are owned by AppContainer', () => {
-    const onClose = vi.fn();
-    renderWithProviders(
-      <TranscriptView
-        items={items}
-        onClose={onClose}
-        useAlternateScreen={false}
-      />,
-    );
-    // The component installs no close-key handler; the global guard in
-    // AppContainer owns Esc/q/Ctrl+C/Ctrl+O. onClose must never fire from here.
-    expect(onClose).not.toHaveBeenCalled();
   });
 });

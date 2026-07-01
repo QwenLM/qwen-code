@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { memo, useCallback, useMemo, useRef } from 'react';
+import { memo, useCallback, useMemo } from 'react';
 import type { ErrorInfo } from 'react';
 import { Box, Text } from 'ink';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -14,11 +14,7 @@ import { t } from '../../i18n/index.js';
 import { AlternateScreen } from './AlternateScreen.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ErrorBoundary } from './shared/ErrorBoundary.js';
-import {
-  ScrollableList,
-  SCROLL_TO_ITEM_END,
-  type ScrollableListRef,
-} from './shared/ScrollableList.js';
+import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import type { HistoryItem } from '../types.js';
 
@@ -27,7 +23,6 @@ const debugLogger = createDebugLogger('TRANSCRIPT_VIEW');
 interface TranscriptViewProps {
   /** Frozen snapshot of history + pending items, already stitched by the caller. */
   items: HistoryItem[];
-  onClose: () => void;
   /**
    * When false, Ink already owns the alternate screen (VP mode) — the
    * AlternateScreen wrapper skips its escape writes to avoid double-enter.
@@ -63,11 +58,9 @@ const keyExtractor = (item: HistoryItem) =>
 
 const TranscriptViewImpl = ({
   items,
-  onClose,
   useAlternateScreen = true,
 }: TranscriptViewProps) => {
   const { rows, columns } = useTerminalSize();
-  const listRef = useRef<ScrollableListRef<HistoryItem>>(null);
 
   const headerHeight = 1;
   const footerHeight = 1;
@@ -92,17 +85,14 @@ const TranscriptViewImpl = ({
 
   const title = t('Transcript');
 
-  // onClose is intentionally unused here: per design the close keys
-  // (Esc / q / Ctrl+C / Ctrl+O) are owned exclusively by AppContainer's
-  // global keypress guard so a single broadcast keypress isn't handled twice.
-  // Kept in the props for symmetry with ThinkingViewer and future use.
-  void onClose;
+  // Close keys (Esc / q / Ctrl+C / Ctrl+O) are owned exclusively by
+  // AppContainer's global keypress guard so a single broadcast keypress isn't
+  // handled twice — TranscriptView renders no close handler of its own.
 
   const content = useMemo(
     () => (
       <OverflowProvider>
         <ScrollableList
-          ref={listRef}
           hasFocus
           data={items}
           renderItem={renderItem}
@@ -174,8 +164,8 @@ const TranscriptViewImpl = ({
 /**
  * Memoized so the frozen transcript doesn't re-reconcile on every AppContainer
  * re-render while streaming continues underneath. AppContainer hands a stable
- * `items` reference (memoized from the freeze snapshot) and stable `onClose`,
- * so the default shallow prop compare is enough.
+ * `items` reference (memoized from the freeze snapshot), so the default shallow
+ * prop compare is enough.
  */
 export const TranscriptView = memo(TranscriptViewImpl);
 TranscriptView.displayName = 'TranscriptView';

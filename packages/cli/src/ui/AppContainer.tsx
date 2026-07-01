@@ -4304,7 +4304,6 @@ export const AppContainer = (props: AppContainerProps) => {
                       {transcriptFreeze ? (
                         <TranscriptView
                           items={transcriptItems}
-                          onClose={closeTranscript}
                           useAlternateScreen={!useTerminalBuffer}
                         />
                       ) : thinkingViewerData ? (

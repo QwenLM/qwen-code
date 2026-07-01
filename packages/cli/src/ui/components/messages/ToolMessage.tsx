@@ -707,13 +707,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   // keeping only TAB and LF which legitimately structure multi-line output.
   const sanitizedDetailedDisplay = React.useMemo(
     () =>
-      typeof detailedDisplay === 'string'
+      usingDetailedDisplay && typeof detailedDisplay === 'string'
         ? escapeAnsiCtrlCodes(detailedDisplay).replace(
             BARE_C0_CONTROL_CHARS_REGEX,
             '',
           )
         : detailedDisplay,
-    [detailedDisplay],
+    [detailedDisplay, usingDetailedDisplay],
   );
   const effectiveResultDisplay = usingDetailedDisplay
     ? sanitizedDetailedDisplay

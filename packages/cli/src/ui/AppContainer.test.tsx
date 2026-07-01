@@ -3506,6 +3506,8 @@ describe('AppContainer State Management', () => {
       ['q', makeKey({ name: 'q', sequence: 'q' })],
       ['Ctrl+C', makeKey({ name: 'c', ctrl: true, sequence: '\x03' })],
       ['Ctrl+D', makeKey({ name: 'd', ctrl: true, sequence: '\x04' })],
+      // Ctrl+O is the toggle: pressing it again while open also closes.
+      ['Ctrl+O', ctrlO],
     ])('%s while open removes the TranscriptView', (_label, closeKey) => {
       const { lastFrame } = renderApp();
       const handleKeypress = getGlobalKeypress()!;
