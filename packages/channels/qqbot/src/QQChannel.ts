@@ -1629,7 +1629,6 @@ export class QQChannel extends ChannelBase {
   }
 
   private handleGroup(event: QQGroupMessageEvent): void {
-    if (this.isDuplicate(event.id)) return;
     if (!event.group_openid) {
       process.stderr.write(
         `[QQ:${this.name}] Group message dropped: missing group_openid\n`,
@@ -1699,6 +1698,10 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+
+    // Dedup check after isAtBot guard — non-@bot messages don't consume the
+    // dedup token, preserving it for handleGroupAll which may need it.
+    if (this.isDuplicate(event.id)) return;
 
     // Inject per-group OPENID into the message prefix instead of global instructions
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
