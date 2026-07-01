@@ -597,6 +597,16 @@ export function registerSessionRoutes(
     addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
     const abort = new AbortController();
+    let responseFinished = false;
+    const onResClose = () => {
+      if (!responseFinished) abort.abort();
+    };
+    const onResFinish = () => {
+      responseFinished = true;
+      res.off('close', onResClose);
+    };
+    res.once('close', onResClose);
+    res.once('finish', onResFinish);
     const effectiveDeadlineMs = resolvePromptDeadlineMs(
       promptDeadlineMs,
       requestDeadlineMs,
@@ -628,6 +638,8 @@ export function registerSessionRoutes(
       );
     } catch (err) {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      res.off('close', onResClose);
+      res.off('finish', onResFinish);
       if (daemonLog && err instanceof PromptQueueFullError) {
         daemonLog.warn('prompt admission rejected: queue full', {
           sessionId,
@@ -650,6 +662,7 @@ export function registerSessionRoutes(
       });
       return;
     }
+    res.off('close', onResClose);
 
     promptPromise
       .then(
@@ -1095,6 +1108,51 @@ export function registerSessionRoutes(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'POST /session/:id/mid-turn-message',
+        sessionId,
+      });
+    }
+  });
+
+  // Pending prompt queue: list and remove.
+  app.get('/session/:id/pending-prompts', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const pendingPrompts = bridge.getPendingPrompts(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json({ pendingPrompts });
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/pending-prompts',
+        sessionId,
+      });
+    }
+  });
+
+  app.delete('/session/:id/pending-prompts/:promptId', mutate(), (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    const promptId = req.params['promptId'];
+    if (!promptId) {
+      res.status(400).json({ error: '`promptId` route parameter is required' });
+      return;
+    }
+    try {
+      const result = bridge.removePendingPrompt(
+        sessionId,
+        promptId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'DELETE /session/:id/pending-prompts/:promptId',
         sessionId,
       });
     }

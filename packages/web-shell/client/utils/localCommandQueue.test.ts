@@ -15,7 +15,6 @@ describe('appendOrDeferLocalUserMessage', () => {
       undefined,
       {
         append,
-        enqueue,
       },
     );
 
@@ -24,7 +23,7 @@ describe('appendOrDeferLocalUserMessage', () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  it('defers to the queue and returns true while a turn is streaming', () => {
+  it('suppresses local commands and returns true while a turn is streaming', () => {
     const append = vi.fn();
     const enqueue = vi.fn();
 
@@ -34,23 +33,23 @@ describe('appendOrDeferLocalUserMessage', () => {
       undefined,
       {
         append,
-        enqueue,
       },
     );
 
     expect(deferred).toBe(true);
-    expect(enqueue).toHaveBeenCalledExactlyOnceWith('/context', undefined);
+    expect(enqueue).not.toHaveBeenCalled();
     expect(append).not.toHaveBeenCalled();
   });
 
-  it('forwards images to the queue when deferring', () => {
+  it('does not enqueue images when suppressing', () => {
     const append = vi.fn();
     const enqueue = vi.fn();
     const images = [{ data: 'base64xx', media_type: 'image/png' }];
 
-    appendOrDeferLocalUserMessage(true, '/stats', images, { append, enqueue });
+    appendOrDeferLocalUserMessage(true, '/stats', images, { append });
 
-    expect(enqueue).toHaveBeenCalledExactlyOnceWith('/stats', images);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
   });
 });
 

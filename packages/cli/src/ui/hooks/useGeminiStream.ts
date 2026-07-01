@@ -88,6 +88,7 @@ import {
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   useReactToolScheduler,
@@ -108,6 +109,35 @@ import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+// The per-turn model override is held in two coupled refs: the model id and a
+// flag marking whether it came from an explicit inline `/model <id> <prompt>`
+// (which must win over skill-tool overrides for the rest of the turn). The two
+// always move together; these helpers are the single place that writes both so
+// the invariant (inline flag true => model id set) can't be broken by editing
+// one ref in isolation, and every set/clear is traceable via debug logs.
+function applyModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+  value: string | undefined,
+  isInline: boolean,
+): void {
+  modelOverrideRef.current = value;
+  inlineActiveRef.current = isInline;
+  debugLogger.debug(
+    `model override ${
+      value === undefined ? 'cleared' : `set to ${value}`
+    } (inline=${isInline})`,
+  );
+}
+
+function clearModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+): void {
+  applyModelOverride(modelOverrideRef, inlineActiveRef, undefined, false);
+}
+
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
@@ -138,9 +168,9 @@ function formatVisionBridgeNotice(result: VisionBridgeResult): string {
   const egressNote = result.egressOccurred
     ? ` Your image and prompt/context were sent to ${target}.`
     : '';
-  // No leading glyph here: the renderer supplies the gutter prefix (🔎 for the
+  // No leading glyph here: the renderer supplies the gutter prefix (◎ for the
   // dim notice, ✕ for the error variant). Baking one in too produced a doubled
-  // marker (e.g. `● 🔎 …`).
+  // marker (e.g. `● ◎ …`).
   if (result.status === 'failed') {
     const reason = result.egressOccurred
       ? 'the vision model request failed'
@@ -503,6 +533,10 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // True when the current turn's model override came from an explicit inline
+  // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
+  // explicit choice mid-turn, so this takes precedence until the next user turn.
+  const inlineModelOverrideActiveRef = useRef<boolean>(false);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
   // Scoped to a top-level submit and cleared below before a new user prompt.
   // Repeated duplicate provider ids within that submit are terminal/drop-only.
@@ -793,7 +827,7 @@ export const useGeminiStream = (
     // Log API cancellation
     const prompt_id = config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
-      config.getModel(),
+      modelOverrideRef.current ?? config.getModel(),
       prompt_id,
       config.getContentGeneratorConfig()?.authType,
       loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
@@ -991,6 +1025,33 @@ export const useGeminiStream = (
               localQueryToSendToGemini = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
+              // Per-turn model override (e.g. inline `/model <id> <prompt>`).
+              // Runs after the new-user-turn reset above and before the stream
+              // is sent, so it applies to this turn and — because the reset is
+              // skipped for ToolResult/Retry — persists across the tool loop,
+              // then clears on the next user turn. Re-validate provider identity
+              // here rather than trust the producer: any slash command can set
+              // `modelOverride`, so the consumer enforces that it names a model
+              // on the active provider before redirecting API calls to it.
+              if (slashCommandResult.modelOverride) {
+                if (
+                  isInlineModelOverrideAllowed(
+                    config,
+                    slashCommandResult.modelOverride,
+                  )
+                ) {
+                  applyModelOverride(
+                    modelOverrideRef,
+                    inlineModelOverrideActiveRef,
+                    slashCommandResult.modelOverride,
+                    true,
+                  );
+                } else {
+                  debugLogger.warn(
+                    `ignoring model override '${slashCommandResult.modelOverride}': not a model on the active provider`,
+                  );
+                }
+              }
 
               return {
                 queryToSend: localQueryToSendToGemini,
@@ -1501,7 +1562,7 @@ export const useGeminiStream = (
         addItem(
           {
             type: 'info',
-            text: `⚠️  ${message}`,
+            text: `⚠  ${message}`,
           },
           userMessageTimestamp,
         );
@@ -1527,10 +1588,11 @@ export const useGeminiStream = (
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const activeModel = modelOverrideRef.current ?? config.getModel();
       const reasonClause =
         eventValue?.triggerReason === 'image_overflow'
-          ? `accumulated enough tool screenshots to trigger compaction for ${config.getModel()}`
-          : `approached the input token limit for ${config.getModel()}`;
+          ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
+          : `approached the input token limit for ${activeModel}`;
       return addItem(
         {
           type: 'info',
@@ -1566,8 +1628,8 @@ export const useGeminiStream = (
         {
           type: 'error',
           text:
-            `🚫 Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
-            `💡 Solutions:\n` +
+            `✗ Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
+            `★ Solutions:\n` +
             `   • Start a new session: Use /clear command\n` +
             `   • Increase limit: Add "sessionTokenLimit": (e.g., 128000) to your settings.json\n` +
             `   • Compress history: Use /compress command to compress history`,
@@ -2176,10 +2238,31 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
-        // Clear model override for new user turns, but preserve it on retry
-        // so the same skill-selected model is used again.
-        if (submitType !== SendMessageType.Retry) {
-          modelOverrideRef.current = undefined;
+        // Clear model override for new user turns. On retry, preserve a
+        // skill-selected override so the same model is used again, but drop an
+        // explicit inline `/model <id> <prompt>` override: that is a one-off
+        // for the original prompt, so a retry reverts to the session model and
+        // lets skill-tool overrides apply again.
+        const droppingInlineOverrideOnRetry =
+          submitType === SendMessageType.Retry &&
+          inlineModelOverrideActiveRef.current;
+        if (
+          submitType !== SendMessageType.Retry ||
+          inlineModelOverrideActiveRef.current
+        ) {
+          // The retry re-sends the same prompt on the session model, which may
+          // differ from the one-shot override. Tell the user so the model
+          // switch isn't silent.
+          if (droppingInlineOverrideOnRetry) {
+            addItem(
+              {
+                type: 'info',
+                text: `Inline model override cleared on retry — retrying on the session model (${config.getModel()}).`,
+              },
+              userMessageTimestamp,
+            );
+          }
+          clearModelOverride(modelOverrideRef, inlineModelOverrideActiveRef);
         }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -2269,6 +2352,7 @@ export const useGeminiStream = (
                 prompt_id,
                 config.getContentGeneratorConfig()?.authType,
                 queryToSend,
+                modelOverrideRef.current ?? config.getModel(),
               ),
             );
           }
@@ -2456,10 +2540,10 @@ export const useGeminiStream = (
    * Retries the last failed prompt when the user presses Ctrl+Y.
    *
    * Activation conditions for Ctrl+Y shortcut:
-   * 1. ✅ The last request must have failed (lastPromptErroredRef.current === true)
-   * 2. ✅ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
-   * 3. ✅ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
-   * 4. ✅ There must be a stored lastPrompt in lastPromptRef.current
+   * 1. ✓ The last request must have failed (lastPromptErroredRef.current === true)
+   * 2. ✓ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
+   * 3. ✓ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
+   * 4. ✓ There must be a stored lastPrompt in lastPromptRef.current
    *
    * When conditions are not met:
    * - If streaming is active (Responding/WaitingForConfirmation): silently return without action
@@ -2766,9 +2850,25 @@ export const useGeminiStream = (
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
       // prior override, while non-skill tools (field absent) leave it intact.
+      // An explicit inline `/model <id> <prompt>` override wins for the whole
+      // turn, so skip skill-tool writes (including the undefined-clears case)
+      // while it is active.
       for (const toolCall of geminiTools) {
         if ('modelOverride' in toolCall.response) {
-          modelOverrideRef.current = toolCall.response.modelOverride;
+          if (inlineModelOverrideActiveRef.current) {
+            debugLogger.debug(
+              `skill-tool model override (${String(
+                toolCall.response.modelOverride,
+              )}) blocked: inline override active`,
+            );
+          } else {
+            applyModelOverride(
+              modelOverrideRef,
+              inlineModelOverrideActiveRef,
+              toolCall.response.modelOverride,
+              false,
+            );
+          }
         }
       }
 

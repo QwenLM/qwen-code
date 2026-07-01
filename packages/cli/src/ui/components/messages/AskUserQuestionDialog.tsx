@@ -185,6 +185,10 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
           void onConfirm(ToolConfirmationOutcome.Cancel);
           return;
         }
+        if (key.name === 'return') {
+          handleCustomInputSubmit();
+          return;
+        }
         return;
       }
 
@@ -217,8 +221,8 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
       }
 
       // Number key selection
-      const numKey = parseInt(input || '', 10);
-      if (!isNaN(numKey) && numKey >= 1 && numKey <= totalOptions) {
+      const numKey = input && /^[1-9]\d*$/.test(input) ? Number(input) : NaN;
+      if (Number.isSafeInteger(numKey) && numKey <= totalOptions) {
         const targetIndex = numKey - 1;
         setSelectedIndex(targetIndex);
 

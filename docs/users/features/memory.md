@@ -99,7 +99,7 @@ Everything saved is plain markdown — you can open, edit, or delete any file at
 
 Qwen periodically goes through its saved memories to remove duplicates and clean up outdated entries. This runs automatically in the background once a day after enough sessions have accumulated. You can trigger it manually with `/dream` if you want it to run now.
 
-While cleanup is running, **✦ dreaming** appears in the corner of the screen. Your session continues normally.
+Your session continues normally while cleanup runs in the background.
 
 ### Turning it on or off
 

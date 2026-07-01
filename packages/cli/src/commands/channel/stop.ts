@@ -18,6 +18,13 @@ export const stopCommand: CommandModule = {
       process.exit(0);
     }
 
+    if (info.owner === 'serve') {
+      writeStderrLine(
+        `Channel service is managed by qwen serve (PID ${info.pid}). Stop qwen serve to stop channels.`,
+      );
+      process.exit(1);
+    }
+
     writeStdoutLine(`Stopping channel service (PID ${info.pid})...`);
 
     if (!signalService(info.pid, 'SIGTERM')) {

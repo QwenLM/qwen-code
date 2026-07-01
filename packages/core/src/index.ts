@@ -120,6 +120,7 @@ export {
   applySkillAllowedTools,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
+export { nextFireTime, parseCron } from './utils/cronParser.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -275,6 +276,7 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/const.js';
+export * from './memory/remember.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.
@@ -346,6 +348,7 @@ export {
   logExtensionDisable,
   logExtensionEnable,
   logIdeConnection,
+  logLoopDetected,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
@@ -360,6 +363,7 @@ export {
   ExtensionUninstallEvent,
   IdeConnectionEvent,
   IdeConnectionType,
+  LoopDetectedEvent,
   LoopType,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
