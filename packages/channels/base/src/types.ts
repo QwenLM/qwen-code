@@ -37,6 +37,7 @@ export interface ChannelRuntimeMemoryScope {
 export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
+  groupHistoryLimit?: number;
 }
 
 export interface BlockStreamingChunkConfig {
@@ -66,6 +67,7 @@ export interface ChannelConfig {
   memoryScope?: ChannelMemoryScopeConfig;
   model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
+  groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
   /** Dispatch mode for concurrent messages. Default: 'steer' (resolved in ChannelBase.handleInbound). */

@@ -1,4 +1,4 @@
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import type {
   ChannelConfig,
   ChannelRuntimeIdentity,
@@ -10,9 +10,12 @@ import type {
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
+import { GroupHistoryStore } from './group-history-store.js';
+import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
+import { getGlobalQwenDir } from './paths.js';
 import {
   sanitizeSenderName,
   sanitizeQuotedText,
@@ -38,6 +41,11 @@ import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
  * later is already invalidated.
  */
 export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
+const GROUP_HISTORY_CONTEXT_MARKER =
+  '[Chat messages since your last reply - for context]';
+const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
+const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
+const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
 
 export interface ChannelBaseOptions {
@@ -48,6 +56,7 @@ export interface ChannelBaseOptions {
    * events directly.
    */
   registerBridgeEvents?: boolean;
+  groupHistoryPath?: string;
   loopController?: ChannelLoopController;
 }
 
@@ -146,6 +155,7 @@ export abstract class ChannelBase {
   private readonly memoryScope: ChannelRuntimeMemoryScope;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
+  private groupHistory: GroupHistoryStore;
   private readonly loopController?: ChannelLoopController;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
@@ -197,6 +207,14 @@ export abstract class ChannelBase {
     this.proxy = options?.proxy;
     this.identity = this.resolveIdentity(name, config);
     this.memoryScope = this.resolveMemoryScope(name, config);
+    this.groupHistory = new GroupHistoryStore(
+      options?.groupHistoryPath ??
+        join(
+          getGlobalQwenDir(),
+          'channels',
+          `${encodeURIComponent(name)}-group-history.jsonl`,
+        ),
+    );
     this.loopController = options?.loopController;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
@@ -764,6 +782,7 @@ export abstract class ChannelBase {
         envelope.chatId,
         envelope.threadId,
       );
+      this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
           // Audit: clearing a SHARED session wipes the conversation for every
@@ -1520,10 +1539,126 @@ export abstract class ChannelBase {
     return bridge.availableCommands ?? [];
   }
 
+  private groupHistoryKey(envelope: Envelope): string {
+    return JSON.stringify([
+      this.name,
+      envelope.chatId,
+      envelope.threadId ?? null,
+    ]);
+  }
+
+  private groupHistoryLimit(envelope: Envelope): number {
+    if (!envelope.isGroup) {
+      return 0;
+    }
+    const groupCfg = this.config.groups[envelope.chatId];
+    const wildcardGroupCfg = this.config.groups['*'];
+    const configured =
+      groupCfg?.groupHistoryLimit ??
+      wildcardGroupCfg?.groupHistoryLimit ??
+      this.config.groupHistoryLimit ??
+      0;
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return 0;
+    }
+    return Math.floor(configured);
+  }
+
+  private recordPendingGroupHistory(envelope: Envelope): void {
+    const limit = this.groupHistoryLimit(envelope);
+    if (limit <= 0 || envelope.text.trim().length === 0) {
+      return;
+    }
+    const senderId = truncateGroupHistoryField(envelope.senderId);
+    if (!this.gate.isAllowed(senderId)) {
+      return;
+    }
+
+    const entry: GroupHistoryEntry = {
+      senderId,
+      senderName: truncateGroupHistoryField(envelope.senderName),
+      text: envelope.text.slice(0, GROUP_HISTORY_ENTRY_TEXT_LIMIT),
+      messageId:
+        envelope.messageId === undefined
+          ? undefined
+          : truncateGroupHistoryField(envelope.messageId),
+      timestamp: Date.now(),
+    };
+    try {
+      this.groupHistory.record(this.groupHistoryKey(envelope), entry, limit);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to record group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private drainPendingGroupHistory(envelope: Envelope): GroupHistoryEntry[] {
+    const limit = this.groupHistoryLimit(envelope);
+    if (limit <= 0) {
+      return [];
+    }
+    try {
+      return this.groupHistory.drain(this.groupHistoryKey(envelope), limit);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
+      return [];
+    }
+  }
+
+  private clearPendingGroupHistory(envelope: Envelope): void {
+    if (!envelope.isGroup && this.config.sessionScope !== 'single') {
+      return;
+    }
+    try {
+      if (this.config.sessionScope === 'single') {
+        this.groupHistory.clearAll();
+      } else {
+        this.groupHistory.clear(this.groupHistoryKey(envelope));
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to clear group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private prependGroupHistoryContext(
+    promptText: string,
+    entries: GroupHistoryEntry[],
+  ): string {
+    if (entries.length === 0) {
+      return promptText;
+    }
+
+    const lines = entries.filter((entry) =>
+      this.gate.isAllowed(entry.senderId),
+    );
+    if (lines.length === 0) {
+      return promptText;
+    }
+
+    const formatted = lines.map((entry) => {
+      const who = sanitizeSenderName(entry.senderName || entry.senderId);
+      const text = sanitizeQuotedText(
+        entry.text,
+        GROUP_HISTORY_ENTRY_TEXT_LIMIT,
+      );
+      return `- [${who}] ${text}`;
+    });
+
+    return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
+  }
+
   async handleInbound(envelope: Envelope): Promise<void> {
     // 1. Group gate: policy + allowlist + mention gating
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
+      if (groupResult.reason === 'mention_required') {
+        this.recordPendingGroupHistory(envelope);
+      }
       return; // silently drop — no pairing, no reply
     }
 
@@ -1629,6 +1764,9 @@ export abstract class ChannelBase {
       }
     }
 
+    const recognizedSlashCommand =
+      this.isSlashCommand(envelope.text) &&
+      this.isRecognizedCommand(envelope.text, sessionId);
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
 
@@ -1656,10 +1794,7 @@ export abstract class ChannelBase {
     if (
       (envelope.isGroup || this.config.sessionScope === 'single') &&
       !envelope.alreadyPrefixed &&
-      !(
-        this.isSlashCommand(envelope.text) &&
-        this.isRecognizedCommand(envelope.text, sessionId)
-      )
+      !recognizedSlashCommand
     ) {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
@@ -1710,18 +1845,6 @@ export abstract class ChannelBase {
       if (filePaths.length > 0) {
         promptText = promptText + '\n\n' + filePaths.join('\n');
       }
-    }
-
-    // Prepend channel boundary and instructions on first message of a session.
-    if (
-      this.shouldPrependChannelBoundaryPrompt() &&
-      !this.instructedSessions.has(sessionId)
-    ) {
-      const prefix = this.config.instructions
-        ? `${this.channelBoundaryPrompt()}\n\n${this.config.instructions}`
-        : this.channelBoundaryPrompt();
-      promptText = `${prefix}\n\n${promptText}`;
-      this.instructedSessions.add(sessionId);
     }
 
     // Resolve dispatch mode: per-group override → channel config → default
@@ -1876,6 +1999,23 @@ export abstract class ChannelBase {
         );
         return;
       }
+      const groupHistoryEntries = recognizedSlashCommand
+        ? []
+        : this.drainPendingGroupHistory(envelope);
+      let promptToSend = this.prependGroupHistoryContext(
+        promptText,
+        groupHistoryEntries,
+      );
+      if (
+        this.shouldPrependChannelBoundaryPrompt() &&
+        !this.instructedSessions.has(sessionId)
+      ) {
+        const prefix = this.config.instructions
+          ? `${this.channelBoundaryPrompt()}\n\n${this.config.instructions}`
+          : this.channelBoundaryPrompt();
+        promptToSend = `${prefix}\n\n${promptToSend}`;
+        this.instructedSessions.add(sessionId);
+      }
       // Register this prompt as active
       let doneResolve: () => void = () => {};
       const done = new Promise<void>((r) => {
@@ -1928,7 +2068,7 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
 
       try {
-        const response = await promptBridge.prompt(sessionId, promptText, {
+        const response = await promptBridge.prompt(sessionId, promptToSend, {
           imageBase64,
           imageMimeType,
         });
@@ -2083,6 +2223,10 @@ export abstract class ChannelBase {
       );
     }
   }
+}
+
+function truncateGroupHistoryField(value: string): string {
+  return value.slice(0, GROUP_HISTORY_ENTRY_METADATA_LIMIT);
 }
 
 function truncateLoopLabel(prompt: string): string {
