@@ -14,6 +14,8 @@ import {
 import { ToolConfirmationOutcome } from './tools.js';
 import { runPlanApprovalGate } from '../plan-gate/planApprovalGate.js';
 import type { GateDecision, MergedGateFinding } from '../plan-gate/types.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 vi.mock('../plan-gate/planApprovalGate.js', async (importOriginal) => {
   const actual =
@@ -363,6 +365,85 @@ describe('ExitPlanModeTool', () => {
 
       const invocation = tool.build(params);
       expect(invocation.toolLocations()).toEqual([]);
+    });
+
+    it('allows by default inside subagent context to avoid approval UI', async () => {
+      const invocation = tool.build({ plan: 'Subagent plan' });
+
+      const permission = await runWithAgentContext('agent-1', () =>
+        invocation.getDefaultPermission(),
+      );
+
+      expect(permission).toBe('allow');
+    });
+
+    it('allows by default inside teammate context to avoid approval UI', async () => {
+      const invocation = tool.build({ plan: 'Teammate plan' });
+
+      const permission = runWithTeammateIdentity(
+        {
+          agentId: 'agent@test',
+          agentName: 'agent',
+          teamName: 'test',
+          isTeamLead: false,
+        },
+        () => invocation.getDefaultPermission(),
+      );
+
+      await expect(permission).resolves.toBe('allow');
+    });
+
+    it('falls back to generic confirmation inside subagent context', async () => {
+      const invocation = tool.build({ plan: 'Subagent plan' });
+
+      const confirmation = await runWithAgentContext('agent-1', () =>
+        invocation.getConfirmationDetails(new AbortController().signal),
+      );
+
+      expect(confirmation.type).toBe('info');
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+    });
+
+    it('rejects inside subagent context without saving or changing mode', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const invocation = tool.build({ plan: 'Subagent plan' });
+
+      const result = await runWithAgentContext('agent-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('not available inside subagents');
+      expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+    });
+
+    it('rejects inside teammate context without saving or changing mode', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const invocation = tool.build({ plan: 'Teammate plan' });
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'agent@test',
+          agentName: 'agent',
+          teamName: 'test',
+          isTeamLead: false,
+        },
+        () => invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('not available inside subagents');
+      expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
     });
   });
 

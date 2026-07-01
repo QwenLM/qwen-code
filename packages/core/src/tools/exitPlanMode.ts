@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolPlanConfirmationDetails, ToolResult } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolPlanConfirmationDetails,
+  ToolResult,
+} from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
@@ -26,6 +30,10 @@ import {
 } from '../plan-gate/planApprovalGate.js';
 import type { EvidenceBundle } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  buildSubagentPlanToolBlockedResult,
+  isPlanLifecycleToolUnavailableInSubagent,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 
 const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
@@ -118,6 +126,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
    * (issue #5574).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
+      // Avoid showing an approval UI for a subagent-only rejection; execute()
+      // still returns before saving the plan or changing approval mode.
+      return 'allow';
+    }
+
     const prePlanMode = this.config.getPrePlanMode();
     const gateState = this.config.getPlanGateState();
     if (
@@ -132,8 +146,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   override async getConfirmationDetails(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolPlanConfirmationDetails> {
+    abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
+      return super.getConfirmationDetails(abortSignal);
+    }
+
     const prePlanMode = this.config.getPrePlanMode();
     const details: ToolPlanConfirmationDetails = {
       type: 'plan',
@@ -195,6 +213,14 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
+      return buildSubagentPlanToolBlockedResult(
+        ToolNames.EXIT_PLAN_MODE,
+        'ExitPlanModeTool',
+        debugLogger,
+      );
+    }
+
     const { plan, originalRequest, researchSummary, resolutionSummary } =
       this.params;
     const prePlanMode = this.config.getPrePlanMode();
