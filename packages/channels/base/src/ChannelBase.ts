@@ -741,20 +741,7 @@ export abstract class ChannelBase {
 
     this.registerCommand('clear', clearHandler);
     this.registerCommand('reset', clearHandler);
-    // /new bypasses shared session confirmation — it starts a fresh session for
-    // everyone, which is additive (like /help or /who), not destructive (like
-    // /clear which wipes conversation history collaborators may be reading).
-    this.registerCommand('new', async (envelope) => {
-      if (!this.isAuthorizedForSharedSession(envelope)) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Only authorized members can start a new session.',
-        );
-        return true;
-      }
-      await doClear(envelope);
-      return true;
-    });
+    this.registerCommand('new', clearHandler);
 
     // Read-only: report the current (possibly group-shared) session and workspace.
     // For a shared session, gate it to authorized senders like /clear — /who
