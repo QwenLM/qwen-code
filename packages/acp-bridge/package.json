@@ -59,6 +59,10 @@
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
     },
+    "./logRedaction": {
+      "types": "./dist/logRedaction.d.ts",
+      "import": "./dist/logRedaction.js"
+    },
     "./bridgeClient": {
       "types": "./dist/bridgeClient.d.ts",
       "import": "./dist/bridgeClient.js"
