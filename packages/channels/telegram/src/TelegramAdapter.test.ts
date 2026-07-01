@@ -185,6 +185,30 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
   });
 
+  it('treats typing status API failures as best-effort', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.sendChatAction.mockImplementation(() => {
+      throw new Error('telegram unavailable');
+    });
+
+    expect(() => channel.beginTyping('chat-1')).not.toThrow();
+    expect(() =>
+      channel.emitLifecycle({
+        channelName: 'telegram',
+        chatId: 'chat-2',
+        sessionId: 'session-2',
+        messageId: 'message-2',
+        identity: { id: 'channel:telegram', displayName: 'telegram' },
+        memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+        type: 'started',
+      }),
+    ).not.toThrow();
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(4);
+  });
+
   it('registers the Telegram command menu before polling starts', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);

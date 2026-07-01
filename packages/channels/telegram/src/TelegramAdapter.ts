@@ -277,12 +277,19 @@ export class TelegramChannel extends ChannelBase {
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
+  private sendTyping(chatId: string): void {
+    try {
+      void this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
+    } catch {}
+  }
+
   private startTyping(chatId: string): void {
     if (this.typingIntervals.has(chatId)) return;
-    const sendTyping = () =>
-      this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
-    sendTyping();
-    this.typingIntervals.set(chatId, setInterval(sendTyping, 4000));
+    this.sendTyping(chatId);
+    this.typingIntervals.set(
+      chatId,
+      setInterval(() => this.sendTyping(chatId), 4000),
+    );
   }
 
   private stopTyping(chatId: string): void {
