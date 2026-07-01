@@ -280,7 +280,9 @@ export class TelegramChannel extends ChannelBase {
   private sendTyping(chatId: string): void {
     try {
       void this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
-    } catch {}
+    } catch {
+      // Best-effort typing indicator.
+    }
   }
 
   private startTyping(chatId: string): void {

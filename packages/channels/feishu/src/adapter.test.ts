@@ -247,6 +247,17 @@ describe('FeishuChannel', () => {
       expect(result).toBe('Content');
     });
 
+    it('strips lifecycle running indicator', () => {
+      const card = {
+        body: {
+          elements: [{ tag: 'markdown', content: 'Content\n---\n*运行中...*' }],
+        },
+      };
+      const result = extractCardText(card);
+      expect(result).not.toContain('运行中');
+      expect(result).toBe('Content');
+    });
+
     it('returns undefined for empty card', () => {
       const result = extractCardText({});
       expect(result).toBeUndefined();
