@@ -352,6 +352,33 @@ describe('<ToolMessage />', () => {
       expect(output).not.toContain('\x0e');
     });
 
+    it('preserves TAB and LF in detailedDisplay (structural whitespace)', () => {
+      // The C0 strip regex intentionally skips \x09 (TAB) and \x0a (LF) so
+      // multi-line / column-aligned file output still renders. Lock that in:
+      // stripping them would collapse the segments together.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="table.txt"
+          resultDisplay="Read 1 file"
+          detailedDisplay={'colA\tcolB\nrow2A\trow2B'}
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      // All four cells survive, and are NOT collapsed into one run (which is
+      // what stripping TAB/LF would produce).
+      expect(output).toContain('colA');
+      expect(output).toContain('colB');
+      expect(output).toContain('row2A');
+      expect(output).toContain('row2B');
+      expect(output).not.toContain('colAcolB');
+      expect(output).not.toContain('colBrow2A');
+    });
+
     it('keeps the summary when forced but NOT in fullDetail mode (main-view force)', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage
