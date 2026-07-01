@@ -666,17 +666,18 @@ export class QQChannel extends ChannelBase {
           // Clean up pending stream delete marker so onResponseComplete
           // can retry via the buffer.
           this.pendingStreamDelete.delete(sessionId);
-          // Restore buffer on failure so onResponseComplete can retry.
-          s.buffer = toFlush + s.buffer;
+          // Restore buffer on failure so onResponseComplete can retry,
+          // but only if streamState hasn't been replaced since we started.
+          if (this.streamState.get(sessionId) === flushedEntry) {
+            s.buffer = toFlush + s.buffer;
+          } else {
+            process.stderr.write(
+              `[QQ:${this.name}] idleFlush: streamState replaced during failed send, ${toFlush.length} chars lost for ${sessionId}\n`,
+            );
+          }
         })
         .finally(() => {
           this.flushingSessions.delete(sessionId);
-          if (this.pendingStreamDelete.has(sessionId)) {
-            this.pendingStreamDelete.delete(sessionId);
-            if (this.streamState.get(sessionId) === flushedEntry) {
-              this.streamState.delete(sessionId);
-            }
-          }
         });
     }, 2000);
     state.timer.unref?.();
@@ -1163,7 +1164,7 @@ export class QQChannel extends ChannelBase {
 
       // Non-1000 close codes (e.g. 4009) imply the server-side session is
       // gone; skip the RESUME attempt and go straight to IDENTIFY.
-      if (code !== 1000) {
+      if (code !== 1000 && code !== 4000) {
         this.tryResume = false;
       }
 
@@ -1373,6 +1374,12 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Server sent INVALID_SESSION, falling back to IDENTIFY\n`,
         );
         this.tryResume = false;
+        // Cancel any pending debounced save to prevent a TOCTOU race
+        // between saveQQState and the coldStart restore on the next READY.
+        if (this.saveTimer) {
+          clearTimeout(this.saveTimer);
+          this.saveTimer = null;
+        }
         // Flush state first to persist any debounced updates before
         // coldStart=true triggers a full restore on the next READY.
         this.flushQQState();
@@ -1553,7 +1560,12 @@ export class QQChannel extends ChannelBase {
     const selfMention = mentions?.find((m) => m.is_you);
     if (!selfMention) return '';
     const botOpenId = selfMention.member_openid || selfMention.id || '';
-    if (!/^[A-F0-9]{32}$/i.test(botOpenId)) return '';
+    if (!/^[A-F0-9]{32}$/i.test(botOpenId)) {
+      process.stderr.write(
+        `[QQ:${this.name}] Invalid botOpenId format: ${sanitizeLogText(botOpenId, 64)}\n`,
+      );
+      return '';
+    }
     if (chatId) {
       this.botOpenIdByGroup.set(chatId, botOpenId);
       this.saveQQState();
@@ -1882,7 +1894,7 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isSlash, cleanText, text, senderName } = result;
+    const { isSlash, cleanText, text, senderName, isAtBot } = result;
 
     if (policy === 'keyword') {
       const triggers = (this.qqConfig.keywordTriggers ?? []).filter(
@@ -1909,8 +1921,8 @@ export class QQChannel extends ChannelBase {
       senderName,
       messageId: event.id,
       isGroup: true,
-      isMentioned: true,
-      isReplyToBot: false,
+      isMentioned: isAtBot,
+      isReplyToBot: isAtBot,
       alreadyPrefixed: !isSlash || undefined,
     }).catch((err: unknown) => {
       process.stderr.write(
