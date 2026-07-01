@@ -436,7 +436,7 @@ describe('handleGroup', () => {
   it('重复消息不触发', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    const evt = makeGroupEvent();
+    const evt = makeGroupEvent({ mentions: [{ is_you: true }] });
     pvt['handleGroup'](evt);
     pvt['handleGroup'](evt);
     await vi.advanceTimersByTimeAsync(600);
@@ -455,7 +455,7 @@ describe('handleGroup', () => {
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
-  it('@all (isAtBot=false) 时 isMentioned=false 且不更新 replyMsgId', async () => {
+  it('@all (isAtBot=false) 时 handleGroup 直接 return，消息由 handleGroupAll 处理', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     // Pre-populate replyMsgId to verify it is NOT clobbered
@@ -474,13 +474,8 @@ describe('handleGroup', () => {
 
     await vi.advanceTimersByTimeAsync(600);
 
-    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
-    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env['isMentioned']).toBe(false);
-    expect(env['isReplyToBot']).toBe(false);
-    expect(env['text']).toContain('[atMention=false]');
-    expect(env['text']).toContain('大家看看');
-    expect(env['alreadyPrefixed']).toBe(true);
+    // handleGroup returns early for non-@bot messages — they go through handleGroupAll
+    expect(mockHandleInbound).not.toHaveBeenCalled();
 
     // replyMsgId should NOT have been updated
     expect(replyMsgId.get('group-openid-1')!.msgId).toBe('old-msg');

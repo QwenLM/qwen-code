@@ -70,6 +70,28 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  sanitizeLogText: (text: string, maxLen: number): string => {
+    const sanitized = Array.from(text, (c) => {
+      const cp = c.codePointAt(0)!;
+      if (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d)
+        return `\\x${cp.toString(16).padStart(2, '0')}`;
+      if (cp === 0x7f || (cp >= 0x80 && cp <= 0x9f))
+        return `\\x${cp.toString(16).padStart(2, '0')}`;
+      if (cp === 0x1b) return '\\x1B';
+      return c;
+    }).join('');
+    return sanitized.slice(0, maxLen);
+  },
+  sanitizeSenderName: (name: string): string => {
+    const cleaned = Array.from(name, (c) => {
+      const cp = c.codePointAt(0)!;
+      if (cp < 0x20 || cp === 0x7f) return ' ';
+      if (c === '[' || c === ']') return ' ';
+      return c;
+    }).join('');
+    return cleaned.replace(/\s+/g, ' ').trim() || 'QQ User';
+  },
+  sanitizePromptText: (text: string): string => text,
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -305,13 +327,19 @@ describe('onToolCall', () => {
     expect(clearTimeout).toHaveBeenCalledWith(timer);
   });
 
-  it('clears the buffer after flushing', () => {
+  it('clears the buffer after flushing', async () => {
     const ch = makeChannel();
     onResponseChunk(ch, 'test-chat', 'text before tool', 'sess-1');
 
     ch.onToolCall('test-chat', toolCall('sess-1'));
 
-    expect(streamState(ch).get('sess-1')!.buffer).toBe('');
+    // Buffer clearing is now async (in .then()) — wait for sendMessage to complete
+    await vi.waitFor(
+      () => {
+        expect(streamState(ch).get('sess-1')!.buffer).toBe('');
+      },
+      { timeout: 1000, interval: 1 },
+    );
   });
 
   it('only flushes the triggering session, not other sessions', async () => {
@@ -403,7 +431,9 @@ describe('onResponseComplete', () => {
       toolName: 'x',
       args: {},
     } as unknown as ToolCallEvent);
-    // drain the async sendMessage before clearing
+    // drain the async sendMessage chain before clearing
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
     mockSendQQMessage.mockClear();
 

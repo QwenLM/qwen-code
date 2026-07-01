@@ -375,6 +375,11 @@ export class QQChannel extends ChannelBase {
     const entry = this.replyMsgId.get(chatId);
     const msgId =
       entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
+    if (entry && !msgId) {
+      process.stderr.write(
+        `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, falling back to active message\n`,
+      );
+    }
 
     // Respect QQ Bot active-message toggle: when a group admin disables
     // active messages, drop outbound sends silently to avoid platform-policy
@@ -411,7 +416,7 @@ export class QQChannel extends ChannelBase {
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => '');
         process.stderr.write(
-          `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 200)})\n`,
+          `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${sanitizeLogText(errBody, 200)})\n`,
         );
 
         // Roll back msgSeqMap if we had a msgId (passive reply context)
@@ -497,7 +502,12 @@ export class QQChannel extends ChannelBase {
         return null;
       }
     }
-    if (!this.accessToken) return null;
+    if (!this.accessToken) {
+      process.stderr.write(
+        `[QQ:${this.name}] resolveRoute: accessToken is empty after fetchToken\n`,
+      );
+      return null;
+    }
     if (!isValidChatId(chatId)) {
       process.stderr.write(
         `[QQ:${this.name}] resolveRoute: invalid chatId rejected (length=${chatId.length})\n`,
@@ -567,6 +577,9 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
+    this.seenMessages.clear();
+    this.flushingSessions.clear();
+    this.pendingStreamDelete.clear();
     this.coldStart = true;
   }
 
@@ -626,6 +639,11 @@ export class QQChannel extends ChannelBase {
           // Only delete streamState on success (moved from .finally so a
           // failed idle-flush doesn't orphan the session).
           if (this.pendingStreamDelete.has(sessionId)) {
+            if (s.buffer) {
+              process.stderr.write(
+                `[QQ:${this.name}] pendingStreamDelete discarding non-empty buffer (${s.buffer.length} chars) for ${sessionId}\n`,
+              );
+            }
             this.pendingStreamDelete.delete(sessionId);
             this.streamState.delete(sessionId);
           }
@@ -698,12 +716,17 @@ export class QQChannel extends ChannelBase {
       state.timer = null;
     }
     if (state.buffer) {
-      this.sendMessage(state.chatId, state.buffer).catch((err) => {
-        process.stderr.write(
-          `[QQ:${this.name}] toolCallFlush send failed: ${err}\n`,
-        );
-      });
-      state.buffer = '';
+      const toFlush = state.buffer;
+      this.sendMessage(state.chatId, toFlush)
+        .then(() => {
+          state.buffer = '';
+        })
+        .catch((err) => {
+          state.buffer = toFlush + (state.buffer || '');
+          process.stderr.write(
+            `[QQ:${this.name}] toolCallFlush send failed: ${err}\n`,
+          );
+        });
     }
   }
 
@@ -1323,6 +1346,9 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Server sent INVALID_SESSION, falling back to IDENTIFY\n`,
         );
         this.tryResume = false;
+        // Flush state first to persist any debounced updates before
+        // coldStart=true triggers a full restore on the next READY.
+        this.flushQQState();
         // Trigger full state restore on the next READY — the gateway
         // assigned a new session_id, so in-memory routing state
         // (chatTypeMap, replyMsgId, msgSeqMap) must be reloaded.
@@ -1651,8 +1677,9 @@ export class QQChannel extends ChannelBase {
 
     if (!isAtBot) {
       process.stderr.write(
-        `[QQ:${this.name}] @all msg in ${sanitizeLogText(chatId, 32)} (isAtBot=false)\n`,
+        `[QQ:${this.name}] @all msg in ${sanitizeLogText(chatId, 32)} (isAtBot=false), returning to handleGroupAll\n`,
       );
+      return;
     }
 
     const text = isSlash

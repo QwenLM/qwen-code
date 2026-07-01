@@ -58,6 +58,29 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  sanitizeLogText: (text: string, maxLen: number): string => {
+    // Minimal sanitization for tests
+    const sanitized = Array.from(text, (c) => {
+      const cp = c.codePointAt(0)!;
+      if (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d)
+        return `\\x${cp.toString(16).padStart(2, '0')}`;
+      if (cp === 0x7f || (cp >= 0x80 && cp <= 0x9f))
+        return `\\x${cp.toString(16).padStart(2, '0')}`;
+      if (cp === 0x1b) return '\\x1B';
+      return c;
+    }).join('');
+    return sanitized.slice(0, maxLen);
+  },
+  sanitizeSenderName: (name: string): string => {
+    const cleaned = Array.from(name, (c) => {
+      const cp = c.codePointAt(0)!;
+      if (cp < 0x20 || cp === 0x7f) return ' ';
+      if (c === '[' || c === ']') return ' ';
+      return c;
+    }).join('');
+    return cleaned.replace(/\s+/g, ' ').trim() || 'QQ User';
+  },
+  sanitizePromptText: (text: string): string => text,
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -230,7 +253,10 @@ describe('sendMessage', () => {
       ch as unknown as {
         replyMsgId: Map<string, { msgId: string; timestamp: number }>;
       }
-    )['replyMsgId'].set('test-chat-id', { msgId: 'msg-001', timestamp: Date.now() });
+    )['replyMsgId'].set('test-chat-id', {
+      msgId: 'msg-001',
+      timestamp: Date.now(),
+    });
     mockSendQQMessage
       .mockResolvedValueOnce(mockResponse(false, 400, 'markdown unsupported'))
       .mockResolvedValueOnce(mockResponse(true));
@@ -244,7 +270,12 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { msg_type: 2, markdown: { content: '**bold**' }, msg_id: 'msg-001', msg_seq: 1 },
+      {
+        msg_type: 2,
+        markdown: { content: '**bold**' },
+        msg_id: 'msg-001',
+        msg_seq: 1,
+      },
     );
     // Fallback: active message (no msg_id)
     expect(mockSendQQMessage).toHaveBeenNthCalledWith(
