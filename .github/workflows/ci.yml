@@ -192,6 +192,10 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
+      - name: 'Audit critical runtime dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run audit:runtime:critical'
+
       - name: 'Check lockfile'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: 'npm run check:lockfile'
