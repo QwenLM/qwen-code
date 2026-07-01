@@ -461,6 +461,25 @@ describe('getSessionTimelineEntries', () => {
     ]);
   });
 
+  it('summarizes grouped parallel agents in the turn detail', () => {
+    expect(
+      getSessionTimelineEntries([
+        makeUserMessage('u1'),
+        makeAgentToolGroup('agent-1'),
+        makeAgentToolGroup('agent-2'),
+        makeAssistantMessage('final'),
+      ]),
+    ).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: '2 parallel agents',
+        timestamp: undefined,
+        nodeKinds: ['agents'],
+      },
+    ]);
+  });
+
   it('handles empty assistant content and user shell turns', () => {
     const entries = getSessionTimelineEntries([
       makeUserShellMessage('shell'),

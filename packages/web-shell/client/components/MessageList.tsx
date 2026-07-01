@@ -556,15 +556,31 @@ function timelineDetailSnippetForMessage(message: Message): string {
   }
 }
 
+function timelineDetailSnippetForItem(item: DisplayItem): string {
+  if (item.type === 'parallel_agents') {
+    const count = item.agents.length;
+    return `${count} parallel agent${count === 1 ? '' : 's'}`;
+  }
+  if (item.type !== 'message') return '';
+  return timelineDetailSnippetForMessage(item.message);
+}
+
 function timelineDetailForTurn(
-  turnItems: readonly Message[],
-  finalAssistantIndex: number,
+  turnItems: readonly DisplayItem[],
+  finalAssistantId: string | null,
   nodeKinds: readonly TurnTimelineNodeKind[],
 ): string {
   const snippets: string[] = [];
   for (let i = 0; i < turnItems.length; i += 1) {
-    if (i === finalAssistantIndex) continue;
-    const snippet = timelineDetailSnippetForMessage(turnItems[i]!);
+    const item = turnItems[i]!;
+    if (
+      item.type === 'message' &&
+      finalAssistantId !== null &&
+      item.message.id === finalAssistantId
+    ) {
+      continue;
+    }
+    const snippet = timelineDetailSnippetForItem(item);
     if (snippet) snippets.push(snippet);
   }
 
@@ -587,7 +603,7 @@ export function getSessionTimelineEntries(
 
   const pushTurn = () => {
     if (!turnStart) return;
-    let finalAssistantIndex = -1;
+    let finalAssistantId: string | null = null;
     for (let i = turnItems.length - 1; i >= 0; i -= 1) {
       const item = turnItems[i];
       if (
@@ -595,20 +611,22 @@ export function getSessionTimelineEntries(
         compactTimelineText(item.content, 1).length > 0 &&
         !item.isStreaming
       ) {
-        finalAssistantIndex = i;
+        finalAssistantId = item.id;
         break;
       }
     }
 
+    const timelineItems = groupParallelAgents(turnItems);
     const nodeKinds: TurnTimelineNodeKind[] = [];
-    for (let i = 0; i < turnItems.length; i += 1) {
-      if (i === finalAssistantIndex) continue;
-      const item = turnItems[i]!;
-      const node = getTurnTimelineNode({
-        type: 'message',
-        key: item.id,
-        message: item,
-      });
+    for (const item of timelineItems) {
+      if (
+        item.type === 'message' &&
+        finalAssistantId !== null &&
+        item.message.id === finalAssistantId
+      ) {
+        continue;
+      }
+      const node = getTurnTimelineNode(item);
       if (node.kind !== 'none' && !nodeKinds.includes(node.kind)) {
         nodeKinds.push(node.kind);
       }
@@ -617,7 +635,7 @@ export function getSessionTimelineEntries(
     entries.push({
       id: turnStart.id,
       label: timelineLabelForTurn(turnStart),
-      detail: timelineDetailForTurn(turnItems, finalAssistantIndex, nodeKinds),
+      detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
       timestamp: turnStart.timestamp,
       nodeKinds,
     });
