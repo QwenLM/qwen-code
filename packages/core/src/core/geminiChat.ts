@@ -395,6 +395,8 @@ const RECOVERY_CONTAINED_PREFIX_MIN_BYTES = 12;
 // Limit the substring search to the immediate truncation tail so a coincidental
 // match thousands of characters earlier in the previous turn cannot win.
 const RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS = 400;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000;
+const STREAM_IDLE_WARNING_FRACTION = 0.5;
 
 function byteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8');
@@ -988,14 +990,125 @@ function stripThoughtPartsFromContent(content: Content): Content | null {
   };
 }
 
+type InvalidStreamErrorType =
+  | 'NO_FINISH_REASON'
+  | 'NO_RESPONSE_TEXT'
+  | 'STREAM_IDLE_TIMEOUT';
+
+interface StreamIdleWatchdog {
+  next<T>(nextPromise: Promise<IteratorResult<T>>): Promise<IteratorResult<T>>;
+  cleanup(): void;
+}
+
+function isStreamWatchdogDisabled(): boolean {
+  const value = process.env['QWEN_CODE_DISABLE_STREAM_WATCHDOG'];
+  return value === '1' || value === 'true';
+}
+
+function getStreamIdleTimeoutMs(): number | undefined {
+  if (isStreamWatchdogDisabled()) {
+    return undefined;
+  }
+
+  const value = process.env['QWEN_CODE_STREAM_IDLE_TIMEOUT_MS'];
+  if (!value) {
+    return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    debugLogger.warn(
+      `Ignoring invalid QWEN_CODE_STREAM_IDLE_TIMEOUT_MS value: ${value}`,
+    );
+    return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  }
+
+  return parsed;
+}
+
+function linkAbortSignal(
+  signal: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
+  if (!signal) {
+    return () => {};
+  }
+
+  if (signal.aborted) {
+    controller.abort(signal.reason);
+    return () => {};
+  }
+
+  const onAbort = () => {
+    controller.abort(signal.reason);
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  return () => signal.removeEventListener('abort', onAbort);
+}
+
+function createStreamIdleWatchdog(
+  model: string,
+  abortController: AbortController,
+): StreamIdleWatchdog | undefined {
+  const timeoutMs = getStreamIdleTimeoutMs();
+  if (timeoutMs === undefined) {
+    return undefined;
+  }
+
+  const warningMs = Math.max(
+    1,
+    Math.floor(timeoutMs * STREAM_IDLE_WARNING_FRACTION),
+  );
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let warningId: ReturnType<typeof setTimeout> | undefined;
+
+  const clearTimers = () => {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+      timeoutId = undefined;
+    }
+    if (warningId !== undefined) {
+      clearTimeout(warningId);
+      warningId = undefined;
+    }
+  };
+
+  return {
+    next<T>(nextPromise: Promise<IteratorResult<T>>): Promise<IteratorResult<T>> {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        warningId = setTimeout(() => {
+          debugLogger.warn(
+            `Stream has been idle for ${warningMs}ms while waiting for the next chunk from ${model}.`,
+          );
+        }, warningMs);
+        timeoutId = setTimeout(() => {
+          clearTimers();
+          abortController.abort();
+          reject(
+            new InvalidStreamError(
+              `Model stream went idle for ${timeoutMs}ms without receiving a chunk.`,
+              'STREAM_IDLE_TIMEOUT',
+            ),
+          );
+        }, timeoutMs);
+      });
+
+      return Promise.race([nextPromise, timeoutPromise]).finally(clearTimers);
+    },
+    cleanup() {
+      clearTimers();
+    },
+  };
+}
+
 /**
  * Custom error to signal that a stream completed with invalid content,
  * which should trigger a retry.
  */
 export class InvalidStreamError extends Error {
-  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT';
+  readonly type: InvalidStreamErrorType;
 
-  constructor(message: string, type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT') {
+  constructor(message: string, type: InvalidStreamErrorType) {
     super(message);
     this.name = 'InvalidStreamError';
     this.type = type;
@@ -2622,18 +2735,34 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const streamAbortController = new AbortController();
+    const cleanupAbortLink = linkAbortSignal(
+      params.config?.abortSignal,
+      streamAbortController,
+    );
+    const streamWatchdog = createStreamIdleWatchdog(
+      model,
+      streamAbortController,
+    );
+
     const apiCall = () =>
       this.config.getContentGenerator().generateContentStream(
         {
           model,
           contents: requestContents,
-          config: { ...this.generationConfig, ...params.config },
+          config: {
+            ...this.generationConfig,
+            ...params.config,
+            abortSignal: streamAbortController.signal,
+          },
         },
         prompt_id,
       );
     const cgConfig = this.config.getContentGeneratorConfig();
     const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
-    const streamResponse = await retryWithBackoff(apiCall, {
+    let streamResponse: AsyncGenerator<GenerateContentResponse>;
+    try {
+      streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
           if (isSchemaDepthError(error.message)) return false;
@@ -2676,8 +2805,18 @@ export class GeminiChat {
         );
       },
     });
+    } catch (error) {
+      streamWatchdog?.cleanup();
+      cleanupAbortLink();
+      throw error;
+    }
 
-    return this.processStreamResponse(model, streamResponse);
+    return this.processStreamResponse(
+      model,
+      streamResponse,
+      streamWatchdog,
+      cleanupAbortLink,
+    );
   }
 
   /**
@@ -2994,6 +3133,8 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    streamWatchdog?: StreamIdleWatchdog,
+    cleanupAbortLink?: () => void,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -3021,12 +3162,18 @@ export class GeminiChat {
     let streamError: unknown = null;
 
     try {
-      for await (const chunk of streamResponse) {
+      while (true) {
+        const result = streamWatchdog
+          ? await streamWatchdog.next(streamResponse.next())
+          : await streamResponse.next();
+        if (result.done) {
+          break;
+        }
+        const chunk = result.value;
         // Use ||= to avoid later usage-only chunks (no candidates) overwriting
         // a finishReason that was already seen in an earlier chunk.
         hasFinishReason ||=
-          chunk?.candidates?.some((candidate) => candidate.finishReason) ??
-          false;
+          chunk?.candidates?.some((candidate) => candidate.finishReason) ?? false;
 
         if (isValidResponse(chunk)) {
           const content = chunk.candidates?.[0]?.content;
@@ -3124,6 +3271,8 @@ export class GeminiChat {
       }
     } catch (e) {
       streamError = e;
+    } finally {
+      streamWatchdog?.cleanup();
     }
 
     let thoughtContentPart: Part | undefined;
