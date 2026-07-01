@@ -74,8 +74,6 @@ export class QQChannel extends ChannelBase {
   private readonly maxReconnectAttempts: number = 20;
   /** QQ Bot session_id from READY, used for RESUME on reconnect. */
   private sessionId: string = '';
-  /** Bot's own QQ OPENID, extracted from the first inbound @mention targeting us. */
-  private botOpenId: string = '';
   /** Per-group bot OPENID map for multi-group support (member_openid is group-scoped). */
   private botOpenIdByGroup: Map<string, string> = new Map();
   /** Set to true after first READY + session restore completes. Guards
@@ -1554,7 +1552,6 @@ export class QQChannel extends ChannelBase {
       );
       return '';
     }
-    this.botOpenId = botOpenId;
     if (chatId) {
       this.botOpenIdByGroup.set(chatId, botOpenId);
       this.saveQQState();
