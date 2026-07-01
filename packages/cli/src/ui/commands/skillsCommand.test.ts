@@ -15,6 +15,7 @@ interface FakeSkill {
   description?: string;
   priority?: number;
   userInvocable?: boolean;
+  level?: string;
 }
 
 function makeContext(opts: {
@@ -108,9 +109,24 @@ describe('skillsCommand bare entry', () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
       skills: [
-        { name: 'high', priority: 100 },
-        { name: 'low', priority: -5 },
-        { name: 'mid', priority: 10 },
+        {
+          name: 'high',
+          priority: 100,
+          description: 'High priority',
+          level: 'project',
+        },
+        {
+          name: 'low',
+          priority: -5,
+          description: 'Low priority',
+          level: 'bundled',
+        },
+        {
+          name: 'mid',
+          priority: 10,
+          description: 'Mid priority',
+          level: 'user',
+        },
       ],
       executionMode: 'acp',
     });
@@ -120,7 +136,11 @@ describe('skillsCommand bare entry', () => {
     expect(context.ui.addItem).toHaveBeenCalledWith(
       {
         type: MessageType.SKILLS_LIST,
-        skills: [{ name: 'high' }, { name: 'mid' }, { name: 'low' }],
+        skills: [
+          { name: 'high', description: 'High priority', level: 'Project' },
+          { name: 'mid', description: 'Mid priority', level: 'User' },
+          { name: 'low', description: 'Low priority', level: 'Bundled' },
+        ],
       },
       expect.any(Number),
     );
@@ -130,9 +150,14 @@ describe('skillsCommand bare entry', () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
       skills: [
-        { name: 'alpha' },
-        { name: 'model-only', userInvocable: false },
-        { name: 'gamma' },
+        { name: 'alpha', description: 'Alpha skill', level: 'bundled' },
+        {
+          name: 'model-only',
+          userInvocable: false,
+          description: 'Model only',
+          level: 'bundled',
+        },
+        { name: 'gamma', description: 'Gamma skill', level: 'bundled' },
       ],
       executionMode: 'non_interactive',
     });
@@ -142,7 +167,10 @@ describe('skillsCommand bare entry', () => {
     expect(context.ui.addItem).toHaveBeenCalledWith(
       {
         type: MessageType.SKILLS_LIST,
-        skills: [{ name: 'alpha' }, { name: 'gamma' }],
+        skills: [
+          { name: 'alpha', description: 'Alpha skill', level: 'Bundled' },
+          { name: 'gamma', description: 'Gamma skill', level: 'Bundled' },
+        ],
       },
       expect.any(Number),
     );
@@ -151,7 +179,11 @@ describe('skillsCommand bare entry', () => {
   it('omits disabled skills from the non-interactive listing', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
-      skills: [{ name: 'alpha' }, { name: 'beta' }, { name: 'gamma' }],
+      skills: [
+        { name: 'alpha', description: 'Alpha', level: 'bundled' },
+        { name: 'beta', description: 'Beta', level: 'bundled' },
+        { name: 'gamma', description: 'Gamma', level: 'bundled' },
+      ],
       workspaceDisabled: ['beta'],
       mergedDisabled: ['beta'],
       executionMode: 'non_interactive',
@@ -162,7 +194,10 @@ describe('skillsCommand bare entry', () => {
     expect(context.ui.addItem).toHaveBeenCalledWith(
       {
         type: MessageType.SKILLS_LIST,
-        skills: [{ name: 'alpha' }, { name: 'gamma' }],
+        skills: [
+          { name: 'alpha', description: 'Alpha', level: 'Bundled' },
+          { name: 'gamma', description: 'Gamma', level: 'Bundled' },
+        ],
       },
       expect.any(Number),
     );
@@ -189,7 +224,10 @@ describe('skillsCommand bare entry', () => {
   it('shows a clarifying message when all skills are disabled in non-interactive mode', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
-      skills: [{ name: 'a' }, { name: 'b' }],
+      skills: [
+        { name: 'a', description: 'Skill A', level: 'bundled' },
+        { name: 'b', description: 'Skill B', level: 'bundled' },
+      ],
       workspaceDisabled: ['a', 'b'],
       mergedDisabled: ['a', 'b'],
       executionMode: 'acp',

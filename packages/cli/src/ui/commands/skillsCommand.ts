@@ -13,6 +13,7 @@ import {
 import { MessageType, type HistoryItemSkillsList } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { normalizeSkillPriority } from '@qwen-code/qwen-code-core';
+import { levelLabel } from '../utils/skill-level-label.js';
 
 export const skillsCommand: SlashCommand = {
   name: 'skills',
@@ -87,7 +88,11 @@ export const skillsCommand: SlashCommand = {
     );
     const skillsListItem: HistoryItemSkillsList = {
       type: MessageType.SKILLS_LIST,
-      skills: sortedSkills.map((skill) => ({ name: skill.name })),
+      skills: sortedSkills.map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        level: levelLabel(skill.level),
+      })),
     };
     context.ui.addItem(skillsListItem, Date.now());
   },
