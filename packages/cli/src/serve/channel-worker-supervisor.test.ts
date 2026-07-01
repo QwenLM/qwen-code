@@ -1020,6 +1020,36 @@ describe('createChannelWorkerSupervisor', () => {
       enabled: true,
       state: 'stopped',
     });
+    expect(supervisor.snapshot()).not.toHaveProperty('nextRestartAt');
+  });
+
+  it('clears a pending restart timestamp when force shutdown cancels the timer', async () => {
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const spawnWorker = vi.fn().mockReturnValueOnce(firstChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker,
+      restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [100] },
+    });
+
+    const started = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+    firstChild.emit('exit', 1, null);
+
+    expect(supervisor.snapshot()).toHaveProperty('nextRestartAt');
+    supervisor.killAllSync();
+
+    expect(supervisor.snapshot()).not.toHaveProperty('nextRestartAt');
   });
 
   it('restarts when no heartbeat arrives after ready', async () => {
@@ -1075,6 +1105,8 @@ describe('createChannelWorkerSupervisor', () => {
       pid: 22222,
       restartCount: 1,
     });
+    expect(supervisor.snapshot()).not.toHaveProperty('error');
+    expect(supervisor.snapshot()).not.toHaveProperty('nextRestartAt');
     expect(supervisor.snapshot()).not.toHaveProperty('staleHeartbeatAt');
   });
 

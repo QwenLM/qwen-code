@@ -448,9 +448,15 @@ export function createChannelWorkerSupervisor(
   });
 
   const clearRestartTimer = () => {
-    if (!restartTimer) return;
-    clearTimeout(restartTimer);
-    restartTimer = undefined;
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      restartTimer = undefined;
+    }
+    if (snapshot.nextRestartAt) {
+      const next = { ...snapshot };
+      delete next.nextRestartAt;
+      snapshot = next;
+    }
   };
 
   const clearStaleHeartbeatTimer = () => {
@@ -516,13 +522,13 @@ export function createChannelWorkerSupervisor(
       };
       return false;
     }
+    clearRestartTimer();
     const delayMs = nextRestartDelayMs();
     const nextRestartAt = new Date(nowMs + delayMs).toISOString();
     snapshot = {
       ...snapshot,
       nextRestartAt,
     };
-    clearRestartTimer();
     restartTimer = setTimeout(() => {
       restartTimer = undefined;
       void launch('restart').catch((err: unknown) => {
@@ -700,6 +706,8 @@ export function createChannelWorkerSupervisor(
               ? [...message.channels]
               : [...snapshot.channels],
         };
+        delete next.error;
+        delete next.nextRestartAt;
         delete next.staleHeartbeatAt;
         if (message.requestedChannels?.length) {
           next.requestedChannels = [...message.requestedChannels];
