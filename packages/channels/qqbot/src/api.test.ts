@@ -17,8 +17,13 @@ vi.stubGlobal(
   },
 );
 
-const { fetchAccessToken, fetchGatewayUrl, getApiBase, sendQQMessage } =
-  await import('./api.js');
+const {
+  fetchAccessToken,
+  fetchGatewayUrl,
+  validateGatewayUrl,
+  getApiBase,
+  sendQQMessage,
+} = await import('./api.js');
 
 function mockResponse(ok: boolean, status: number, body: unknown): Response {
   return {
@@ -190,12 +195,12 @@ describe('fetchGatewayUrl', () => {
     );
   });
 
-  it('rejects non-WebSocket protocols', async () => {
-    await expect(fetchGatewayUrl('https://evil.com/gateway')).rejects.toThrow();
-    await expect(fetchGatewayUrl('http://proxy/gateway')).rejects.toThrow();
-    await expect(fetchGatewayUrl('ws://localhost:8080')).rejects.toThrow();
-    await expect(
-      fetchGatewayUrl('wss://api.sgroup.qq.com/'),
-    ).resolves.toBeDefined();
+  it('rejects non-WebSocket protocols', () => {
+    expect(() => validateGatewayUrl('https://evil.com/gateway')).toThrow();
+    expect(() => validateGatewayUrl('http://proxy/gateway')).toThrow();
+    expect(() => validateGatewayUrl('ws://localhost:8080')).toThrow();
+    expect(validateGatewayUrl('wss://api.sgroup.qq.com/')).toBe(
+      'wss://api.sgroup.qq.com/',
+    );
   });
 });

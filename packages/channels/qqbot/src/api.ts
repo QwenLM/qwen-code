@@ -69,25 +69,20 @@ export function validateGatewayUrl(url: string): string {
 }
 
 /**
- * Resolve the WebSocket Gateway URL.
- * When called with a single URL argument, validates the URL directly without
- * making an HTTP request.  When called with (accessToken, sandbox), fetches
- * the gateway endpoint then validates the returned URL.
+ * Resolve the WebSocket Gateway URL from the QQ Bot API.
+ * Fetches the gateway endpoint then validates the returned URL.
  * Throws on HTTP errors, missing URL in the response, or invalid protocol.
+ *
+ * For URL validation without an HTTP request, call validateGatewayUrl directly.
  */
 export async function fetchGatewayUrl(
-  accessTokenOrUrl: string,
-  sandbox?: boolean,
+  accessToken: string,
+  sandbox: boolean,
 ): Promise<string> {
-  // Single-arg form: validate the URL directly (no HTTP call)
-  if (sandbox === undefined) {
-    return validateGatewayUrl(accessTokenOrUrl);
-  }
-
   const gw = sandbox ? `${SANDBOX_HOST}/gateway` : `${API_HOST}/gateway`;
 
   const resp = await fetch(gw, {
-    headers: { Authorization: `QQBot ${accessTokenOrUrl}` },
+    headers: { Authorization: `QQBot ${accessToken}` },
     signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
 
