@@ -8,11 +8,6 @@ import { createRoot, type Root } from 'react-dom/client';
 // under them couldn't catch their own throw).
 let workspaceShouldThrow = false;
 const sessionProviderProps: Array<Record<string, unknown>> = [];
-let connectionState: { sessionId?: string } = {};
-const actionMocks = {
-  loadSession: vi.fn(() => Promise.resolve()),
-  clearSession: vi.fn(() => Promise.resolve()),
-};
 vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
   const React = await import('react');
   return {
@@ -29,8 +24,6 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
       sessionProviderProps.push(props);
       return React.createElement(React.Fragment, null, children);
     },
-    useConnection: () => connectionState,
-    useActions: () => actionMocks,
   };
 });
 vi.mock('./App', async () => {
@@ -67,10 +60,7 @@ afterEach(() => {
     container.remove();
   }
   workspaceShouldThrow = false;
-  connectionState = {};
   sessionProviderProps.length = 0;
-  actionMocks.loadSession.mockClear();
-  actionMocks.clearSession.mockClear();
   vi.restoreAllMocks();
 });
 
@@ -81,71 +71,24 @@ describe('WebShellWithProviders top-level boundary', () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it('defers session creation until first prompt when no initial session is provided', () => {
+  it('starts on an empty session by default', () => {
     render(<WebShellWithProviders />);
     expect(sessionProviderProps[0]).toMatchObject({
-      initialSessionId: undefined,
+      sessionId: undefined,
     });
     expect(sessionProviderProps[0]).not.toHaveProperty('deferSessionCreation');
   });
 
-  it('loads the requested session immediately when initialSessionId is provided', () => {
-    render(<WebShellWithProviders initialSessionId="session-1" />);
+  it('passes controlled sessionId to the daemon session provider', () => {
+    render(<WebShellWithProviders sessionId="session-2" />);
     expect(sessionProviderProps[0]).toMatchObject({
-      initialSessionId: 'session-1',
+      sessionId: 'session-2',
     });
-    expect(sessionProviderProps[0]).not.toHaveProperty('deferSessionCreation');
   });
 
-  it('loads the controlled active session when it differs from the current one', async () => {
-    connectionState = { sessionId: 'session-1' };
-    render(<WebShellWithProviders activeSessionId="session-2" />);
-    await act(async () => {});
-
-    expect(actionMocks.loadSession).toHaveBeenCalledWith('session-2', {
-      deferTranscriptReset: true,
-    });
-    expect(actionMocks.clearSession).not.toHaveBeenCalled();
-  });
-
-  it('does not load when the controlled active session matches the current one', async () => {
-    connectionState = { sessionId: 'session-1' };
-    render(<WebShellWithProviders activeSessionId="session-1" />);
-    await act(async () => {});
-
-    expect(actionMocks.loadSession).not.toHaveBeenCalled();
-    expect(actionMocks.clearSession).not.toHaveBeenCalled();
-  });
-
-  it('clears the current session when controlled activeSessionId is explicitly undefined', async () => {
-    connectionState = { sessionId: 'session-1' };
-    render(<WebShellWithProviders activeSessionId={undefined} />);
-    await act(async () => {});
-
-    expect(actionMocks.clearSession).toHaveBeenCalledOnce();
-    expect(actionMocks.loadSession).not.toHaveBeenCalled();
-  });
-
-  it('does not clear a deferred session created after an empty controlled render', async () => {
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    mounted.push({ root, container });
-
-    connectionState = {};
-    act(() => {
-      root.render(<WebShellWithProviders activeSessionId={undefined} />);
-    });
-    await act(async () => {});
-
-    connectionState = { sessionId: 'created-session' };
-    act(() => {
-      root.render(<WebShellWithProviders activeSessionId={undefined} />);
-    });
-    await act(async () => {});
-
-    expect(actionMocks.clearSession).not.toHaveBeenCalled();
-    expect(actionMocks.loadSession).not.toHaveBeenCalled();
+  it('passes explicit undefined sessionId to the daemon session provider', () => {
+    render(<WebShellWithProviders sessionId={undefined} />);
+    expect(sessionProviderProps[0]).toHaveProperty('sessionId', undefined);
   });
 
   it('catches a daemon-provider render crash instead of white-screening', () => {

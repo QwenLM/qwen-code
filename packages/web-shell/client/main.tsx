@@ -129,7 +129,7 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
       <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
         <DaemonSessionProvider
           key={sessionId ?? 'new'}
-          initialSessionId={sessionId}
+          sessionId={sessionId}
           suppressOwnUserEcho
         >
           <App

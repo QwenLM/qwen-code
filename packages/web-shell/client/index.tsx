@@ -1,9 +1,7 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { type ReactNode } from 'react';
 import {
   DaemonSessionProvider,
   DaemonWorkspaceProvider,
-  useActions,
-  useConnection,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -15,10 +13,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   baseUrl?: string;
   /** Bearer token passed to daemon requests. */
   token?: string;
-  /** Initial daemon session id to load. Omit to create/attach automatically. */
-  initialSessionId?: string;
-  /** Controlled daemon session id for hosts that provide their own sidebar. */
-  activeSessionId?: string;
+  /** Session id to load. Undefined starts on an empty page. */
+  sessionId?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
 }
@@ -27,82 +23,6 @@ function resolveBaseUrl(baseUrl: string | undefined): string {
   if (baseUrl) return baseUrl;
   if (typeof window !== 'undefined') return window.location.origin;
   return '';
-}
-
-function ControlledSession({
-  activeSessionId,
-  allowDeferredSessionAdoption,
-  enabled,
-}: {
-  activeSessionId?: string;
-  allowDeferredSessionAdoption: boolean;
-  enabled: boolean;
-}) {
-  const connection = useConnection();
-  const actions = useActions();
-  const pendingRequestRef = useRef<string | undefined>(undefined);
-  const observedSessionIdRef = useRef<string | undefined>(undefined);
-  const hasObservedSessionRef = useRef(false);
-
-  useEffect(() => {
-    if (!enabled) return;
-
-    const currentSessionId = connection.sessionId;
-    const previousSessionId = observedSessionIdRef.current;
-    const hasObservedSession = hasObservedSessionRef.current;
-    observedSessionIdRef.current = currentSessionId;
-    hasObservedSessionRef.current = true;
-    if (activeSessionId === currentSessionId) {
-      pendingRequestRef.current = undefined;
-      return;
-    }
-    if (
-      activeSessionId === undefined &&
-      currentSessionId &&
-      allowDeferredSessionAdoption &&
-      hasObservedSession &&
-      previousSessionId === undefined
-    ) {
-      pendingRequestRef.current = undefined;
-      return;
-    }
-
-    const requestKey = activeSessionId ?? '';
-    if (pendingRequestRef.current === requestKey) return;
-    pendingRequestRef.current = requestKey;
-
-    const request = activeSessionId
-      ? actions.loadSession(activeSessionId, { deferTranscriptReset: true })
-      : currentSessionId
-        ? actions.clearSession()
-        : undefined;
-
-    if (!request) {
-      pendingRequestRef.current = undefined;
-      return;
-    }
-
-    void request
-      .catch((error: unknown) => {
-        console.warn(
-          '[WebShellWithProviders] session transition failed:',
-          error,
-        );
-      })
-      .finally(() => {
-        if (pendingRequestRef.current === requestKey) {
-          pendingRequestRef.current = undefined;
-        }
-      });
-  }, [
-    actions,
-    activeSessionId,
-    allowDeferredSessionAdoption,
-    connection.sessionId,
-    enabled,
-  ]);
-
-  return null;
 }
 
 /**
@@ -152,19 +72,8 @@ export function WebShell(props: WebShellProps) {
  * are available without extra setup.
  */
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
-  const {
-    baseUrl,
-    token,
-    initialSessionId,
-    activeSessionId,
-    clientId,
-    ...webShellProps
-  } = props;
+  const { baseUrl, token, sessionId, clientId, ...webShellProps } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
-  const controlsSession = Object.prototype.hasOwnProperty.call(
-    props,
-    'activeSessionId',
-  );
 
   return (
     <RootBoundary
@@ -176,15 +85,10 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     >
       <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
         <DaemonSessionProvider
-          initialSessionId={initialSessionId}
+          sessionId={sessionId}
           clientId={clientId}
           suppressOwnUserEcho
         >
-          <ControlledSession
-            activeSessionId={activeSessionId}
-            allowDeferredSessionAdoption={initialSessionId === undefined}
-            enabled={controlsSession}
-          />
           <App {...webShellProps} />
         </DaemonSessionProvider>
       </DaemonWorkspaceProvider>

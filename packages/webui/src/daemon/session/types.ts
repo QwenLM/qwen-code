@@ -92,8 +92,8 @@ export interface DaemonSessionProviderProps {
   token?: string;
   /** Workspace cwd used when creating, loading, or resuming daemon sessions. */
   workspaceCwd?: string;
-  /** Session id to load on mount instead of creating or attaching automatically. */
-  initialSessionId?: string;
+  /** Session id to load. Undefined keeps the page empty until a prompt creates one. */
+  sessionId?: string;
   /** Stable client identity to reuse for session-scoped daemon requests. */
   clientId?: string;
   /** Extra create-session options, excluding workspaceCwd which is owned by the provider. */

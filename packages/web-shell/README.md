@@ -43,7 +43,7 @@ export function QwenCodePanel() {
     <WebShellWithProviders
       baseUrl="http://127.0.0.1:4170"
       token="your-bearer-token"
-      initialSessionId="838e1811-9f84-4848-9915-d9a7f01ff5c6"
+      sessionId="838e1811-9f84-4848-9915-d9a7f01ff5c6"
       onSessionIdChange={(sessionId) => {
         console.log('current session:', sessionId);
       }}
@@ -69,7 +69,7 @@ import { WebShell } from '@qwen-code/web-shell';
 export function App() {
   return (
     <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="...">
-      <DaemonSessionProvider initialSessionId="...">
+      <DaemonSessionProvider sessionId="...">
         <ChatPanel />
         <WebShell theme="dark" language="zh-CN" />
       </DaemonSessionProvider>
@@ -87,11 +87,11 @@ export function App() {
 
 包含 `WebShell` 的所有 Props，加上 Provider 配置：
 
-| 属性               | 类型     | 说明                                                 |
-| ------------------ | -------- | ---------------------------------------------------- |
-| `baseUrl`          | `string` | daemon API 地址，未传时使用 `window.location.origin` |
-| `token`            | `string` | daemon API Bearer token                              |
-| `initialSessionId` | `string` | 初始要连接的 session id                              |
+| 属性        | 类型     | 说明                                                 |
+| ----------- | -------- | ---------------------------------------------------- |
+| `baseUrl`   | `string` | daemon API 地址，未传时使用 `window.location.origin` |
+| `token`     | `string` | daemon API Bearer token                              |
+| `sessionId` | `string` | 要连接的 session id；未传或 `undefined` 时保持空页面 |
 
 ### WebShell
 

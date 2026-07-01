@@ -174,17 +174,18 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
  * and risking transcript wipes if reconnect later attaches a different
  * session and hits the sessionId-change `store.reset()` branch.
  *
- * 404/410 (session-not-found) normally keep the reconnect-then-recreate
- * behavior, unless the caller opts into leaving missing sessions disconnected.
+ * 404/410 (session-not-found) leave the requested session disconnected instead
+ * of silently creating a replacement empty session.
  */
 const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
+const UNHANDLED_SESSION = Symbol('unhandled session');
 
 export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const {
     baseUrl,
     token,
     workspaceCwd,
-    initialSessionId,
+    sessionId,
     clientId,
     createSessionRequest,
     maxQueued = 1024,
@@ -193,7 +194,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     includeRawEvent = false,
     autoConnect = true,
     autoReconnect = true,
-    missingSessionBehavior = 'create',
+    missingSessionBehavior = 'disconnect',
     reconnectDelayMs = 1_000,
     maxReconnectDelayMs = 10_000,
     heartbeatIntervalMs = 30_000,
@@ -211,9 +212,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   workspaceCapabilitiesRef.current = workspace?.capabilities;
   const workspaceGetCapabilitiesRef = useRef(workspace?.getCapabilities);
   workspaceGetCapabilitiesRef.current = workspace?.getCapabilities;
+  const initialRestoreSessionIdRef = useRef(sessionId);
+  const initialRestoreSessionId = initialRestoreSessionIdRef.current;
   const shouldDeferInitialSessionCreation =
-    Object.prototype.hasOwnProperty.call(props, 'initialSessionId') &&
-    initialSessionId === undefined;
+    initialRestoreSessionId === undefined;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
   const activeWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
@@ -260,7 +262,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   createSessionRequestRef.current = createSessionRequest;
   const [promptStatus, setPromptStatus] = useState<DaemonPromptStatus>('idle');
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
-    initialSessionId,
+    initialRestoreSessionId,
   );
   const [restoreMode, setRestoreMode] = useState<'load' | 'resume'>('load');
   const [restoreSessionNonce, setRestoreSessionNonce] = useState(0);
@@ -268,7 +270,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [newSessionNonce, setNewSessionNonce] = useState(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
     status: autoConnect ? 'connecting' : 'idle',
-    ...(initialSessionId ? { sessionId: initialSessionId } : {}),
+    ...(initialRestoreSessionId ? { sessionId: initialRestoreSessionId } : {}),
   });
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
@@ -837,6 +839,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             signal: abort.signal,
             maxQueued,
           })) {
+            if (sessionRef.current?.sessionId !== activeSession.sessionId) {
+              break;
+            }
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
@@ -1143,10 +1148,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
+          const wasLoadingRequestedSession =
+            restoreSessionId !== undefined || reconnectSessionId !== undefined;
           const shouldDisconnectMissingSession =
             isTerminal &&
             !isAuthFailure &&
-            missingSessionBehavior === 'disconnect';
+            (missingSessionBehavior === 'disconnect' ||
+              wasLoadingRequestedSession);
           if (failedSessionId && (isAuthFailure || isTerminal)) {
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
@@ -1296,7 +1304,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     sessionScope,
     maxQueued,
     store,
-    initialSessionId,
     restoreSessionId,
     restoreMode,
     restoreSessionNonce,
@@ -1311,6 +1318,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   useEffect(() => {
     if (
       !heartbeatSupportedRef.current ||
+      connection.status !== 'connected' ||
       heartbeatIntervalMs <= 0 ||
       heartbeatFailureThreshold <= 0 ||
       !connection.sessionId
@@ -1352,7 +1360,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       disposed = true;
       clearInterval(timer);
     };
-  }, [connection.sessionId, heartbeatFailureThreshold, heartbeatIntervalMs]);
+  }, [
+    connection.sessionId,
+    connection.status,
+    heartbeatFailureThreshold,
+    heartbeatIntervalMs,
+  ]);
 
   const actions = useMemo<DaemonSessionActions>(
     () =>
@@ -1412,6 +1425,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }),
     [addNotice, clientId, resolvedBaseUrl, resolvedToken, store],
   );
+  const lastHandledSessionIdRef = useRef<
+    string | undefined | typeof UNHANDLED_SESSION
+  >(UNHANDLED_SESSION);
+
+  useEffect(() => {
+    if (lastHandledSessionIdRef.current === sessionId) return;
+    lastHandledSessionIdRef.current = sessionId;
+
+    const currentSessionId = connectionRef.current.sessionId;
+    if (sessionId === currentSessionId) return;
+
+    const request = sessionId
+      ? actions.loadSession(sessionId, { deferTranscriptReset: true })
+      : currentSessionId
+        ? actions.clearSession()
+        : undefined;
+
+    if (!request) return;
+
+    void request.catch((error: unknown) => {
+      console.warn(
+        '[DaemonSessionProvider] controlled session transition failed:',
+        error,
+      );
+    });
+  }, [actions, sessionId]);
+
   return (
     <DaemonStoreContext.Provider value={store}>
       <DaemonConnectionContext.Provider value={connection}>

@@ -914,7 +914,7 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
-  const activeSessionIdRef = useRef(connection.sessionId);
+  const currentSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
       (message): message is LocalAnchoredMessage => message !== null,
@@ -1408,7 +1408,7 @@ export function App({
   onBugReportRef.current = onBugReport;
 
   useEffect(() => {
-    activeSessionIdRef.current = connection.sessionId;
+    currentSessionIdRef.current = connection.sessionId;
     btwAbortControllerRef.current?.abort();
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
@@ -1436,7 +1436,7 @@ export function App({
     });
     sessionActions.recapSession().then(
       (result) => {
-        if (activeSessionIdRef.current !== sessionId) return;
+        if (currentSessionIdRef.current !== sessionId) return;
         setRecapMessage({
           anchorAfterId,
           anchorIndex,
@@ -1452,7 +1452,7 @@ export function App({
         });
       },
       (error: unknown) => {
-        if (activeSessionIdRef.current !== sessionId) return;
+        if (currentSessionIdRef.current !== sessionId) return;
         setRecapMessage(null);
         if (!isAbortError(error) && !isAlreadyDispatched(error)) {
           console.warn('[web-shell] unhandled recap failure', error);
@@ -1493,7 +1493,7 @@ export function App({
         .btwSession(question, { signal: abortController.signal })
         .then(
           (result) => {
-            if (activeSessionIdRef.current !== sessionId) return;
+            if (currentSessionIdRef.current !== sessionId) return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
             setBtwMessage({
@@ -1505,7 +1505,7 @@ export function App({
             });
           },
           (error: unknown) => {
-            if (activeSessionIdRef.current !== sessionId) return;
+            if (currentSessionIdRef.current !== sessionId) return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
             setBtwMessage(null);
