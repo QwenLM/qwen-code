@@ -439,16 +439,17 @@ describe('AgentCore.prepareTools', () => {
         description: 'exit plan mode',
       } as FunctionDeclaration,
     ];
-    const { core, getFunctionDeclarationsFilteredSpy } = buildAgentForTools(
-      {
-        tools: [
-          ToolNames.READ_FILE,
-          ToolNames.ENTER_PLAN_MODE,
-          ToolNames.EXIT_PLAN_MODE,
-        ],
-      },
-      fnDecls,
-    );
+    const { core, debugSpy, getFunctionDeclarationsFilteredSpy } =
+      buildAgentForTools(
+        {
+          tools: [
+            ToolNames.READ_FILE,
+            ToolNames.ENTER_PLAN_MODE,
+            ToolNames.EXIT_PLAN_MODE,
+          ],
+        },
+        fnDecls,
+      );
 
     const tools = await core.prepareTools();
 
@@ -456,6 +457,12 @@ describe('AgentCore.prepareTools', () => {
       ToolNames.READ_FILE,
     ]);
     expect(tools.map((t) => t.name)).toEqual([ToolNames.READ_FILE]);
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered "${ToolNames.ENTER_PLAN_MODE}" from explicit subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered "${ToolNames.EXIT_PLAN_MODE}" from explicit subagent tool list`,
+    );
   });
 
   it('filters inline declarations using the full subagent exclusion floor', async () => {

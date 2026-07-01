@@ -1096,7 +1096,7 @@ describe('createProductionDispatch', () => {
     expect(created.length).toBe(1);
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
-    expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{8}$/);
+    expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
   });
 
   it('strips internal tags from fast-path final text', async () => {
@@ -1178,20 +1178,19 @@ describe('createProductionDispatch', () => {
   // subagent terminates with a non-GOAL mode. Without this, `await agent(...)`
   // would resolve to '' on user cancel and the script would keep running.
   it.each([
-    ['CANCELLED', /terminate mode: CANCELLED/],
-    ['MAX_TURNS', /terminate mode: MAX_TURNS/],
-    ['TIMEOUT', /terminate mode: TIMEOUT/],
-    ['ERROR', /terminate mode: ERROR/],
-  ])(
-    'throws when subagent terminate mode is %s',
-    async (mode, expectedMessage) => {
-      nextTerminateMode.value = mode;
-      const dispatch = createProductionDispatch(fakeConfig());
-      await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
-        expectedMessage,
-      );
-    },
-  );
+    ['CANCELLED'],
+    ['MAX_TURNS'],
+    ['TIMEOUT'],
+    ['ERROR'],
+  ])('throws when subagent terminate mode is %s', async (mode) => {
+    nextTerminateMode.value = mode;
+    const dispatch = createProductionDispatch(fakeConfig());
+    await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
+      new RegExp(
+        `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+      ),
+    );
+  });
 
   // ── R1 (#1 + #3): token reporting across all terminate modes ──────────
 
@@ -1947,7 +1946,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(result).toBe('explore-output');
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
-    expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{8}$/);
+    expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
     // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode] must
     // be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
@@ -3033,7 +3032,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       await expect(
         dispatch('extract', { schema: { type: 'object' } }),
       ).rejects.toThrow(
-        new RegExp(`did not complete \\(terminate mode: ${mode}\\)\\.`),
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
       );
     },
   );

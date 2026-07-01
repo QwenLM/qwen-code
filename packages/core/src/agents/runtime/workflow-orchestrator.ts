@@ -415,7 +415,8 @@ async function runSingleDispatch(
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
   ctx.set('task_prompt', prompt);
-  const workflowAgentId = `workflow-agent-${randomBytes(4).toString('hex')}`;
+  const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+  debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
   if (
     opts.agentType === undefined &&
@@ -457,6 +458,9 @@ async function runSingleDispatch(
     // is valid inside the throw path because AgentHeadless's own
     // outer `finally` finalizes stats before propagating the error.
     try {
+      // runWithAgentContext is load-bearing for workflow subagents: it
+      // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
+      // so plan lifecycle tools remain blocked if tool filtering changes.
       await runWithAgentContext(workflowAgentId, () =>
         subagent.execute(ctx, attemptSignal),
       );
@@ -471,7 +475,7 @@ async function runSingleDispatch(
     const mode = subagent.getTerminateMode();
     if (mode !== AgentTerminateMode.GOAL) {
       throw new Error(
-        `Workflow subagent did not complete (terminate mode: ${mode}).`,
+        `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
       );
     }
     return toModelVisibleSubagentResult(subagent.getFinalText(), mode);
@@ -773,6 +777,9 @@ async function runOverridePath(
       // AgentHeadless's own outer `finally` finalizes stats before
       // propagating.
       try {
+        // runWithAgentContext is load-bearing for workflow subagents: it
+        // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
+        // so plan lifecycle tools remain blocked if tool filtering changes.
         await runWithAgentContext(workflowAgentId, () =>
           subagent.execute(ctx, dispatchSignal),
         );
@@ -822,7 +829,7 @@ async function runOverridePath(
           mode !== AgentTerminateMode.CANCELLED
         ) {
           throw new Error(
-            `Workflow subagent did not complete (terminate mode: ${mode}).`,
+            `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
           );
         }
         // The dispatch aborts via schemaState.abortController on the
@@ -849,7 +856,7 @@ async function runOverridePath(
       const mode = subagent.getTerminateMode();
       if (mode !== AgentTerminateMode.GOAL) {
         throw new Error(
-          `Workflow subagent did not complete (terminate mode: ${mode}).`,
+          `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`,
         );
       }
       let finalText: WorkflowAgentResult = toModelVisibleSubagentResult(

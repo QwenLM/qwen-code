@@ -506,10 +506,19 @@ export class AgentCore {
         // the recursion guard). This prevents control-plane tools
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
+        const allowedNames = asStrings.filter((name) => {
+          if (excludedFromSubagents.has(name)) {
+            this.runtimeContext
+              .getDebugLogger()
+              ?.debug(
+                `[prepareTools] Filtered "${name}" from explicit subagent tool list`,
+              );
+            return false;
+          }
+          return true;
+        });
         toolsList.push(
-          ...toolRegistry.getFunctionDeclarationsFiltered(
-            asStrings.filter((name) => !excludedFromSubagents.has(name)),
-          ),
+          ...toolRegistry.getFunctionDeclarationsFiltered(allowedNames),
         );
       }
       // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
