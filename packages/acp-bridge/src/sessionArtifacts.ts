@@ -142,6 +142,7 @@ export class SessionArtifactStore {
   private readonly artifacts = new Map<string, StoredArtifact>();
   private receivedSeq = 0;
   private insertSeq = 0;
+  private realWorkspaceCwdPromise?: Promise<string>;
 
   constructor(options: SessionArtifactStoreOptions) {
     this.sessionId = options.sessionId;
@@ -296,7 +297,11 @@ export class SessionArtifactStore {
 
     const metadata = normalizeMetadata(input.metadata);
     const workspaceStatus = workspacePath
-      ? await getWorkspaceStatus(this.workspaceCwd, workspacePath)
+      ? await getWorkspaceStatus(
+          this.workspaceCwd,
+          workspacePath,
+          this.getRealWorkspaceCwd(),
+        )
       : undefined;
     if (workspaceStatus?.escaped) {
       throw new SessionArtifactValidationError(
@@ -370,9 +375,15 @@ export class SessionArtifactStore {
     const status = await getWorkspaceStatus(
       this.workspaceCwd,
       artifact.workspacePath,
+      this.getRealWorkspaceCwd(),
     );
     artifact.status = status.status;
     artifact.sizeBytes = status.sizeBytes;
+  }
+
+  private getRealWorkspaceCwd(): Promise<string> {
+    this.realWorkspaceCwdPromise ??= fs.realpath(this.workspaceCwd);
+    return this.realWorkspaceCwdPromise;
   }
 
   private async evictOverflow(
@@ -1022,6 +1033,7 @@ function inferKind(input: {
 async function getWorkspaceStatus(
   workspaceCwd: string,
   workspacePath: string,
+  realWorkspaceCwd: Promise<string>,
 ): Promise<{
   status: DaemonSessionArtifactStatus;
   sizeBytes?: number;
@@ -1029,7 +1041,7 @@ async function getWorkspaceStatus(
 }> {
   const absolutePath = path.resolve(workspaceCwd, workspacePath);
   try {
-    const realWorkspace = await fs.realpath(workspaceCwd);
+    const realWorkspace = await realWorkspaceCwd;
     const realPath = await fs.realpath(absolutePath);
     const relative = path.relative(realWorkspace, realPath);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {

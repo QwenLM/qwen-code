@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -311,6 +311,30 @@ describe('SessionArtifactStore', () => {
     const missing = (await store.list()).artifacts[0];
     expect(missing).toMatchObject({ status: 'missing' });
     expect(missing).not.toHaveProperty('sizeBytes');
+  });
+
+  it('caches the workspace root realpath across artifact refreshes', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-realpath-cache',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'one.txt'), 'one');
+    await fs.writeFile(path.join(workspace, 'two.txt'), 'two');
+    const realpathSpy = vi.spyOn(fs, 'realpath');
+
+    try {
+      await store.upsertMany([
+        { title: 'One', workspacePath: 'one.txt' },
+        { title: 'Two', workspacePath: 'two.txt' },
+      ]);
+      await store.list();
+
+      expect(
+        realpathSpy.mock.calls.filter(([target]) => target === workspace),
+      ).toHaveLength(1);
+    } finally {
+      realpathSpy.mockRestore();
+    }
   });
 
   it('refreshes stale missing candidates before eviction', async () => {
