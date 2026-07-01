@@ -183,11 +183,14 @@ export abstract class ChannelBase {
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     const target = this.router.getTarget(event.sessionId);
     if (target) {
-      if (!this.activePrompts.get(event.sessionId)?.cancelled) {
+      const active = this.activePrompts.get(event.sessionId);
+      if (active && !active.cancelled) {
+        const safeToolCall = { ...event };
+        delete safeToolCall.rawInput;
         this.emitTaskLifecycle({
           ...this.lifecycleBase(target.chatId, event.sessionId),
           type: 'tool_call',
-          toolCall: event,
+          toolCall: safeToolCall,
         });
       }
       this.onToolCall(target.chatId, event);
@@ -349,8 +352,8 @@ export abstract class ChannelBase {
       chatId,
       sessionId,
       ...(messageId ? { messageId } : {}),
-      identity: this.identity,
-      memoryScope: this.memoryScope,
+      identity: { ...this.identity },
+      memoryScope: { ...this.memoryScope },
     };
   }
 
@@ -559,6 +562,16 @@ export abstract class ChannelBase {
         });
         return response;
       } catch (err) {
+        if (promptState.cancelRequested && !promptState.cancelled) {
+          const cancelled = await promptState.cancelRequested;
+          if (cancelled) {
+            promptState.cancelled = true;
+          }
+        }
+        if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
+          this.emitTaskCancellation(promptState, sessionId, 'timeout');
+          promptState.cancelled = true;
+        }
         if (
           !promptState.cancelled &&
           !(err instanceof ChannelLoopSkippedError)
@@ -568,6 +581,21 @@ export abstract class ChannelBase {
             type: 'failed',
             error: err instanceof Error ? err.message : String(err),
           });
+        } else if (
+          promptState.cancelled &&
+          !(err instanceof ChannelLoopSkippedError) &&
+          !(err instanceof Error && err.message === 'loop timed out')
+        ) {
+          const channel = sanitizeLogText(this.name, 64);
+          const safeJobId = sanitizeLogText(job.id, 64);
+          const safeSessionId = sanitizeLogText(sessionId, 64);
+          const message = sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            256,
+          );
+          process.stderr.write(
+            `[${channel}] loop ${safeJobId} threw after cancellation for session ${safeSessionId}: ${message}\n`,
+          );
         }
         throw err;
       } finally {
