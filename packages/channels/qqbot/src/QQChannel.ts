@@ -719,6 +719,14 @@ export class QQChannel extends ChannelBase {
           // grow without bound across weeks of uptime.
           this.msgSeqMap.delete(entry.msgId);
           this.replyMsgId.delete(chatId);
+          // Cascade eviction to chatTypeMap and groupActiveMsgEnabled:
+          // if there's been no replyMsgId activity for 5 minutes, the
+          // routing/message-permission entries for that chatId are stale.
+          // chatTypeMap will be re-populated on the next inbound message;
+          // groupActiveMsgEnabled will be re-populated on the next
+          // GROUP_MSG_REJECT/RECEIVE event.
+          this.chatTypeMap.delete(chatId);
+          this.groupActiveMsgEnabled.delete(chatId);
         }
       }
     }, 60_000);
