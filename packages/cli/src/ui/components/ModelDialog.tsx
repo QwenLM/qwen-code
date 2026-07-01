@@ -205,6 +205,12 @@ function handleModelSwitchSuccess({
 
   const baseUrl = after?.baseUrl ?? t('(default)');
   const maskedKey = maskApiKey(after?.apiKey);
+  const scopeSuffix =
+    persistScope === 'workspace'
+      ? t(' (this project)')
+      : persistScope === 'user'
+        ? t(' (global)')
+        : '';
   uiState?.historyManager.addItem(
     {
       type: 'info',
@@ -215,7 +221,8 @@ function handleModelSwitchSuccess({
         `\n` +
         `Base URL: ${baseUrl}` +
         `\n` +
-        `API key: ${maskedKey}`,
+        `API key: ${maskedKey}` +
+        scopeSuffix,
     },
     Date.now(),
   );
@@ -568,10 +575,16 @@ export function ModelDialog({
 
         const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'voiceModel', voiceModel);
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
         uiState?.historyManager.addItem(
           {
             type: 'success',
-            text: `${t('Voice Model')}: ${voiceModel}`,
+            text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
           },
           Date.now(),
         );
@@ -589,10 +602,16 @@ export function ModelDialog({
         settings.setValue(scope, 'fastModel', fastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
         config?.setFastModel(fastModel);
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
         uiState?.historyManager.addItem(
           {
             type: 'success',
-            text: `${t('Fast Model')}: ${fastModel}`,
+            text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
           },
           Date.now(),
         );
@@ -649,10 +668,16 @@ export function ModelDialog({
           selectedEntry && !isImageCapable(selectedEntry.model)
             ? `\n${t("⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.", { model: visionModel })}`
             : '';
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
         uiState?.historyManager.addItem(
           {
             type: 'success',
-            text: `${t('Vision Model')}: ${visionModel}${visionWarning}`,
+            text: `${t('Vision Model')}: ${visionModel}${scopeSuffix}${visionWarning}`,
           },
           Date.now(),
         );
