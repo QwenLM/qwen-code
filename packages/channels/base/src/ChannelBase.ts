@@ -87,6 +87,7 @@ export interface ChannelLoopPromptOptions {
 type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
 type ActivePrompt = {
   cancelled: boolean;
+  cancelPending?: boolean;
   cancellationEmitted?: boolean;
   cancelRequested?: Promise<boolean>;
   done: Promise<void>;
@@ -184,7 +185,7 @@ export abstract class ChannelBase {
     const target = this.router.getTarget(event.sessionId);
     if (target) {
       const active = this.activePrompts.get(event.sessionId);
-      if (active && !active.cancelled) {
+      if (active && !active.cancelled && !active.cancelPending) {
         const safeToolCall: ToolCallEvent = {
           sessionId: event.sessionId,
           toolCallId: event.toolCallId,
@@ -847,11 +848,11 @@ export abstract class ChannelBase {
           },
         );
       active.cancelRequested = cancelRequested;
-      active.cancelled = true;
+      active.cancelPending = true;
 
       const cancelSucceeded = await cancelRequested;
+      active.cancelPending = false;
       if (!cancelSucceeded) {
-        active.cancelled = false;
         await this.sendMessage(
           envelope.chatId,
           'Failed to cancel current request.',
@@ -859,6 +860,7 @@ export abstract class ChannelBase {
         return true;
       }
 
+      active.cancelled = true;
       this.stopActiveStreaming(active, activeSessionId, 'cancel');
       this.collectBuffers.delete(activeSessionId);
       this.emitTaskCancellation(active, activeSessionId, 'cancel_command');
@@ -2414,7 +2416,11 @@ export abstract class ChannelBase {
       promptState.stopStreaming = () => streamer?.stop();
 
       const onChunk = (sid: string, chunk: string) => {
-        if (sid === sessionId && !promptState.cancelled) {
+        if (
+          sid === sessionId &&
+          !promptState.cancelled &&
+          !promptState.cancelPending
+        ) {
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -2464,7 +2470,10 @@ export abstract class ChannelBase {
         }
       } catch (err) {
         if (promptState.cancelRequested && !promptState.cancelled) {
-          promptState.cancelled = await promptState.cancelRequested;
+          const cancelled = await promptState.cancelRequested;
+          if (cancelled) {
+            promptState.cancelled = true;
+          }
         }
         if (!promptState.cancelled) {
           this.emitTaskLifecycle({
