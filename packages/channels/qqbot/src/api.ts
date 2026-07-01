@@ -55,8 +55,7 @@ export async function fetchAccessToken(
 }
 
 /**
- * Validate that a URL uses wss: or ws: protocol.
- * Returns the URL unchanged on success, throws on invalid protocol.
+ * Validates gateway URL protocol — rejects non-wss: URLs.
  * Used internally by fetchGatewayUrl and available for direct URL validation.
  */
 export function validateGatewayUrl(url: string): string {
