@@ -405,8 +405,14 @@ export abstract class ChannelBase {
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
     let promptText = `[Loop "${label}" created by ${createdBy}]\n\n${sanitizePromptText(job.prompt)}`;
-    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-      promptText = `${this.config.instructions}\n\n${promptText}`;
+    if (
+      this.shouldPrependChannelBoundaryPrompt() &&
+      !this.instructedSessions.has(sessionId)
+    ) {
+      const prefix = this.config.instructions
+        ? `${this.channelBoundaryPrompt()}\n\n${this.config.instructions}`
+        : this.channelBoundaryPrompt();
+      promptText = `${prefix}\n\n${promptText}`;
       this.instructedSessions.add(sessionId);
     }
 
@@ -439,10 +445,19 @@ export abstract class ChannelBase {
         messageId: job.id,
       };
       this.activePrompts.set(sessionId, promptState);
+      this.emitTaskLifecycle({
+        ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
+        type: 'started',
+      });
       this.onPromptStart(job.target.chatId, sessionId);
 
       const onChunk = (sid: string, chunk: string) => {
         if (sid === sessionId && !promptState.cancelled) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
+            type: 'text_chunk',
+            chunk,
+          });
           this.onResponseChunk(job.target.chatId, chunk, sessionId);
         }
       };
@@ -473,7 +488,23 @@ export abstract class ChannelBase {
         if (response) {
           await this.pushProactive(job.target, response);
         }
+        this.emitTaskLifecycle({
+          ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
+          type: 'completed',
+        });
         return response;
+      } catch (err) {
+        if (
+          !promptState.cancelled &&
+          !(err instanceof ChannelLoopSkippedError)
+        ) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
+            type: 'failed',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        throw err;
       } finally {
         promptBridge.off('textChunk', onChunk);
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
@@ -1765,7 +1796,6 @@ export abstract class ChannelBase {
           // of scope for this phase (wenshao option (b)).
           const firstCancellation = !active.cancelled;
           active.cancelled = true;
-          this.emitTaskCancellation(active, sessionId, 'steer');
           if (firstCancellation) {
             process.stderr.write(
               `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
@@ -1778,6 +1808,7 @@ export abstract class ChannelBase {
                 `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
               );
             });
+            this.emitTaskCancellation(active, sessionId, 'steer');
           }
           // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
           // after the wind-down bound, this steered turn is wedged behind a hung

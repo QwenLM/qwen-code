@@ -1112,7 +1112,7 @@ describe('ChannelBase', () => {
       const ch = createChannel({}, {
         router,
         registerBridgeEvents: true,
-      } as ChannelBaseOptions & { registerBridgeEvents: true });
+      } as unknown as ChannelBaseOptions & { registerBridgeEvents: true });
       const toolCall = {
         sessionId: 's-1',
         toolCallId: 'tool-1',
@@ -3426,6 +3426,54 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('stops active streaming before emitting steer cancellation lifecycle', async () => {
+      let resolveFirst!: (value: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(firstPrompt)
+        .mockResolvedValueOnce('second');
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          resolveFirst('late');
+          return Promise.resolve();
+        },
+      );
+      const ch = createChannel();
+      const order: string[] = [];
+      vi.spyOn(
+        ch as unknown as {
+          stopActiveStreaming: (
+            active: unknown,
+            sessionId: string,
+            reason: string,
+          ) => void;
+        },
+        'stopActiveStreaming',
+      ).mockImplementation(() => {
+        order.push('stop');
+      });
+      vi.spyOn(
+        ch as unknown as {
+          onTaskLifecycle: (event: ChannelTaskLifecycleEvent) => void;
+        },
+        'onTaskLifecycle',
+      ).mockImplementation((event) => {
+        if (event.type === 'cancelled') {
+          order.push('cancelled');
+        }
+      });
+
+      const first = ch.handleInbound(envelope({ messageId: 'm-steer' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const second = ch.handleInbound(envelope({ text: 'replacement' }));
+      await first;
+      await second;
+
+      expect(order).toEqual(['stop', 'cancelled']);
+    });
+
     it('emits one cancellation lifecycle event for repeated steer messages before the active turn settles', async () => {
       let resolveFirst!: (value: string) => void;
       const firstPrompt = new Promise<string>((resolve) => {
@@ -4135,7 +4183,11 @@ describe('ChannelBase', () => {
 
       // The abandoned turn emits a late chunk keyed by sessionId. A is cancelled, so
       // A's onChunk suppresses it; B has not attached one yet — it must not be seen.
-      bridge.emit('textChunk', sid, 'STALE chunk from abandoned turn');
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sid,
+        'STALE chunk from abandoned turn',
+      );
       expect(chunks).not.toContain('STALE chunk from abandoned turn');
 
       // A finishes → B dequeues and becomes the active turn.
@@ -4158,7 +4210,11 @@ describe('ChannelBase', () => {
 
       // B's OWN chunk is delivered — it attached its onChunk only now (after A's
       // finally detached A's). Proves the new turn streams cleanly once it starts.
-      bridge.emit('textChunk', sid, 'fresh chunk for B');
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sid,
+        'fresh chunk for B',
+      );
       expect(chunks).toContain('fresh chunk for B');
 
       resolveB('steered response');
@@ -5487,6 +5543,93 @@ describe('ChannelBase', () => {
       );
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
+      ]);
+    });
+
+    it('prepends channel boundary metadata to first loop prompt in a session', async () => {
+      const ch = createChannel({
+        instructions: 'Reply briefly.',
+        identity: {
+          id: 'channel:test',
+          displayName: 'Test Channel',
+        },
+        memoryScope: {
+          namespace: 'memory:test',
+        },
+      });
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![1] as string;
+      expect(promptText).toContain('Channel identity:\n- id: channel:test');
+      expect(promptText).toContain('- display name: Test Channel');
+      expect(promptText).toContain('- namespace: memory:test');
+      expect(promptText).toContain('Reply briefly.');
+      expect(promptText).toContain(
+        '[Loop "daily summary" created by Alice]\n\npost summary',
+      );
+    });
+
+    it('emits lifecycle events for loop chunks and completion', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
+          return Promise.resolve('loop response');
+        },
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'text_chunk',
+          chunk: 'part',
+          messageId: 'job-1',
+        }),
+        expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
       ]);
     });
 
