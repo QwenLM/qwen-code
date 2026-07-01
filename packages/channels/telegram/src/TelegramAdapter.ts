@@ -10,10 +10,11 @@ import {
 } from 'telegram-markdown-formatter';
 import { ChannelBase } from '@qwen-code/channel-base';
 import type {
-  ChannelConfig,
-  ChannelBaseOptions,
-  Envelope,
   ChannelAgentBridge,
+  ChannelBaseOptions,
+  ChannelConfig,
+  ChannelTaskLifecycleEvent,
+  Envelope,
 } from '@qwen-code/channel-base';
 
 const TELEGRAM_BOT_COMMANDS = [
@@ -254,23 +255,41 @@ export class TelegramChannel extends ChannelBase {
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
-  protected override onPromptStart(chatId: string): void {
-    // Clear any stale interval (shouldn't happen, but safe)
-    const existing = this.typingIntervals.get(chatId);
-    if (existing) clearInterval(existing);
-
+  private startTyping(chatId: string): void {
+    if (this.typingIntervals.has(chatId)) return;
     const sendTyping = () =>
       this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
     sendTyping();
     this.typingIntervals.set(chatId, setInterval(sendTyping, 4000));
   }
 
-  protected override onPromptEnd(chatId: string): void {
+  private stopTyping(chatId: string): void {
     const interval = this.typingIntervals.get(chatId);
-    if (interval) {
-      clearInterval(interval);
-      this.typingIntervals.delete(chatId);
+    if (!interval) return;
+    clearInterval(interval);
+    this.typingIntervals.delete(chatId);
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startTyping(event.chatId);
+      return;
     }
+    if (
+      event.type === 'completed' ||
+      event.type === 'cancelled' ||
+      event.type === 'failed'
+    ) {
+      this.stopTyping(event.chatId);
+    }
+  }
+
+  protected override onPromptStart(chatId: string): void {
+    this.startTyping(chatId);
+  }
+
+  protected override onPromptEnd(chatId: string): void {
+    this.stopTyping(chatId);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {

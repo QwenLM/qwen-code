@@ -3,6 +3,7 @@ import { TelegramChannel } from './TelegramAdapter.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
+  ChannelTaskLifecycleEvent,
   Envelope,
 } from '@qwen-code/channel-base';
 
@@ -15,8 +16,12 @@ type TestTelegramMessage = {
 type TestTelegramEntity = { type: string; offset: number; length: number };
 
 class TestTelegramChannel extends TelegramChannel {
-  startTyping(chatId: string): void {
+  beginTyping(chatId: string): void {
     this.onPromptStart(chatId);
+  }
+
+  emitLifecycle(event: ChannelTaskLifecycleEvent): void {
+    this.onTaskLifecycle(event);
   }
 
   buildTestEnvelope(
@@ -118,14 +123,41 @@ describe('TelegramChannel', () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
 
-    channel.startTyping('chat-1');
-    channel.startTyping('chat-2');
+    channel.beginTyping('chat-1');
+    channel.beginTyping('chat-2');
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
 
     channel.disconnect();
 
     expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
     expect(bot.stop).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps lifecycle start and terminal events to typing', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    const baseEvent = {
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+
+    channel.emitLifecycle({ ...baseEvent, type: 'completed' });
+    channel.emitLifecycle({ ...baseEvent, type: 'failed', error: 'boom' });
 
     vi.advanceTimersByTime(4000);
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
