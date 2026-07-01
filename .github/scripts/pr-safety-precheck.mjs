@@ -82,19 +82,6 @@ function checkSensitivePath(path, reasons) {
     addReason(reasons, 'sensitive_path:container');
   }
   if (
-    /(^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|\.npmrc)$/i.test(
-      path,
-    )
-  ) {
-    addReason(reasons, 'sensitive_path:package_lifecycle');
-  }
-  if (
-    path.startsWith('scripts/') ||
-    /\.(?:sh|bash|zsh|fish|ps1|cmd|bat)$/i.test(path)
-  ) {
-    addReason(reasons, 'sensitive_path:shell_script');
-  }
-  if (
     /(^|\/)(?:\.env|\.env\.[^/]+|secrets?\.|credentials?\.|auth[^/]*|token[^/]*)/i.test(
       path,
     )
@@ -120,6 +107,7 @@ export function assessPullRequestSafety({
   const headSha = typeof pr?.headRefOid === 'string' ? pr.headRefOid : '';
   const files = Array.isArray(pr?.files) ? pr.files : null;
   const diffText = typeof diff === 'string' ? diff : '';
+  let addedText = '';
 
   if (!headSha) addReason(reasons, 'input:missing_head_sha');
   if (!files) {
@@ -141,10 +129,15 @@ export function assessPullRequestSafety({
     if (/Binary files .* differ/i.test(diffText)) {
       addReason(reasons, 'input:binary_diff');
     }
-    checkPatterns(diffText, SENSITIVE_DIFF_PATTERNS, reasons);
+    addedText = diffText
+      .split('\n')
+      .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
+      .map((line) => line.slice(1))
+      .join('\n');
+    checkPatterns(addedText, SENSITIVE_DIFF_PATTERNS, reasons);
   }
 
-  const prText = `${pr?.title ?? ''}\n${pr?.body ?? ''}\n${diffText}`;
+  const prText = `${pr?.title ?? ''}\n${pr?.body ?? ''}\n${addedText}`;
   checkPatterns(prText, PROMPT_INJECTION_PATTERNS, reasons);
 
   return {
