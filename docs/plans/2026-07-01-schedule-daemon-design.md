@@ -1,6 +1,8 @@
 # `/schedule` — Local Always-On Scheduled Tasks (Daemon) Design
 
-**Status:** Design agreed (brainstorming). Ready for Phase 0 implementation planning.
+**Status:** Phase 0 implemented on branch `feat/schedule-daemon` (tracking issue #6112).
+The one remaining Phase-0 item is auto-surfacing completed runs on interactive
+startup; the delivery core + `/schedule logs` land it manually for now.
 **Date:** 2026-07-01
 
 ## Goal
@@ -204,8 +206,10 @@ context.
 ## Rollout phases
 
 - **Phase 0 (MVP):** SKILL.md store; `qwen schedule daemon` (foreground OK); `/schedule`
-  create/list/delete/run; fresh-child firing; run records; next-session catch-up
-  delivery. Daemon started manually.
+  create/list/delete/run/logs; `schedule_create` model tool; fresh-child firing; run
+  records + delivery core. Daemon started manually. **Implemented** — except
+  auto-surfacing completed runs on interactive startup (delivery core + `/schedule logs`
+  cover it manually; the on-startup push is the remaining follow-up).
 - **Phase 1:** daemon auto-spawn/keep-alive; `update`/`logs`; NL-create polish;
   summarize actions blocked by `auto` mode.
 - **Phase 2:** reboot auto-start `install`; channels push; one-shot `fireAt` reminders;
