@@ -293,6 +293,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     updatedModelProviders: {},
   }),
   unregisterGoalHook: vi.fn(),
+  uiTelemetryService: {
+    removeSession: vi.fn(),
+  },
   runManagedRememberByAgent: mockRunManagedRememberByAgent,
   clearCachedCredentialFile: vi.fn(),
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
@@ -6204,6 +6207,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     | ((conn: AgentSideConnectionLike) => AgentLike)
     | undefined;
   let mockConfig: Config;
+  let liveCancelPendingPrompt: ReturnType<typeof vi.fn>;
 
   // Live session sessionId is whatever `getSessionId()` on the inner config
   // returns; matches the existing test scaffolding.
@@ -6213,6 +6217,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     vi.clearAllMocks();
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
+    liveCancelPendingPrompt = vi.fn().mockResolvedValue(undefined);
 
     vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
       capturedAgentFactory = factory as typeof capturedAgentFactory;
@@ -6274,6 +6279,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue(recording),
     };
   }
@@ -6298,6 +6304,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
         ({
           getId: vi.fn().mockReturnValue(liveSessionId),
           getConfig: vi.fn().mockReturnValue(innerConfig),
+          cancelPendingPrompt: liveCancelPendingPrompt,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -6404,6 +6411,58 @@ describe('QwenAgent extMethod renameSession routing', () => {
     // queued earlier failure to the caller.
     expect(recording.flush).toHaveBeenCalledOnce();
     expect(result).toEqual({ success: false });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps the live session open when strict session close flush fails', async () => {
+    const recording = makeRecordingService();
+    recording.flush.mockRejectedValueOnce(new Error('flush failed'));
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    innerConfig.getToolRegistry.mockReturnValue(toolRegistry);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).toContain(liveSessionId);
+    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
+    expect(toolRegistry.stop).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(recording.flush).toHaveBeenCalledTimes(3);
+    expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(toolRegistry.stop).toHaveBeenCalledOnce();
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).not.toContain(liveSessionId);
 
     mockConnectionState.resolve();
     await agentPromise;

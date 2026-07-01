@@ -339,6 +339,12 @@ export interface AutoModeSettings {
   };
   /** Environment / context lines injected into the classifier's system prompt. */
   environment?: string[];
+  /**
+   * When true, ALL shell commands are routed through the auto-mode
+   * classifier, including read-only commands that would otherwise be
+   * auto-approved. Default false.
+   */
+  classifyAllShell?: boolean;
 }
 
 export interface AccessibilitySettings {
