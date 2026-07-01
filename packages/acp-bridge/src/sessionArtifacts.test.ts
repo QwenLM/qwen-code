@@ -168,6 +168,37 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
+  it('drops invalid artifacts in non-strict batches and keeps valid ones', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's4-non-strict',
+      workspaceCwd: workspace,
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      const result = await store.upsertMany([
+        {
+          title: 'Forged',
+          storage: 'published',
+          url: 'file:///tmp/forged.html',
+        },
+        {
+          title: 'Valid',
+          url: 'https://example.com/valid',
+        },
+      ]);
+
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0]?.artifact).toMatchObject({ title: 'Valid' });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('published artifacts are reserved');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('keeps first display fields and only enriches missing metadata keys', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5',
