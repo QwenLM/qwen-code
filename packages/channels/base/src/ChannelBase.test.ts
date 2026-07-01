@@ -4697,7 +4697,7 @@ describe('ChannelBase', () => {
       );
     });
 
-    it('does not emit completed while cancel command is still awaiting bridge cancellation', async () => {
+    it('suppresses lifecycle activity while cancel command is still awaiting bridge cancellation', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
         resolvePrompt = resolve;
@@ -4720,13 +4720,16 @@ describe('ChannelBase', () => {
 
       const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
       await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'late part');
       resolvePrompt('late response');
       await Promise.resolve();
       expect(ch.taskEvents).not.toEqual(
         expect.arrayContaining([
+          expect.objectContaining({ type: 'text_chunk' }),
           expect.objectContaining({ type: 'completed' }),
         ]),
       );
+      expect(ch.responseChunks).toEqual([]);
       resolveCancel();
       await Promise.all([prompt, cancel]);
 
@@ -4741,6 +4744,58 @@ describe('ChannelBase', () => {
           messageId: 'm-cancel',
         }),
       ]);
+    });
+
+    it('does not emit tool call lifecycle events while cancellation is pending', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('toolCall', {
+        sessionId,
+        toolCallId: 'tool-pending-cancel',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+      });
+
+      expect(ch.toolCalls).toEqual([
+        {
+          chatId: 'chat1',
+          event: expect.objectContaining({
+            toolCallId: 'tool-pending-cancel',
+          }),
+        },
+      ]);
+      expect(ch.taskEvents).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_call' }),
+        ]),
+      );
+      resolveCancel();
+      await cancel;
+      resolvePrompt('late');
+      await prompt;
     });
 
     it('emits one cancellation lifecycle event for repeated /cancel commands', async () => {
@@ -7400,6 +7455,69 @@ describe('ChannelBase', () => {
         }),
         expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
       ]);
+    });
+
+    it('suppresses loop chunks while cancellation is pending', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const cancel = ch.handleInbound(
+        envelope({ senderId: 'alice', text: '/cancel' }),
+      );
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'late loop part',
+      );
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+      ]);
+      expect(ch.responseChunks).toEqual([]);
+      resolveCancel();
+      await cancel;
+      resolvePrompt('loop response');
+      await expect(loopRun).rejects.toThrow('loop cancelled before delivery');
     });
 
     it('emits a terminal lifecycle event when a loop is disabled after the agent response', async () => {
