@@ -915,6 +915,7 @@ export function App({
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
   const currentSessionIdRef = useRef(connection.sessionId);
+  const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
       (message): message is LocalAnchoredMessage => message !== null,
@@ -1833,8 +1834,10 @@ export function App({
   useEffect(() => {
     if (connection.sessionId) {
       setActiveGoal(null);
-      onSessionIdChange?.(connection.sessionId);
     }
+    if (lastNotifiedSessionIdRef.current === connection.sessionId) return;
+    lastNotifiedSessionIdRef.current = connection.sessionId;
+    onSessionIdChange?.(connection.sessionId);
   }, [connection.sessionId, onSessionIdChange]);
 
   useEffect(() => {
@@ -2010,13 +2013,12 @@ export function App({
       await (
         sessionActions as typeof sessionActions & SessionActionsWithCreate
       ).clearSession();
-      onSessionIdChange?.(undefined);
       return true;
     } catch (error) {
       reportError(error, 'Failed to start a new chat');
       return false;
     }
-  }, [closeMobileDrawer, onSessionIdChange, reportError, sessionActions]);
+  }, [closeMobileDrawer, reportError, sessionActions]);
 
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {

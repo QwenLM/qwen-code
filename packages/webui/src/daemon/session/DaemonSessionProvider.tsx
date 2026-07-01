@@ -213,6 +213,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   workspaceGetCapabilitiesRef.current = workspace?.getCapabilities;
   const initialRestoreSessionIdRef = useRef(sessionId);
   const initialRestoreSessionId = initialRestoreSessionIdRef.current;
+  // Captured once at mount: if the host did not provide an initial session,
+  // keep the provider empty until the first prompt creates one. Later
+  // sessionId prop changes are handled by the controlled-session effect below.
   const shouldDeferInitialSessionCreation =
     initialRestoreSessionId === undefined;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
