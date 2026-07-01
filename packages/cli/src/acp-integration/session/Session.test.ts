@@ -9717,23 +9717,11 @@ describe('Session', () => {
       };
     }
 
-    it('forwards PostToolBatch hook artifacts to the artifact event channel', async () => {
+    it('does not fire PostToolBatch hooks from the ACP session path', async () => {
       const messageBus = {
         request: vi.fn().mockImplementation(async (request) => ({
           success: true,
-          output:
-            request.eventName === 'PostToolBatch'
-              ? {
-                  hookSpecificOutput: {
-                    artifacts: [
-                      {
-                        title: 'Batch report',
-                        workspacePath: 'reports/batch.html',
-                      },
-                    ],
-                  },
-                }
-              : { decision: 'allow' },
+          output: { decision: 'allow', eventName: request.eventName },
         })),
       };
       mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
@@ -9764,156 +9752,15 @@ describe('Session', () => {
         ],
       );
 
-      expect(messageBus.request).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventName: 'PostToolBatch',
-          input: expect.objectContaining({
-            tool_calls: [
-              expect.objectContaining({
-                tool_name: 'read_file',
-                tool_input: { path: 'README.md' },
-                tool_use_id: 'read_call',
-                status: 'success',
-              }),
-            ],
-          }),
-        }),
+      expect(messageBus.request).not.toHaveBeenCalledWith(
+        expect.objectContaining({ eventName: 'PostToolBatch' }),
         expect.anything(),
         expect.anything(),
         expect.anything(),
       );
-      expect(mockClient.extNotification).toHaveBeenCalledWith(
-        'qwen/notify/session/artifact-event',
-        expect.objectContaining({
-          sessionId: 'test-session-id',
-          source: 'hook',
-          hookEventName: 'PostToolBatch',
-          artifacts: [
-            {
-              title: 'Batch report',
-              workspacePath: 'reports/batch.html',
-            },
-          ],
-        }),
-      );
-    });
-
-    it('does not emit hook artifact notifications for empty artifact batches', async () => {
-      const messageBus = {
-        request: vi.fn().mockImplementation(async (request) => ({
-          success: true,
-          output:
-            request.eventName === 'PostToolBatch'
-              ? {
-                  hookSpecificOutput: {
-                    artifacts: [],
-                  },
-                }
-              : { decision: 'allow' },
-        })),
-      };
-      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
-      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-      mockConfig.hasHooksForEvent = vi
-        .fn()
-        .mockImplementation(
-          (eventName: string) => eventName === 'PostToolBatch',
-        );
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-      mockToolRegistry.getTool.mockReturnValue(
-        mockAllowedTool(
-          'read_file',
-          vi.fn().mockResolvedValue({
-            llmContent: 'tool output',
-            returnDisplay: 'tool output',
-          }),
-        ),
-      );
-
-      await (session as unknown as ToolCallInternals).runToolCalls(
-        new AbortController().signal,
-        'prompt-empty-batch-artifacts',
-        [
-          {
-            id: 'read_call',
-            name: 'read_file',
-            args: { path: 'README.md' },
-          },
-        ],
-      );
-
       expect(mockClient.extNotification).not.toHaveBeenCalledWith(
         'qwen/notify/session/artifact-event',
-        expect.anything(),
-      );
-    });
-
-    it('logs and continues when hook artifact notification fails', async () => {
-      debugLoggerWarnSpy.mockClear();
-      (
-        mockClient.extNotification as ReturnType<typeof vi.fn>
-      ).mockRejectedValueOnce(new Error('notification unavailable'));
-      const messageBus = {
-        request: vi.fn().mockImplementation(async (request) => ({
-          success: true,
-          output:
-            request.eventName === 'PostToolBatch'
-              ? {
-                  hookSpecificOutput: {
-                    artifacts: [
-                      {
-                        title: 'Batch report',
-                        workspacePath: 'reports/batch.html',
-                      },
-                    ],
-                  },
-                }
-              : { decision: 'allow' },
-        })),
-      };
-      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
-      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-      mockConfig.hasHooksForEvent = vi
-        .fn()
-        .mockImplementation(
-          (eventName: string) => eventName === 'PostToolBatch',
-        );
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-      mockToolRegistry.getTool.mockReturnValue(
-        mockAllowedTool(
-          'read_file',
-          vi.fn().mockResolvedValue({
-            llmContent: 'tool output',
-            returnDisplay: 'tool output',
-          }),
-        ),
-      );
-
-      await expect(
-        (session as unknown as ToolCallInternals).runToolCalls(
-          new AbortController().signal,
-          'prompt-failed-batch-artifacts',
-          [
-            {
-              id: 'read_call',
-              name: 'read_file',
-              args: { path: 'README.md' },
-            },
-          ],
-        ),
-      ).resolves.toMatchObject({
-        parts: [
-          {
-            functionResponse: {
-              id: 'read_call',
-              name: 'read_file',
-            },
-          },
-        ],
-      });
-
-      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('notification unavailable'),
+        expect.objectContaining({ hookEventName: 'PostToolBatch' }),
       );
     });
 

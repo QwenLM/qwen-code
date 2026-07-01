@@ -176,35 +176,31 @@ export class SessionArtifactStore {
     options: { strict?: boolean; trustedPublisher?: boolean } = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
-      const normalizedResults = await Promise.all(
-        inputs.map(async (input) => {
-          try {
-            return await this.normalizeInput(
+      const normalizedResults: NormalizedArtifact[] = [];
+      for (const input of inputs) {
+        try {
+          normalizedResults.push(
+            await this.normalizeInput(
               input,
               ++this.receivedSeq,
               options.trustedPublisher === true,
-            );
-          } catch (error) {
-            if (options.strict) {
-              throw error;
-            }
-            const message =
-              error instanceof Error ? error.message : String(error);
-            writeStderrLine(
-              `[artifacts] session=${this.sessionId} action=dropped reason=${JSON.stringify(
-                message,
-              )}`,
-            );
-            return undefined;
+            ),
+          );
+        } catch (error) {
+          if (options.strict) {
+            throw error;
           }
-        }),
-      );
-      const normalized = normalizedResults.filter(
-        (artifact): artifact is NormalizedArtifact => artifact !== undefined,
-      );
-
+          const message =
+            error instanceof Error ? error.message : String(error);
+          writeStderrLine(
+            `[artifacts] session=${this.sessionId} action=dropped reason=${JSON.stringify(
+              message,
+            )}`,
+          );
+        }
+      }
       const changes: SessionArtifactChange[] = [];
-      for (const artifact of coalesceByIdentity(normalized)) {
+      for (const artifact of coalesceByIdentity(normalizedResults)) {
         const existing =
           this.artifacts.get(artifact.id) ??
           this.findPublishedUpgradeTarget(artifact);

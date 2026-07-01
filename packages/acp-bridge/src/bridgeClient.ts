@@ -904,15 +904,8 @@ export class BridgeClient implements Client {
       );
       return;
     }
-    // Hook artifact events are tied to the active prompt lifecycle. Late events
-    // from an already-finished prompt are dropped instead of mutating an idle
-    // session behind the client's current snapshot.
-    if (entry.promptActive !== true) {
-      writeStderrLine(
-        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_idle`,
-      );
-      return;
-    }
+    const source =
+      typeof params['source'] === 'string' ? params['source'] : undefined;
     const hookEventName =
       typeof params['hookEventName'] === 'string'
         ? params['hookEventName']
@@ -923,6 +916,23 @@ export class BridgeClient implements Client {
       typeof params['toolCallId'] === 'string'
         ? params['toolCallId']
         : undefined;
+    // Hook artifact events are tied to the active prompt lifecycle. Late events
+    // from an already-finished prompt are dropped instead of mutating an idle
+    // session behind the client's current snapshot.
+    if (entry.promptActive !== true) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_idle source=${JSON.stringify(
+          source ?? '<missing>',
+        )} hookEventName=${JSON.stringify(
+          hookEventName ?? '<missing>',
+        )} toolName=${JSON.stringify(
+          toolName ?? '<missing>',
+        )} toolCallId=${JSON.stringify(
+          toolCallId ?? '<missing>',
+        )} artifactCount=${rawArtifacts.length}`,
+      );
+      return;
+    }
     const artifacts = rawArtifacts.filter(isRecord).map((artifact) => ({
       ...artifactPayloadFields(artifact),
       source: 'hook' as const,

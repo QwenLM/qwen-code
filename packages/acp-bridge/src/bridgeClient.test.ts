@@ -882,6 +882,10 @@ describe('BridgeClient — artifact ingress', () => {
       await expect(
         client.extNotification('qwen/notify/session/artifact-event', {
           sessionId,
+          source: 'hook',
+          hookEventName: 'PostToolUse',
+          toolName: 'read_file',
+          toolCallId: 'call-idle',
           artifacts: [{ title: 'Idle', url: 'https://example.com/idle' }],
         }),
       ).resolves.toBeUndefined();
@@ -891,6 +895,11 @@ describe('BridgeClient — artifact ingress', () => {
       });
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('reason=session_idle');
+      expect(logged).toContain('source="hook"');
+      expect(logged).toContain('hookEventName="PostToolUse"');
+      expect(logged).toContain('toolName="read_file"');
+      expect(logged).toContain('toolCallId="call-idle"');
+      expect(logged).toContain('artifactCount=1');
     } finally {
       stderr.mockRestore();
       await fsp.rm(workspace, { recursive: true, force: true });
