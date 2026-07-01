@@ -286,6 +286,14 @@ function redactWorkerLogLine(
   return redacted;
 }
 
+function normalizeWorkerLogLineForRedaction(line: string): string {
+  // eslint-disable-next-line no-control-regex
+  return line.replace(
+    /[\u0000-\u001f\u007f-\u009f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g,
+    '',
+  );
+}
+
 function attachWorkerLogStream(
   stream: WorkerLogStream | undefined,
   streamName: ChannelWorkerLogEntry['stream'],
@@ -299,10 +307,13 @@ function attachWorkerLogStream(
   let buffer = '';
   let discardingOversizedLine = false;
   const flushLine = (line: string) => {
-    const redacted = redactWorkerLogLine(line, {
-      ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
-      workerEnv: opts.workerEnv,
-    });
+    const redacted = redactWorkerLogLine(
+      normalizeWorkerLogLineForRedaction(line),
+      {
+        ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+        workerEnv: opts.workerEnv,
+      },
+    );
     notifyLog(opts.onLog, {
       stream: streamName,
       line: sanitizeLogText(redacted, MAX_WORKER_LOG_LINE_LENGTH),
@@ -337,6 +348,7 @@ function attachWorkerLogStream(
     }
     if (discardingOversizedLine) {
       buffer = '';
+      discardingOversizedLine = false;
       return;
     }
     flushOversizedBuffer();
@@ -707,6 +719,7 @@ export function createChannelWorkerSupervisor(
       if (child) return;
       stopping = false;
       clearRestartTimer();
+      restartAttemptTimes = [];
       await launch('initial');
     },
     async stop() {

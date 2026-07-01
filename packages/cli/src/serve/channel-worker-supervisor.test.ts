@@ -500,6 +500,73 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('resets restart budget after an intentional stop and start', async () => {
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const secondChild = new FakeChild();
+    const thirdChild = new FakeChild(false);
+    const fourthChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild)
+      .mockReturnValueOnce(thirdChild)
+      .mockReturnValueOnce(fourthChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker,
+      restartPolicy: { maxRestarts: 1, windowMs: 300_000, delaysMs: [10] },
+    });
+
+    const firstStart = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await firstStart;
+    firstChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+    secondChild.emit('message', {
+      type: 'ready',
+      pid: 22222,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await Promise.resolve();
+
+    await supervisor.stop();
+
+    const secondStart = supervisor.start();
+    thirdChild.emit('message', {
+      type: 'ready',
+      pid: 33333,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await secondStart;
+    thirdChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+    fourthChild.emit('message', {
+      type: 'ready',
+      pid: 44444,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await Promise.resolve();
+
+    expect(spawnWorker).toHaveBeenCalledTimes(4);
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'running',
+      pid: 44444,
+    });
+  });
+
   it('does not double-notify or reschedule when a restart launch times out then exits', async () => {
     vi.useFakeTimers();
     const firstChild = new FakeChild(false);
@@ -868,6 +935,7 @@ describe('createChannelWorkerSupervisor', () => {
 
     const started = supervisor.start();
     child.stderr.emit('data', Buffer.from('failed with secret-token\n'));
+    child.stderr.emit('data', Buffer.from('split secret-to\u200bken\n'));
     child.stdout.emit('data', Buffer.from('adapter token telegram-secret'));
     child.stdout.emit('data', Buffer.from('\nredis redis-secret\n'));
     child.stdout.emit('data', Buffer.from('auth basic-auth-secret\n'));
@@ -887,6 +955,10 @@ describe('createChannelWorkerSupervisor', () => {
     expect(onLog).toHaveBeenCalledWith({
       stream: 'stderr',
       line: 'failed with <redacted>',
+    });
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stderr',
+      line: 'split <redacted>',
     });
     expect(onLog).toHaveBeenCalledWith({
       stream: 'stdout',
@@ -925,6 +997,7 @@ describe('createChannelWorkerSupervisor', () => {
     const started = supervisor.start();
     child.stderr.emit('data', Buffer.from('x'.repeat(70_000)));
     child.stderr.emit('data', Buffer.from('discarded oversized tail'));
+    child.stderr.emit('data', Buffer.from('fresh line'));
     child.stderr.emit('data', Buffer.from('\nnext line\n'));
     child.emit('message', {
       type: 'ready',
@@ -937,6 +1010,13 @@ describe('createChannelWorkerSupervisor', () => {
     const firstLog = onLog.mock.calls[0]?.[0];
     expect(firstLog).toMatchObject({ stream: 'stderr' });
     expect(firstLog?.line).toHaveLength(4096);
+    expect(onLog).not.toHaveBeenCalledWith(
+      expect.objectContaining({ line: 'discarded oversized tail' }),
+    );
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stderr',
+      line: 'fresh line',
+    });
     expect(onLog).toHaveBeenLastCalledWith({
       stream: 'stderr',
       line: 'next line',
