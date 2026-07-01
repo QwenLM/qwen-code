@@ -5802,6 +5802,55 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('injects channel memory before instructions for first loop prompt in a session', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![1],
+      ).toBe(
+        [
+          'Channel memory for this chat:\nUse staging.',
+          'Use repo conventions.',
+          '[Loop "daily summary" created by Alice]\n\npost summary',
+        ].join('\n\n'),
+      );
+    });
+
     it('disables single-scope loop prompts before they reach the agent', async () => {
       const disable = vi.fn().mockResolvedValue(true);
       const ch = createChannel(

@@ -287,10 +287,7 @@ export abstract class ChannelBase {
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
     let promptText = `[Loop "${label}" created by ${createdBy}]\n\n${sanitizePromptText(job.prompt)}`;
-    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-      promptText = `${this.config.instructions}\n\n${promptText}`;
-      this.instructedSessions.add(sessionId);
-    }
+    const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
 
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
     const generation = this.sessionGenerations.get(sessionId) ?? 0;
@@ -307,6 +304,41 @@ export abstract class ChannelBase {
         throw new ChannelLoopSkippedError(
           'loop dropped because it is no longer enabled',
         );
+      }
+      if (shouldPrependSessionContext) {
+        const context: string[] = [];
+        if (
+          this.channelMemory &&
+          this.isSenderAuthorizedForChannelMemory(job.target.senderId) &&
+          (!this.isSharedSessionTarget(job.target) ||
+            this.config.senderPolicy === 'allowlist')
+        ) {
+          try {
+            const memoryText = (
+              await this.channelMemory.readChannelMemory({
+                channelName: this.name,
+                chatId: job.target.chatId,
+                threadId: job.target.threadId,
+              })
+            ).trim();
+            if (memoryText) {
+              context.push(
+                `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
+              );
+            }
+          } catch (error) {
+            process.stderr.write(
+              `[${this.name}] channel memory read failed for loop ${job.id} chat ${sanitizeLogText(job.target.chatId, 64)}: ${this.channelMemoryErrorMessage(error)}\n`,
+            );
+          }
+        }
+        if (this.config.instructions) {
+          context.push(this.config.instructions);
+        }
+        if (context.length > 0) {
+          promptText = `${context.join('\n\n')}\n\n${promptText}`;
+        }
+        this.instructedSessions.add(sessionId);
       }
 
       let doneResolve: () => void = () => {};
@@ -1339,9 +1371,13 @@ export abstract class ChannelBase {
   }
 
   private isAuthorizedForChannelMemory(envelope: Envelope): boolean {
+    return this.isSenderAuthorizedForChannelMemory(envelope.senderId);
+  }
+
+  private isSenderAuthorizedForChannelMemory(senderId: string): boolean {
     return (
       this.config.allowedUsers.length > 0 &&
-      this.config.allowedUsers.includes(envelope.senderId)
+      this.config.allowedUsers.includes(senderId)
     );
   }
 
@@ -1404,9 +1440,13 @@ export abstract class ChannelBase {
    * and the host-shell (`!`) gate.
    */
   private isSharedSession(envelope: Envelope): boolean {
+    return this.isSharedSessionTarget(envelope);
+  }
+
+  private isSharedSessionTarget(target: { isGroup?: boolean }): boolean {
     return (
       this.config.sessionScope === 'single' ||
-      (envelope.isGroup && this.config.sessionScope === 'thread')
+      (target.isGroup === true && this.config.sessionScope === 'thread')
     );
   }
 
@@ -1937,15 +1977,16 @@ export abstract class ChannelBase {
       }
       if (shouldPrependSessionContext) {
         const context: string[] = [];
-        let channelMemory: string | undefined;
+        let memoryText: string | undefined;
         if (
+          this.channelMemory &&
           this.isAuthorizedForChannelMemory(envelope) &&
           (!this.isSharedSession(envelope) ||
             this.config.senderPolicy === 'allowlist')
         ) {
           try {
-            channelMemory = (
-              await this.channelMemory?.readChannelMemory(
+            memoryText = (
+              await this.channelMemory.readChannelMemory(
                 this.channelMemoryTarget(envelope),
               )
             )?.trim();
@@ -1958,9 +1999,9 @@ export abstract class ChannelBase {
             this.instructedSessions.delete(sessionId);
           }
         }
-        if (channelMemory) {
+        if (memoryText) {
           context.push(
-            `Channel memory for this chat:\n${sanitizePromptText(channelMemory)}`,
+            `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
           );
         }
         if (this.config.instructions) {
