@@ -3435,6 +3435,7 @@ export class CoreToolScheduler {
         // below, so the head/tail truncator never bisects a <system-reminder>
         // envelope or hook-injected context.
         let postToolUseAdditionalContext: string | undefined;
+        let postToolUseArtifacts: ToolArtifact[] | undefined;
         let reminderEnvelope: string | undefined;
 
         // PostToolUse Hook
@@ -3481,6 +3482,9 @@ export class CoreToolScheduler {
           // model-facing truncation below.
           if (postHookResult.additionalContext) {
             postToolUseAdditionalContext = postHookResult.additionalContext;
+          }
+          if (postHookResult.artifacts && postHookResult.artifacts.length > 0) {
+            postToolUseArtifacts = postHookResult.artifacts;
           }
 
           // Check if hook requested to stop execution
@@ -3742,6 +3746,10 @@ export class CoreToolScheduler {
           typeof content === 'string' ? content.length : undefined;
 
         const response = convertToFunctionResponse(toolName, callId, content);
+        const artifacts = [
+          ...(toolResult.artifacts ?? []),
+          ...(postToolUseArtifacts ?? []),
+        ];
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,
@@ -3756,9 +3764,7 @@ export class CoreToolScheduler {
           ...('modelOverride' in toolResult
             ? { modelOverride: toolResult.modelOverride }
             : {}),
-          ...(toolResult.artifacts && toolResult.artifacts.length > 0
-            ? { artifacts: toolResult.artifacts }
-            : {}),
+          ...(artifacts.length > 0 ? { artifacts } : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
         safeSetStatus(span, { code: SpanStatusCode.OK });

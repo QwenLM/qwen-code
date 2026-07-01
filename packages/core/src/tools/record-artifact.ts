@@ -302,7 +302,13 @@ function validateString(
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
-    if (code <= 0x1f || code === 0x7f) {
+    if (
+      code <= 0x1f ||
+      code === 0x7f ||
+      (code >= 0x200b && code <= 0x200f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      code === 0xfeff
+    ) {
       return true;
     }
   }

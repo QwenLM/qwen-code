@@ -6587,6 +6587,64 @@ describe('CoreToolScheduler telemetry spans', () => {
     }
   });
 
+  it('preserves PostToolUse artifacts on successful responses', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'post-hook',
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              artifacts: [
+                {
+                  title: 'Hook report',
+                  workspacePath: 'reports/hook.html',
+                },
+              ],
+            },
+          },
+        }),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+        artifacts: [
+          {
+            title: 'Tool report',
+            workspacePath: 'reports/tool.html',
+          },
+        ],
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Tool report',
+          workspacePath: 'reports/tool.html',
+        },
+        {
+          title: 'Hook report',
+          workspacePath: 'reports/hook.html',
+        },
+      ]);
+    }
+  });
+
   it('sets tool failure status when span attribute recording fails', async () => {
     const { spanRecord, completedCalls } = await runSingleTool({
       throwSpanSetAttribute: true,

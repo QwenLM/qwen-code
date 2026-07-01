@@ -135,4 +135,23 @@ describe('RecordArtifactTool', () => {
       }),
     ).toThrow(/metadata/);
   });
+
+  it('rejects Unicode control characters before reporting success', () => {
+    const tool = new RecordArtifactTool();
+
+    expect(() =>
+      tool.build({
+        title: 'Hidden\u202eTitle',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/control characters/);
+
+    expect(() =>
+      tool.build({
+        title: 'Metadata key',
+        url: 'https://example.com/resource',
+        metadata: { 'preview\u200b': 'hidden' },
+      }),
+    ).toThrow(/metadata/);
+  });
 });
