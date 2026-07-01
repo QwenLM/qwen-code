@@ -214,7 +214,7 @@ jobs:
 
       - name: 'Run actionlint'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        timeout-minutes: 15
+        timeout-minutes: 5
         run: 'node scripts/lint.js --actionlint'
 
       - name: 'Run shellcheck'
