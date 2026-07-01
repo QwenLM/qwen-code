@@ -222,11 +222,11 @@ describe('onResponseChunk', () => {
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('clears the buffer after idleFlush', () => {
+  it('clears the buffer after idleFlush', async () => {
     const ch = makeChannel();
     onResponseChunk(ch, 'test-chat', 'hello', 'sess-1');
 
-    vi.advanceTimersByTime(2000);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(streamState(ch).get('sess-1')!.buffer).toBe('');
   });
 

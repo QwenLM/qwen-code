@@ -168,8 +168,9 @@ describe('cronTextHandler', () => {
     expect(cronBuffer.get('sess-1')!.buffer).toBe('hello world');
 
     // Advance past the 2s idle timer
-    vi.advanceTimersByTime(2000);
-    await Promise.resolve();
+    // Use async timer advancement so all promise chains (.then on
+    // sendMessage) settle before assertions.
+    await vi.advanceTimersByTimeAsync(2000);
 
     // Flush should have called sendQQMessage via sendMessage
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);

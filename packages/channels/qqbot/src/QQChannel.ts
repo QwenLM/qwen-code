@@ -154,6 +154,11 @@ export class QQChannel extends ChannelBase {
     }
   > = new Map();
 
+  /** Set of sessionIds currently being flushed by the idle-flush timer. */
+  private flushingSessions: Set<string> = new Set();
+  /** Set of sessionIds that onResponseComplete marked for cleanup after idle-flush completes. */
+  private pendingStreamDelete: Set<string> = new Set();
+
   /** Accumulation buffer for cron/non-prompt textChunk events. */
   private cronBuffer: Map<
     string,
@@ -230,9 +235,15 @@ export class QQChannel extends ChannelBase {
           if (toFlush) {
             const target = this.router.getTarget(sessionId);
             if (target) {
-              this.sendMessage(target.chatId, toFlush).catch((err) => {
-                process.stderr.write(`[QQ:${this.name}] Cron flush send error: ${err}\n`);
-              });
+              this.sendMessage(target.chatId, toFlush)
+                .then(() => {
+                  this.cronBuffer.delete(sessionId);
+                })
+                .catch((err) => {
+                  process.stderr.write(`[QQ:${this.name}] Cron flush send error: ${err}\n`);
+                  // Keep the entry on failure so text isn't lost
+                });
+              return; // deletion is handled in .then
             }
           }
           this.cronBuffer.delete(sessionId);
@@ -370,6 +381,7 @@ export class QQChannel extends ChannelBase {
       entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
 
     let nextSeq = 0;
+    let rollbackApplied = false;
     try {
       const body: Record<string, unknown> = {
         msg_type: 2,
@@ -398,6 +410,7 @@ export class QQChannel extends ChannelBase {
         // Roll back msgSeqMap if we had a msgId (passive reply context)
         if (msgId) {
           this.msgSeqMap.set(msgId, nextSeq - 1);
+          rollbackApplied = true;
           process.stderr.write(
             `[QQ:${this.name}] Retrying as active message\n`,
           );
@@ -439,7 +452,7 @@ export class QQChannel extends ChannelBase {
 
       if (msgId) this.saveQQState();
     } catch (e) {
-      if (msgId) {
+      if (msgId && !rollbackApplied) {
         this.msgSeqMap.set(msgId, nextSeq - 1);
         this.saveQQState();
       }
@@ -579,17 +592,32 @@ export class QQChannel extends ChannelBase {
     }
     // Start a new 2-second silence timer: flush when the model stops sending chunks.
     state.timer = setTimeout(() => {
-      state!.timer = null;
-      const toFlush = state!.buffer;
+      const s = state!;
+      s.timer = null;
+      const toFlush = s.buffer;
       if (!toFlush) return;
-      // Clear buffer before send; restore on failure so text is not lost.
-      state!.buffer = '';
-      this.sendMessage(state!.chatId, toFlush).catch((err) => {
-        process.stderr.write(
-          `[QQ:${this.name}] idleFlush send failed: ${err}\n`,
-        );
-        state!.buffer = toFlush + (state!.buffer || '');
-      });
+      // Set flushing flag so onResponseComplete knows buffer is being sent.
+      // Don't clear buffer until send completes — onResponseComplete may fire
+      // between the clear and the send resolution, causing it to delete a stale
+      // entry and orphan the catch/restore path.
+      this.flushingSessions.add(sessionId);
+      this.sendMessage(s.chatId, toFlush)
+        .then(() => {
+          s.buffer = '';
+        })
+        .catch((err) => {
+          process.stderr.write(
+            `[QQ:${this.name}] idleFlush send failed: ${err}\n`,
+          );
+          // Buffer stays intact on failure; onResponseComplete may retry
+        })
+        .finally(() => {
+          this.flushingSessions.delete(sessionId);
+          if (this.pendingStreamDelete.has(sessionId)) {
+            this.pendingStreamDelete.delete(sessionId);
+            this.streamState.delete(sessionId);
+          }
+        });
     }, 2000);
     state.timer.unref?.();
   }
@@ -611,6 +639,12 @@ export class QQChannel extends ChannelBase {
     }
     // ?? not ||: empty-string buffer means already-flushed by idleFlush/onToolCall;
     // || would re-send _fullText (duplicate message).
+    if (state && this.flushingSessions.has(sessionId)) {
+      // idle-flush is in flight; don't read the buffer or delete streamState.
+      // Mark for cleanup so the flush's .finally deletes the entry.
+      this.pendingStreamDelete.add(sessionId);
+      return;
+    }
     const remaining =
       state?.buffer ??
       (() => {
@@ -1223,7 +1257,12 @@ export class QQChannel extends ChannelBase {
             this.readyTimeout = null;
           }
           this.connectReject = null;
+          this._ready = true;
           this.startHeartbeat();
+          if (this._cronTextHandler && !this.cronTextHandlerAttached) {
+            this.bridge.on?.('textChunk', this._cronTextHandler);
+            this.cronTextHandlerAttached = true;
+          }
           onReady();
         }
         break;
@@ -1476,7 +1515,7 @@ export class QQChannel extends ChannelBase {
     const cleanText = event.content.trim();
     const isSlash = cleanText.startsWith('/');
     const text = isSlash
-      ? cleanText
+      ? sanitizePromptText(cleanText)
       : `[atMention=true] [${safeName}]: ${sanitizePromptText(cleanText)}`;
     this.handleInbound({
       channelName: this.name,
@@ -1566,7 +1605,7 @@ export class QQChannel extends ChannelBase {
     }
 
     const text = isSlash
-      ? cleanText
+      ? sanitizePromptText(cleanText)
       : `[atMention=${isAtBot}] ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content?.trim() ?? '') : cleanText)}`;
     this.handleInbound({
       channelName: this.name,
@@ -1731,7 +1770,7 @@ export class QQChannel extends ChannelBase {
     // the model can @mention group members. When disabled, strip tags before
     // the content reaches the LLM to prevent prompt-injection-based @mentions.
     const text = isSlash
-      ? cleanText
+      ? sanitizePromptText(cleanText)
       : `[atMention=${isAtBot}] ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
 
     // Only track replyMsgId for at-mention messages — non-@messages should
