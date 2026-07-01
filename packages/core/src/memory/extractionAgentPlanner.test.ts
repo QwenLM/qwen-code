@@ -10,6 +10,7 @@ import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
@@ -116,6 +117,35 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedUserScope: false,
       systemMessage: undefined,
     });
+  });
+
+  it('uses a scoped config that allows shell and denies outside writes', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    const permissionManager = call?.config.getPermissionManager?.();
+    expect(permissionManager).toBeDefined();
+    expect(await permissionManager!.isToolEnabled(ToolNames.SHELL)).toBe(true);
+    expect(
+      permissionManager!.findMatchingDenyRule({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/tmp/outside.md',
+      }),
+    ).toBe(
+      'ManagedAutoMemory(write_file: only within /tmp/user-memory or /tmp/auto-memory)',
+    );
+    expect(
+      await permissionManager!.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/tmp/outside.md',
+      }),
+    ).toBe('deny');
   });
 
   it('throws when getCacheSafeParams returns null', async () => {
