@@ -347,6 +347,37 @@ class FakeBridge {
       servers: [{ name: 'typescript', status: 'READY', languages: ['ts'] }],
     };
   }
+  lastAddedArtifact:
+    | {
+        sessionId: string;
+        artifact: Parameters<HttpAcpBridge['addSessionArtifact']>[1];
+        context: Parameters<HttpAcpBridge['addSessionArtifact']>[2];
+      }
+    | undefined;
+  async getSessionArtifacts(sessionId: string) {
+    return {
+      v: 1,
+      sessionId,
+      artifacts: [],
+      generatedAt: new Date().toISOString(),
+      limits: { maxArtifacts: 200 },
+    };
+  }
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: Parameters<HttpAcpBridge['addSessionArtifact']>[1],
+    context: Parameters<HttpAcpBridge['addSessionArtifact']>[2],
+  ) {
+    this.lastAddedArtifact = { sessionId, artifact, context };
+    return { v: 1, sessionId, changes: [] };
+  }
+  removeSessionArtifact(sessionId: string, artifactId: string) {
+    return {
+      v: 1,
+      sessionId,
+      changes: [{ action: 'removed' as const, artifactId, reason: 'explicit' }],
+    };
+  }
   async getWorkspaceToolsStatus() {
     return { v: 1, tools: [] };
   }
@@ -4806,6 +4837,58 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           servers: [{ name: 'typescript', status: 'READY' }],
         },
       });
+    });
+
+    it('_qwen/session/artifacts/add forwards only public artifact fields', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/artifacts/add',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Lineage',
+          kind: 'link',
+          storage: 'external_url',
+          url: 'https://example.test/lineage',
+          metadata: { table: 'fact_orders' },
+          source: 'tool',
+          trustedPublisher: true,
+          clientId: 'forged-client',
+          toolName: 'forged-tool',
+          hookEventName: 'forged-hook',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { v: 1, sessionId: 'sess-1', changes: [] },
+      });
+      expect(bridge.lastAddedArtifact?.sessionId).toBe('sess-1');
+      expect(bridge.lastAddedArtifact?.artifact).toMatchObject({
+        title: 'Lineage',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.test/lineage',
+        metadata: { table: 'fact_orders' },
+      });
+      const artifact = bridge.lastAddedArtifact?.artifact as
+        | Record<string, unknown>
+        | undefined;
+      expect(artifact).not.toHaveProperty('sessionId');
+      expect(artifact).not.toHaveProperty('source');
+      expect(artifact).not.toHaveProperty('trustedPublisher');
+      expect(artifact).not.toHaveProperty('clientId');
+      expect(artifact).not.toHaveProperty('toolName');
+      expect(artifact).not.toHaveProperty('hookEventName');
     });
 
     it('session methods reject unowned session', async () => {

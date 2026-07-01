@@ -116,6 +116,9 @@ function errMsg(err: unknown): string {
 type PermissionResponse = Parameters<
   HttpAcpBridge['respondToSessionPermission']
 >[2];
+type AddSessionArtifactInput = Parameters<
+  HttpAcpBridge['addSessionArtifact']
+>[1];
 
 const SESSION_SHELL_METHOD = `${QWEN_METHOD_NS}session/shell`;
 const INVALID_PERMISSION_OUTCOME_ERROR =
@@ -357,6 +360,36 @@ function parsePermissionResponse(
     response['_meta'] = params['_meta'];
   }
   return response as PermissionResponse;
+}
+
+function pickSessionArtifactInput(
+  params: Record<string, unknown>,
+): AddSessionArtifactInput {
+  const {
+    title,
+    kind,
+    storage,
+    description,
+    workspacePath,
+    managedId,
+    url,
+    mimeType,
+    sizeBytes,
+    metadata,
+  } = params;
+
+  return {
+    title,
+    kind,
+    storage,
+    description,
+    workspacePath,
+    managedId,
+    url,
+    mimeType,
+    sizeBytes,
+    metadata,
+  } as AddSessionArtifactInput;
 }
 
 /**
@@ -2140,13 +2173,9 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/artifacts/add`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          const { sessionId: _sid, ...artifact } = params;
-          void _sid;
           const result = await this.bridge.addSessionArtifact(
             sessionId,
-            artifact as unknown as Parameters<
-              HttpAcpBridge['addSessionArtifact']
-            >[1],
+            pickSessionArtifactInput(params),
             this.sessionCtx(conn, sessionId, loopback),
           );
           this.replyConn(conn, id, result as unknown);
