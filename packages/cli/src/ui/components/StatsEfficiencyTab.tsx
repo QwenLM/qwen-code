@@ -21,12 +21,30 @@ import { t } from '../../i18n/index.js';
 export const EfficiencyTab: React.FC<{
   data: StatsData;
   bodyWidth: number;
-}> = ({ data, bodyWidth }) => {
+  /** When set, only the top N models are listed (the rest collapse into a
+   * "+N more" line). Used when the tab is embedded in a height-limited view. */
+  maxModelRows?: number;
+  /** When set, only the top N tools are listed (the rest collapse into a
+   * "+N more" line). Used when the tab is embedded in a height-limited view so
+   * a long tool leaderboard cannot overflow the host dialog. */
+  maxToolRows?: number;
+}> = ({ data, bodyWidth, maxModelRows, maxToolRows }) => {
   const SERIES_COLORS = getSeriesColors();
   const cardWidth = Math.floor((bodyWidth - 4) / 3);
-  const modelEntries = Object.entries(data.report.models).sort(
+  const allModelEntries = Object.entries(data.report.models).sort(
     (a, b) => b[1].totalTokens - a[1].totalTokens,
   );
+  const modelEntries =
+    maxModelRows != null && allModelEntries.length > maxModelRows
+      ? allModelEntries.slice(0, maxModelRows)
+      : allModelEntries;
+  const hiddenModelCount = allModelEntries.length - modelEntries.length;
+
+  const toolEntries =
+    maxToolRows != null && data.toolLeaderboard.length > maxToolRows
+      ? data.toolLeaderboard.slice(0, maxToolRows)
+      : data.toolLeaderboard;
+  const hiddenToolCount = data.toolLeaderboard.length - toolEntries.length;
 
   return (
     <Box flexDirection="column">
@@ -128,7 +146,7 @@ export const EfficiencyTab: React.FC<{
               { text: t('Success'), width: 22, color: theme.text.secondary },
             ]}
           />
-          {data.toolLeaderboard.map((tool) => (
+          {toolEntries.map((tool) => (
             <TableRow
               key={tool.name}
               cells={[
@@ -155,6 +173,14 @@ export const EfficiencyTab: React.FC<{
               ]}
             />
           ))}
+          {hiddenToolCount > 0 && (
+            <Text color={theme.text.secondary}>
+              {'  ' +
+                t('+{{count}} more (run /stats for the full list)', {
+                  count: String(hiddenToolCount),
+                })}
+            </Text>
+          )}
         </Box>
       )}
 
@@ -219,6 +245,14 @@ export const EfficiencyTab: React.FC<{
               />
             );
           })}
+          {hiddenModelCount > 0 && (
+            <Text color={theme.text.secondary}>
+              {'  ' +
+                t('+{{count}} more (run /stats for the full list)', {
+                  count: String(hiddenModelCount),
+                })}
+            </Text>
+          )}
         </Box>
       )}
 

@@ -626,6 +626,59 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the selected baseUrl for same-provider duplicate vision model ids', async () => {
+    const switchModel = vi.fn();
+    const setVisionModel = vi.fn();
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const { props, mockSettings } = renderComponent(
+      { isVisionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3.7-plus',
+            label: '[ModelStudio Standard] qwen3.7-plus',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            modalities: { image: true, video: true },
+          },
+          {
+            id: 'qwen3.7-plus',
+            label: '[ModelStudio Token Plan] qwen3.7-plus',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: selectedBaseUrl,
+            modalities: { image: true, video: true },
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        })),
+        isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen3.7-max',
+        setVisionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'visionModel',
+      `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+    expect(setVisionModel).toHaveBeenCalledWith(
+      `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('warns in the history when a pinned vision model is not image-capable', async () => {
     // qwen-plus is text-only by name default, so the pin is honored but flagged.
     // The primary is a different model so the pin isn't rejected as the primary.
@@ -869,6 +922,77 @@ describe('<ModelDialog />', () => {
     const items = mockedSelect.mock.calls[0][0].items;
     const visionIndex = items.findIndex((item) =>
       String(item.value).includes('qwen-vl-max'),
+    );
+    expect(visionIndex).toBeGreaterThanOrEqual(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);
+  });
+
+  it('highlights the matching baseUrl for duplicate vision-model settings', () => {
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        visionModel: `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'qwen3.7-plus',
+        label: '[ModelStudio Standard] qwen3.7-plus',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+      {
+        id: 'qwen3.7-plus',
+        label: '[ModelStudio Token Plan] qwen3.7-plus',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: selectedBaseUrl,
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'qwen3.7-max'),
+              getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_OPENAI,
+                model: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({
+                  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isVisionModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const visionIndex = items.findIndex(
+      (item) =>
+        String(item.value).includes('qwen3.7-plus') &&
+        String(item.value).includes(selectedBaseUrl),
     );
     expect(visionIndex).toBeGreaterThanOrEqual(0);
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);

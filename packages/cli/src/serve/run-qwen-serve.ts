@@ -91,12 +91,9 @@ import {
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
 
-// Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
-// `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
-// the daemon WS. Off by default while the contract settles.
+// Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
-// CDP tunnel opt-in (Plan C, issue #5626). `=1` advertises `cdp_tunnel_over_ws`
-// and exposes the `/cdp` WebSocket. Off by default while the contract settles.
+// CDP tunnel; default-on for Chrome-extension origins or explicit env opt-in.
 const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
@@ -170,6 +167,20 @@ function parseDeadlineEnv(
     );
   }
   return parsed;
+}
+
+function envFlagDisabled(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  const normalized = raw.trim().toLowerCase();
+  return normalized === '0' || normalized === 'false';
+}
+
+function hasChromeExtensionOrigin(origins: readonly string[] | undefined) {
+  return (
+    origins?.some((origin) =>
+      origin.trim().toLowerCase().startsWith('chrome-extension://'),
+    ) === true
+  );
 }
 
 function createDaemonTelemetryRuntimeConfig(
@@ -1288,24 +1299,24 @@ export async function runQwenServe(
       QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV,
       process.env[QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV],
     );
+  const clientMcpOverWsEnv = process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV];
+  const cdpTunnelOverWsEnv = process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV];
+  const chromeExtensionOriginAllowed = hasChromeExtensionOrigin(
+    optsIn.allowOrigins,
+  );
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
-    // Reverse tool channel (issue #5626, Phase 2). Opt-in via env until the
-    // public contract settles — the WS `mcp_register` / `mcp_message` frames
-    // and the child↔parent `client_mcp/message` round-trip stay dormant
-    // otherwise. An explicit `clientMcpOverWs` in `optsIn` (embedded callers)
-    // still wins.
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
-      process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV] === '1',
-    // CDP tunnel (Plan C, issue #5626). Opt-in via env until the contract
-    // settles; an explicit `cdpTunnelOverWs` in `optsIn` still wins.
+      (!envFlagDisabled(clientMcpOverWsEnv) &&
+        clientMcpOverWsEnv !== undefined),
     cdpTunnelOverWs:
       optsIn.cdpTunnelOverWs ??
-      process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
+      (!envFlagDisabled(cdpTunnelOverWsEnv) &&
+        (cdpTunnelOverWsEnv !== undefined || chromeExtensionOriginAllowed)),
   };
   const channelRuntime = opts.channelSelection
     ? await loadChannelWorkerRuntime()
@@ -1697,23 +1708,7 @@ export async function runQwenServe(
         ? String(opts.mcpClientBudget)
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
-    // CDP tunnel (Plan C, #5626): forward the flag + bound port so the spawned
-    // ACP child can auto-register chrome-devtools-mcp against this `/cdp`
-    // endpoint. Only meaningful with a fixed `--port`: the override map is frozen
-    // at bridge construction, so an ephemeral `--port 0` (resolved only after
-    // `listen`) can't be threaded here. Leave the port unset in that case so the
-    // child surfaces a clear diagnostic instead of a bogus port "0".
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
-    QWEN_SERVE_CDP_TUNNEL_PORT:
-      opts.cdpTunnelOverWs && opts.port > 0 ? String(opts.port) : undefined,
-    // Tell the child whether `/cdp` requires bearer auth. The ACP child can't
-    // inherit QWEN_SERVER_TOKEN (the spawn path scrubs it) and chrome-devtools-
-    // mcp is launched with `--wsEndpoint` only, so it can't authenticate against
-    // an auth-gated `/cdp`. The child uses this flag to skip auto-registering the
-    // browser tools (with a diagnostic) instead of registering tools that can't
-    // connect. See buildCdpTunnelMcpServer in acpAgent.ts.
-    QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED:
-      opts.cdpTunnelOverWs && (token || opts.requireAuth) ? '1' : undefined,
   };
 
   const cliVersionPromise = getCliVersion();
@@ -1785,14 +1780,18 @@ export async function runQwenServe(
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
-  const writeChannelWorkerPidfile = (): void => {
+  const writeChannelWorkerPidfile = (
+    snapshot = channelWorker.snapshot(),
+    options: { clearWorkerPid?: boolean } = {},
+  ): void => {
     if (!opts.channelSelection || !channelServicePidfile) return;
-    const snapshot = channelWorker.snapshot();
     try {
       channelServicePidfile.writeServeServiceInfo({
         channels: snapshot.channels,
         servePid: process.pid,
-        workerPid: snapshot.pid,
+        ...(!options.clearWorkerPid && snapshot.pid !== undefined
+          ? { workerPid: snapshot.pid }
+          : {}),
       });
     } catch (err) {
       daemonLog.warn(
@@ -2305,13 +2304,26 @@ export async function runQwenServe(
             ...(token ? { daemonToken: token } : {}),
             workspace: boundWorkspace,
             selection: opts.channelSelection,
+            onReady: (snapshot) => {
+              writeChannelWorkerPidfile(snapshot);
+            },
+            onLog: ({ stream, line }) => {
+              const message = `channel worker ${stream}: ${line}`;
+              if (stream === 'stderr') {
+                daemonLog.warn(message);
+              } else {
+                daemonLog.info(message);
+              }
+            },
             onExit: (snapshot) => {
               daemonLog.warn(
                 `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
                   `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
-                  `error=${snapshot.error ?? 'none'})`,
+                  `error=${snapshot.error ?? 'none'}, restartCount=${snapshot.restartCount ?? 0}, ` +
+                  `nextRestartAt=${snapshot.nextRestartAt ?? 'none'}, ` +
+                  `staleHeartbeatAt=${snapshot.staleHeartbeatAt ?? 'none'})`,
               );
-              removeCurrentServePidfile();
+              writeChannelWorkerPidfile(snapshot, { clearWorkerPid: true });
             },
           });
         }
@@ -2356,6 +2368,12 @@ export async function runQwenServe(
         writeStderrLine(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
         );
+        if (opts.clientMcpOverWs === true) {
+          writeStderrLine(
+            `qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth. ` +
+              `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
+          );
+        }
       } else if (opts.requireAuth) {
         // The boot check above guarantees `token` is set whenever
         // `--require-auth` is on, so this branch only fires alongside
@@ -2368,7 +2386,6 @@ export async function runQwenServe(
             'on every route, including loopback /health).',
         );
       }
-
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
@@ -2475,7 +2492,6 @@ export async function runQwenServe(
         if (opts.channelSelection) {
           await channelWorker.start();
           if (runtimeStartupSettled) return;
-          writeChannelWorkerPidfile();
         }
         if (runtimeStartupSettled) return;
         runtimeStartupSettled = true;

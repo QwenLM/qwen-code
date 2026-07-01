@@ -90,6 +90,16 @@ function getSessionIdFromUrl(): string | undefined {
   }
 }
 
+function replaceStandaloneSessionUrl(sessionId: string | undefined): void {
+  const url = new URL(window.location.href);
+  url.pathname = sessionId ? `/session/${encodeURIComponent(sessionId)}` : '/';
+  if (!import.meta.env.DEV) {
+    url.searchParams.delete('token');
+    url.searchParams.delete('daemon');
+  }
+  window.history.replaceState(null, '', url);
+}
+
 function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
@@ -119,6 +129,9 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     setLanguage(nextLanguage);
     storeLanguage(nextLanguage);
   }, []);
+  const handleSessionIdChange = useCallback((nextSessionId?: string) => {
+    replaceStandaloneSessionUrl(nextSessionId);
+  }, []);
 
   return (
     <ErrorBoundary
@@ -130,7 +143,7 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
       <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
         <DaemonSessionProvider
           key={sessionId ?? 'new'}
-          initialSessionId={sessionId}
+          sessionId={sessionId}
           suppressOwnUserEcho
         >
           <App
@@ -138,6 +151,7 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onThemeChange={handleThemeChange}
             language={language}
             onLanguageChange={handleLanguageChange}
+            onSessionIdChange={handleSessionIdChange}
             sidebar
             compactThinking
           />

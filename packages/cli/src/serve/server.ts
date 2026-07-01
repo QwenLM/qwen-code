@@ -105,6 +105,7 @@ import {
 } from './server/error-handlers.js';
 import { installRateLimiter } from './server/rate-limiter-setup.js';
 import { createServeFeatures } from './server/serve-features.js';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import { registerWorkspaceLifecycleRoutes } from './routes/workspace-lifecycle.js';
 import { registerWorkspaceMcpControlRoutes } from './routes/workspace-mcp-control.js';
@@ -371,6 +372,7 @@ export function createServeApp(
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
     });
+  const archiveCoordinator = new SessionArchiveCoordinator();
 
   installSelfOriginStripMiddleware(app, getPort);
 
@@ -727,6 +729,7 @@ export function createServeApp(
   registerSessionRoutes(app, {
     boundWorkspace,
     bridge,
+    archiveCoordinator,
     mutate,
     sendBridgeError,
     daemonLog,
@@ -787,6 +790,7 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, bridge, {
     boundWorkspace,
+    archiveCoordinator,
     workspace,
     fsFactory,
     deviceFlowRegistry,
@@ -798,6 +802,7 @@ export function createServeApp(
       opts.allowOrigins && opts.allowOrigins.length > 0
         ? parseAllowOriginPatterns(opts.allowOrigins)
         : undefined,
+    hostname: opts.hostname,
     sessionShellCommandEnabled,
     workspaceRememberLane,
     checkRate: rateLimiter?.checkRate,
