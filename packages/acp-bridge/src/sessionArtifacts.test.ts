@@ -80,19 +80,34 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toBeInstanceOf(SessionArtifactValidationError);
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Forged with flag',
+            storage: 'published',
+            url: 'https://example.com/flag',
+            trustedPublisher: true,
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toBeInstanceOf(SessionArtifactValidationError);
 
     await store.upsertMany([
       { title: 'Link', url: 'https://example.com/artifact' },
     ]);
-    const upgraded = await store.upsertMany([
-      {
-        title: 'Published',
-        storage: 'published',
-        url: 'https://example.com/artifact',
-        managedId: 'managed-1',
-        trustedPublisher: true,
-      },
-    ]);
+    const upgraded = await store.upsertMany(
+      [
+        {
+          title: 'Published',
+          storage: 'published',
+          url: 'https://example.com/artifact',
+          managedId: 'managed-1',
+        },
+      ],
+      { trustedPublisher: true },
+    );
 
     expect(upgraded.changes).toHaveLength(1);
     expect(upgraded.changes[0]).toMatchObject({
@@ -311,6 +326,56 @@ describe('SessionArtifactStore', () => {
     const missing = (await store.list()).artifacts[0];
     expect(missing).toMatchObject({ status: 'missing' });
     expect(missing).not.toHaveProperty('sizeBytes');
+  });
+
+  it('marks a stored workspace artifact missing if it later escapes by symlink', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-symlink-refresh',
+      workspaceCwd: workspace,
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+      await fs.writeFile(path.join(outside, 'secret.txt'), 'secret');
+      await store.upsertMany(
+        [{ title: 'Report', workspacePath: 'report.txt' }],
+        { strict: true },
+      );
+
+      await fs.rm(path.join(workspace, 'report.txt'));
+      await fs.symlink(
+        path.join(outside, 'secret.txt'),
+        path.join(workspace, 'report.txt'),
+      );
+
+      const artifact = (await store.list()).artifacts[0];
+      expect(artifact).toMatchObject({ status: 'missing' });
+      expect(artifact).not.toHaveProperty('sizeBytes');
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('does not hide unexpected workspace status errors', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-realpath-error',
+      workspaceCwd: workspace,
+    });
+    const realpathSpy = vi
+      .spyOn(fs, 'realpath')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+
+    try {
+      await expect(
+        store.upsertMany([{ title: 'Denied', workspacePath: 'denied.txt' }], {
+          strict: true,
+        }),
+      ).rejects.toThrow('permission denied');
+    } finally {
+      realpathSpy.mockRestore();
+    }
   });
 
   it('caches the workspace root realpath across artifact refreshes', async () => {

@@ -271,8 +271,7 @@ export class SessionArtifactStore {
       );
     }
 
-    const trustedPublisher =
-      trustedPublisherFromCaller || input.trustedPublisher === true;
+    const trustedPublisher = trustedPublisherFromCaller;
     const workspacePath = input.workspacePath
       ? normalizeWorkspacePath(input.workspacePath, this.workspaceCwd)
       : undefined;
@@ -358,12 +357,11 @@ export class SessionArtifactStore {
   }
 
   private async refreshWorkspaceStatuses(): Promise<void> {
-    for (const artifact of this.artifacts.values()) {
-      if (!artifact.workspacePath) {
-        continue;
-      }
-      await this.refreshWorkspaceStatus(artifact);
-    }
+    await Promise.all(
+      Array.from(this.artifacts.values())
+        .filter((artifact) => artifact.workspacePath)
+        .map((artifact) => this.refreshWorkspaceStatus(artifact)),
+    );
   }
 
   private async refreshWorkspaceStatus(
@@ -399,9 +397,9 @@ export class SessionArtifactStore {
     const candidates = Array.from(this.artifacts.values()).filter(
       (artifact) => !createdInThisBatch.has(artifact.id),
     );
-    for (const artifact of candidates) {
-      await this.refreshWorkspaceStatus(artifact);
-    }
+    await Promise.all(
+      candidates.map((artifact) => this.refreshWorkspaceStatus(artifact)),
+    );
 
     while (this.artifacts.size > this.maxArtifacts) {
       const artifact = selectEvictionCandidate(
@@ -1047,12 +1045,26 @@ async function getWorkspaceStatus(
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
       return { status: 'missing', escaped: true };
     }
-    const stat = await fs.stat(realPath);
+    const stat = await fs.lstat(realPath);
+    if (stat.isSymbolicLink()) {
+      return { status: 'missing', escaped: true };
+    }
     return {
       status: 'available',
       ...(stat.isFile() ? { sizeBytes: stat.size } : {}),
     };
-  } catch {
+  } catch (error) {
+    if (!isNotFoundError(error)) {
+      throw error;
+    }
     return { status: 'missing' };
   }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
