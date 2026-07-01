@@ -1636,9 +1636,9 @@ describe('createChannelWorkerSupervisor', () => {
         state: 'exited',
         exitCode: null,
         signal: 'SIGTERM',
+        error: 'ipc failed',
       }),
     );
-    expect(onExit.mock.calls[0]![0]).not.toHaveProperty('error');
   });
 
   it('ignores a late error after a ready worker exit is already recorded', async () => {
@@ -1698,8 +1698,8 @@ describe('createChannelWorkerSupervisor', () => {
       enabled: true,
       state: 'running',
       channels: ['telegram'],
+      error: 'ipc failed',
     });
-    expect(supervisor.snapshot()).not.toHaveProperty('error');
 
     const stopped = supervisor.stop();
     await Promise.resolve();
@@ -1742,8 +1742,8 @@ describe('createChannelWorkerSupervisor', () => {
       enabled: true,
       state: 'stopped',
       signal: 'SIGKILL',
+      error: 'ipc failed',
     });
-    expect(supervisor.snapshot()).not.toHaveProperty('error');
   });
 
   it('kills the worker synchronously on force shutdown', async () => {

@@ -619,12 +619,14 @@ export function createChannelWorkerSupervisor(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const error = sanitizeWorkerError(message, redaction);
-      snapshot = {
-        ...snapshot,
-        state: 'failed',
-        error,
-      };
-      if (kind === 'initial') throw new Error(error);
+      if (kind === 'initial') {
+        snapshot = {
+          ...snapshot,
+          state: 'failed',
+          error,
+        };
+        throw new Error(error);
+      }
       handleRestartFailure(message, redaction);
       return;
     }
@@ -751,10 +753,7 @@ export function createChannelWorkerSupervisor(
             (ready ? undefined : sanitizeWorkerError(message, redaction)),
         );
         child = undefined;
-        if (ready && !stopping) {
-          scheduleRestart();
-          notifyExit(opts.onExit, snapshotCopy());
-        } else if (!ready && kind === 'restart' && !stopping) {
+        if ((ready || kind === 'restart') && !stopping) {
           scheduleRestart();
           notifyExit(opts.onExit, snapshotCopy());
         }
@@ -765,6 +764,10 @@ export function createChannelWorkerSupervisor(
       function settleError(err: Error) {
         if (child !== startedChild || exitObserved) return;
         if (settled && ready) {
+          snapshot = {
+            ...snapshot,
+            error: sanitizeWorkerError(err.message, redaction),
+          };
           startedChild.kill('SIGTERM');
           return;
         }

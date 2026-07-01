@@ -503,17 +503,24 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       });
       removeEarlyShutdownHandlers();
 
-      const heartbeatTimer = setInterval(() => {
-        process.send?.({
-          type: 'heartbeat',
-          pid: process.pid,
-          at: new Date().toISOString(),
-        });
+      let heartbeatTimer: NodeJS.Timeout | undefined;
+      const clearHeartbeat = () => {
+        if (!heartbeatTimer) return;
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = undefined;
+      };
+      heartbeatTimer = setInterval(() => {
+        try {
+          process.send?.({
+            type: 'heartbeat',
+            pid: process.pid,
+            at: new Date().toISOString(),
+          });
+        } catch {
+          clearHeartbeat();
+        }
       }, CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref();
-      const clearHeartbeat = () => {
-        clearInterval(heartbeatTimer);
-      };
 
       let shuttingDown = false;
       let exitCode = 0;
