@@ -8973,6 +8973,54 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('preserves bridge state when required agent close fails so retry can flush', async () => {
+      let failClose = true;
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/close' && failClose) {
+            failClose = false;
+            throw new Error('flush failed');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireAgentClose: true,
+        }),
+      ).rejects.toThrow();
+
+      expect(handle.agent.extMethodCalls).toHaveLength(1);
+      expect(handle.agent.extMethodCalls[0]).toEqual({
+        method: 'qwen/control/session/close',
+        params: { sessionId: session.sessionId, requireFlush: true },
+      });
+      expect(bridge.sessionCount).toBe(1);
+      expect(() =>
+        bridge.recordHeartbeat(session.sessionId, {
+          clientId: session.clientId,
+        }),
+      ).not.toThrow();
+
+      await bridge.closeSession(session.sessionId, undefined, {
+        requireAgentClose: true,
+      });
+
+      expect(handle.agent.extMethodCalls).toHaveLength(2);
+      expect(() =>
+        bridge.recordHeartbeat(session.sessionId, {
+          clientId: session.clientId,
+        }),
+      ).toThrow(SessionNotFoundError);
+
+      await bridge.shutdown();
+    });
+
     it('resolves pending permissions as cancelled', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {

@@ -2616,11 +2616,36 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async closeStoredSession(sessionId: string): Promise<void> {
+  private async closeStoredSession(
+    sessionId: string,
+    opts?: { requireFlush?: boolean },
+  ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
       return;
+    }
+
+    const requireFlush = opts?.requireFlush === true;
+    const flushRecording = async (): Promise<unknown> => {
+      try {
+        await session.getConfig().getChatRecordingService()?.flush();
+        return undefined;
+      } catch (err) {
+        debugLogger.debug(
+          `Session ${sessionId} chat recording flush during close failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return err;
+      }
+    };
+
+    if (requireFlush) {
+      const preCancelFlushError = await flushRecording();
+      if (preCancelFlushError !== undefined) {
+        throw preCancelFlushError;
+      }
     }
 
     try {
@@ -2631,6 +2656,11 @@ class QwenAgent implements Agent {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    }
+
+    const flushError = await flushRecording();
+    if (flushError !== undefined && requireFlush) {
+      throw flushError;
     }
 
     try {
@@ -5874,7 +5904,9 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        await this.closeStoredSession(sessionId);
+        await this.closeStoredSession(sessionId, {
+          requireFlush: params['requireFlush'] === true,
+        });
         return { sessionId, closed: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
