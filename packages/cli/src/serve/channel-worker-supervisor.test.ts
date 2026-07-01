@@ -190,6 +190,18 @@ describe('createChannelWorkerSupervisor', () => {
     );
   });
 
+  it('rejects restart policies without a restart delay', () => {
+    expect(() =>
+      createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [] },
+      }),
+    ).toThrow('restartPolicy.delaysMs must be non-empty.');
+  });
+
   it('rejects startup when the worker never becomes ready', async () => {
     const child = new FakeChild();
     const supervisor = createChannelWorkerSupervisor({
@@ -1159,8 +1171,8 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'running',
       pid: 22222,
       restartCount: 1,
-      lastHeartbeatAt: expect.any(String),
     });
+    expect(supervisor.snapshot()).not.toHaveProperty('lastHeartbeatAt');
   });
 
   it('ignores heartbeats from a mismatched pid without rearming stale detection', async () => {
@@ -1374,6 +1386,39 @@ describe('createChannelWorkerSupervisor', () => {
     expect(onLog).toHaveBeenCalledWith({
       stream: 'stdout',
       line: ' at stack frame',
+    });
+  });
+
+  it('forwards CRLF-delimited worker log lines without trailing carriage returns', async () => {
+    const child = new FakeChild();
+    child.stderr = new EventEmitter();
+    const onLog = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onLog,
+    });
+
+    const started = supervisor.start();
+    child.stderr.emit('data', Buffer.from('line one\r\nline two\r\n'));
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    expect(onLog).toHaveBeenNthCalledWith(1, {
+      stream: 'stderr',
+      line: 'line one',
+    });
+    expect(onLog).toHaveBeenNthCalledWith(2, {
+      stream: 'stderr',
+      line: 'line two',
     });
   });
 

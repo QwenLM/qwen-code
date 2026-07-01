@@ -417,6 +417,9 @@ export function createChannelWorkerSupervisor(
 ): ChannelWorkerSupervisor {
   const spawnWorker = opts.spawnWorker ?? defaultSpawnWorker;
   const restartPolicy = opts.restartPolicy ?? DEFAULT_RESTART_POLICY;
+  if (restartPolicy.delaysMs.length === 0) {
+    throw new Error('restartPolicy.delaysMs must be non-empty.');
+  }
   const heartbeatTimeoutMs =
     opts.heartbeatTimeoutMs ?? DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS;
   if (
@@ -709,6 +712,7 @@ export function createChannelWorkerSupervisor(
               : [...snapshot.channels],
         };
         delete next.error;
+        delete next.lastHeartbeatAt;
         delete next.nextRestartAt;
         delete next.staleHeartbeatAt;
         if (message.requestedChannels?.length) {
