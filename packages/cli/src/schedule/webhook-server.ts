@@ -1,7 +1,7 @@
 /**
  * Webhook server for receiving external event triggers.
  *
- * Lightweight HTTP server that receives webhooks and triggers
+ * Lightweight HTTP/HTTPS server that receives webhooks and triggers
  * scheduled tasks based on configured triggers.
  */
 
@@ -11,7 +11,12 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
+import {
+  createServer as createHttpsServer,
+  type Server as HttpsServer,
+} from 'node:https';
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import * as fs from 'node:fs';
 
 export interface WebhookTriggerConfig {
   path: string;
@@ -28,10 +33,14 @@ export interface WebhookServerOptions {
   host?: string;
   triggers: WebhookTriggerConfig[];
   onTrigger: (taskId: string, payload: unknown) => Promise<void>;
+  tls?: {
+    cert: string; // path to cert file
+    key: string; // path to key file
+  };
 }
 
 export class WebhookServer {
-  private server: Server | null = null;
+  private server: Server | HttpsServer | null = null;
   private options: WebhookServerOptions;
 
   constructor(options: WebhookServerOptions) {
@@ -44,12 +53,36 @@ export class WebhookServer {
     }
 
     return new Promise((resolve, reject) => {
-      this.server = createServer(this.handleRequest.bind(this));
-
       const host = this.options.host || '127.0.0.1';
+      const protocol = this.options.tls ? 'https' : 'http';
+
+      if (this.options.tls) {
+        // HTTPS mode
+        let cert: Buffer; let key: Buffer;
+        try {
+          cert = fs.readFileSync(this.options.tls.cert);
+          key = fs.readFileSync(this.options.tls.key);
+        } catch (err) {
+          reject(
+            new Error(
+              `Failed to read TLS certificates: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+          return;
+        }
+
+        this.server = createHttpsServer(
+          { cert, key },
+          this.handleRequest.bind(this),
+        );
+      } else {
+        // HTTP mode (default)
+        this.server = createServer(this.handleRequest.bind(this));
+      }
+
       this.server.listen(this.options.port, host, () => {
         process.stderr.write(
-          `[WebhookServer] Listening on http://${host}:${this.options.port} with ${this.options.triggers.length} trigger(s)\n`,
+          `[WebhookServer] Listening on ${protocol}://${host}:${this.options.port} with ${this.options.triggers.length} trigger(s)\n`,
         );
         resolve();
       });

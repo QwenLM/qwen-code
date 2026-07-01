@@ -789,6 +789,19 @@ const webhookStartCommand: CommandModule = {
         type: 'string',
         default: '127.0.0.1',
         describe: 'Host to bind to',
+      })
+      .option('https', {
+        type: 'boolean',
+        default: false,
+        describe: 'Enable HTTPS (requires --cert and --key)',
+      })
+      .option('cert', {
+        type: 'string',
+        describe: 'Path to TLS certificate file',
+      })
+      .option('key', {
+        type: 'string',
+        describe: 'Path to TLS private key file',
       }),
   handler: async (argv) => {
     const { WebhookServer } = await import('../schedule/webhook-server.js');
@@ -796,6 +809,14 @@ const webhookStartCommand: CommandModule = {
 
     const port = argv['port'] as number;
     const host = argv['host'] as string;
+    const useHttps = argv['https'] as boolean;
+    const certPath = argv['cert'] as string | undefined;
+    const keyPath = argv['key'] as string | undefined;
+
+    if (useHttps && (!certPath || !keyPath)) {
+      writeStderrLine('Error: --https requires both --cert and --key paths');
+      process.exit(1);
+    }
 
     // Load tasks with webhook triggers
     const tasks = await listScheduleTasks();
@@ -835,6 +856,10 @@ const webhookStartCommand: CommandModule = {
       port,
       host,
       triggers,
+      tls:
+        useHttps && certPath && keyPath
+          ? { cert: certPath, key: keyPath }
+          : undefined,
       onTrigger: async (taskId: string, _payload: unknown) => {
         const { spawn } = await import('node:child_process');
         const task = await import('@qwen-code/qwen-code-core').then((m) =>
@@ -865,7 +890,10 @@ const webhookStartCommand: CommandModule = {
 
     try {
       await server.start();
-      writeStderrLine(`Webhook server started on http://${host}:${port}`);
+      const protocol = useHttps ? 'https' : 'http';
+      writeStderrLine(
+        `Webhook server started on ${protocol}://${host}:${port}`,
+      );
       writeStderrLine(`Registered ${triggers.length} trigger(s):`);
       for (const t of triggers) {
         writeStderrLine(`  ${t.method} ${t.path} → ${t.taskId}`);

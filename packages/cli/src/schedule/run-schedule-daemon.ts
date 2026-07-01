@@ -10,8 +10,8 @@
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import { homedir } from 'node:os';
-import { spawn } from 'node:child_process';
+import { homedir, platform } from 'node:os';
+import { spawn, fork } from 'node:child_process';
 
 import { ScheduleDaemon } from '@qwen-code/qwen-code-core';
 
@@ -165,6 +165,8 @@ export async function getScheduleDaemonStatus(): Promise<{
 // Background daemon mode
 // ---------------------------------------------------------------------------
 
+const MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+
 function getLogDir(): string {
   return path.join(homedir(), '.qwen', 'logs');
 }
@@ -178,8 +180,31 @@ function getStderrLogPath(): string {
 }
 
 /**
+ * Rotate log file if it exceeds MAX_LOG_SIZE_BYTES.
+ * Renames current log to .log.1 (overwriting any existing backup).
+ */
+function rotateLog(logPath: string): void {
+  try {
+    const stat = fs.statSync(logPath);
+    if (stat.size > MAX_LOG_SIZE_BYTES) {
+      const backupPath = `${logPath}.1`;
+      // Overwrite existing backup
+      try {
+        fs.unlinkSync(backupPath);
+      } catch {
+        // No existing backup
+      }
+      fs.renameSync(logPath, backupPath);
+    }
+  } catch {
+    // File doesn't exist yet — no rotation needed
+  }
+}
+
+/**
  * Start the daemon in background mode.
- * Spawns a detached child process that runs the daemon in foreground mode.
+ * Uses fork() on Windows to avoid Node.js v24 detached: true bug,
+ * spawn() on other platforms. Rotates logs before opening.
  */
 export async function startDaemonInBackground(
   options: DaemonStartOptions = {},
@@ -197,6 +222,10 @@ export async function startDaemonInBackground(
   const logDir = getLogDir();
   await fsp.mkdir(logDir, { recursive: true });
 
+  // Rotate logs before opening
+  rotateLog(getStdoutLogPath());
+  rotateLog(getStderrLogPath());
+
   // Determine the CLI entry point
   const cliEntry = process.argv[1];
   if (!cliEntry) {
@@ -204,17 +233,26 @@ export async function startDaemonInBackground(
   }
 
   // Build args
-  const args = [cliEntry, 'schedule', 'daemon', 'start', '--foreground'];
+  const args = ['schedule', 'daemon', 'start', '--foreground'];
   if (options.forceSandbox) {
     args.push('--force-sandbox');
   }
 
-  // Spawn detached child process
-  const child = spawn(process.execPath, args, {
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env },
-  });
+  // Use fork() on Windows to avoid Node.js v24 detached: true bug
+  // (nodejs/node#62125 — TerminateProcess bypasses JS cleanup)
+  // fork() works everywhere and avoids the issue entirely.
+  const isWindows = platform() === 'win32';
+  const child = isWindows
+    ? fork(cliEntry, args, {
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env },
+      })
+    : spawn(process.execPath, [cliEntry, ...args], {
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env },
+      });
 
   // Redirect output to log files
   const stdoutLog = fs.createWriteStream(getStdoutLogPath(), { flags: 'a' });
