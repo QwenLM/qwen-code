@@ -19,20 +19,16 @@
  */
 
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-const SPIKE_DIR = '/tmp/planc-spike';
-const spikeRequire = createRequire(`${SPIKE_DIR}/package.json`);
-const puppeteer = spikeRequire('puppeteer-core');
-const { WebSocket } = spikeRequire('ws');
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // repo root = .../packages/cli/src/serve/cdp-tunnel/acceptance -> up 6
 const REPO_ROOT = resolve(__dirname, '../../../../../..');
+const { default: puppeteer } = await import('puppeteer-core');
+const { WebSocket } = await import('ws');
 
 const HOST = '127.0.0.1';
 const PORT = 9710;

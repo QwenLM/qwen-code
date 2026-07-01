@@ -145,6 +145,31 @@
 .app,
 .app * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+:where(.app button) {
+  padding: 0;
+}
+
+.app *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.app *::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+.app *::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+
+.app *::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }
 
 .themeDark {
@@ -210,6 +235,9 @@
   --chat-editor-accent-color: #4a9eff;
   --chat-editor-selection-bg: #3d5a7a;
   --chat-editor-selection-color: #ffffff;
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #3a3a3a;
+  --scrollbar-thumb-hover: #525252;
 }
 
 .themeLight {
@@ -275,6 +303,9 @@
   --chat-editor-accent-color: #0b66c3;
   --chat-editor-selection-bg: rgba(11, 102, 195, 0.18);
   --chat-editor-selection-color: var(--chat-editor-text-primary);
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #c7c9cc;
+  --scrollbar-thumb-hover: #aeb1b5;
 }
 
 .content {

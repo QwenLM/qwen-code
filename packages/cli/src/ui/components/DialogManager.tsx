@@ -301,6 +301,7 @@ export const DialogManager = ({
           }}
           onRestartRequest={() => process.exit(0)}
           availableTerminalHeight={listDialogHeight}
+          width={mainAreaWidth}
           config={config}
         />
       </Box>
