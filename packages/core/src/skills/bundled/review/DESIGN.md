@@ -211,7 +211,7 @@ Our lightweight mode is the best a CLI can do: GitHub API calls work cross-repo 
 
 Key implementation detail: Step 7 must use the owner/repo extracted from the URL, not `gh repo view` (which returns the current repo).
 
-## Why auto-discover tools from CI config instead of user configuration
+## Why auto-discover build/test commands from CI config instead of user configuration
 
 **Considered:**
 

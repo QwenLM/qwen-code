@@ -231,8 +231,7 @@ Most PRs converge to the lower end of the range (1 reverse audit round); the cap
 The review intentionally excludes:
 
 - Pre-existing issues in unchanged code (focus on the diff only)
-- Style/formatting/naming that matches your codebase conventions
-- Purely cosmetic formatting a formatter would auto-normalize (substantive lint/type issues are no longer auto-excluded — no deterministic tool runs them)
+- Style or formatting a formatter would auto-normalize, or naming matching your codebase conventions — but NOT substantive issues a linter or type checker would flag (unused variables, unreachable code, type errors), which are in scope
 - Subjective "consider doing X" suggestions without a real problem
 - Minor refactoring that doesn't fix a bug or risk
 - Missing documentation unless the logic is genuinely confusing
@@ -245,4 +244,4 @@ The review intentionally excludes:
 - If unsure whether something is a problem → don't report it
 - Same pattern across N files → aggregated into one finding
 - PR comments are high-confidence only
-- Style/formatting issues matching codebase conventions are excluded
+- Cosmetic style/formatting matching codebase conventions is excluded

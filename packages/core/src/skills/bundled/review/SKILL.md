@@ -34,7 +34,7 @@ To disambiguate the argument type: if the argument is a pure integer, treat it a
 
 1. Check if any git remote URL matches the URL's owner/repo: run `git remote -v` and look for a remote whose URL contains the owner/repo (e.g., `openjdk/jdk`). This handles forks — a local clone of `wenshao/jdk` with an `upstream` remote pointing to `openjdk/jdk` can still review `openjdk/jdk` PRs.
 2. If a matching remote is found, proceed with the **normal worktree flow** — use that remote name (instead of hardcoded `origin`) for `git fetch <remote> pull/<number>/head:qwen-review/pr-<number>`. In Step 7, use the owner/repo from the URL for posting comments.
-3. If **no remote matches**, use **lightweight mode**: run `gh pr diff <url>` to get the diff directly. Skip Step 2 (no local rules) and Step 8 (no local cache). In Step 9, skip worktree removal (none was created) but still clean up temp files (`.qwen/tmp/qwen-review-{target}-*`). Also fetch existing PR comments using the URL's owner/repo (`gh api repos/{owner}/{repo}/pulls/{number}/comments`) to avoid duplicating human feedback. In Step 7, use the owner/repo from the URL. Inform the user: "Cross-repo review: running in lightweight mode (no build/test)."
+3. If **no remote matches**, use **lightweight mode**: run `gh pr diff <url>` to get the diff directly. Skip Step 2 (no local rules) and Step 8 (no local reports or cache). In Step 9, skip worktree removal (none was created) but still clean up temp files (`.qwen/tmp/qwen-review-{target}-*`). Also fetch existing PR comments using the URL's owner/repo (`gh api repos/{owner}/{repo}/pulls/{number}/comments`) to avoid duplicating human feedback. In Step 7, use the owner/repo from the URL. Inform the user: "Cross-repo review: running in lightweight mode (no build/test)."
 
 Otherwise (not a URL, not an integer), treat the argument as a file path.
 
@@ -572,9 +572,8 @@ This step runs **after** Step 7 and Step 8 to ensure all review outputs are save
 These criteria apply to both Step 3 (review agents) and Step 4 (verification agents). Do NOT flag or confirm any finding that matches:
 
 - Pre-existing issues in unchanged code (focus on the diff only)
-- Style, formatting, or naming that matches surrounding codebase conventions
+- Style or formatting a formatter (prettier, gofmt) would auto-normalize, or naming that matches surrounding codebase conventions — but NOT substantive issues a linter or type checker would flag (unused variables, unreachable code, type errors), which are in scope and should be reported even where the surrounding code tolerates them
 - Pedantic nitpicks that a senior engineer would not flag
-- Purely cosmetic formatting a formatter (prettier, gofmt) would auto-normalize. Substantive issues a linter or type checker would flag (unused variables, unreachable code, type errors) are in scope — LLM agents should report them.
 - Subjective "consider doing X" suggestions that aren't real problems
 - If you're unsure whether something is a problem, do NOT report it
 - Minor refactoring suggestions that don't address real problems
