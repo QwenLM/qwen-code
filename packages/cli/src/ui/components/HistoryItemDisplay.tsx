@@ -114,7 +114,10 @@ const ClickableThinkMessage: React.FC<{
   // with the conversation). Click needs SGR mouse tracking; useMouseEvents
   // enables it only in VP mode (no `bypassVpGate`), so in non-VP the handler
   // stays dormant and native scrollback is preserved — the block still toggles
-  // via Alt+T (the "option+t to expand" affordance it already shows).
+  // via Alt+T. Advertise "click" in the collapsed hint only in VP, where the
+  // click actually does something.
+  const settings = useSettings();
+  const clickable = !!settings.merged.ui?.useTerminalBuffer;
   const isActive = !isPending;
 
   useMouseEvents(
@@ -147,6 +150,7 @@ const ClickableThinkMessage: React.FC<{
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
         durationMs={durationMs}
+        clickable={clickable}
       />
     </Box>
   );

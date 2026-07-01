@@ -57,6 +57,11 @@ interface ThinkMessageProps {
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
+  /**
+   * VP mode only: the collapsed line is mouse-clickable, so the hint advertises
+   * "click" in addition to the keyboard toggle. Non-VP has no click handler.
+   */
+  clickable?: boolean;
 }
 
 interface ThinkMessageContentProps {
@@ -288,6 +293,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   durationMs,
+  clickable = false,
 }) => {
   const durationSuffix =
     durationMs != null ? ` ${formatDuration(durationMs)}` : '';
@@ -297,10 +303,13 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
       durationMs != null
         ? `${t('Thought for')} ${formatDuration(durationMs)}`
         : t('Thinking');
+    const hint = clickable
+      ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
+      : t('({{keyHint}} to expand)', { keyHint: toggleKeyHint });
     return (
       <Text dimColor italic>
         {THINKING_ICON}
-        {label} {t('({{keyHint}} to expand)', { keyHint: toggleKeyHint })}
+        {label} {hint}
       </Text>
     );
   }
