@@ -1660,8 +1660,12 @@ export class SessionService {
   }
 
   async sessionExistsInAnyState(sessionId: string): Promise<boolean> {
-    const location = await this.getSessionLocation(sessionId);
-    return location !== undefined;
+    try {
+      const location = await this.getSessionLocation(sessionId);
+      return location !== undefined;
+    } catch {
+      return true;
+    }
   }
 }
 

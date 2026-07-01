@@ -1759,6 +1759,23 @@ describe('SessionService', () => {
         sessionService.sessionExistsInAnyState(sessionIdA),
       ).resolves.toBe(true);
     });
+
+    it('should treat unreadable active or archived files as existing for any-state checks', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            throw new Error('malformed jsonl');
+          }
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+
+      await expect(
+        sessionService.sessionExistsInAnyState(sessionIdA),
+      ).resolves.toBe(true);
+    });
   });
 
   describe('getResumePromptTokenCount', () => {
