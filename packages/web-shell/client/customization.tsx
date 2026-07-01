@@ -25,6 +25,8 @@ export interface WebShellMarkdownCustomization {
   rehypePlugins?: Options['rehypePlugins'];
 }
 
+export type MarkdownTableMode = 'basic' | 'advanced';
+
 export type ToolHeaderKind =
   | 'agent'
   | 'edit'
@@ -100,6 +102,9 @@ export type ComposerToolbarStartRenderer =
   ComponentType<WebShellComposerToolbarStartRenderInfo>;
 
 export type ComposerToolbarEndRenderer =
+  ComponentType<WebShellComposerToolbarStartRenderInfo>;
+
+export type ComposerToolbarRightRenderer =
   ComponentType<WebShellComposerToolbarStartRenderInfo>;
 
 // ---- Background task info (public type for footer renderer) ----
@@ -197,6 +202,7 @@ export interface WebShellCustomization {
   renderWelcomeFooter?: WelcomeFooterRenderer;
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
+  renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   /**
@@ -206,6 +212,7 @@ export interface WebShellCustomization {
    * expanded. Defaults to enabled when unset.
    */
   collapseCompletedTurns?: boolean;
+  markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
 }

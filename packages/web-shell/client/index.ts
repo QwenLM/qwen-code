@@ -10,6 +10,7 @@ export type {
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
   ComposerToolbarStartRenderer,
+  ComposerToolbarRightRenderer,
   WelcomeFooterRenderer,
   WebShellComposerApi,
   WebShellComposerInput,
