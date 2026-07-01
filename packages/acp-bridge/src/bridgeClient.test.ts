@@ -793,6 +793,32 @@ describe('BridgeClient — artifact ingress', () => {
       stderr.mockRestore();
     }
   });
+
+  it('logs and drops artifact events for unknown sessions', async () => {
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId: 'sess:missing',
+          artifacts: [{ title: 'Lost', url: 'https://example.com/lost' }],
+        }),
+      ).resolves.toBeUndefined();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=session_not_found');
+      expect(logged).toContain('sess:missing');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
 });
 
 /**

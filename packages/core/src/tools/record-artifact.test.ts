@@ -110,5 +110,29 @@ describe('RecordArtifactTool', () => {
         url: 'https://example.com/resource',
       }),
     ).toThrow(/unsafe markup/);
+
+    expect(() =>
+      tool.build({
+        title: 'Script data url',
+        description: 'data:text/javascript,alert(1)',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/unsafe markup/);
+
+    expect(() =>
+      tool.build({
+        title: 'Metadata key',
+        url: 'https://example.com/resource',
+        metadata: { '<script>': 'unsafe key' },
+      }),
+    ).toThrow(/metadata/);
+
+    expect(() =>
+      tool.build({
+        title: 'Metadata value',
+        url: 'https://example.com/resource',
+        metadata: { preview: 'data:text/javascript,alert(1)' },
+      }),
+    ).toThrow(/metadata/);
   });
 });

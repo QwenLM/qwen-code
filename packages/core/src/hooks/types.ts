@@ -290,11 +290,33 @@ export interface HookOutput {
 }
 
 function isToolArtifactLike(value: unknown): value is ToolArtifact {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const artifact = value as Record<string, unknown>;
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as { title?: unknown }).title === 'string'
+    typeof artifact['title'] === 'string' &&
+    isOptionalString(artifact, 'kind') &&
+    isOptionalString(artifact, 'storage') &&
+    isOptionalString(artifact, 'description') &&
+    isOptionalString(artifact, 'workspacePath') &&
+    isOptionalString(artifact, 'managedId') &&
+    isOptionalString(artifact, 'url') &&
+    isOptionalString(artifact, 'mimeType') &&
+    (artifact['sizeBytes'] === undefined ||
+      typeof artifact['sizeBytes'] === 'number') &&
+    (artifact['metadata'] === undefined ||
+      (typeof artifact['metadata'] === 'object' &&
+        artifact['metadata'] !== null &&
+        !Array.isArray(artifact['metadata'])))
   );
+}
+
+function isOptionalString(
+  value: Record<string, unknown>,
+  key: string,
+): boolean {
+  return value[key] === undefined || typeof value[key] === 'string';
 }
 
 export const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;

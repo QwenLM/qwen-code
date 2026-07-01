@@ -237,6 +237,7 @@ export interface SessionMetadataResult {
 
 type OpenStringUnion<T extends string> = T | (string & {});
 
+/** Known artifact kinds mirrored from the daemon/core contract. */
 export type KnownDaemonSessionArtifactKind =
   | 'file'
   | 'link'

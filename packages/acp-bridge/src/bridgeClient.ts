@@ -859,7 +859,12 @@ export class BridgeClient implements Client {
       return;
     }
     const entry = this.resolveEntry(sessionId);
-    if (!entry) return;
+    if (!entry) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_not_found`,
+      );
+      return;
+    }
     const hookEventName =
       typeof params['hookEventName'] === 'string'
         ? params['hookEventName']

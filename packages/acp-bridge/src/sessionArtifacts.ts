@@ -410,10 +410,15 @@ export class SessionArtifactStore {
         delete artifact.workspacePath;
       }
       artifact.lastStatAt = options.now ?? Date.now();
-    } catch {
+    } catch (error) {
       if (options.onError === 'preserve') {
         return;
       }
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} action=status_refresh_failed artifactId=${artifact.id} reason=${JSON.stringify(
+          error instanceof Error ? error.message : String(error),
+        )}`,
+      );
       artifact.status = 'missing';
       artifact.sizeBytes = undefined;
       artifact.lastStatAt = options.now ?? Date.now();
@@ -726,8 +731,7 @@ function selectEvictionCandidate(
             SOURCE_RESERVATIONS[artifact.retentionSource],
       ),
     ) ??
-    oldest(candidates.filter((artifact) => !artifact.clientRetained)) ??
-    oldest(candidates)
+    oldest(candidates.filter((artifact) => !artifact.clientRetained))
   );
 }
 
@@ -1009,7 +1013,7 @@ function hasControlCharacter(value: string): boolean {
 }
 
 function hasUnsafeDisplayPayload(value: string): boolean {
-  return /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*text\/html|on[a-z]+\s*=/i.test(
+  return /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript)|on[a-z]+\s*=/i.test(
     value,
   );
 }
@@ -1080,9 +1084,21 @@ function normalizeMetadata(
   }
   const normalized: Record<string, string | number | boolean | null> = {};
   for (const [key, value] of Object.entries(metadata)) {
+    if (!key) {
+      throw new SessionArtifactValidationError(
+        'metadata keys must not be empty',
+        'metadata',
+      );
+    }
     if (key.length > 120) {
       throw new SessionArtifactValidationError(
         'metadata keys must be 120 characters or fewer',
+        'metadata',
+      );
+    }
+    if (hasControlCharacter(key) || hasUnsafeDisplayPayload(key)) {
+      throw new SessionArtifactValidationError(
+        'metadata keys contain unsafe content',
         'metadata',
       );
     }

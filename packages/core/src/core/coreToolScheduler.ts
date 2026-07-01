@@ -986,6 +986,8 @@ function withPostToolBatchArtifacts(
     return completedCalls;
   }
 
+  // PostToolBatch hook output is batch-level and carries no per-call target.
+  // Attach it to the last completed call so the bridge receives it once.
   const existingArtifacts = lastCall.response.artifacts ?? [];
   calls[lastIndex] = {
     ...lastCall,

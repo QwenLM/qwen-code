@@ -513,6 +513,10 @@ describe('toolHookTriggers', () => {
                 title: 'Batch report',
                 workspacePath: 'batch.html',
               },
+              {
+                title: 'Bad report',
+                workspacePath: 123,
+              },
             ],
           },
         },

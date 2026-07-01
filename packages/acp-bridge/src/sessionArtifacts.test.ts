@@ -209,6 +209,38 @@ describe('SessionArtifactStore', () => {
     );
   });
 
+  it('drops new overflow instead of evicting existing client-retained artifacts', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's3-retained',
+      workspaceCwd: workspace,
+      maxArtifacts: 2,
+    });
+
+    const first = await store.upsertMany([
+      {
+        title: 'Retained one',
+        source: 'client',
+        url: 'https://example.com/retained-one',
+      },
+    ]);
+    const second = await store.upsertMany([
+      {
+        title: 'Retained two',
+        source: 'client',
+        url: 'https://example.com/retained-two',
+      },
+    ]);
+
+    const overflow = await store.upsertMany([
+      { title: 'Tool overflow', url: 'https://example.com/tool-overflow' },
+    ]);
+
+    expect(overflow.changes).toEqual([]);
+    expect(
+      (await store.list()).artifacts.map((artifact) => artifact.id),
+    ).toEqual([first.changes[0]?.artifactId, second.changes[0]?.artifactId]);
+  });
+
   it('rejects workspace path traversal', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's4',
@@ -376,6 +408,19 @@ describe('SessionArtifactStore', () => {
       store.upsertMany(
         [
           {
+            title: 'Report',
+            description: 'data:text/javascript,alert(1)',
+            url: 'https://example.com/data-js',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'description' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
             title: '&lt;script&gt;alert(1)&lt;/script&gt;',
             url: 'https://example.com/entity',
           },
@@ -391,6 +436,19 @@ describe('SessionArtifactStore', () => {
             title: 'Report',
             url: 'https://example.com/metadata',
             metadata: { preview: '<iframe src="https://example.com">' },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Report',
+            url: 'https://example.com/metadata-key',
+            metadata: { '<script>': 'unsafe key' },
           },
         ],
         { strict: true },
@@ -574,14 +632,21 @@ describe('SessionArtifactStore', () => {
       .mockRejectedValueOnce(
         Object.assign(new Error('permission denied'), { code: 'EACCES' }),
       );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
 
     try {
       const artifact = (await store.list()).artifacts[0];
       expect(artifact).toMatchObject({ status: 'missing' });
       expect(artifact).not.toHaveProperty('sizeBytes');
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('status_refresh_failed');
+      expect(logged).toContain('permission denied');
     } finally {
       vi.useRealTimers();
       realpathSpy.mockRestore();
+      stderr.mockRestore();
     }
   });
 

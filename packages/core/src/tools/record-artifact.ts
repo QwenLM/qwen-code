@@ -287,11 +287,8 @@ function validateString(
   if (trimmed.length > maxLength) {
     return `"${field}" exceeds ${maxLength} characters`;
   }
-  for (let i = 0; i < trimmed.length; i++) {
-    const code = trimmed.charCodeAt(i);
-    if (code <= 0x1f || code === 0x7f) {
-      return `"${field}" contains control characters`;
-    }
+  if (hasControlCharacter(trimmed)) {
+    return `"${field}" contains control characters`;
   }
   if (
     (field === 'title' || field === 'description') &&
@@ -302,8 +299,18 @@ function validateString(
   return null;
 }
 
+function hasControlCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function hasUnsafeDisplayPayload(value: string): boolean {
-  return /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*text\/html|on[a-z]+\s*=/i.test(
+  return /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript)|on[a-z]+\s*=/i.test(
     value,
   );
 }
@@ -342,8 +349,14 @@ function validateMetadata(
     return '"metadata" must be an object';
   }
   for (const [key, value] of Object.entries(metadata)) {
+    if (!key) {
+      return '"metadata" keys must not be empty';
+    }
     if (key.length > 120) {
       return '"metadata" keys must be 120 characters or fewer';
+    }
+    if (hasControlCharacter(key) || hasUnsafeDisplayPayload(key)) {
+      return '"metadata" keys contain unsafe content';
     }
     if (
       value !== null &&
@@ -352,6 +365,12 @@ function validateMetadata(
       typeof value !== 'boolean'
     ) {
       return '"metadata" values must be primitive';
+    }
+    if (
+      typeof value === 'string' &&
+      (hasControlCharacter(value) || hasUnsafeDisplayPayload(value))
+    ) {
+      return '"metadata" string values contain unsafe content';
     }
   }
   if (Buffer.byteLength(JSON.stringify(metadata), 'utf8') > 4096) {
