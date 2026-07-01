@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   DaemonWorkspaceProvider,
   DaemonSessionProvider,
@@ -97,6 +97,20 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   );
   const [sessionId] = useState<string | undefined>(() => getSessionIdFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  // Keep the <html> theme class and <meta name="theme-color"> in sync with
+  // the React theme so mobile status bars / overscroll backgrounds stay
+  // consistent when the user toggles or when ?theme= lands via URL.
+  useEffect(() => {
+    const root = document.documentElement;
+    for (const cls of Array.from(root.classList)) {
+      if (cls.startsWith('theme-')) root.classList.remove(cls);
+    }
+    root.classList.add(`theme-${theme}`);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      meta.setAttribute('content', theme === 'light' ? '#ffffff' : '#0d0d0d');
+    }
+  }, [theme]);
   const handleThemeChange = useCallback((nextTheme: WebShellTheme) => {
     setTheme(nextTheme);
     storeTheme(nextTheme);

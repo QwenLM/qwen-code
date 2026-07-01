@@ -149,13 +149,20 @@ export const MessageItem = memo(function MessageItem({
     </ErrorBoundary>
   );
 
+  // Re-enable text selection on every message row so users can long-press /
+  // drag-select reply text. The blanket `html * { user-select: none }` in
+  // standalone.css disables selection on UI chrome (native-app feel); this
+  // attribute opts the message subtree back in, including descendants
+  // (Markdown body, code blocks, tool panels, sub-messages).
+  const selectableSafeBody = <div data-user-selectable="true">{safeBody}</div>;
+
   if (message.role === 'assistant') {
     if (showAssistantActions) {
-      return safeBody;
+      return selectableSafeBody;
     }
     return (
       <MessageTimestamp timestamp={message.timestamp}>
-        {safeBody}
+        {selectableSafeBody}
       </MessageTimestamp>
     );
   }
@@ -163,7 +170,7 @@ export const MessageItem = memo(function MessageItem({
   // The cancellation marker is a right-aligned, full-width turn-terminal row; a
   // hover timestamp would overlap its text, so render it without the wrapper.
   if (message.role === 'system' && message.source === 'prompt_cancelled') {
-    return safeBody;
+    return selectableSafeBody;
   }
 
   return (
@@ -173,7 +180,7 @@ export const MessageItem = memo(function MessageItem({
       copyText={message.role === 'user' ? message.content : undefined}
       copyTitle="Copy"
     >
-      {safeBody}
+      {selectableSafeBody}
     </MessageTimestamp>
   );
 }, areMessageItemPropsEqual);
