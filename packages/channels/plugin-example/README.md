@@ -61,6 +61,15 @@ In a separate terminal:
 qwen channel start my-plugin-test
 ```
 
+Or run the same adapter under the experimental daemon-managed channel worker:
+
+```bash
+cd /path/to/your/project
+qwen serve --channel my-plugin-test
+```
+
+`qwen serve --channel` requires the channel's configured `cwd` to resolve to the daemon workspace.
+
 ### 6. Send a message
 
 ```bash
@@ -98,6 +107,8 @@ See `src/MockPluginChannel.ts` for a working example. The key points:
 `AcpBridge` is still the current standalone `qwen channel start` implementation. Plugin adapters should depend on the `ChannelAgentBridge` abstraction provided by `@qwen-code/channel-base`.
 
 Existing TypeScript plugins that explicitly type the adapter constructor or factory `bridge` parameter as `AcpBridge` should change that annotation to `ChannelAgentBridge`. JavaScript plugins are unaffected at runtime.
+
+`qwen serve --channel <name>` hosts the same plugin through a daemon-managed worker backed by `DaemonChannelBridge`. The worker is owned by `qwen serve`; stop the daemon to stop serve-managed channels.
 
 ### Features you get for free
 

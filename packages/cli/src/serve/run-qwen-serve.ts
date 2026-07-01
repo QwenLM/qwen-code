@@ -78,12 +78,19 @@ import {
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
+import type {
+  ChannelWorkerSupervisor,
+  CreateChannelWorkerSupervisorOptions,
+} from './channel-worker-supervisor.js';
+import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
+import { channelSelectionNames } from './channel-selection.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
+import type { ServiceInfo } from '../commands/channel/pidfile.js';
+import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
 
-const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 // Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
 // `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
 // the daemon WS. Off by default while the contract settles.
@@ -323,6 +330,22 @@ function formatHostForUrl(host: string): string {
   return host;
 }
 
+export function formatChannelWorkerDaemonUrl(
+  host: string,
+  port: number,
+): string {
+  const normalized = host.trim().toLowerCase();
+  if (
+    normalized === '' ||
+    normalized === '0.0.0.0' ||
+    normalized === '::' ||
+    normalized === '[::]'
+  ) {
+    return `http://127.0.0.1:${port}`;
+  }
+  return `http://${formatHostForUrl(host)}:${port}`;
+}
+
 /**
  * Pull the `context.fileName` snapshot out of merged settings into a
  * typed string, falling back to `undefined` when the value is missing
@@ -409,6 +432,74 @@ type SettingsRuntime = typeof import('../config/settings.js');
 type LoadedSettingsAdapterRuntime =
   typeof import('../config/loadedSettingsAdapter.js');
 type TrustedFoldersRuntime = typeof import('../config/trustedFolders.js');
+type ChannelServicePidfile = {
+  readServiceInfo(): ServiceInfo | null;
+  writeServeServiceInfo(opts: {
+    channels: string[];
+    servePid?: number;
+    workerPid?: number;
+  }): void;
+  reserveServeServiceInfo(opts: {
+    channels: string[];
+    servePid?: number;
+  }): void;
+  removeServiceInfo(): void;
+  removeServeServiceInfo?(servePid?: number): boolean;
+};
+type ChannelWorkerRuntime = {
+  createChannelWorkerSupervisor(
+    opts: CreateChannelWorkerSupervisorOptions,
+  ): ChannelWorkerSupervisor;
+  channelServicePidfile: ChannelServicePidfile;
+};
+
+let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
+async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
+  channelWorkerRuntimePromise ??= Promise.all([
+    import('./channel-worker-supervisor.js'),
+    import('../commands/channel/pidfile.js'),
+  ])
+    .then(([supervisor, pidfile]) => ({
+      createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
+      channelServicePidfile: pidfile,
+    }))
+    .catch((err: unknown) => {
+      channelWorkerRuntimePromise = undefined;
+      throw err;
+    });
+  return channelWorkerRuntimePromise;
+}
+
+function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
+  const snapshot = {
+    enabled: false,
+    state: 'disabled' as const,
+    channels: [],
+  };
+  return {
+    async start() {},
+    async stop() {},
+    killAllSync() {},
+    snapshot: () => ({ ...snapshot, channels: [] }),
+  };
+}
+
+function writeServeChannelReservation(
+  channelServicePidfile: ChannelServicePidfile,
+  channels: string[],
+): void {
+  channelServicePidfile.reserveServeServiceInfo({
+    channels,
+    servePid: process.pid,
+  });
+}
+
+function channelServicePidfileConflictError(info: ServiceInfo): Error {
+  const owner = info.owner === 'serve' ? 'qwen serve' : 'qwen channel start';
+  return new Error(
+    `Channel service is already running under ${owner} (PID ${info.pid}). Stop it before starting qwen serve --channel.`,
+  );
+}
 
 function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
@@ -511,6 +602,10 @@ export interface RunQwenServeDeps {
    * QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS, then 120s. Use 0 to disable.
    */
   runtimeStartupTimeoutMs?: number;
+  channelWorkerSupervisorFactory?: (
+    opts: CreateChannelWorkerSupervisorOptions,
+  ) => ChannelWorkerSupervisor;
+  channelServicePidfile?: ChannelServicePidfile;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -832,6 +927,9 @@ function createBootstrapServeApp(input: {
   sessionShellCommandEnabled: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   getRuntimeError: () => string | undefined;
+  getChannelWorkerSnapshot: () => ReturnType<
+    ChannelWorkerSupervisor['snapshot']
+  >;
   onHealthServed?: () => void;
 }): Application {
   const {
@@ -844,6 +942,7 @@ function createBootstrapServeApp(input: {
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError,
+    getChannelWorkerSnapshot,
     onHealthServed,
   } = input;
   const app = express();
@@ -905,6 +1004,7 @@ function createBootstrapServeApp(input: {
       return;
     }
     const runtimeError = getRuntimeError();
+    const channelWorker = getChannelWorkerSnapshot();
     const runtimeFailed = runtimeError !== undefined;
     const issue: DaemonStatusIssue = runtimeError
       ? {
@@ -978,6 +1078,7 @@ function createBootstrapServeApp(input: {
           policy: permissionPolicy ?? 'first-responder',
         },
         channel: { live: false },
+        channelWorker,
         transport: {
           restSseActive: 0,
           acp: {
@@ -1205,6 +1306,77 @@ export async function runQwenServe(
     cdpTunnelOverWs:
       optsIn.cdpTunnelOverWs ??
       process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
+  };
+  const channelRuntime = opts.channelSelection
+    ? await loadChannelWorkerRuntime()
+    : undefined;
+  const channelServicePidfile =
+    deps.channelServicePidfile ?? channelRuntime?.channelServicePidfile;
+  let channelPidfileReserved = false;
+  const removeCurrentServePidfile = (): void => {
+    if (!opts.channelSelection || !channelServicePidfile) return;
+    if (!channelPidfileReserved) return;
+    if (channelServicePidfile.removeServeServiceInfo) {
+      if (channelServicePidfile.removeServeServiceInfo(process.pid)) {
+        channelPidfileReserved = false;
+      }
+      return;
+    }
+    const info = channelServicePidfile.readServiceInfo();
+    if (
+      info?.owner === 'serve' &&
+      info.pid === process.pid &&
+      info.servePid === process.pid
+    ) {
+      channelServicePidfile.removeServiceInfo();
+      channelPidfileReserved = false;
+    }
+  };
+  const reserveChannelServicePidfile = (): void => {
+    if (!opts.channelSelection) return;
+    if (!channelServicePidfile) {
+      throw new Error('Channel service pidfile runtime is not available.');
+    }
+    const channelPidfileNames = channelSelectionNames(opts.channelSelection);
+    const existingChannelService = channelServicePidfile.readServiceInfo();
+    if (existingChannelService) {
+      throw channelServicePidfileConflictError(existingChannelService);
+    }
+    try {
+      writeServeChannelReservation(channelServicePidfile, channelPidfileNames);
+      channelPidfileReserved = true;
+    } catch (err) {
+      if (err && typeof err === 'object' && 'code' in err) {
+        const code = (err as { code?: unknown }).code;
+        if (code === 'EEXIST') {
+          const info = channelServicePidfile.readServiceInfo();
+          if (info) {
+            throw channelServicePidfileConflictError(info);
+          }
+          try {
+            writeServeChannelReservation(
+              channelServicePidfile,
+              channelPidfileNames,
+            );
+            channelPidfileReserved = true;
+            return;
+          } catch (retryErr) {
+            if (
+              retryErr &&
+              typeof retryErr === 'object' &&
+              'code' in retryErr &&
+              (retryErr as { code?: unknown }).code === 'EEXIST'
+            ) {
+              throw new Error(
+                'Channel service is already starting. Retry after the current startup finishes.',
+              );
+            }
+            throw retryErr;
+          }
+        }
+      }
+      throw err;
+    }
   };
   validateRateLimitOptions(opts);
 
@@ -1610,6 +1782,26 @@ export async function runQwenServe(
     markRuntimeFailed = reject;
   });
   void runtimeReady.catch(() => {});
+  let channelWorker: ChannelWorkerSupervisor =
+    createDisabledChannelWorkerSupervisor();
+  const getChannelWorkerSnapshot = () => channelWorker.snapshot();
+  const writeChannelWorkerPidfile = (): void => {
+    if (!opts.channelSelection || !channelServicePidfile) return;
+    const snapshot = channelWorker.snapshot();
+    try {
+      channelServicePidfile.writeServeServiceInfo({
+        channels: snapshot.channels,
+        servePid: process.pid,
+        workerPid: snapshot.pid,
+      });
+    } catch (err) {
+      daemonLog.warn(
+        `failed to write channel worker pidfile metadata: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
 
   const handleBridge =
     deps.bridge ??
@@ -1916,6 +2108,7 @@ export async function runQwenServe(
       startup,
       fsFactory,
       daemonLog,
+      getChannelWorkerSnapshot,
       workspace: workspaceService,
       // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
       // so the WS provider and the child-answering bridge share one sender map.
@@ -1976,8 +2169,10 @@ export async function runQwenServe(
     runtimeAppForCleanup = runtime.app;
     runtimeApp = runtime.app;
     bridgeRef = runtime.bridge;
-    runtimeStartupSettled = true;
-    markRuntimeReady();
+    if (!opts.channelSelection) {
+      runtimeStartupSettled = true;
+      markRuntimeReady();
+    }
   }
 
   cliVersion ??= await cliVersionPromise;
@@ -1992,6 +2187,7 @@ export async function runQwenServe(
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError: () => runtimeStartupError,
+    getChannelWorkerSnapshot,
     onHealthServed: deferRuntimeUntilFirstHealth
       ? () => startRuntimeAfterHealth?.()
       : undefined,
@@ -2053,6 +2249,8 @@ export async function runQwenServe(
     );
   }
 
+  reserveChannelServicePidfile();
+
   return await new Promise<RunHandle>((resolve, reject) => {
     const server = app.listen(opts.port, listenHostname, () => {
       startup.listenerReadyAt = new Date().toISOString();
@@ -2091,6 +2289,46 @@ export async function runQwenServe(
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      try {
+        if (opts.channelSelection) {
+          const createSupervisor =
+            deps.channelWorkerSupervisorFactory ??
+            channelRuntime?.createChannelWorkerSupervisor;
+          if (!createSupervisor) {
+            throw new Error(
+              'Channel worker supervisor runtime is not available.',
+            );
+          }
+          channelWorker = createSupervisor({
+            cliEntryPath: findCliEntryPath(),
+            daemonUrl: formatChannelWorkerDaemonUrl(opts.hostname, actualPort),
+            ...(token ? { daemonToken: token } : {}),
+            workspace: boundWorkspace,
+            selection: opts.channelSelection,
+            onExit: (snapshot) => {
+              daemonLog.warn(
+                `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
+                  `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
+                  `error=${snapshot.error ?? 'none'})`,
+              );
+              removeCurrentServePidfile();
+            },
+          });
+        }
+      } catch (err) {
+        removeCurrentServePidfile();
+        const error = err instanceof Error ? err : new Error(String(err));
+        server.close((closeErr) => {
+          if (closeErr) {
+            daemonLog.error(
+              'server close after channel worker setup error failed',
+              closeErr,
+            );
+          }
+          reject(error);
+        });
+        return;
+      }
       writeStdoutLine(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
@@ -2186,6 +2424,14 @@ export async function runQwenServe(
           }
         }
       };
+      const stopChannelWorkerAfterFailedStartup = async (): Promise<void> => {
+        await channelWorker.stop().catch((stopErr) => {
+          daemonLog.error(
+            'channel worker stop after runtime startup error failed',
+            stopErr instanceof Error ? stopErr : null,
+          );
+        });
+      };
       const failRuntimeStartup = async (
         err: unknown,
         bridgeForCleanup?: AcpSessionBridge,
@@ -2208,8 +2454,33 @@ export async function runQwenServe(
         }
         writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
         daemonLog.error('runtime startup failed', error);
-        markRuntimeFailed(error);
+        await stopChannelWorkerAfterFailedStartup();
+        removeCurrentServePidfile();
         await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
+        markRuntimeFailed(error);
+      };
+      const armRuntimeStartupTimer = (): void => {
+        if (runtimeStartupTimeoutMs <= 0 || runtimeStartupTimer) return;
+        runtimeStartupTimer = setTimeout(() => {
+          void failRuntimeStartup(
+            new Error(
+              `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
+            ),
+          );
+        }, runtimeStartupTimeoutMs);
+        runtimeStartupTimer.unref();
+      };
+      const completeRuntimeStartup = async (): Promise<void> => {
+        if (runtimeStartupSettled) return;
+        if (opts.channelSelection) {
+          await channelWorker.start();
+          if (runtimeStartupSettled) return;
+          writeChannelWorkerPidfile();
+        }
+        if (runtimeStartupSettled) return;
+        runtimeStartupSettled = true;
+        clearRuntimeStartupTimer();
+        markRuntimeReady();
       };
       const startBridgePreheat = (bridge: AcpSessionBridge): void => {
         startup.preheat.status = 'running';
@@ -2236,6 +2507,7 @@ export async function runQwenServe(
       };
       const startRuntime = (): void => {
         if (runtimeStarting) return;
+        armRuntimeStartupTimer();
         clearRuntimeStartAfterHealthTimer();
         clearRuntimeStartFallbackTimer();
         runtimeStarting = buildRuntime()
@@ -2261,21 +2533,9 @@ export async function runQwenServe(
             if (shouldPreheat) {
               startBridgePreheat(runtime.bridge);
             }
-            runtimeStartupSettled = true;
-            clearRuntimeStartupTimer();
-            markRuntimeReady();
+            await completeRuntimeStartup();
           })
           .catch((err) => failRuntimeStartup(err));
-        if (runtimeStartupTimeoutMs > 0) {
-          runtimeStartupTimer = setTimeout(() => {
-            void failRuntimeStartup(
-              new Error(
-                `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
-              ),
-            );
-          }, runtimeStartupTimeoutMs);
-          runtimeStartupTimer.unref();
-        }
       };
       startRuntimeForRequest = startRuntime;
       const scheduleRuntimeStartFallback = (): void => {
@@ -2326,7 +2586,9 @@ export async function runQwenServe(
           // `qwen` processes in the operator's `ps` output.
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
+            channelWorker.killAllSync();
             bridgeRef?.killAllSync();
+            removeCurrentServePidfile();
           } catch (err) {
             daemonLog.error(
               'force-kill error',
@@ -2346,6 +2608,11 @@ export async function runQwenServe(
           daemonLog.error('shutdown error', err instanceof Error ? err : null);
           await daemonLog.flush().catch(() => {});
           process.exit(1);
+        }
+      };
+      const onUncaughtExceptionMonitor = () => {
+        if (process.listenerCount('uncaughtException') === 0) {
+          removeCurrentServePidfile();
         }
       };
 
@@ -2369,11 +2636,10 @@ export async function runQwenServe(
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
             // NOTE: the SIGINT/SIGTERM handlers stay attached during the
-            // drain. Their `if (shuttingDown) return` guard makes a second
-            // signal a no-op. Detaching them up front would leave Node's
-            // default signal behavior in charge — a second SIGTERM mid-drain
-            // would terminate the process and orphan agent children. We
-            // detach AFTER drain completes (`finish` below).
+            // drain so a second signal can take the explicit force-exit path
+            // above. Detaching them up front would leave Node's default signal
+            // behavior in charge and could orphan agent children. We detach
+            // AFTER drain completes (`finish` below).
 
             // Two-phase shutdown:
             //   1. `bridge.shutdown()` — tears down agent children with
@@ -2407,6 +2673,10 @@ export async function runQwenServe(
               settled = true;
               process.removeListener('SIGINT', onSignal);
               process.removeListener('SIGTERM', onSignal);
+              process.removeListener(
+                'uncaughtExceptionMonitor',
+                onUncaughtExceptionMonitor,
+              );
               void (
                 coreRuntimePromise
                   ? coreRuntimePromise.then((core) => core.shutdownTelemetry())
@@ -2494,6 +2764,15 @@ export async function runQwenServe(
                   rl.setDraining(true);
                   rl.dispose();
                 }
+                // The worker owns daemon-backed sessions; disconnect it before
+                // tearing down the ACP bridge it is attached to.
+                await channelWorker.stop().catch((err) => {
+                  daemonLog.error(
+                    'channel worker stop error',
+                    err instanceof Error ? err : null,
+                  );
+                });
+                removeCurrentServePidfile();
                 const bridgeForShutdown = bridgeRef;
                 if (bridgeForShutdown) {
                   await bridgeForShutdown.shutdown().catch((err) => {
@@ -2557,6 +2836,7 @@ export async function runQwenServe(
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // Swap the boot-error listener for a runtime-error one
       // before resolving. `server.once('error', reject)` at the
@@ -2575,6 +2855,12 @@ export async function runQwenServe(
         acpHandle?.attachServer?.(server);
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef);
+        }
+        if (opts.channelSelection && !runtimeStartupSettled) {
+          armRuntimeStartupTimer();
+          runtimeStarting = completeRuntimeStartup().catch((err) =>
+            failRuntimeStartup(err, bridgeRef),
+          );
         }
       } else if (deferRuntimeUntilFirstHealth) {
         scheduleRuntimeStartFallback();
@@ -2603,6 +2889,9 @@ export async function runQwenServe(
         );
       }
     });
-    server.once('error', reject);
+    server.once('error', (err) => {
+      removeCurrentServePidfile();
+      reject(err);
+    });
   });
 }
