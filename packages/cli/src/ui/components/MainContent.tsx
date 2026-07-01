@@ -454,11 +454,15 @@ export const MainContent = () => {
           <Box
             flexDirection="column"
             maxHeight={
-              uiState.constrainHeight
+              uiState.constrainHeight && availableTerminalHeight != null
                 ? Math.max(1, availableTerminalHeight)
                 : undefined
             }
-            overflow={uiState.constrainHeight ? 'hidden' : 'visible'}
+            overflow={
+              uiState.constrainHeight && availableTerminalHeight != null
+                ? 'hidden'
+                : 'visible'
+            }
           >
             {pendingHistoryItemsWithSourceCopyOffsets.map(
               ({ item, sourceCopyIndexOffsets }, i) => (
