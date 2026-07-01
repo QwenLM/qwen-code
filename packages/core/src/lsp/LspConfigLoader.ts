@@ -34,12 +34,21 @@ export class LspConfigLoader {
    * Supports basic format: { "language": { "command": "...", "extensionToLanguage": {...} } }
    */
   async loadUserConfigs(): Promise<LspServerConfig[]> {
-    const result = await this.loadUserConfigsStrict();
-    if (result.ok) {
-      return result.configs;
+    const lspConfigPath = path.join(this.workspaceRoot, '.lsp.json');
+    if (!fs.existsSync(lspConfigPath)) {
+      return [];
     }
-    debugLogger.warn('Failed to load user .lsp.json config:', result.error);
-    return [];
+
+    try {
+      const configContent = fs.readFileSync(lspConfigPath, 'utf-8');
+      const data = JSON.parse(configContent);
+      return this.parseConfigSource(data, lspConfigPath, {
+        forceTrustRequired: true,
+      });
+    } catch (error) {
+      debugLogger.warn('Failed to load user .lsp.json config:', error);
+      return [];
+    }
   }
 
   async loadUserConfigsStrict(): Promise<LspUserConfigLoadResult> {
@@ -183,6 +192,7 @@ export class LspConfigLoader {
   private parseConfigSource(
     source: unknown,
     origin: string,
+    options: { forceTrustRequired?: boolean } = {},
   ): LspServerConfig[] {
     if (!this.isRecord(source)) {
       return [];
@@ -200,7 +210,9 @@ export class LspConfigLoader {
       const name =
         typeof spec['command'] === 'string' ? (spec['command'] as string) : key;
 
-      const config = this.buildServerConfig(name, languages, spec, origin);
+      const config = this.buildServerConfig(name, languages, spec, origin, {
+        forceTrustRequired: options.forceTrustRequired,
+      });
       if (config) {
         configs.push(config);
       }
@@ -234,7 +246,9 @@ export class LspConfigLoader {
       const languages = [key];
       const name =
         typeof spec['command'] === 'string' ? (spec['command'] as string) : key;
-      const config = this.buildServerConfig(name, languages, spec, origin);
+      const config = this.buildServerConfig(name, languages, spec, origin, {
+        forceTrustRequired: true,
+      });
       if (!config) {
         return {
           ok: false,
@@ -274,6 +288,7 @@ export class LspConfigLoader {
     languages: string[],
     spec: Record<string, unknown>,
     origin: string,
+    options: { forceTrustRequired?: boolean } = {},
   ): LspServerConfig | null {
     const transport = this.normalizeTransport(spec['transport']);
     const command =
@@ -302,8 +317,9 @@ export class LspConfigLoader {
         ? (spec['restartOnCrash'] as boolean)
         : undefined;
     const maxRestarts = this.normalizeMaxRestarts(spec['maxRestarts']);
-    const trustRequired =
-      typeof spec['trustRequired'] === 'boolean'
+    const trustRequired = options.forceTrustRequired
+      ? true
+      : typeof spec['trustRequired'] === 'boolean'
         ? (spec['trustRequired'] as boolean)
         : true;
     const socket = this.normalizeSocketOptions(spec);

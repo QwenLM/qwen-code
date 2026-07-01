@@ -544,7 +544,7 @@ describe('gemini.tsx main function', () => {
 
       expect(appEvents.emit).toHaveBeenCalledWith(
         AppEvent.LogError,
-        'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.',
+        'Failed to reload LSP server settings: invalid lsp json. Existing LSP state is unchanged. Run with --debug for details.',
       );
     });
 
@@ -581,6 +581,7 @@ describe('gemini.tsx main function', () => {
         AppEvent.LogError,
         'Failed to reload LSP server settings for: clangd. Existing LSP state is partially unchanged. Run with --debug for details.',
       );
+      expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
     });
 
     it('surfaces invalid config without reinitializing LSP', async () => {

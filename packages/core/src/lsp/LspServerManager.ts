@@ -34,6 +34,15 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { lspServerConfigHash } from './configHash.js';
 
 const debugLogger = createDebugLogger('LSP');
+const SECURITY_SENSITIVE_ENV_KEYS = new Set([
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'LD_PRELOAD',
+  'NODE_OPTIONS',
+  'PATH',
+]);
 
 export interface LspServerManagerOptions {
   requireTrustedWorkspace: boolean;
@@ -121,12 +130,16 @@ export class LspServerManager {
    * still able to start a new process.
    */
   async stopAll(): Promise<void> {
-    await this.reconcileQueue;
-    for (const [name, handle] of Array.from(this.serverHandles)) {
-      await this.stopServer(name, handle);
-    }
-    this.serverHandles.clear();
-    this.serverConfigHashes.clear();
+    const stop = async () => {
+      for (const [name, handle] of Array.from(this.serverHandles)) {
+        await this.stopServer(name, handle);
+      }
+      this.serverHandles.clear();
+      this.serverConfigHashes.clear();
+    };
+    const next = this.reconcileQueue.then(stop, stop);
+    this.reconcileQueue = next.catch(() => undefined);
+    return next;
   }
 
   async reconcileServerConfigs(
@@ -369,6 +382,7 @@ export class LspServerManager {
         `LSP server ${name} requires trusted workspace, skipping startup`,
       );
       handle.status = 'FAILED';
+      this.serverConfigHashes.delete(name);
       return;
     }
 
@@ -383,6 +397,7 @@ export class LspServerManager {
         `Workspace trust check failed, not starting LSP server ${name}`,
       );
       handle.status = 'FAILED';
+      this.serverConfigHashes.delete(name);
       return;
     }
 
@@ -398,13 +413,14 @@ export class LspServerManager {
           `LSP server ${name} command path is unsafe: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
 
       if (
         !(await this.commandExists(
           handle.config.command,
-          handle.config.env,
+          undefined,
           commandCwd,
         ))
       ) {
@@ -412,6 +428,7 @@ export class LspServerManager {
           `LSP server ${name} command not found: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
     }
@@ -443,6 +460,7 @@ export class LspServerManager {
     } catch (error) {
       handle.status = 'FAILED';
       handle.error = error as Error;
+      this.serverConfigHashes.delete(name);
       await this.releaseServerResources(name, handle, false);
       if (handle.processDiagnostics) {
         debugLogger.error(
@@ -524,6 +542,7 @@ export class LspServerManager {
     }
     try {
       const shutdownPromise = handle.connection.shutdown();
+      void shutdownPromise.catch(() => undefined);
       const timeout =
         handle.config.shutdownTimeout ?? DEFAULT_LSP_SHUTDOWN_TIMEOUT_MS;
       let timerId: ReturnType<typeof setTimeout> | undefined;
@@ -558,11 +577,13 @@ export class LspServerManager {
       // stopRequested before terminating the process.
       if (!handle.config.restartOnCrash) {
         handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
       const maxRestarts = handle.config.maxRestarts ?? DEFAULT_LSP_MAX_RESTARTS;
       if (maxRestarts <= 0) {
         handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
       const attempts = handle.restartAttempts ?? 0;
@@ -571,14 +592,32 @@ export class LspServerManager {
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
         handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
       handle.restartAttempts = attempts + 1;
       debugLogger.warn(
         `LSP server ${name} exited (code ${code ?? 'unknown'}), restarting (${handle.restartAttempts}/${maxRestarts})`,
       );
+      this.enqueueCrashRestart(name, handle);
+    });
+  }
+
+  private enqueueCrashRestart(name: string, handle: LspServerHandle): void {
+    const restart = async () => {
+      if (this.serverHandles.get(name) !== handle || handle.stopRequested) {
+        return;
+      }
       this.resetHandle(handle);
-      void this.startServer(name, handle);
+      await this.startServer(name, handle);
+      if (handle.status === 'FAILED') {
+        this.serverConfigHashes.delete(name);
+      }
+    };
+    const next = this.reconcileQueue.then(restart, restart);
+    this.reconcileQueue = next.catch(() => undefined);
+    void next.catch((error) => {
+      debugLogger.warn(`LSP server ${name} crash restart failed:`, error);
     });
   }
 
@@ -606,7 +645,17 @@ export class LspServerManager {
     if (!env || Object.keys(env).length === 0) {
       return undefined;
     }
-    return { ...process.env, ...env };
+    const filteredEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(env)) {
+      if (SECURITY_SENSITIVE_ENV_KEYS.has(key)) {
+        debugLogger.warn(
+          `Ignoring security-sensitive LSP server env override: ${key}`,
+        );
+        continue;
+      }
+      filteredEnv[key] = value;
+    }
+    return { ...process.env, ...filteredEnv };
   }
 
   private async connectSocketWithRetry(

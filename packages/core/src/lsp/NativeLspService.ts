@@ -200,12 +200,16 @@ export class NativeLspService {
       serverConfigs,
       workspaceTrusted,
     );
+    const restartedOpenDocuments = this.snapshotOpenDocuments(
+      admitted.map((config) => config.name),
+    );
     const reconcile = await this.serverManager.reconcileServerConfigs(admitted);
     this.clearDocumentTrackingForServers([
       ...reconcile.removed,
       ...reconcile.restarted,
       ...reconcile.failed,
     ]);
+    await this.replayOpenDocuments(reconcile.restarted, restartedOpenDocuments);
     debugLogger.info(
       `LSP reinitialize result: added=${formatServerNames(
         reconcile.added,
@@ -245,6 +249,42 @@ export class NativeLspService {
     for (const name of serverNames) {
       this.openedDocuments.delete(name);
       this.lastConnections.delete(name);
+    }
+  }
+
+  private snapshotOpenDocuments(
+    serverNames: string[],
+  ): Map<string, Set<string>> {
+    const snapshots = new Map<string, Set<string>>();
+    for (const name of serverNames) {
+      const documents = this.openedDocuments.get(name);
+      if (documents) {
+        snapshots.set(name, new Set(documents));
+      }
+    }
+    return snapshots;
+  }
+
+  private async replayOpenDocuments(
+    serverNames: string[],
+    snapshots: Map<string, Set<string>>,
+  ): Promise<void> {
+    if (
+      serverNames.length === 0 ||
+      !serverNames.some((name) => snapshots.has(name))
+    ) {
+      return;
+    }
+    const readyHandles = new Map(this.getReadyHandles());
+    for (const name of serverNames) {
+      const handle = readyHandles.get(name);
+      const documents = snapshots.get(name);
+      if (!handle || !documents) {
+        continue;
+      }
+      for (const uri of documents) {
+        await this.sendDocumentOpen(name, handle, uri);
+      }
     }
   }
 
@@ -402,6 +442,33 @@ export class NativeLspService {
       return false;
     }
 
+    if (!this.sendDocumentOpen(serverName, handle, uri)) {
+      return false;
+    }
+
+    // Wait for the LSP server to process the newly opened document.
+    // Without this delay, requests sent immediately after didOpen may return
+    // empty results because the server hasn't finished analyzing the file.
+    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+
+    return true;
+  }
+
+  private sendDocumentOpen(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+    uri: string,
+  ): boolean {
+    if (!uri.startsWith('file://')) {
+      return false;
+    }
+
+    const openedForServer = this.openedDocuments.get(serverName);
+    if (openedForServer?.has(uri)) {
+      return false;
+    }
+    this.lastConnections.set(serverName, handle.connection);
+
     let filePath: string;
     try {
       filePath = fileURLToPath(uri);
@@ -439,11 +506,6 @@ export class NativeLspService {
     const nextOpened = openedForServer ?? new Set<string>();
     nextOpened.add(uri);
     this.openedDocuments.set(serverName, nextOpened);
-
-    // Wait for the LSP server to process the newly opened document.
-    // Without this delay, requests sent immediately after didOpen may return
-    // empty results because the server hasn't finished analyzing the file.
-    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
 
     return true;
   }

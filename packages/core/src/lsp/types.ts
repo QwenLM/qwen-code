@@ -254,9 +254,7 @@ export interface LspServerStatusInfo {
   error?: string;
 }
 
-export type LspServerSkipReason =
-  | 'workspace_untrusted'
-  | 'server_trust_required';
+export type LspServerSkipReason = 'server_trust_required';
 
 export interface LspSkippedServer {
   name: string;

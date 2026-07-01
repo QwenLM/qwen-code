@@ -189,6 +189,63 @@ describe('LspConfigLoader config-driven behavior', () => {
 
     expect(result).toEqual({ ok: true, configs: [] });
   });
+
+  it('non-strict user config loading skips invalid entries without rejecting all configs', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+          invalid: {
+            transport: 'stdio',
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const configs = await loader.loadUserConfigs();
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.name).toBe('typescript-language-server');
+  });
+
+  it('non-strict user config loading returns empty configs for malformed JSON', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': '{',
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const configs = await loader.loadUserConfigs();
+
+    expect(configs).toEqual([]);
+  });
+
+  it('forces user configs to require trusted workspaces', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+            trustRequired: false,
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+
+    await expect(loader.loadUserConfigs()).resolves.toEqual([
+      expect.objectContaining({ trustRequired: true }),
+    ]);
+    await expect(loader.loadUserConfigsStrict()).resolves.toEqual({
+      ok: true,
+      configs: [expect.objectContaining({ trustRequired: true })],
+    });
+  });
 });
 
 describe('LspConfigLoader extension configs', () => {

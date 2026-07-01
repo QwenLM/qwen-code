@@ -264,6 +264,29 @@ describe('LspServerManager', () => {
       expect(manager.getHandles().has('clangd')).toBe(false);
     });
 
+    it('waits for a server startup before restarting it', async () => {
+      const { manager, privateView } = createReconcileManager();
+      manager.setServerConfigs([serverConfig]);
+      const handle = manager.getHandles().get('clangd');
+      expect(handle).toBeDefined();
+      let resolveStartup!: () => void;
+      handle!.startingPromise = new Promise<void>((resolve) => {
+        resolveStartup = resolve;
+      });
+
+      const reconcile = manager.reconcileServerConfigs([
+        { ...serverConfig, args: ['--log=verbose'] },
+      ]);
+      await Promise.resolve();
+      expect(privateView.stopServer).not.toHaveBeenCalled();
+
+      resolveStartup();
+      await reconcile;
+
+      expect(privateView.stopServer).toHaveBeenCalledOnce();
+      expect(privateView.startServer).toHaveBeenCalledOnce();
+    });
+
     it('stopAll waits for an active reconcile before clearing handles', async () => {
       const { manager, privateView } = createReconcileManager();
       let resolveStart!: () => void;
@@ -287,6 +310,33 @@ describe('LspServerManager', () => {
 
       expect(privateView.stopServer).toHaveBeenCalledOnce();
       expect(manager.getHandles().size).toBe(0);
+    });
+
+    it('serializes stopAll with later reconcile calls', async () => {
+      const { manager, privateView } = createReconcileManager();
+      const order: string[] = [];
+      manager.setServerConfigs([serverConfig]);
+      vi.mocked(privateView.stopServer).mockImplementation(
+        async (_name, handle) => {
+          order.push('stop');
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          (handle as { status: string }).status = 'NOT_STARTED';
+        },
+      );
+      vi.mocked(privateView.startServer).mockImplementation(
+        async (_name, handle) => {
+          order.push('start');
+          (handle as { status: string }).status = 'READY';
+        },
+      );
+
+      await Promise.all([
+        manager.stopAll(),
+        manager.reconcileServerConfigs([{ ...serverConfig, command: 'next' }]),
+      ]);
+
+      expect(order).toEqual(['stop', 'start']);
+      expect(manager.getHandles().get('clangd')?.config.command).toBe('next');
     });
   });
 
@@ -484,6 +534,176 @@ describe('LspServerManager', () => {
     );
   });
 
+  it('retries the same config after initial command lookup failure', async () => {
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    )
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    vi.spyOn(
+      manager as unknown as {
+        createLspConnection: (
+          config: LspServerConfig,
+        ) => Promise<LspConnectionResult>;
+      },
+      'createLspConnection',
+    ).mockResolvedValue({
+      connection: createMockConnection(),
+      process: createMockProcess() as unknown as ChildProcess,
+    } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockResolvedValue(undefined);
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+    const result = await manager.reconcileServerConfigs([serverConfig]);
+
+    expect(result.restarted).toEqual(['clangd']);
+    expect(manager.getHandles().get('clangd')?.status).toBe('READY');
+  });
+
+  it('does not use LSP config env when probing command existence', async () => {
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    const commandExists = vi
+      .spyOn(
+        manager as unknown as {
+          commandExists: (
+            command: string,
+            env?: Record<string, string>,
+            cwd?: string,
+          ) => Promise<boolean>;
+        },
+        'commandExists',
+      )
+      .mockResolvedValue(false);
+
+    manager.setServerConfigs([
+      {
+        ...serverConfig,
+        env: { PATH: '/tmp/fake-bin', SAFE_VALUE: '1' },
+      },
+    ]);
+    await manager.startAll();
+
+    expect(commandExists).toHaveBeenCalledWith(
+      'clangd',
+      undefined,
+      '/workspace',
+    );
+  });
+
+  it('retries the same config after a crash restart failure', async () => {
+    const manager = createTrustedManager();
+    let exitHandler: ((code: number | null) => void) | undefined;
+    const process = createMockProcess();
+    process.once = vi.fn(
+      (event: string, handler: (code: number | null) => void) => {
+        if (event === 'exit') {
+          exitHandler = handler;
+        }
+        return process;
+      },
+    );
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    )
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    vi.spyOn(
+      manager as unknown as {
+        createLspConnection: (
+          config: LspServerConfig,
+        ) => Promise<LspConnectionResult>;
+      },
+      'createLspConnection',
+    ).mockResolvedValue({
+      connection: createMockConnection(),
+      process: process as unknown as ChildProcess,
+    } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockResolvedValue(undefined);
+    const config = { ...serverConfig, restartOnCrash: true };
+
+    manager.setServerConfigs([config]);
+    await manager.startAll();
+    expect(exitHandler).toBeDefined();
+
+    exitHandler?.(1);
+    const result = await manager.reconcileServerConfigs([config]);
+
+    expect(result.restarted).toEqual(['clangd']);
+    expect(manager.getHandles().get('clangd')?.status).toBe('READY');
+  });
+
+  it('filters security-sensitive LSP environment overrides', () => {
+    const manager = createTrustedManager();
+    const env = (
+      manager as unknown as {
+        buildProcessEnv(env: Record<string, string>): NodeJS.ProcessEnv;
+      }
+    ).buildProcessEnv({
+      PATH: '/tmp/fake-bin',
+      NODE_OPTIONS: '--require /tmp/hook.js',
+      SAFE_VALUE: '1',
+    });
+
+    expect(env['PATH']).toBe(process.env['PATH']);
+    expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
+    expect(env['SAFE_VALUE']).toBe('1');
+  });
+
   it('kills owned process after graceful shutdown for socket transports', async () => {
     const manager = createTrustedManager();
     const connection = createMockConnection();
@@ -639,13 +859,16 @@ function createMockProcess(
   overrides: {
     exitCode?: number | null;
     kill?: ReturnType<typeof vi.fn>;
+    once?: ReturnType<typeof vi.fn>;
   } = {},
 ): {
   exitCode: number | null;
   kill: ReturnType<typeof vi.fn>;
+  once: ReturnType<typeof vi.fn>;
 } {
   return {
     exitCode: overrides.exitCode ?? null,
     kill: overrides.kill ?? vi.fn(),
+    once: overrides.once ?? vi.fn(),
   };
 }

@@ -1108,6 +1108,7 @@ export function registerLspHotReload(
           )}`,
         );
         if (failedServers.length > 0) {
+          appEvents.emit(AppEvent.LspStatusChanged);
           const message = `Failed to reload LSP server settings for: ${formatRuntimeReloadNames(
             failedServers,
           )}. Existing LSP state is partially unchanged. Run with --debug for details.`;
@@ -1124,10 +1125,11 @@ export function registerLspHotReload(
     } catch (error) {
       debugLogger.warn('Failed to reload LSP server settings:', error);
       if (!errorReported) {
-        appEvents.emit(
-          AppEvent.LogError,
-          'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.',
-        );
+        const message =
+          error instanceof Error
+            ? `Failed to reload LSP server settings: ${error.message}. Existing LSP state is unchanged. Run with --debug for details.`
+            : 'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.';
+        appEvents.emit(AppEvent.LogError, message);
       }
       throw error;
     }

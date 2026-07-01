@@ -253,6 +253,89 @@ describe('NativeLspService', () => {
     }
   });
 
+  test('reinitialize replays open documents after restarting servers', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-replay-'));
+    try {
+      const filePath = path.join(tempDir, 'main.ts');
+      const uri = pathToFileURL(filePath).toString();
+      fs.writeFileSync(filePath, 'const value = 1;\n', 'utf-8');
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const connection = {
+        listen: vi.fn(),
+        send: vi.fn(),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn(),
+        initialize: vi.fn(),
+        shutdown: vi.fn(),
+        end: vi.fn(),
+      };
+      const handle = {
+        config: {
+          name: 'typescript-language-server',
+          languages: ['typescript'],
+          command: 'typescript-language-server',
+          args: [],
+          transport: 'stdio',
+        },
+        status: 'READY',
+        connection,
+      };
+      const reconcileServerConfigs = vi.fn(async () => ({
+        added: [],
+        removed: [],
+        restarted: ['typescript-language-server'],
+        unchanged: [],
+        failed: [],
+      }));
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+        getHandles: () => new Map([['typescript-language-server', handle]]),
+      };
+      const internals = service as unknown as {
+        openedDocuments: Map<string, Set<string>>;
+      };
+      internals.openedDocuments.set(
+        'typescript-language-server',
+        new Set([uri]),
+      );
+
+      await service.reinitialize();
+
+      expect(connection.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'textDocument/didOpen',
+          params: {
+            textDocument: expect.objectContaining({
+              uri,
+              languageId: 'typescript',
+              text: 'const value = 1;\n',
+            }),
+          },
+        }),
+      );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('reinitialize stops all servers when trusted workspace is required but unavailable', async () => {
     const tempConfig = new MockConfig();
     vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);
@@ -306,7 +389,7 @@ describe('NativeLspService', () => {
         { requireTrustedWorkspace: false, workspaceRoot: tempDir },
       );
       const reconcileServerConfigs = vi.fn(async () => ({
-        added: ['untrusted-language-server'],
+        added: [],
         removed: [],
         restarted: [],
         unchanged: [],
@@ -318,15 +401,14 @@ describe('NativeLspService', () => {
 
       const result = await service.reinitialize();
 
-      expect(reconcileServerConfigs).toHaveBeenCalledWith([
-        expect.objectContaining({
-          name: 'untrusted-language-server',
-          trustRequired: false,
-        }),
-      ]);
+      expect(reconcileServerConfigs).toHaveBeenCalledWith([]);
       expect(result.skipped).toEqual([
         {
           name: 'trusted-language-server',
+          reason: 'server_trust_required',
+        },
+        {
+          name: 'untrusted-language-server',
           reason: 'server_trust_required',
         },
       ]);
@@ -376,7 +458,7 @@ describe('NativeLspService', () => {
           .getHandles()
           .keys(),
       );
-      expect(handles).toEqual(['untrusted-language-server']);
+      expect(handles).toEqual([]);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

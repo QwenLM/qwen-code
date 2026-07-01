@@ -174,6 +174,10 @@ Failure behavior:
 - If startup fails after a connection or process has been created, release that
   connection/process before returning. Failed initialization must not leave a
   language server process or socket connection alive behind a `FAILED` handle.
+- If startup fails before connection creation, including trust rejection,
+  unsafe command path, or missing command, clear the cached config hash. A later
+  reconcile with the same config must retry instead of treating the failed
+  handle as unchanged.
 - If a removed server logs an error during shutdown, still delete it from the
   handle map.
 - One server's startup failure must not block reconcile for other servers.
@@ -191,6 +195,15 @@ Resource cleanup:
   awaiting `connection.shutdown()` forever.
 - Shutdown timeout timers must be cleared when shutdown completes or fails so a
   large timeout does not retain the handle longer than necessary.
+- The underlying `shutdown()` promise must be observed even when the timeout
+  wins the race, so a late server-side rejection cannot surface as an
+  unhandled rejection.
+- `stopAll()` must participate in the same reconcile queue as hot reload. It is
+  not enough to wait for the current queue and then iterate handles, because a
+  new reconcile could otherwise enter between the wait and handle cleanup.
+- Crash restarts must also serialize through the reconcile queue, or clear the
+  hash when they permanently fail. They must not start a replacement process in
+  parallel with a config-change reconcile.
 - `NativeLspService.stop()` must clear `openedDocuments` and `lastConnections`
   after `serverManager.stopAll()` so a stopped service does not retain old
   document sets or connection objects.
@@ -215,6 +228,10 @@ Flow:
 5. Call `serverManager.reconcileServerConfigs(serverConfigs)`.
 6. Clear `openedDocuments` and `lastConnections` only for removed, restarted,
    and failed servers; preserve document state for unchanged servers.
+7. For successfully restarted servers, replay `textDocument/didOpen` for
+   documents that were open before the restart. This gives the replacement
+   server the same document context without waiting for the next hover,
+   completion, or diagnostic request to lazily reopen each file.
 
 Initial discovery should use the same admission filter before calling
 `setServerConfigs()`. This keeps startup and hot reload status consistent for
@@ -227,6 +244,16 @@ show a user-visible error, but it must not call `reinitialize()` for that event.
 write the error to status/logs. Only deleting the file, or parsing a valid empty
 JSON config, means the desired config is empty.
 
+Cold startup and hot reload intentionally use different user-config parsing
+strictness:
+
+- `loadUserConfigs()` stays lenient for startup compatibility. It skips invalid
+  server entries and returns the valid entries that can be built.
+- `loadUserConfigsStrict()` is used by hot reload. If the existing `.lsp.json`
+  is syntactically valid but contains an invalid top-level shape or invalid
+  server entry, it returns an error and `reinitialize()` does not reconcile.
+  This preserves the currently running LSP state for invalid edits.
+
 `NativeLspService.reinitialize()` returns a service-level result:
 
 ```ts
@@ -234,7 +261,7 @@ interface LspServiceReinitializeResult {
   reconcile: LspReconcileResult;
   skipped: Array<{
     name: string;
-    reason: 'workspace_untrusted' | 'server_trust_required';
+    reason: 'server_trust_required';
   }>;
 }
 ```
@@ -281,6 +308,20 @@ Hot reload must preserve these checks and complete them before starting a new
 server or restarting a changed server. The key rule is: do not spawn first and
 decide whether the server is allowed later.
 
+Workspace `.lsp.json` is workspace-controlled input. User configs must
+therefore always be treated as `trustRequired: true`, even if the file
+explicitly declares `"trustRequired": false`. Extension-provided LSP configs may
+still use their declared `trustRequired` value. This prevents an untrusted
+workspace from lowering its own trust boundary.
+
+Environment variables from `.lsp.json` are also workspace-controlled. Runtime
+spawn may merge allowed env overrides, but security-sensitive variables such as
+`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+`DYLD_INSERT_LIBRARIES`, and `DYLD_LIBRARY_PATH` must not be overridden by LSP
+config. Command existence probing must use the process environment instead of
+the config-provided env, so a malicious `PATH` cannot redirect bare command
+names during the probe.
+
 Allow-list boundary:
 
 - The current repository does not support a CLI allow-list for LSP server names.
@@ -309,7 +350,7 @@ filterLspServerConfigs(configs, {
   admitted: LspServerConfig[];
   skipped: Array<{
     name: string;
-    reason: 'workspace_untrusted' | 'server_trust_required';
+    reason: 'server_trust_required';
   }>;
 }
 ```
@@ -367,8 +408,12 @@ await config.reinitializeLsp();
 
 Then emit an explicit runtime event such as `AppEvent.LspStatusChanged`.
 UI surfaces such as `/lsp`, `/about`, or `/status` can subscribe to that event
-to refresh. On failure, also show a user-visible error through
-`AppEvent.LogError`; do not only write a debug log.
+to refresh. If reconcile returns partial failures, emit the status-changed event
+before throwing back to the watcher; this lets the UI observe successfully
+restarted servers while the watcher still retains the old semantic snapshot for
+retry. On failure, also show a user-visible error through `AppEvent.LogError`;
+include the underlying parser/startup error message when available, and do not
+only write a debug log.
 
 #### Manual `/reload` Trigger
 
@@ -430,12 +475,20 @@ environment-dependent, so they are not required.
 - missing `shutdownTimeout` still uses the default shutdown timeout and cannot
   block reconcile forever;
 - `stopAll()` waits for in-flight startup before releasing resources;
+- `stopAll()` is serialized through the reconcile queue and cannot run
+  concurrently with a later reconcile;
 - `process.kill()` errors are logged and do not abort cleanup;
 - one server startup failure does not affect another server's reconcile;
 - concurrent reconciles run serially;
 - `stopAll()` and `clearServerHandles()` clear the hash map;
 - failed starts are reported in `failed`, are not reported as added/restarted,
   and do not cache their config hash;
+- initial startup failures clear the cached hash so a later reconcile with the
+  same config retries;
+- crash restarts serialize with reconcile and clear cached hashes on permanent
+  failure;
+- command existence probing does not use config-provided env, and
+  security-sensitive env overrides are filtered before spawn;
 - reconcile return value contains added/removed/restarted/unchanged/failed, not
   admission skipped.
 
@@ -448,13 +501,18 @@ real language servers.
   to manager reconcile;
 - `.lsp.json` parse failure preserves old runtime state and does not call
   manager reconcile;
+- strict hot reload rejects invalid server entries without reconciling, while
+  cold startup keeps loading valid entries from the same file;
 - deleting `.lsp.json` treats workspace config as empty and triggers reconcile;
 - untrusted workspace stops all servers and does not reconcile/start;
 - initial discovery applies the same per-server `trustRequired` admission filter
   as hot reload;
+- workspace `.lsp.json` cannot opt out of `trustRequired`;
 - if a CLI allow-list is implemented, the upper bound filters admitted configs;
 - service-level return value aggregates admission skipped reasons;
 - restarted/removed servers only clear their own document tracking.
+- restarted servers replay `textDocument/didOpen` for previously opened
+  documents after the replacement server is ready.
 - `stop()` clears document tracking caches after stopping all servers.
 
 `packages/core/src/config/config.test.ts`
@@ -486,6 +544,8 @@ real language servers.
 
 - `AppEvent.LspStatusChanged` triggers UI refresh;
 - reload failure emits a user-visible error through `AppEvent.LogError`.
+- partial reconcile failure still emits `AppEvent.LspStatusChanged` before the
+  listener rejects, so UI state can reflect successful parts of the reload.
 
 `packages/cli/src/config/config.test.ts`
 
