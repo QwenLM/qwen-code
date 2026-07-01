@@ -23,7 +23,7 @@ export const MEMORY_WARNING_THRESHOLD = Math.min(
 export const MEMORY_UI_COMPACT_THRESHOLD = () =>
   Math.floor(v8.getHeapStatistics().heap_size_limit * 0.65);
 export const MEMORY_CHECK_INTERVAL = 60 * 1000; // one minute
-export const MEMORY_DEBUG_INTERVAL = 30 * 1000; // 30 seconds for debug logging
+export const MEMORY_DEBUG_INTERVAL = 5 * 60 * 1000; // 5 minutes for debug logging
 export const UI_COMPACT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
 interface MemoryMonitorOptions {
