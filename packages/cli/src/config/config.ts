@@ -60,6 +60,7 @@ import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
+import { scheduleCommand } from '../commands/schedule.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
@@ -1061,6 +1062,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
+    // Register `qwen schedule` (always-on /schedule daemon)
+    .command(scheduleCommand)
     // Register sessions subcommands
     .command(sessionsCommand);
 

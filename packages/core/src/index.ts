@@ -260,6 +260,8 @@ export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
 export * from './utils/toolResultDisplayCompaction.js';
+export * from './services/schedule-task-store.js';
+export * from './services/schedule-daemon.js';
 
 // ============================================================================
 // Managed Auto-Memory
