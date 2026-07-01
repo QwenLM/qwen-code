@@ -67,6 +67,7 @@ import {
 } from './utils/relaunch.js';
 import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
+import { getScheduledRunsStartupNotice } from './schedule/startup-notice.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
@@ -806,6 +807,12 @@ export async function main() {
           ? [
               'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan or another provider.',
             ]
+          : []),
+        // Report scheduled-task runs the daemon completed while away. Gated on
+        // interactive mode so a headless `qwen -p` (incl. the daemon's own
+        // children) never consumes the delivery cursor.
+        ...(config.isInteractive()
+          ? await getScheduledRunsStartupNotice()
           : []),
       ]),
     ];
