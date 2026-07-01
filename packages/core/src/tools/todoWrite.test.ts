@@ -10,6 +10,7 @@ import { TodoWriteTool, listTodoSessions } from './todoWrite.js';
 import { DefaultHookOutput, HookPhase, type TodoItem } from '../hooks/types.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
@@ -37,6 +38,7 @@ describe('TodoWriteTool', () => {
     mockConfig = {
       getSessionId: () => 'test-session-123',
       getHookSystem: () => undefined,
+      getTodosDir: () => Storage.getTodosDir(),
     } as Config;
     tool = new TodoWriteTool(mockConfig);
     mockAbortSignal = new AbortController().signal;
@@ -296,6 +298,7 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => mockHookSystem,
+        getTodosDir: () => Storage.getTodosDir(),
       } as unknown as Config;
       tool = new TodoWriteTool(mockConfig);
 
@@ -350,6 +353,7 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => mockHookSystem,
+        getTodosDir: () => Storage.getTodosDir(),
       } as unknown as Config;
       tool = new TodoWriteTool(mockConfig);
 
@@ -416,6 +420,7 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => mockHookSystem,
+        getTodosDir: () => Storage.getTodosDir(),
       } as unknown as Config;
       tool = new TodoWriteTool(mockConfig);
 
@@ -493,6 +498,7 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => mockHookSystem,
+        getTodosDir: () => Storage.getTodosDir(),
       } as unknown as Config;
       tool = new TodoWriteTool(mockConfig);
 
@@ -543,6 +549,7 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => mockHookSystem,
+        getTodosDir: () => Storage.getTodosDir(),
       } as unknown as Config;
       tool = new TodoWriteTool(mockConfig);
 
@@ -610,6 +617,7 @@ describe('TodoWriteTool', () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',
         getHookSystem: () => mockHookSystem,
+        getTodosDir: () => Storage.getTodosDir(),
       } as unknown as Config;
       tool = new TodoWriteTool(mockConfig);
 
@@ -699,6 +707,7 @@ describe('TodoWriteTool – runtime output directory', () => {
     mockConfig = {
       getSessionId: () => 'runtime-session',
       getHookSystem: () => undefined,
+      getTodosDir: () => Storage.getTodosDir(),
     } as Config;
     tool = new TodoWriteTool(mockConfig);
     mockAbortSignal = new AbortController().signal;
@@ -780,6 +789,57 @@ describe('TodoWriteTool – runtime output directory', () => {
 
     const writePath = mockAtomicWrite.mock.calls[0]?.[0] as string;
     expect(writePath).toContain(path.join('.qwen', 'todos'));
+  });
+
+  it('should read and write todos from the configured todos directory', async () => {
+    const configuredTodoDir = path.join(os.tmpdir(), 'qwen-configured-todos');
+    mockConfig = {
+      getSessionId: () => 'configured-session',
+      getHookSystem: () => undefined,
+      getTodosDir: () => configuredTodoDir,
+    } as Config;
+    tool = new TodoWriteTool(mockConfig);
+
+    const existingTodos: TodoItem[] = [
+      { id: '1', content: 'Existing task', status: 'pending' },
+    ];
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Existing task', status: 'completed' }],
+    };
+    const todoFilePath = path.join(
+      configuredTodoDir,
+      'configured-session.json',
+    );
+
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({
+        todos: existingTodos,
+        sessionId: 'configured-session',
+      }),
+    );
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockAtomicWrite.mockResolvedValue(undefined);
+
+    const invocation = tool.build(params);
+    const result = await invocation.execute(mockAbortSignal);
+
+    expect(mockFs.readFile).toHaveBeenCalledWith(todoFilePath, 'utf-8');
+    expect(mockFs.mkdir).toHaveBeenCalledWith(configuredTodoDir, {
+      recursive: true,
+    });
+    expect(mockAtomicWrite).toHaveBeenCalledWith(
+      todoFilePath,
+      expect.any(String),
+      { encoding: 'utf-8' },
+    );
+    const persisted = JSON.parse(mockAtomicWrite.mock.calls[0]?.[1] as string);
+    expect(persisted).toEqual({
+      todos: params.todos,
+      sessionId: 'configured-session',
+    });
+    expect(result.llmContent).toContain(
+      'Todos have been modified successfully',
+    );
   });
 
   it('should check file existence in custom runtime dir for getDescription', () => {

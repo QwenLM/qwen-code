@@ -27,6 +27,10 @@
       "description": "Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.",
       "type": "string"
     },
+    "todosDirectory": {
+      "description": "Custom directory for todo list files created by the todo-write tool. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to the global runtime todos directory (~/.qwen/todos).",
+      "type": "string"
+    },
     "env": {
       "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
       "type": "object",

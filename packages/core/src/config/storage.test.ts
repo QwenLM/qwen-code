@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 const mockRealpathSync = vi.hoisted(() => vi.fn());
 
@@ -343,6 +344,65 @@ describe('Storage – getPlansDir', () => {
     expect(
       Storage.getPlanFilePath('../../../escape', projectRoot, './plans'),
     ).toBe(path.join(projectRoot, 'plans', 'escape.md'));
+  });
+});
+
+describe('Storage – getTodosDir', () => {
+  const projectRoot = path.resolve('workspace', 'project');
+  const originalRuntimeEnv = process.env['QWEN_RUNTIME_DIR'];
+
+  beforeEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    delete process.env['QWEN_RUNTIME_DIR'];
+    mockRealpathSync.mockImplementation((pathToResolve) =>
+      actualFs.realpathSync(pathToResolve),
+    );
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    if (originalRuntimeEnv !== undefined) {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeEnv;
+    } else {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    }
+    mockRealpathSync.mockReset();
+  });
+
+  it('defaults to the runtime base todos directory when todosDirectory is not configured', () => {
+    const runtimeDir = path.resolve('custom', 'runtime');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    expect(Storage.getTodosDir(projectRoot)).toBe(
+      path.join(Storage.getRuntimeBaseDir(), 'todos'),
+    );
+  });
+
+  it('resolves relative todosDirectory values against the project root', () => {
+    expect(Storage.getTodosDir(projectRoot, './.qwen/todos')).toBe(
+      path.join(projectRoot, '.qwen', 'todos'),
+    );
+  });
+
+  it('rejects todosDirectory values that escape the project root', () => {
+    expect(() => Storage.getTodosDir(projectRoot, '../todos')).toThrow(
+      FatalConfigError,
+    );
+    expect(() => Storage.getTodosDir(projectRoot, '../todos')).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+
+  it('requires projectRoot when todosDirectory is configured', () => {
+    expect(() => Storage.getTodosDir(undefined, './todos')).toThrow(
+      FatalConfigError,
+    );
+    expect(() => Storage.getTodosDir(undefined, './todos')).toThrow(
+      'projectRoot is required when todosDirectory is configured',
+    );
+    expect(() => Storage.getTodosDir(null, './todos')).toThrow(
+      'projectRoot is required when todosDirectory is configured',
+    );
   });
 });
 
