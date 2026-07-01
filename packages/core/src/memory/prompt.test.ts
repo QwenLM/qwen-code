@@ -8,6 +8,8 @@ import { describe, expect, it } from 'vitest';
 import {
   appendManagedAutoMemoryToUserMemory,
   buildManagedAutoMemoryPrompt,
+  CONDENSED_DO_NOT_SAVE_SECTION,
+  CONDENSED_WHEN_TO_ACCESS_SECTION,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
 } from './prompt.js';
 
@@ -258,5 +260,116 @@ describe('managed auto-memory prompt helpers', () => {
     // Without it, condensed prompt is returned
     expect(without).not.toContain('## Types of memory');
     expect(without).toContain('## Memory types');
+  });
+
+  it('emits full prompt when only userSection has content (project index empty)', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      {
+        memoryDir: '/home/u/.qwen/memories',
+        indexContent: '- [Pref](user/pref.md) — prefers dark mode.',
+      },
+    );
+
+    // Full verbose sections should be present because userSection has content
+    expect(prompt).toContain('## Types of memory');
+    expect(prompt).toContain('## What NOT to save in memory');
+    expect(prompt).toContain('## When to access memories');
+    expect(prompt).toContain('## Before recommending from memory');
+  });
+
+  it('treats whitespace-only indexContent as empty (triggers condensed)', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '   \n  \t  \n  ',
+    );
+
+    // Should take the condensed path
+    expect(prompt).toContain('## Memory types');
+    expect(prompt).toContain('## Do not save');
+    expect(prompt).not.toContain('## Types of memory');
+    expect(prompt).not.toContain('## What NOT to save in memory');
+    expect(prompt).toContain('currently empty');
+  });
+
+  it('emits condensed prompt for project+team two-tier without userSection (all empty)', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      undefined,
+      { memoryDir: '/tmp/project/.qwen/team-memory', indexContent: null },
+    );
+
+    // Two-tier (project + team), no user section
+    expect(prompt).toContain('two persistent, file-based memory directories');
+    expect(prompt).not.toContain('USER memory');
+    expect(prompt).toContain('TEAM memory');
+    // Uses condensed sections
+    expect(prompt).toContain('## Memory types');
+    expect(prompt).toContain('## Do not save');
+    expect(prompt).toContain('## How to save memories');
+    // Condensed team guidance is present
+    expect(prompt).toContain(
+      'route project-wide conventions and shared references to TEAM',
+    );
+    expect(prompt).toContain('do NOT hand-edit the team MEMORY.md');
+    // Full verbose sections are omitted
+    expect(prompt).not.toContain('## Types of memory');
+    expect(prompt).not.toContain('## Saving to team memory');
+  });
+
+  it('condensed prompt includes maintenance directives', () => {
+    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+
+    expect(prompt).toContain('Keep the name, description, and type fields');
+    expect(prompt).toContain('Organize memories semantically by topic');
+    expect(prompt).toContain(
+      'Update or remove memories that turn out to be wrong',
+    );
+  });
+
+  it('condensed prompt includes read-path behavioral guidance', () => {
+    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+
+    expect(prompt).toContain('## Accessing memories');
+    expect(prompt).toContain(
+      'MUST access memory when the user explicitly asks',
+    );
+    expect(prompt).toContain('ignore memory, proceed as if empty');
+    expect(prompt).toContain('stale');
+  });
+
+  it('condensed prompt includes surprising/non-obvious heuristic in do-not-save', () => {
+    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+
+    expect(prompt).toContain('surprising');
+    expect(prompt).toContain('non-obvious');
+  });
+
+  it('condensed prompt includes date normalization for project type and negative judgement for user type', () => {
+    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+
+    expect(prompt).toContain('convert relative dates to absolute dates');
+    expect(prompt).toContain('negative judgement');
+  });
+
+  it('condensed multi-tier prompt includes cross-directory duplicate check', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      { memoryDir: '/home/u/.qwen/memories', indexContent: null },
+    );
+
+    expect(prompt).toContain(
+      'check if there is an existing memory in any of your memory directories',
+    );
+  });
+
+  it('exports CONDENSED_DO_NOT_SAVE_SECTION and CONDENSED_WHEN_TO_ACCESS_SECTION as module constants', () => {
+    expect(CONDENSED_DO_NOT_SAVE_SECTION).toBeDefined();
+    expect(CONDENSED_DO_NOT_SAVE_SECTION.length).toBeGreaterThan(0);
+    expect(CONDENSED_WHEN_TO_ACCESS_SECTION).toBeDefined();
+    expect(CONDENSED_WHEN_TO_ACCESS_SECTION.length).toBeGreaterThan(0);
   });
 });

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_PROMPT');
+
 const MAX_MANAGED_AUTO_MEMORY_INDEX_LINES = 200;
 const MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES = 25_000;
 
@@ -118,6 +122,39 @@ export const WHEN_TO_ACCESS_SECTION: readonly string[] = [
   '- You MUST access memory when the user explicitly asks you to check, recall, or remember.',
   '- If the user says to *ignore* or *not use* memory: proceed as if MEMORY.md were empty. Do not apply remembered facts, cite, compare against, or mention memory content.',
   MEMORY_DRIFT_CAVEAT,
+];
+
+/**
+ * Condensed version of {@link WHEN_TO_ACCESS_SECTION}.
+ * Includes the same key behavioral directives in a shorter form
+ * suitable for the empty-index prompt path.
+ */
+export const CONDENSED_WHEN_TO_ACCESS_SECTION: readonly string[] = [
+  '## Accessing memories',
+  '',
+  '- Access memory when relevant or when user references prior-conversation work.',
+  '- You MUST access memory when the user explicitly asks you to check, recall, or remember.',
+  '- If the user says to ignore memory, proceed as if empty.',
+  '- Memory records can become stale — verify against current state before acting on them.',
+];
+
+/**
+ * Condensed version of {@link WHAT_NOT_TO_SAVE_SECTION}.
+ * Source of truth for exclusion rules is WHAT_NOT_TO_SAVE_SECTION;
+ * this constant provides the same guidance in shorter form for the
+ * empty-index (condensed) prompt path.
+ */
+export const CONDENSED_DO_NOT_SAVE_SECTION: readonly string[] = [
+  '## Do not save',
+  '',
+  '- Code patterns, architecture, or file paths (read the project instead)',
+  '- Git history or debugging solutions',
+  '- MCP tool names, schemas, or failed call transcripts (save only confirmed durable workarounds or warnings)',
+  '- Ephemeral task state or current conversation context',
+  '- Content already in QWEN.md or AGENTS.md',
+  '',
+  'These exclusions apply even when the user explicitly asks you to save.',
+  'If the user asks you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.',
 ];
 
 export const TRUSTING_RECALL_SECTION: readonly string[] = [
@@ -298,6 +335,9 @@ export function buildManagedAutoMemoryPrompt(
     allIndexesEmpty(indexContent, userSection, teamSection) &&
     !options?.forceFullProtocol
   ) {
+    debugLogger.debug(
+      'memory prompt: using condensed path (all indexes empty, forceFullProtocol=false)',
+    );
     const condensedIntro = multiTier
       ? [
           `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
@@ -311,10 +351,17 @@ export function buildManagedAutoMemoryPrompt(
     const condensedTypes = [
       '## Memory types',
       '',
-      "- **user** — the user's role, goals, responsibilities, and knowledge (always user-scoped)",
+      "- **user** — the user's role, goals, responsibilities, and knowledge (always user-scoped). Avoid writing memories that could be viewed as a negative judgement.",
       '- **feedback** — guidance on how to approach work: corrections AND confirmed approaches (default user; project only for project-wide conventions)',
-      '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git (always project-scoped)',
+      '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git (always project-scoped). Always convert relative dates to absolute dates when saving.',
       '- **reference** — pointers to where information lives in external systems (default project; user when the resource is personal)',
+    ];
+
+    const condensedMaintenanceBullets = [
+      '',
+      '- Keep the name, description, and type fields in memory files up-to-date with the content.',
+      '- Organize memories semantically by topic, not chronologically.',
+      '- Update or remove memories that turn out to be wrong or outdated.',
     ];
 
     const condensedSave = multiTier
@@ -329,6 +376,8 @@ export function buildManagedAutoMemoryPrompt(
           '',
           '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry: one line, under ~150 chars: `- [Title](file.md) — one-line hook`.',
           '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
+          '- Do not write duplicate memories. First check if there is an existing memory in any of your memory directories you can update before writing a new one.',
+          ...condensedMaintenanceBullets,
           ...(teamSection !== undefined
             ? [
                 '',
@@ -347,6 +396,7 @@ export function buildManagedAutoMemoryPrompt(
           '',
           `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\`. Each entry: one line, under ~150 chars: \`- [Title](file.md) — one-line hook\`.`,
           '- Never write memory content directly into MEMORY.md — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
+          ...condensedMaintenanceBullets,
         ];
 
     const indexSections = buildIndexSections(
@@ -355,18 +405,6 @@ export function buildManagedAutoMemoryPrompt(
       userSection,
       teamSection,
     );
-
-    const condensedDoNotSave = [
-      '## Do not save',
-      '',
-      '- Code patterns, architecture, or file paths (read the project instead)',
-      '- Git history or debugging solutions',
-      '- MCP tool names, schemas, or failed call transcripts (save only confirmed durable workarounds or warnings)',
-      '- Ephemeral task state or current conversation context',
-      '- Content already in QWEN.md or AGENTS.md',
-      '',
-      'These exclusions apply even when the user explicitly asks you to save.',
-    ];
 
     const condensedLines = [
       '# auto memory',
@@ -378,7 +416,9 @@ export function buildManagedAutoMemoryPrompt(
       '',
       ...condensedTypes,
       '',
-      ...condensedDoNotSave,
+      ...CONDENSED_DO_NOT_SAVE_SECTION,
+      '',
+      ...CONDENSED_WHEN_TO_ACCESS_SECTION,
       '',
       ...condensedSave,
       '',
@@ -387,6 +427,11 @@ export function buildManagedAutoMemoryPrompt(
 
     return condensedLines.join('\n');
   }
+
+  const forceReason = options?.forceFullProtocol
+    ? 'forceFullProtocol=true'
+    : 'at least one index has content';
+  debugLogger.debug(`memory prompt: using full path (${forceReason})`);
 
   const intro = multiTier
     ? [
