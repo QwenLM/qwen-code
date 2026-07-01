@@ -1672,7 +1672,11 @@ describe('DiscoveredMCPTool', () => {
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockImplementation((_params, _schema, options) => {
           onProgressCallback = options?.onprogress;
-          return new Promise((resolve) => {
+          return new Promise((resolve, reject) => {
+            // Listen for abort signal to properly reject when timeout fires
+            options?.signal?.addEventListener('abort', () => {
+              reject(options.signal!.reason);
+            });
             // Resolve after 2.5 seconds (would timeout without progress)
             setTimeout(() => {
               resolve({ content: [{ type: 'text', text: 'Success' }] });
@@ -1698,15 +1702,19 @@ describe('DiscoveredMCPTool', () => {
       const invocation = tool.build({ param: 'test' });
       const executePromise = invocation.execute(new AbortController().signal);
 
-      // Send progress at 500ms, 1500ms, 2500ms to reset the timeout
+      // Send progress at 500ms, 1400ms, 2300ms to reset the timeout
+      // Each progress must arrive BEFORE the 1000ms idle timeout fires
       vi.advanceTimersByTime(500);
       onProgressCallback?.({ progress: 0.25 });
 
-      vi.advanceTimersByTime(1000);
+      vi.advanceTimersByTime(900);
       onProgressCallback?.({ progress: 0.5 });
 
-      vi.advanceTimersByTime(1000);
+      vi.advanceTimersByTime(900);
       onProgressCallback?.({ progress: 0.75 });
+
+      // Advance past the mock's 2500ms resolve time
+      vi.advanceTimersByTime(200);
 
       const result = await executePromise;
 

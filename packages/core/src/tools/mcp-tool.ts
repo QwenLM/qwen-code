@@ -334,7 +334,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         clearTimeout(idleTimeoutId);
       }
       if (this.mcpToolIdleTimeoutMs && this.mcpToolIdleTimeoutMs > 0) {
-        idleTimeoutId = setTimeout(() => {
+        const timer = setTimeout(() => {
           const error = new Error(
             `MCP tool '${this.serverToolName}' on server '${this.serverName}' ` +
               `did not respond within ${this.mcpToolIdleTimeoutMs}ms idle timeout`,
@@ -342,6 +342,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           error.name = 'AbortError';
           idleTimeoutController.abort(error);
         }, this.mcpToolIdleTimeoutMs);
+        timer.unref();
+        idleTimeoutId = timer;
       }
     };
 
@@ -375,11 +377,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         },
       );
 
-      // Clear the idle timeout on success
-      if (idleTimeoutId) {
-        clearTimeout(idleTimeoutId);
-      }
-
       // Wrap the raw CallToolResult into the Part[] format that the
       // existing transform/display functions expect.
       const rawResponseParts = wrapMcpCallToolResultAsParts(
@@ -412,11 +409,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         returnDisplay: getDisplayFromParts(truncatedParts),
       };
     } catch (error) {
-      // Clear the idle timeout on error
+      return this.handleReconnectOnError(error, signal, updateOutput);
+    } finally {
+      // Clear the idle timeout in all cases
       if (idleTimeoutId) {
         clearTimeout(idleTimeoutId);
       }
-      return this.handleReconnectOnError(error, signal, updateOutput);
     }
   }
 
