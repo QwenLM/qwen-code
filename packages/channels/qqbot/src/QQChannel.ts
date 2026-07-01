@@ -241,7 +241,9 @@ export class QQChannel extends ChannelBase {
                     this.cronBuffer.delete(sessionId);
                   })
                   .catch((err) => {
-                    process.stderr.write(`[QQ:${this.name}] Cron flush send error: ${err}\n`);
+                    process.stderr.write(
+                      `[QQ:${this.name}] Cron flush send error: ${err}\n`,
+                    );
                     entry!.buffer = toFlush + (entry!.buffer || '');
                   });
                 return; // deletion is handled in .then
@@ -279,6 +281,8 @@ export class QQChannel extends ChannelBase {
 
   async connect(): Promise<void> {
     this.disposed = false;
+    this.isReconnecting = false;
+    this.reconnectAttempts = 0;
     if (!this.config.instructions) {
       const parts: string[] = [
         '## QQ Bot Channel',
@@ -368,19 +372,20 @@ export class QQChannel extends ChannelBase {
     const route = await this.resolveRoute(chatId);
     if (!route) return;
 
+    const entry = this.replyMsgId.get(chatId);
+    const msgId =
+      entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
+
     // Respect QQ Bot active-message toggle: when a group admin disables
     // active messages, drop outbound sends silently to avoid platform-policy
-    // violations.
-    if (this.groupActiveMsgEnabled.get(chatId) === false) {
+    // violations. Only applies to active sends (no msgId — passive replies
+    // to @-bot messages must still be delivered).
+    if (!msgId && this.groupActiveMsgEnabled.get(chatId) === false) {
       process.stderr.write(
         `[QQ:${this.name}] sendMessage blocked: active messages disabled for ${chatId}\n`,
       );
       return;
     }
-
-    const entry = this.replyMsgId.get(chatId);
-    const msgId =
-      entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
 
     let nextSeq = 0;
     let rollbackApplied = false;
@@ -437,7 +442,10 @@ export class QQChannel extends ChannelBase {
         }
 
         // Plain-text fallback for ALL markdown rejections (with or without msgId)
-        const plainBody: Record<string, unknown> = { content: text, msg_type: 0 };
+        const plainBody: Record<string, unknown> = {
+          content: text,
+          msg_type: 0,
+        };
         if (msgId) {
           plainBody['msg_id'] = msgId;
           // Don't set msg_seq — plain-text fallback uses the same msg_id
@@ -545,7 +553,11 @@ export class QQChannel extends ChannelBase {
       this.connectReject(new Error('Channel disconnected'));
       this.connectReject = null;
     }
-    if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler && this.cronTextHandlerAttached) {
+    if (
+      this.qqConfig['cron-msg-experimental'] &&
+      this._cronTextHandler &&
+      this.cronTextHandlerAttached
+    ) {
       this.bridge.off?.('textChunk', this._cronTextHandler);
       this.cronTextHandlerAttached = false;
     }
@@ -601,27 +613,29 @@ export class QQChannel extends ChannelBase {
       s.timer = null;
       const toFlush = s.buffer;
       if (!toFlush) return;
+      // Clear buffer BEFORE async send so new chunks arriving during the
+      // send don't get lost (same pattern as onToolCall already uses).
+      s.buffer = '';
       // Set flushing flag so onResponseComplete knows buffer is being sent.
-      // Don't clear buffer until send completes — onResponseComplete may fire
-      // between the clear and the send resolution, causing it to delete a stale
-      // entry and orphan the catch/restore path.
       this.flushingSessions.add(sessionId);
       this.sendMessage(s.chatId, toFlush)
         .then(() => {
-          s.buffer = '';
+          // Only delete streamState on success (moved from .finally so a
+          // failed idle-flush doesn't orphan the session).
+          if (this.pendingStreamDelete.has(sessionId)) {
+            this.pendingStreamDelete.delete(sessionId);
+            this.streamState.delete(sessionId);
+          }
         })
         .catch((err) => {
           process.stderr.write(
             `[QQ:${this.name}] idleFlush send failed: ${err}\n`,
           );
-          // Buffer stays intact on failure; onResponseComplete may retry
+          // Restore buffer on failure so onResponseComplete can retry.
+          s.buffer = toFlush + s.buffer;
         })
         .finally(() => {
           this.flushingSessions.delete(sessionId);
-          if (this.pendingStreamDelete.has(sessionId)) {
-            this.pendingStreamDelete.delete(sessionId);
-            this.streamState.delete(sessionId);
-          }
         });
     }, 2000);
     state.timer.unref?.();
@@ -673,6 +687,9 @@ export class QQChannel extends ChannelBase {
     // Only flush the triggering session
     const state = this.streamState.get(event.sessionId);
     if (!state) return;
+    // Guard: if an idle-flush is in-flight for this session, don't flush
+    // again — the idle-flush's send will deliver the accumulated text.
+    if (this.flushingSessions.has(event.sessionId)) return;
     if (state.timer) {
       clearTimeout(state.timer);
       state.timer = null;
@@ -982,9 +999,13 @@ export class QQChannel extends ChannelBase {
               this.disconnect();
               this.reconnectTimer = setTimeout(() => {
                 this.isReconnecting = false;
+                // Ensure disposed is false before connect — disconnect()
+                // sets it to true, and any disposed guard between now and
+                // connect()'s own `this.disposed = false` would block it.
+                this.disposed = false;
                 this.connect().catch((err: unknown) => {
                   process.stderr.write(
-                    `[QQ:${this.name}] FATAL: reconnect after token exhaustion failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+                    `[QQ:${this.name}] FATAL: reconnect after token exhaustion failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
                   );
                 });
               }, 1000);
@@ -1202,7 +1223,11 @@ export class QQChannel extends ChannelBase {
                 this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
-                if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler && !this.cronTextHandlerAttached) {
+                if (
+                  this.qqConfig['cron-msg-experimental'] &&
+                  this._cronTextHandler &&
+                  !this.cronTextHandlerAttached
+                ) {
                   this.bridge.on?.('textChunk', this._cronTextHandler);
                   this.cronTextHandlerAttached = true;
                 }
@@ -1215,7 +1240,11 @@ export class QQChannel extends ChannelBase {
                 this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
-                if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler && !this.cronTextHandlerAttached) {
+                if (
+                  this.qqConfig['cron-msg-experimental'] &&
+                  this._cronTextHandler &&
+                  !this.cronTextHandlerAttached
+                ) {
                   this.bridge.on?.('textChunk', this._cronTextHandler);
                   this.cronTextHandlerAttached = true;
                 }
@@ -1340,7 +1369,9 @@ export class QQChannel extends ChannelBase {
         d: {
           token: `QQBot ${this.accessToken}`,
           intents:
-            Intent.C2C_MESSAGE | Intent.GROUP_AT_MESSAGE | (this.qqConfig.groupAllPolicy !== 'log' ? Intent.GROUP_MESSAGE : 0),
+            Intent.C2C_MESSAGE |
+            Intent.GROUP_AT_MESSAGE |
+            (this.qqConfig.groupAllPolicy !== 'log' ? Intent.GROUP_MESSAGE : 0),
           shard: [0, 1],
           properties: {},
         },
@@ -1457,13 +1488,16 @@ export class QQChannel extends ChannelBase {
   private extractBotOpenId(mentions: QQGroupMessageEvent['mentions']): string {
     const selfMention = mentions?.find((m) => m.is_you);
     if (!selfMention?.id) return '';
-    if (!/^[A-F0-9]{32}$/i.test(selfMention.id)) {
+    // For QQ group messages, use member_openid (group-specific OPENID)
+    // instead of id (global OPENID) for proper reply routing.
+    const botOpenId = selfMention.member_openid || selfMention.id;
+    if (!/^[A-F0-9]{32}$/i.test(botOpenId)) {
       process.stderr.write(
-        `[QQ:${this.name}] Invalid botOpenId format: ${sanitizeLogText(selfMention.id, 64)}\n`,
+        `[QQ:${this.name}] Invalid botOpenId format: ${sanitizeLogText(botOpenId, 64)}\n`,
       );
       return '';
     }
-    this.botOpenId = selfMention.id;
+    this.botOpenId = botOpenId;
     if (this.qqConfig.allowMention !== false) {
       this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
     }
@@ -1533,7 +1567,9 @@ export class QQChannel extends ChannelBase {
       isReplyToBot: false,
       alreadyPrefixed: !isSlash || undefined,
     }).catch((err: unknown) =>
-      process.stderr.write(`[QQ:${this.name}] C2C handler error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`),
+      process.stderr.write(
+        `[QQ:${this.name}] C2C handler error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+      ),
     );
   }
 
@@ -1627,7 +1663,9 @@ export class QQChannel extends ChannelBase {
       isReplyToBot: isAtBot,
       alreadyPrefixed: !isSlash || undefined,
     }).catch((err: unknown) =>
-      process.stderr.write(`[QQ:${this.name}] Group handler error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`),
+      process.stderr.write(
+        `[QQ:${this.name}] Group handler error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+      ),
     );
   }
 
@@ -1812,7 +1850,7 @@ export class QQChannel extends ChannelBase {
       alreadyPrefixed: !isSlash || undefined,
     }).catch((err: unknown) => {
       process.stderr.write(
-        `[QQ:${this.name}] handleGroupAll error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+        `[QQ:${this.name}] handleGroupAll error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
       );
     });
   }
