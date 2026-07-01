@@ -31,6 +31,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   LoopTickResult,
+  VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -118,6 +119,11 @@ import {
   getProviderToolCallId,
   parsePositiveIntegerEnv,
   DEFAULT_TOKEN_LIMIT,
+  hasImageParts,
+  normalizeParts,
+  runVisionBridge,
+  shouldRunVisionBridge,
+  splitImageParts,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -5360,6 +5366,9 @@ export class Session implements SessionContext {
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
+    const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
+      this.config,
+    );
 
     const parts = message.map((part) => {
       switch (part.type) {
@@ -5367,6 +5376,20 @@ export class Session implements SessionContext {
           collectExtensionMentionRefs(part.text, extensionMentions);
           return { text: part.text };
         case 'image':
+          if (preserveUnsupportedImageForBridge) {
+            return {
+              inlineData: {
+                mimeType: part.mimeType,
+                data: part.data,
+              },
+            };
+          }
+          return clampInlineMediaPart({
+            inlineData: {
+              mimeType: part.mimeType,
+              data: part.data,
+            },
+          });
         case 'audio':
           return clampInlineMediaPart({
             inlineData: {
@@ -5409,11 +5432,14 @@ export class Session implements SessionContext {
       embeddedContext.length === 0 &&
       extensionParts.length === 0
     ) {
-      return parts;
+      return this.#applyVisionBridgeIfNeeded(parts, abortSignal);
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
-      return [...parts, ...extensionParts];
+      return this.#applyVisionBridgeIfNeeded(
+        [...parts, ...extensionParts],
+        abortSignal,
+      );
     }
 
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
@@ -5448,6 +5474,9 @@ export class Session implements SessionContext {
       const readResult = await readManyFiles(this.config, {
         paths: pathSpecsToRead,
         signal: abortSignal,
+        ...(preserveUnsupportedImageForBridge
+          ? { preserveUnsupportedImageForBridge }
+          : {}),
       });
 
       const contentParts = Array.isArray(readResult.contentParts)
@@ -5462,6 +5491,8 @@ export class Session implements SessionContext {
       for (const part of contentParts) {
         if (typeof part === 'string') {
           processedQueryParts.push({ text: part });
+        } else if (preserveUnsupportedImageForBridge && hasImageParts([part])) {
+          processedQueryParts.push(part);
         } else {
           processedQueryParts.push(clampInlineMediaPart(part));
         }
@@ -5481,18 +5512,102 @@ export class Session implements SessionContext {
       }
       // Type guard for blob resources
       if ('blob' in contextPart && contextPart.blob) {
+        const inlinePart = {
+          inlineData: {
+            mimeType: contextPart.mimeType ?? 'application/octet-stream',
+            data: contextPart.blob,
+          },
+        };
         processedQueryParts.push(
-          clampInlineMediaPart({
-            inlineData: {
-              mimeType: contextPart.mimeType ?? 'application/octet-stream',
-              data: contextPart.blob,
-            },
-          }),
+          preserveUnsupportedImageForBridge && hasImageParts([inlinePart])
+            ? inlinePart
+            : clampInlineMediaPart(inlinePart),
         );
       }
     }
 
-    return processedQueryParts;
+    return this.#applyVisionBridgeIfNeeded(processedQueryParts, abortSignal);
+  }
+
+  async #applyVisionBridgeIfNeeded(
+    parts: Part[],
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
+      return parts;
+    }
+
+    let bridgeResult: VisionBridgeResult;
+    try {
+      debugLogger.debug('vision bridge: gate matched, running conversion');
+      bridgeResult = await runVisionBridge({
+        config: this.config,
+        parts,
+        signal: abortSignal,
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `vision bridge: failed before replacement; falling back to text-only parts error=${String(error instanceof Error ? error.message : error)}`,
+      );
+      return splitImageParts(parts).nonImageParts;
+    }
+    debugLogger.debug(
+      `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}${bridgeResult.error ? ` error=${bridgeResult.error}` : ''}`,
+    );
+
+    if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
+      try {
+        await this.messageEmitter.emitAgentMessage(
+          this.#formatVisionBridgeNotice(bridgeResult),
+        );
+      } catch (error) {
+        debugLogger.debug(
+          `vision bridge: failed to emit notice; continuing with bridge result error=${String(error instanceof Error ? error.message : error)}`,
+        );
+      }
+    }
+
+    if (abortSignal.aborted) {
+      debugLogger.debug('vision bridge: turn aborted after bridge returned');
+      return splitImageParts(parts).nonImageParts;
+    }
+
+    if (bridgeResult.applied && bridgeResult.parts != null) {
+      return normalizeParts(bridgeResult.parts);
+    }
+
+    // Bridge did not apply (e.g. skipped after cancel). Strip images before
+    // forwarding to the text-only primary model — never send raw inlineData to
+    // a model that cannot interpret it.
+    return splitImageParts(parts).nonImageParts;
+  }
+
+  #formatVisionBridgeNotice(result: VisionBridgeResult): string {
+    const modelName = result.modelId ?? 'vision model';
+    const target = result.modelEndpoint
+      ? `${modelName} (${result.modelEndpoint})`
+      : modelName;
+    const egressNote = result.egressOccurred
+      ? ` Your image and prompt/context were sent to ${target}.`
+      : '';
+
+    if (result.status === 'failed') {
+      const reason = result.egressOccurred
+        ? 'the vision model request failed'
+        : 'the vision bridge could not run';
+      return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+    }
+
+    if (result.status === 'skipped') {
+      return `Vision bridge cancelled.${egressNote}`;
+    }
+
+    // On success the image was always sent, so disclose egress unconditionally.
+    const omitted =
+      result.omittedCount > 0
+        ? ` (${result.omittedCount} image(s) omitted)`
+        : '';
+    return `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   }
 
   async #resolveExtensionMentionParts(
