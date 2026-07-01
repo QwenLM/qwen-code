@@ -434,7 +434,11 @@ class FakeBridge {
     originatorClientId: string;
   }> = [];
   runtimeMcpRemoves: Array<{ name: string; originatorClientId: string }> = [];
-  runtimeMcpAddResult: { shadowedSettings?: boolean } = {};
+  runtimeMcpAddResult: {
+    shadowedSettings?: boolean;
+    skipped?: boolean;
+    reason?: string;
+  } = {};
   runtimeMcpAddError: Error | undefined;
   runtimeMcpBeforeAddResolve: (() => Promise<void>) | undefined;
   async addRuntimeMcpServer(
@@ -5874,6 +5878,35 @@ describe('ACP WebSocket transport security', () => {
     );
     ws.close();
     await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
+  it('retries chrome-devtools MCP registration after a skipped result', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddResult = {
+      skipped: true,
+      reason: 'budget_exceeded',
+    };
+
+    const first = await wsConnect();
+    await initializeCdpBridge(first, 1);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: chrome-devtools runtime MCP skipped: budget_exceeded',
+    );
+
+    bridge.runtimeMcpAddResult = {};
+    const second = await wsConnect();
+    await initializeCdpBridge(second, 2);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(2));
+    second.close();
+    await new Promise<void>((resolve) => second.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    first.close();
+    await new Promise<void>((resolve) => first.once('close', () => resolve()));
   });
 
   it('removes chrome-devtools MCP if the CDP bridge disconnects during registration', async () => {

@@ -491,7 +491,6 @@ export function mountAcpHttp(
           }
         }
         if ((result as { skipped?: boolean }).skipped) {
-          cdpMcpTerminalSkipLogged = true;
           writeStderrLine(
             `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped: ${
               (result as { reason?: string }).reason ?? 'unknown'

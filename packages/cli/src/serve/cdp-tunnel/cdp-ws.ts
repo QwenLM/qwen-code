@@ -174,7 +174,7 @@ export function attachCdpClient(
 
   link.onAttachFailure = (reason: string) => {
     log(`qwen serve: /cdp attach failed (${reason}); closing puppeteer socket`);
-    dispose(`cdp_attach failed: ${reason}`);
+    dispose(`cdp_attach failed: ${reason}`, false);
     try {
       ws.close(CLOSE_NO_BRIDGE, 'cdp attach failed');
     } catch {

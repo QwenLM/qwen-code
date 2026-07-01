@@ -181,6 +181,32 @@ describe('attachCdpClient (Plan C #5626)', () => {
     await vi.waitFor(() => expect(ws.closed?.code).toBe(1011));
     expect(ws.closed?.reason).toBe('cdp attach failed');
     expect(bridge.cdpBound).toBe(false);
+    expect(releases(sent)).toHaveLength(0);
+  });
+
+  it('does not release when detach rejects a pending lazy attach', async () => {
+    const { bridge, sent } = makeBridge();
+    const ws = new FakeWs();
+    bind(ws, makeRegistry(bridge).registry);
+
+    ws.emit(
+      'message',
+      JSON.stringify({
+        id: 1,
+        method: 'Runtime.evaluate',
+        sessionId: 'qwen-cdp-page-session',
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(sent[0]).toMatchObject({ type: 'cdp_attach' }),
+    );
+    bridge.routeInbound({ type: 'cdp_detach', reason: 'tab closed' });
+
+    expect(ws.closed?.code).toBe(1000);
+    expect(ws.closed?.reason).toBe('tab detached: tab closed');
+    await vi.waitFor(() => expect(bridge.cdpBound).toBe(false));
+    expect(releases(sent)).toHaveLength(0);
   });
 
   it('onExtensionGone closes the puppeteer socket without sending a release', () => {
