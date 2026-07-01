@@ -466,7 +466,7 @@ function mergeBatchArtifact(
     next.storage === 'published' &&
     next.trustedPublisher;
   if (publishedUpgrade) {
-    return {
+    const merged: NormalizedArtifact = {
       ...existing,
       kind: next.kind,
       storage: 'published',
@@ -484,6 +484,8 @@ function mergeBatchArtifact(
       retentionSource: existing.retentionSource,
       clientRetained: existing.clientRetained || next.clientRetained,
     };
+    delete merged.workspacePath;
+    return merged;
   }
   return {
     ...existing,
@@ -528,6 +530,7 @@ function mergeArtifact(
   if (publishedUpgrade) {
     next.title = incoming.title;
     next.description = incoming.description;
+    delete next.workspacePath;
   }
 
   const changed =

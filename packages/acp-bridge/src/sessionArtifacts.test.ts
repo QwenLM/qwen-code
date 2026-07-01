@@ -118,6 +118,7 @@ describe('SessionArtifactStore', () => {
         managedId: 'managed-1',
       },
     });
+    expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
   });
 
   it('evicts non-retained old artifacts before client-retained artifacts', async () => {
