@@ -1628,6 +1628,85 @@ export class QQChannel extends ChannelBase {
     );
   }
 
+  /**
+   * Extract common group-message fields that both handleGroup and handleGroupAll
+   * need: sender identity, @-mention detection, slash-command detection, reply
+   * tracking, and message text construction.
+   *
+   * Returns null when the message has no meaningful text after @-tag stripping
+   * and should not be processed further.
+   */
+  private prepareGroupMessage(
+    event: QQGroupMessageEvent,
+    chatId: string,
+  ): {
+    isAtBot: boolean;
+    isSlash: boolean;
+    safeName: string;
+    senderOpenId: string;
+    botTag: string;
+    cleanText: string;
+    openIdSuffix: string;
+    text: string;
+    senderName: string;
+  } | null {
+    const senderName =
+      event.author?.username ||
+      event.author?.id ||
+      event.author?.member_openid ||
+      'QQ User';
+    const safeName = sanitizeSenderName(senderName);
+    const senderOpenId =
+      event.author?.member_openid || event.author?.user_openid || '';
+
+    const content = (event.content || '').trim();
+    const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    if (!cleanText) return null;
+
+    const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
+
+    // Extract bot's own OPENID from mentions (per-group)
+    if (isAtBot && !this.botOpenIdByGroup.has(chatId)) {
+      this.extractBotOpenId(event.mentions, chatId);
+    }
+
+    const isSlash = isAtBot && cleanText.startsWith('/');
+    const isBot = event.author?.bot === true;
+    const botTag = isBot ? '[bot] ' : '';
+
+    // Log slash commands with safeName for audit trail
+    if (isSlash) {
+      process.stderr.write(
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+      );
+    }
+
+    // Only track replyMsgId for at-bot messages
+    if (isAtBot) {
+      this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
+      this.saveQQState();
+    }
+
+    const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
+    const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
+
+    const text = isSlash
+      ? sanitizePromptText(cleanText)
+      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
+
+    return {
+      isAtBot,
+      isSlash,
+      safeName,
+      senderOpenId,
+      botTag,
+      cleanText,
+      openIdSuffix,
+      text,
+      senderName,
+    };
+  }
+
   private handleGroup(event: QQGroupMessageEvent): void {
     if (!event.group_openid) {
       process.stderr.write(
@@ -1649,48 +1728,10 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    const senderName =
-      event.author.username ||
-      event.author.id ||
-      event.author.member_openid ||
-      'QQ User';
-    const safeName = sanitizeSenderName(senderName);
-    const senderOpenId =
-      event.author.member_openid || event.author.user_openid || '';
-    const cleanText = (event.content || '')
-      .replace(/<@[^>]{1,64}>/g, '')
-      .trim();
-    // Ignore messages that have no meaningful text after @mention stripping
-    // (pure @mention, image, or sticker messages).
-    if (!cleanText) return;
 
-    // GROUP_AT_MESSAGE_CREATE may fire for @all mentions (not just
-    // specifically @bot). Only treat as a slash command when the bot
-    // itself is the direct target.
-    const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
-
-    // Extract bot's own OPENID from mentions (per-group)
-    if (isAtBot && !this.botOpenIdByGroup.has(chatId)) {
-      this.extractBotOpenId(event.mentions, chatId);
-    }
-
-    const isSlash = isAtBot && cleanText.startsWith('/');
-    const isBot = event.author.bot === true;
-    const botTag = isBot ? '[bot] ' : '';
-
-    // Log slash commands with safeName for audit trail
-    if (isSlash) {
-      process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
-      );
-    }
-
-    // Only track replyMsgId for at-bot messages — non-bot @all mentions
-    // should not clobber a preceding @mention's replyMsgId.
-    if (isAtBot) {
-      this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
-      this.saveQQState();
-    }
+    const result = this.prepareGroupMessage(event, chatId);
+    if (!result) return;
+    const { isAtBot, isSlash, text, senderName } = result;
 
     if (!isAtBot) {
       process.stderr.write(
@@ -1703,13 +1744,6 @@ export class QQChannel extends ChannelBase {
     // dedup token, preserving it for handleGroupAll which may need it.
     if (this.isDuplicate(event.id)) return;
 
-    // Inject per-group OPENID into the message prefix instead of global instructions
-    const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
-    const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
-
-    const text = isSlash
-      ? sanitizePromptText(cleanText)
-      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content?.trim() ?? '') : cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1821,23 +1855,17 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    const isBot = event.author.bot === true;
-    const botTag = isBot ? '[bot] ' : '';
 
     // Validate groupAllPolicy — unknown values default to 'log'.
-    // Policy check runs BEFORE content/regex processing to avoid
-    // unnecessary work when policy is 'log' (discard all messages).
     const rawPolicy = this.qqConfig.groupAllPolicy;
     const policy =
       rawPolicy === 'keyword' || rawPolicy === 'all' ? rawPolicy : 'log';
 
     if (policy === 'log') return;
 
-    const content = event.content?.trim() ?? '';
-    // Compute cleanText so keyword matching and text construction
-    // both use the sanitized content (without <@OPENID> tags).
-    const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
-    if (!cleanText) return;
+    const result = this.prepareGroupMessage(event, chatId);
+    if (!result) return;
+    const { isAtBot, isSlash, cleanText, text, senderName } = result;
 
     if (policy === 'keyword') {
       const triggers = (this.qqConfig.keywordTriggers ?? []).filter(
@@ -1851,54 +1879,6 @@ export class QQChannel extends ChannelBase {
 
     // All policy checks passed — now deduplicate, then forward to LLM.
     if (this.isDuplicate(event.id)) return;
-
-    // policy === 'all' or keyword matched → forward to LLM
-
-    // Group messages use member_openid; username/id are not present.
-    const senderName =
-      event.author.username ||
-      event.author.id ||
-      event.author.member_openid ||
-      'QQ User';
-    const safeName = sanitizeSenderName(senderName);
-    const senderOpenId =
-      event.author.member_openid || event.author.user_openid || '';
-
-    // 只有 @机器人本人 + 斜杠 才是 slash command
-    const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
-
-    // Extract bot's own OPENID from mentions (per-group)
-    if (isAtBot && !this.botOpenIdByGroup.has(chatId)) {
-      this.extractBotOpenId(event.mentions, chatId);
-    }
-
-    const isSlash = isAtBot && cleanText.startsWith('/');
-
-    // Log slash commands with safeName for audit trail
-    if (isSlash) {
-      process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
-      );
-    }
-
-    // When allowMention is enabled (default), preserve raw <@OPENID> tags so
-    // the model can @mention group members. When disabled, strip tags before
-    // the content reaches the LLM to prevent prompt-injection-based @mentions.
-    // Inject per-group OPENID into the message prefix instead of global instructions
-    const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
-    const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
-
-    const text = isSlash
-      ? sanitizePromptText(cleanText)
-      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
-
-    // Only track replyMsgId for at-mention messages — non-@messages should
-    // not clobber a preceding @mention's replyMsgId, or the bot's response
-    // will be threaded to the wrong message.
-    if (isAtBot) {
-      this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
-      this.saveQQState();
-    }
 
     this.handleInbound({
       channelName: this.name,
