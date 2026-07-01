@@ -71,6 +71,26 @@ export interface CreateDaemonSessionActionsArgs {
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
 }
 
+export function getConnectionAfterSessionClear(
+  current: DaemonConnectionState,
+  clearedSessionId: string | undefined,
+): DaemonConnectionState {
+  const next = { ...current };
+  if (!clearedSessionId || current.sessionId === clearedSessionId) {
+    delete next.sessionId;
+    delete next.clientId;
+    delete next.displayName;
+    delete next.tokenUsage;
+    delete next.tokenCount;
+  }
+  return {
+    ...next,
+    status: 'connected',
+    catchingUp: undefined,
+    error: undefined,
+  };
+}
+
 export function createDaemonSessionActions({
   store,
   sessionRef,
@@ -595,20 +615,7 @@ export function createDaemonSessionActions({
           console.warn('[DaemonSessionActions] detach on clear failed:', error);
         }
       }
-      setConnection((current) => {
-        const next = { ...current };
-        delete next.sessionId;
-        delete next.clientId;
-        delete next.displayName;
-        delete next.tokenUsage;
-        delete next.tokenCount;
-        return {
-          ...next,
-          status: 'connected',
-          catchingUp: undefined,
-          error: undefined,
-        };
-      });
+      setConnection((current) => getConnectionAfterSessionClear(current, session?.sessionId));
     },
 
     async newSession() {
