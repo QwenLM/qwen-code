@@ -95,13 +95,13 @@ export function App() {
 
 ### WebShell
 
-| 属性                | 类型                                   | 说明                              |
-| ------------------- | -------------------------------------- | --------------------------------- |
-| `onSessionIdChange` | `(sessionId: string) => void`          | 当前 session id 变化时触发        |
-| `theme`             | `'dark' \| 'light'`                    | UI 主题，默认 `dark`              |
-| `onThemeChange`     | `(theme: WebShellTheme) => void`       | `/theme` 命令切换主题后触发       |
-| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`   | UI 语言                           |
-| `onLanguageChange`  | `(language: WebShellLanguage) => void` | `/language ui` 切换 UI 语言后触发 |
+| 属性                | 类型                                       | 说明                              |
+| ------------------- | ------------------------------------------ | --------------------------------- |
+| `onSessionIdChange` | `(sessionId: string \| undefined) => void` | 当前 session id 变化或清空时触发  |
+| `theme`             | `'dark' \| 'light'`                        | UI 主题，默认 `dark`              |
+| `onThemeChange`     | `(theme: WebShellTheme) => void`           | `/theme` 命令切换主题后触发       |
+| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`       | UI 语言                           |
+| `onLanguageChange`  | `(language: WebShellLanguage) => void`     | `/language ui` 切换 UI 语言后触发 |
 
 ## 架构说明
 
