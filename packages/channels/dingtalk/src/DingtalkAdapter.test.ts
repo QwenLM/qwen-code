@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
+import type { ChannelTaskLifecycleEvent } from '@qwen-code/channel-base';
 
 const dingtalkSdkMock = vi.hoisted(() => ({
   instances: [] as unknown[],
@@ -104,7 +105,72 @@ function getPromptHook(
   return fn.bind(channel);
 }
 
+function getLifecycleHook(
+  channel: DingtalkChannelInstance,
+): (event: ChannelTaskLifecycleEvent) => void {
+  const fn = (channel as unknown as Record<string, unknown>)
+    .onTaskLifecycle as (event: ChannelTaskLifecycleEvent) => void;
+  return fn.bind(channel);
+}
+
 describe('DingtalkChannel prompt reactions', () => {
+  it('maps lifecycle start and terminal events to the eye reaction', () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(undefined);
+    const recallReaction = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+
+    const event = {
+      channelName: 'dingtalk',
+      chatId: 'cid-123',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...event, type: 'started' });
+    lifecycle({ ...event, type: 'started' });
+    lifecycle({ ...event, type: 'failed', error: 'boom' });
+    lifecycle({ ...event, type: 'completed' });
+
+    expect(attachReaction).toHaveBeenCalledOnce();
+    expect(attachReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+    expect(recallReaction).toHaveBeenCalledOnce();
+    expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+  });
+
+  it('does not attach lifecycle reactions without a conversation id', () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(undefined);
+    (channel as unknown as { attachReaction: typeof attachReaction })
+      .attachReaction = attachReaction;
+
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'HTTPS://oapi.dingtalk.com/robot/send?access_token=token',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    });
+
+    expect(attachReaction).not.toHaveBeenCalled();
+  });
+
   it('skips uppercase webhook URLs when starting a prompt', () => {
     const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);

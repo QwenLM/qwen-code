@@ -17,6 +17,7 @@ import type {
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 
 /**
@@ -95,6 +96,7 @@ export class DingtalkChannel extends ChannelBase {
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
+  private activeReactionKeys = new Set<string>();
 
   constructor(
     name: string,
@@ -386,13 +388,47 @@ export class DingtalkChannel extends ChannelBase {
     return !!chatId && !/^https?:\/\//i.test(chatId);
   }
 
+  private reactionKey(messageId: string, conversationId: string): string {
+    return `${conversationId}:${messageId}`;
+  }
+
+  private startReaction(chatId: string, messageId?: string): void {
+    if (!messageId || !this.isConversationId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    if (this.activeReactionKeys.has(key)) return;
+    this.activeReactionKeys.add(key);
+    this.attachReaction(messageId, chatId).catch(() => {
+      this.activeReactionKeys.delete(key);
+    });
+  }
+
+  private stopReaction(chatId: string, messageId?: string): void {
+    if (!messageId || !this.isConversationId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    if (!this.activeReactionKeys.delete(key)) return;
+    this.recallReaction(messageId, chatId).catch(() => {});
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startReaction(event.chatId, event.messageId);
+      return;
+    }
+    if (
+      event.type === 'completed' ||
+      event.type === 'cancelled' ||
+      event.type === 'failed'
+    ) {
+      this.stopReaction(event.chatId, event.messageId);
+    }
+  }
+
   protected override onPromptStart(
     chatId: string,
     _sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
-    this.attachReaction(messageId, chatId).catch(() => {});
+    this.startReaction(chatId, messageId);
   }
 
   protected override onPromptEnd(
@@ -400,8 +436,7 @@ export class DingtalkChannel extends ChannelBase {
     _sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
-    this.recallReaction(messageId, chatId).catch(() => {});
+    this.stopReaction(chatId, messageId);
   }
 
   /**
