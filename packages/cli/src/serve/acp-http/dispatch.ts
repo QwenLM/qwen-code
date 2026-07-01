@@ -2345,34 +2345,36 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/artifacts/add`: {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          const result = await this.bridge.addSessionArtifact(
-            sessionId,
-            pickSessionArtifactInput(params),
-            this.sessionCtx(conn, sessionId, loopback),
-          );
-          this.replyConn(conn, id, result as unknown);
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const result = await this.bridge.addSessionArtifact(
+              sessionId,
+              pickSessionArtifactInput(params),
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
           return;
         }
 
         case `${QWEN_METHOD_NS}session/artifacts/remove`: {
           const sessionId = String(params['sessionId'] ?? '');
-          if (!this.requireOwned(conn, sessionId, id)) return;
-          const artifactId = String(params['artifactId'] ?? '');
-          if (!artifactId) {
-            if (id !== undefined) {
-              conn.sendConn(
-                error(id, RPC.INVALID_PARAMS, '`artifactId` is required'),
-              );
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const artifactId = String(params['artifactId'] ?? '');
+            if (!artifactId) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`artifactId` is required'),
+                );
+              }
+              return;
             }
-            return;
-          }
-          const result = await this.bridge.removeSessionArtifact(
-            sessionId,
-            artifactId,
-            this.sessionCtx(conn, sessionId, loopback),
-          );
-          this.replyConn(conn, id, result as unknown);
+            const result = await this.bridge.removeSessionArtifact(
+              sessionId,
+              artifactId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
           return;
         }
 

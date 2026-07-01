@@ -5684,6 +5684,150 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440131';
+        await writeStoredSession(sessionId);
+        let addStarted!: () => void;
+        let releaseAdd!: () => void;
+        const addStartedPromise = new Promise<void>((resolve) => {
+          addStarted = resolve;
+        });
+        const addReleasedPromise = new Promise<void>((resolve) => {
+          releaseAdd = resolve;
+        });
+        bridge.addSessionArtifact = async (sessionId, artifact, context) => {
+          bridge.lastAddedArtifact = { sessionId, artifact, context };
+          addStarted();
+          await addReleasedPromise;
+          return { v: 1, sessionId, changes: [] };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/load',
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 99 });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 60,
+          method: '_qwen/session/artifacts/add',
+          params: {
+            sessionId,
+            title: 'Lineage',
+            url: 'https://example.test/lineage',
+          },
+        });
+        await addStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 61,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 61,
+          error: {
+            code: -32603,
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseAdd();
+        expect(await reader.next()).toMatchObject({
+          id: 60,
+          result: { v: 1, sessionId, changes: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('_qwen/session/artifacts/remove holds the archive gate while mutating', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440132';
+        await writeStoredSession(sessionId);
+        let removeStarted!: () => void;
+        let releaseRemove!: () => void;
+        const removeStartedPromise = new Promise<void>((resolve) => {
+          removeStarted = resolve;
+        });
+        const removeReleasedPromise = new Promise<void>((resolve) => {
+          releaseRemove = resolve;
+        });
+        bridge.removeSessionArtifact = async (
+          sessionId,
+          artifactId,
+          context,
+        ) => {
+          bridge.lastRemovedArtifact = { sessionId, artifactId, context };
+          removeStarted();
+          await removeReleasedPromise;
+          return {
+            v: 1,
+            sessionId,
+            changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/load',
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 99 });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 62,
+          method: '_qwen/session/artifacts/remove',
+          params: { sessionId, artifactId: 'artifact-1' },
+        });
+        await removeStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 63,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 63,
+          error: {
+            code: -32603,
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseRemove();
+        expect(await reader.next()).toMatchObject({
+          id: 62,
+          result: {
+            v: 1,
+            sessionId,
+            changes: [
+              {
+                action: 'removed',
+                artifactId: 'artifact-1',
+                reason: 'explicit',
+              },
+            ],
+          },
+        });
+        reader.close();
+      });
+    });
+
     it('session methods reject unowned session', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
