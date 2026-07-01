@@ -400,8 +400,8 @@ export class QQChannel extends ChannelBase {
         markdown: { content: text },
       };
       nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
-      if (msgId) this.msgSeqMap.set(msgId, nextSeq);
       if (msgId) {
+        this.msgSeqMap.set(msgId, nextSeq);
         body['msg_id'] = msgId;
         body['msg_seq'] = nextSeq;
       }
@@ -419,7 +419,6 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${sanitizeLogText(errBody, 200)})\n`,
         );
 
-        // Roll back msgSeqMap if we had a msgId (passive reply context)
         if (msgId) {
           this.msgSeqMap.set(msgId, nextSeq - 1);
           rollbackApplied = true;
@@ -429,11 +428,9 @@ export class QQChannel extends ChannelBase {
           const activeBody: Record<string, unknown> = {
             content: text,
             msg_type: 0,
+            msg_id: msgId,
+            msg_seq: nextSeq,
           };
-          if (msgId) {
-            activeBody['msg_id'] = msgId;
-            activeBody['msg_seq'] = nextSeq;
-          }
           const activeResp = await sendQQMessage(
             route.base,
             route.path,
@@ -441,21 +438,18 @@ export class QQChannel extends ChannelBase {
             activeBody,
           );
           if (activeResp.ok) {
-            if (msgId) {
-              this.msgSeqMap.set(msgId, nextSeq);
-              this.saveQQState();
-            }
+            this.msgSeqMap.set(msgId, nextSeq);
+            this.saveQQState();
             return;
           }
           process.stderr.write(
             `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status}: ${(await activeResp.text().catch(() => '')).slice(0, 100)})\n`,
           );
-          // If 429 on active retry, don't fall through to plain-text
           if (activeResp.status === 429) {
             process.stderr.write(
               `[QQ:${this.name}] Active retry rate-limited (HTTP 429), giving up on fallback\n`,
             );
-            if (msgId) this.saveQQState();
+            this.saveQQState();
             return;
           }
         }
@@ -631,12 +625,10 @@ export class QQChannel extends ChannelBase {
     } else {
       state.buffer += chunk;
     }
-    // Cancel any pending idle timer — new data arrived, restart the silence window.
     if (state.timer) {
       clearTimeout(state.timer);
       state.timer = null;
     }
-    // Start a new 2-second silence timer: flush when the model stops sending chunks.
     state.timer = setTimeout(() => {
       const s = state!;
       s.timer = null;
@@ -718,7 +710,6 @@ export class QQChannel extends ChannelBase {
    * than waiting for the tool call to complete.
    */
   override onToolCall(_chatId: string, event: ToolCallEvent): void {
-    // Only flush the triggering session
     const state = this.streamState.get(event.sessionId);
     if (!state) return;
     // Guard: if an idle-flush is in-flight for this session, don't flush
@@ -1440,12 +1431,7 @@ export class QQChannel extends ChannelBase {
    * with exponential backoff. Keeps retrying until success.
    */
   private async reconnectWithRetry(): Promise<void> {
-    // Guard: if the channel was disposed (daemon shutdown) while a reconnect
-    // timeout was pending, bail out immediately to avoid an infinite loop.
-    if (this.disposed) return;
-    // Guard: prevent parallel reconnection chains when multiple close events
-    // fire in rapid succession, each scheduling reconnectWithRetry.
-    if (this.isReconnecting) return;
+    if (this.disposed || this.isReconnecting) return;
     this.isReconnecting = true;
 
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
@@ -1535,27 +1521,14 @@ export class QQChannel extends ChannelBase {
     }
   }
 
-  /**
-   * Extract bot's own OPENID from mentions. Finds the self-mention,
-   * validates format, writes invalid-format diagnostic to stderr.
-   * Returns the validated id or empty string.
-   */
   private extractBotOpenId(
     mentions: QQGroupMessageEvent['mentions'],
     chatId?: string,
   ): string {
     const selfMention = mentions?.find((m) => m.is_you);
-    if (!selfMention || (!selfMention.id && !selfMention.member_openid))
-      return '';
-    // For QQ group messages, use member_openid (group-specific OPENID)
-    // instead of id (global OPENID) for proper reply routing.
-    const botOpenId = selfMention.member_openid || selfMention.id;
-    if (!/^[A-F0-9]{32}$/i.test(botOpenId)) {
-      process.stderr.write(
-        `[QQ:${this.name}] Invalid botOpenId format: ${sanitizeLogText(botOpenId, 64)}\n`,
-      );
-      return '';
-    }
+    if (!selfMention) return '';
+    const botOpenId = selfMention.member_openid || selfMention.id || '';
+    if (!/^[A-F0-9]{32}$/i.test(botOpenId)) return '';
     if (chatId) {
       this.botOpenIdByGroup.set(chatId, botOpenId);
       this.saveQQState();
