@@ -17,6 +17,7 @@ import type { ServeChannelSelection } from '../../serve/types.js';
 import { normalizeServeChannelSelection } from '../../serve/channel-selection.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
+  CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS,
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
   QWEN_DAEMON_WORKSPACE_ENV,
@@ -508,7 +509,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           pid: process.pid,
           at: new Date().toISOString(),
         });
-      }, 15_000);
+      }, CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref();
       const clearHeartbeat = () => {
         clearInterval(heartbeatTimer);

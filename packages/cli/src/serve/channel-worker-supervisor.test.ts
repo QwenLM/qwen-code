@@ -4,6 +4,9 @@ import {
   createChannelWorkerSupervisor,
   type ChannelWorkerChild,
 } from './channel-worker-supervisor.js';
+import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
+
+const TEST_HEARTBEAT_TIMEOUT_MS = CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS + 5;
 
 class FakeChild extends EventEmitter implements ChannelWorkerChild {
   pid: number | undefined = 12345;
@@ -171,6 +174,20 @@ describe('createChannelWorkerSupervisor', () => {
       error: 'fork failed',
       restartCount: 0,
     });
+  });
+
+  it('rejects heartbeat timeouts that cannot exceed the worker heartbeat interval', () => {
+    expect(() =>
+      createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        heartbeatTimeoutMs: CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS,
+      }),
+    ).toThrow(
+      `heartbeatTimeoutMs (${CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS}) must exceed the worker heartbeat interval (${CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS}ms) or be 0 to disable.`,
+    );
   });
 
   it('rejects startup when the worker never becomes ready', async () => {
@@ -443,6 +460,72 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('uses escalating restart delays from the restart policy', async () => {
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const secondChild = new FakeChild(false);
+    const thirdChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild)
+      .mockReturnValueOnce(thirdChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker,
+      restartPolicy: {
+        maxRestarts: 3,
+        windowMs: 300_000,
+        delaysMs: [10, 50, 100],
+      },
+    });
+
+    const started = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+    firstChild.emit('exit', 1, null);
+
+    await vi.advanceTimersByTimeAsync(9);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
+    secondChild.emit('message', {
+      type: 'ready',
+      pid: 22222,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await Promise.resolve();
+    secondChild.emit('exit', 1, null);
+
+    await vi.advanceTimersByTimeAsync(49);
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnWorker).toHaveBeenCalledTimes(3);
+    thirdChild.emit('message', {
+      type: 'ready',
+      pid: 33333,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await Promise.resolve();
+
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'running',
+      pid: 33333,
+      restartCount: 2,
+    });
+  });
+
   it('does not restart a pre-ready startup failure', async () => {
     vi.useFakeTimers();
     const child = new FakeChild();
@@ -505,7 +588,9 @@ describe('createChannelWorkerSupervisor', () => {
       enabled: true,
       state: 'failed',
       restartCount: 1,
-      error: 'Channel worker restart budget exhausted.',
+      error: expect.stringContaining(
+        'Channel worker restart budget exhausted. Last error: Channel worker exited before ready',
+      ),
     });
   });
 
@@ -759,6 +844,53 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('keeps the last restart failure in the budget exhausted error', async () => {
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const spawnWorker = vi.fn().mockReturnValueOnce(firstChild);
+    spawnWorker.mockImplementationOnce(() => {
+      throw new Error('fork failed');
+    });
+    const onExit = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker,
+      onExit,
+      restartPolicy: { maxRestarts: 1, windowMs: 300_000, delaysMs: [10] },
+    });
+
+    const started = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+    firstChild.emit('exit', 1, null);
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
+    expect(onExit).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        state: 'failed',
+        error:
+          'Channel worker restart budget exhausted. Last error: fork failed',
+        restartCount: 1,
+      }),
+    );
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'failed',
+      error: 'Channel worker restart budget exhausted. Last error: fork failed',
+      restartCount: 1,
+    });
+  });
+
   it('does not clobber restart spawn failure state on force shutdown', async () => {
     vi.useFakeTimers();
     const firstChild = new FakeChild(false);
@@ -898,14 +1030,16 @@ describe('createChannelWorkerSupervisor', () => {
       .fn()
       .mockReturnValueOnce(firstChild)
       .mockReturnValueOnce(secondChild);
+    const onExit = vi.fn();
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
       daemonUrl: 'http://127.0.0.1:4170',
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram'] },
       spawnWorker,
+      onExit,
       restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10] },
-      heartbeatTimeoutMs: 20,
+      heartbeatTimeoutMs: TEST_HEARTBEAT_TIMEOUT_MS,
     });
 
     const started = supervisor.start();
@@ -917,7 +1051,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
 
-    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(TEST_HEARTBEAT_TIMEOUT_MS);
     firstChild.emit('exit', null, 'SIGKILL');
     await vi.advanceTimersByTimeAsync(10);
     secondChild.emit('message', {
@@ -929,13 +1063,19 @@ describe('createChannelWorkerSupervisor', () => {
     await Promise.resolve();
 
     expect(firstChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(onExit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: 'exited',
+        staleHeartbeatAt: expect.any(String),
+      }),
+    );
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
       state: 'running',
       pid: 22222,
       restartCount: 1,
-      staleHeartbeatAt: expect.any(String),
     });
+    expect(supervisor.snapshot()).not.toHaveProperty('staleHeartbeatAt');
   });
 
   it('restarts when heartbeat becomes stale after ready', async () => {
@@ -953,7 +1093,7 @@ describe('createChannelWorkerSupervisor', () => {
       selection: { mode: 'names', names: ['telegram'] },
       spawnWorker,
       restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10] },
-      heartbeatTimeoutMs: 20,
+      heartbeatTimeoutMs: TEST_HEARTBEAT_TIMEOUT_MS,
     });
 
     const started = supervisor.start();
@@ -970,7 +1110,7 @@ describe('createChannelWorkerSupervisor', () => {
       at: new Date().toISOString(),
     });
 
-    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(TEST_HEARTBEAT_TIMEOUT_MS);
     firstChild.emit('exit', null, 'SIGKILL');
     await vi.advanceTimersByTimeAsync(10);
     secondChild.emit('message', {
@@ -1000,7 +1140,7 @@ describe('createChannelWorkerSupervisor', () => {
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram'] },
       spawnWorker: vi.fn(() => child),
-      heartbeatTimeoutMs: 20,
+      heartbeatTimeoutMs: TEST_HEARTBEAT_TIMEOUT_MS,
     });
 
     const started = supervisor.start();
@@ -1011,7 +1151,7 @@ describe('createChannelWorkerSupervisor', () => {
       requestedChannels: ['telegram'],
     });
     await started;
-    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(TEST_HEARTBEAT_TIMEOUT_MS - 1);
 
     child.emit('message', {
       type: 'heartbeat',
@@ -1020,7 +1160,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
 
     expect(supervisor.snapshot()).not.toHaveProperty('lastHeartbeatAt');
-    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(1);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
@@ -1036,7 +1176,7 @@ describe('createChannelWorkerSupervisor', () => {
       onReady: () => {
         throw new Error('pidfile write failed');
       },
-      heartbeatTimeoutMs: 20,
+      heartbeatTimeoutMs: TEST_HEARTBEAT_TIMEOUT_MS,
     });
 
     const started = supervisor.start();
@@ -1053,7 +1193,7 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'running',
       pid: 11111,
     });
-    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(TEST_HEARTBEAT_TIMEOUT_MS);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
@@ -1067,7 +1207,7 @@ describe('createChannelWorkerSupervisor', () => {
       selection: { mode: 'names', names: ['telegram'] },
       spawnWorker: vi.fn(() => child),
       restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10] },
-      heartbeatTimeoutMs: 20,
+      heartbeatTimeoutMs: TEST_HEARTBEAT_TIMEOUT_MS,
     });
 
     const started = supervisor.start();
@@ -1080,7 +1220,7 @@ describe('createChannelWorkerSupervisor', () => {
     await started;
 
     await supervisor.stop();
-    await vi.advanceTimersByTimeAsync(20);
+    await vi.advanceTimersByTimeAsync(TEST_HEARTBEAT_TIMEOUT_MS);
 
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(child.kill).not.toHaveBeenCalledWith('SIGKILL');
@@ -1171,6 +1311,38 @@ describe('createChannelWorkerSupervisor', () => {
     expect(
       onLog.mock.calls.flatMap((call) => call[0].line).join('\n'),
     ).not.toContain('ssword');
+  });
+
+  it('decodes Uint8Array worker log chunks and preserves indentation', async () => {
+    const child = new FakeChild();
+    child.stdout = new EventEmitter();
+    const onLog = vi.fn();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onLog,
+    });
+
+    const started = supervisor.start();
+    child.stdout.emit(
+      'data',
+      new Uint8Array(Buffer.from('\tat stack frame\n')),
+    );
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stdout',
+      line: ' at stack frame',
+    });
   });
 
   it('flushes oversized worker log buffers without waiting for a newline', async () => {

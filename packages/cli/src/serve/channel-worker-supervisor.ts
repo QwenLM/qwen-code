@@ -5,6 +5,7 @@ import { channelSelectionNames } from './channel-selection.js';
 import type { ServeChannelSelection } from './types.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
+  CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS,
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
   QWEN_DAEMON_WORKSPACE_ENV,
@@ -22,7 +23,8 @@ const ANSI_CSI_SEQUENCE_RE = new RegExp(
   'g',
 );
 const WORKER_LOG_INVISIBLE_RE = /[\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
-const WORKER_LOG_CONTROL_RE = /\p{Cc}/gu;
+// eslint-disable-next-line no-control-regex
+const WORKER_LOG_CONTROL_RE = /[\x00-\x08\x0a-\x1f\x7f]/g;
 
 export interface ChannelWorkerRestartPolicy {
   maxRestarts: number;
@@ -371,7 +373,8 @@ function attachWorkerLogStream(
     discardedOversizedLineRemainderLength = 0;
   };
   stream.on('data', (chunk) => {
-    buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+    buffer +=
+      typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
     for (;;) {
       const newlineIndex = buffer.search(/\r?\n/);
       if (newlineIndex < 0) break;
@@ -416,6 +419,14 @@ export function createChannelWorkerSupervisor(
   const restartPolicy = opts.restartPolicy ?? DEFAULT_RESTART_POLICY;
   const heartbeatTimeoutMs =
     opts.heartbeatTimeoutMs ?? DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS;
+  if (
+    heartbeatTimeoutMs > 0 &&
+    heartbeatTimeoutMs <= CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS
+  ) {
+    throw new Error(
+      `heartbeatTimeoutMs (${heartbeatTimeoutMs}) must exceed the worker heartbeat interval (${CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS}ms) or be 0 to disable.`,
+    );
+  }
   let child: ChannelWorkerChild | undefined;
   let snapshot: ChannelWorkerSnapshot = {
     enabled: true,
@@ -494,10 +505,13 @@ export function createChannelWorkerSupervisor(
     if (stopping) return false;
     const nowMs = Date.now();
     if (!canScheduleRestart(nowMs)) {
+      const lastError = snapshot.error;
       snapshot = {
         ...snapshot,
         state: 'failed',
-        error: 'Channel worker restart budget exhausted.',
+        error: lastError
+          ? `Channel worker restart budget exhausted. Last error: ${lastError}`
+          : 'Channel worker restart budget exhausted.',
         nextRestartAt: undefined,
       };
       return false;
@@ -686,6 +700,7 @@ export function createChannelWorkerSupervisor(
               ? [...message.channels]
               : [...snapshot.channels],
         };
+        delete next.staleHeartbeatAt;
         if (message.requestedChannels?.length) {
           next.requestedChannels = [...message.requestedChannels];
         }
