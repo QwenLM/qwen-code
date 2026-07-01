@@ -125,3 +125,6 @@ tmp/
 .codegraph
 .qwen/computer-use/installed.json
 .playwright-mcp/
+
+# AI agent artifacts (e.g., atlarix, claude, etc.)
+.atlarix/
