@@ -113,7 +113,7 @@ describe('<MarkdownDisplay />', () => {
     });
 
     it('does not pad a short pending message up to availableTerminalHeight', () => {
-      // maxHeight + overflow:hidden must clip only when content is too tall —
+      // The clip must activate only when content exceeds the budget —
       // a short pending message renders at its natural height, no blank rows.
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay
@@ -179,6 +179,30 @@ describe('<MarkdownDisplay />', () => {
       ).toBeLessThanOrEqual(1);
     });
 
+    it('does not stack a double cue for a math block near the clip boundary', () => {
+      // RenderMathBlock reserves more rows (RESERVED_LINES=3) than a code block;
+      // the head-slice budget reserves 2 rows so a retained math block never
+      // hits its own inner truncation cue on top of the outer one.
+      const text = [
+        '$$',
+        ...Array.from({ length: 40 }, (_, i) => `x_{${i}} +`),
+        '$$',
+      ].join(eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={8}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(
+        (output.match(/generating more/g) ?? []).length,
+      ).toBeLessThanOrEqual(1);
+      expect(output.split('\n').length).toBeLessThanOrEqual(8);
+    });
+
     it('does not clip a pending message when no height budget is given', () => {
       // The clip is gated on availableTerminalHeight !== undefined; without a
       // budget the full message renders (no clip, no cue).
@@ -199,8 +223,8 @@ describe('<MarkdownDisplay />', () => {
     });
 
     it('applies the minimum floor at a degenerate budget of 1', () => {
-      // Math.max(MIN_PENDING_CONTENT_LINES + 1, 1) - 1 = 1: keep one content
-      // line + the cue, never 0 or negative.
+      // Math.max(MIN_PENDING_CONTENT_LINES, 1 - 2) = 1 (floored): keep one
+      // content line + the cue, never 0 or negative.
       const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
         eol,
       );
