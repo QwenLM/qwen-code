@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.19.3",
+  "version": "0.19.4",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -21,7 +21,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.4"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -38,7 +38,7 @@
     "build:sandbox": "node scripts/build_sandbox.js",
     "bundle": "npm run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",
     "test": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test --workspaces --if-present --parallel",
-    "test:ci": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel && npm run test:scripts",
+    "test:ci": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel && npm run test:scripts && npm run check:serve-fast-path-bundle",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
@@ -61,6 +61,7 @@
     "lint:ci": "eslint . --ext .ts,.tsx --max-warnings 0 && eslint integration-tests --max-warnings 0",
     "lint:sdk:python": "python3 -m ruff check --config packages/sdk-python/pyproject.toml packages/sdk-python",
     "lint:all": "node scripts/lint.js",
+    "audit:runtime:critical": "npm audit --omit=dev --audit-level=critical",
     "format": "prettier --experimental-cli --write .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "typecheck:sdk:python": "python3 -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src",
@@ -152,7 +153,7 @@
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "ink": "^7.0.3",
-    "simple-git": "^3.28.0"
+    "simple-git": "^3.36.0"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",

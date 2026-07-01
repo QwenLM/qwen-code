@@ -118,6 +118,7 @@ jobs:
     # post-merge re-run on `main` would be redundant.
     if: "${{ !cancelled() && github.event_name != 'push' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
     permissions:
       contents: 'read'
       checks: 'write'
@@ -127,14 +128,15 @@ jobs:
       # instant the branch is pushed) instead of github.ref. github.ref is the
       # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
       # can serve stale for minutes after a push, repeatedly flaking this gate.
-      # The merge queue (integration_cli on merge_group) validates the merged
-      # result. Non-PR events keep github.ref.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           # Shallow: nothing here walks git history (the verify guard below checks
           # head.sha == HEAD, schema/tests touch only the working tree). On the
           # in-repo ECS runner a full-history clone is the heaviest transfer and
@@ -191,6 +193,10 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
+      - name: 'Audit critical runtime dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run audit:runtime:critical'
+
       - name: 'Check lockfile'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: 'npm run check:lockfile'
@@ -209,6 +215,7 @@ jobs:
 
       - name: 'Run actionlint'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        timeout-minutes: 5
         run: 'node scripts/lint.js --actionlint'
 
       - name: 'Run shellcheck'
@@ -256,7 +263,16 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
-        run: 'npm run test:ci'
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
 
       - name: 'Run no-AK integration smoke tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
@@ -303,14 +319,14 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      # See the Ubuntu gate's checkout: on PRs use the immutable refs/pull/N/head
-      # to avoid merge-ref rebuild lag; other events keep github.ref.
+      # See the Ubuntu gate's checkout: PRs use the immutable refs/pull/N/head
+      # and merge queue uses the event head SHA.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
 
       - name: 'Set up Node.js 22.x'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -338,7 +354,16 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
-        run: 'npm run test:ci'
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
 
   # Windows counterpart of test_macos (see that job's note). Runner is
   # windows-2022; the check name keeps the windows-latest label so it matches
@@ -356,7 +381,7 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
 
       - name: 'Set up Node.js 22.x'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -384,7 +409,16 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
-        run: 'npm run test:ci'
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
 
   post_coverage_comment:
     name: 'Post Coverage Comment'
@@ -462,6 +496,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           # Shallow, mirroring the Ubuntu gate: nothing here walks git history,
           # and a full-history clone is the heaviest transfer on the ECS runner.
           fetch-depth: 1

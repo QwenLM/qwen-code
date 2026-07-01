@@ -25,12 +25,14 @@ export function mapProviderStatus(
 ): {
   models: DaemonModelInfo[];
   currentModel?: string;
+  currentMode?: string;
   contextWindow?: number;
 } {
   if (!status) return { models: [] };
   const seen = new Set<string>();
   const models: DaemonModelInfo[] = [];
   let currentModel = preferredCurrentModel ?? status.current?.modelId;
+  const currentMode = status.approvalMode;
   let contextWindow: number | undefined;
 
   for (const provider of status.providers) {
@@ -68,7 +70,7 @@ export function mapProviderStatus(
     }
   }
 
-  return { models, currentModel, contextWindow };
+  return { models, currentModel, currentMode, contextWindow };
 }
 
 export function mapSessionContextModels(

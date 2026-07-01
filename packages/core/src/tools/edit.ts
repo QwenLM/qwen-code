@@ -18,7 +18,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
-import { isNodeError } from '../utils/errors.js';
+import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
@@ -416,7 +416,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       if (abortSignal.aborted) {
         throw error;
       }
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = getErrorMessage(error);
       throw new Error(`Error preparing edit: ${errorMsg}`);
     }
 
@@ -484,7 +484,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       if (signal.aborted) {
         throw error;
       }
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = getErrorMessage(error);
       return {
         llmContent: `Error preparing edit: ${errorMsg}`,
         returnDisplay: `Error preparing edit: ${errorMsg}`,
@@ -725,7 +725,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         returnDisplay: displayResult,
       };
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = getErrorMessage(error);
       return {
         llmContent: `Error executing edit: ${errorMsg}`,
         returnDisplay: `Error writing file: ${errorMsg}`,

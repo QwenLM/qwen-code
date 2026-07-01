@@ -8,15 +8,22 @@ name: 'Qwen Autofix'
 # The lifecycle is asynchronous — a PR is opened in one run and its review is
 # addressed in a later run once a reviewer has weighed in — so each scheduled
 # tick runs only the phase(s) that make sense, decided by the `route` job:
-#   • every tick           → review phase (sweep the bot's open PRs)
+#   • every 4h             → review phase (sweep the bot's open PRs)
 #   • every 12h (00/12 UTC) → also the issue phase (locate + fix one new bug)
-# workflow_dispatch can force a phase, an issue, or a PR.
+#   • issues:labeled        → issue phase when label, state, and sender all match
+#   • workflow_dispatch     → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
 # through CI_DEV_BOT_PAT so the bot acts as a single identity, qwen-code-dev-bot.
+# PAT label writes can emit issues:labeled events; the route guards below make
+# those runs exit unless the label, issue state, and bug label all match.
 on:
+  issues:
+    types:
+      - 'labeled'
   schedule:
-    - cron: '0 */4 * * *' # Review every 4h; issue phase additionally at 00/12 UTC
+    - cron: '0 0,12 * * *' # Issue + review every 12h; must match route SCHEDULE check
+    - cron: '0 4,8,16,20 * * *' # Review only between issue runs
   workflow_dispatch:
     inputs:
       phase:
@@ -25,7 +32,7 @@ on:
         default: 'auto'
         type: 'choice'
         options:
-          - 'auto' # review always; issue at 00/12 UTC
+          - 'auto' # review always; issue on schedule or ready-for-agent label
           - 'issue' # locate + fix one bug only
           - 'review' # address review on open PRs only
           - 'both' # issue and review
@@ -75,6 +82,8 @@ jobs:
       ${{ github.repository == 'QwenLM/qwen-code' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
+    permissions:
+      contents: 'read'
     outputs:
       do_issue: '${{ steps.decide.outputs.do_issue }}'
       do_review: '${{ steps.decide.outputs.do_review }}'
@@ -85,6 +94,17 @@ jobs:
           PHASE: '${{ inputs.phase }}'
           FORCED_ISSUE: '${{ inputs.issue_number }}'
           FORCED_PR: '${{ inputs.pr_number }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          GITHUB_TOKEN: '${{ github.token }}'
+          BUG_LABEL: 'type/bug'
+          ISSUE_LABEL: '${{ github.event.label.name }}'
+          ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'
+          ISSUE_NUMBER: '${{ github.event.issue.number }}'
+          ISSUE_STATE: '${{ github.event.issue.state }}'
+          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          REPO: '${{ github.repository }}'
+          SENDER_LOGIN: '${{ github.event.sender.login }}'
+          SCHEDULE: '${{ github.event.schedule }}'
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
@@ -93,18 +113,52 @@ jobs:
             review) DO_REVIEW=true ;;
             both) DO_ISSUE=true; DO_REVIEW=true ;;
             *)
-              # auto (the scheduled default): review every tick, issue every 12h.
+              # auto (the scheduled default): review every tick, issue on the
+              # dedicated 00/12 UTC schedule. Use the event payload instead of
+              # wall-clock time because GitHub may delay scheduled runs.
               DO_REVIEW=true
-              HOUR="$(date -u +%H)"
-              if (( 10#${HOUR} % 12 == 0 )); then DO_ISSUE=true; fi
+              # Must match the issue-phase cron string on the schedule trigger.
+              if [[ "${EVENT_NAME}" == 'schedule' && "${SCHEDULE}" == '0 0,12 * * *' ]]; then
+                DO_ISSUE=true
+              fi
+              if [[ "${EVENT_NAME}" == 'issues' ]]; then
+                DO_REVIEW=false
+                label_is_trigger=false
+                [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" ]] && label_is_trigger=true
+                if [[ "${label_is_trigger}" != 'true' ]]; then
+                  echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                else
+                  issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  sender_permission=''
+                  sender_is_trusted=false
+                  if [[ -n "${SENDER_LOGIN}" ]]; then
+                    if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                      api_error="${sender_permission}"
+                      sender_permission=''
+                      api_error="${api_error//$'\r'/ }"
+                      api_error="${api_error//$'\n'/ }"
+                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
+                    fi
+                    [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
+                  fi
+                  if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_bug}" == 'true' && "${issue_is_ready}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
+                    DO_ISSUE=true
+                  else
+                    echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  fi
+                fi
+              fi
               ;;
           esac
-          # Forcing a specific issue/PR implies running that phase.
-          [[ -n "${FORCED_ISSUE}" ]] && DO_ISSUE=true
-          [[ -n "${FORCED_PR}" ]] && DO_REVIEW=true
+          # Forcing a specific issue/PR implies running that phase only for
+          # explicit manual dispatch. Event payload numbers still flow to the
+          # phase jobs after routing, but must not bypass the label/schedule gates.
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${FORCED_ISSUE}" ]] && DO_ISSUE=true
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${FORCED_PR}" ]] && DO_REVIEW=true
           echo "do_issue=${DO_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "do_review=${DO_REVIEW}" >> "${GITHUB_OUTPUT}"
-          echo "🧭 phase='${PHASE:-auto}' (hour=$(date -u +%H)Z) → issue=${DO_ISSUE} review=${DO_REVIEW}"
+          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' schedule='${SCHEDULE:-n/a}' → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
   # ISSUE PHASE — locate one unattended bug, fix it, open a PR.
@@ -124,6 +178,7 @@ jobs:
       REPO: '${{ github.repository }}'
       WORKDIR: '/tmp/autofix'
       BUG_LABEL: 'type/bug'
+      EVENT_NAME: '${{ github.event_name }}'
       READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
       # Tier-2 age window (days): skip bugs newer than MIN (give triage/dedup
@@ -141,6 +196,7 @@ jobs:
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -164,7 +220,7 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          FORCED_ISSUE: '${{ inputs.issue_number }}'
+          FORCED_ISSUE: '${{ inputs.issue_number || github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"
 
@@ -172,12 +228,20 @@ jobs:
             echo "🎯 Forced issue #${FORCED_ISSUE}"
             forced_issue_json="${WORKDIR}/forced-issue.json"
             gh issue view "${FORCED_ISSUE}" --repo "${REPO}" \
-              --json number,title,body,labels,createdAt,url \
+              --json number,title,body,labels,createdAt,url,state \
               > "${forced_issue_json}"
             if jq -e \
               '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
               "${forced_issue_json}" > /dev/null; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} has an autofix exclusion label; skipping."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            elif [[ "$(jq -r '.state // ""' "${forced_issue_json}")" != 'OPEN' ]]; then
+              echo "⏭️ Forced issue #${FORCED_ISSUE} is not open; skipping."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            elif [[ "${EVENT_NAME}" != 'workflow_dispatch' ]] && ! jq -e --arg bug "${BUG_LABEL}" --arg ready "${READY_FOR_AGENT_LABEL}" \
+              '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))' \
+              "${forced_issue_json}" > /dev/null; then
+              echo "⏭️ Forced issue #${FORCED_ISSUE} is missing ${BUG_LABEL} or ${READY_FOR_AGENT_LABEL}; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             else
               if ! jq -c '[. + {autofixTier: 0}]' "${forced_issue_json}" > "${WORKDIR}/candidates.json"; then
@@ -347,8 +411,9 @@ jobs:
             You are a senior engineer triaging bug reports for autonomous
             fixing. The repository is checked out in the current directory.
             Candidate issues are in /tmp/autofix/candidates.json.
-            `autofixTier: 0` means the issue was forced via workflow_dispatch;
-            treat it as highest priority. `autofixTier: 1` means a maintainer
+            `autofixTier: 0` means a specific issue was selected by manual
+            dispatch or an issue label event; treat it as highest priority.
+            `autofixTier: 1` means a maintainer
             marked the issue ready-for-agent; `autofixTier: 2` means it is a
             recent unattended bug. Do not pick a tier-2 issue over a comparably
             actionable tier-1 issue; only do so when the tier-2 issue has
@@ -856,6 +921,7 @@ jobs:
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0

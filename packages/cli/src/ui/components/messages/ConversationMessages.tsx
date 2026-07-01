@@ -21,6 +21,7 @@ import { wrapToVisualLines } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
 
 export const THINKING_ICON = '∴ ';
+export const THINKING_ICON_PENDING = '∵ ';
 
 export const toggleKeyHint =
   process.platform === 'darwin' ? 'option+t' : 'alt+t';
@@ -233,7 +234,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 }) => (
   <PrefixedMarkdownMessage
     text={text}
-    prefix="✦"
+    prefix="◆"
     prefixColor={theme.text.accent}
     ariaLabel={SCREEN_READER_MODEL_PREFIX}
     isPending={isPending}
@@ -257,7 +258,7 @@ export const AssistantMessageContent: React.FC<
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
-    basePrefix="✦"
+    basePrefix="◆"
     sourceCopyIndexOffsets={sourceCopyIndexOffsets}
   />
 );
@@ -321,7 +322,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     return (
       <Box flexDirection="column">
         <Text dimColor italic>
-          {THINKING_ICON}
+          {THINKING_ICON_PENDING}
           {t('Thinking')}…{durationSuffix}
         </Text>
         <Box paddingLeft={2}>

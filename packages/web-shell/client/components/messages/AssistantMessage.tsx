@@ -53,7 +53,6 @@ export const AssistantMessage = memo(function AssistantMessage({
               content={content}
               source="assistant"
               isStreaming={isStreaming}
-              enhanceTables={!isStreaming}
             />
           </div>
         </div>
@@ -232,9 +231,10 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                     : styles.thinkingSummaryText
                 }
               >
-                {t(thinkingSummaryKey, {
-                  duration: thinkingDuration,
-                })}
+                {t(
+                  thinkingSummaryKey,
+                  thinkingActive ? { duration: thinkingDuration } : {},
+                )}
               </span>
               <span
                 className={

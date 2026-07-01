@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Post-review cleanup for /review Step 11.
+// Post-review cleanup for /review Step 9.
 //   - Remove the temporary worktree at .qwen/tmp/review-pr-<n>.
 //   - Delete the local branch ref qwen-review/pr-<n>.
 //   - Remove any .qwen/tmp/qwen-review-<target>-* side files.

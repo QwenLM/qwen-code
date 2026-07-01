@@ -8,6 +8,7 @@ import express from 'express';
 import type { Application } from 'express';
 import type { DaemonLogger } from './daemon-logger.js';
 import type { DaemonStartupSnapshot } from './daemon-status.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -46,6 +47,10 @@ import {
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
 import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
+import {
+  mountWorkspaceMemoryRememberRoutes,
+  WorkspaceRememberTaskLane,
+} from './workspace-remember.js';
 import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { createHealthDemoRoutes } from './routes/health-demo.js';
@@ -100,6 +105,7 @@ import {
 } from './server/error-handlers.js';
 import { installRateLimiter } from './server/rate-limiter-setup.js';
 import { createServeFeatures } from './server/serve-features.js';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import { registerWorkspaceLifecycleRoutes } from './routes/workspace-lifecycle.js';
 import { registerWorkspaceMcpControlRoutes } from './routes/workspace-mcp-control.js';
@@ -178,6 +184,7 @@ export interface ServeAppDeps {
    * and a stderr audit sink.
    */
   deviceFlowRegistry?: DeviceFlowRegistry;
+  maxExtensionOperationHistory?: number;
   /**
    * Extra device-flow providers for tests / future extensions.
    * Production builds register only `QwenOAuthDeviceFlowProvider`;
@@ -201,6 +208,7 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   workspace?: DaemonWorkspaceService;
   statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
@@ -364,6 +372,7 @@ export function createServeApp(
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
     });
+  const archiveCoordinator = new SessionArchiveCoordinator();
 
   installSelfOriginStripMiddleware(app, getPort);
 
@@ -528,6 +537,7 @@ export function createServeApp(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   const acpHandleRef: { current?: AcpHttpHandle } = {};
+  const workspaceRememberLane = new WorkspaceRememberTaskLane(bridge);
 
   // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
   // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
@@ -550,6 +560,7 @@ export function createServeApp(
     getSupportedDeviceFlowProviders,
     deviceFlowRegistry,
     sessionShellCommandEnabled,
+    getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
   });
 
   registerCapabilitiesRoutes(app, {
@@ -577,6 +588,13 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
     safeBody,
   });
+  mountWorkspaceMemoryRememberRoutes(app, {
+    bridge,
+    lane: workspaceRememberLane,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
   mountWorkspaceAgentsRoutes(app, {
     bridge,
     boundWorkspace,
@@ -599,6 +617,9 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    ...(deps.maxExtensionOperationHistory === undefined
+      ? {}
+      : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
   });
 
   // Workspace file routes (read-only + mutation).
@@ -708,6 +729,7 @@ export function createServeApp(
   registerSessionRoutes(app, {
     boundWorkspace,
     bridge,
+    archiveCoordinator,
     mutate,
     sendBridgeError,
     daemonLog,
@@ -768,6 +790,7 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, bridge, {
     boundWorkspace,
+    archiveCoordinator,
     workspace,
     fsFactory,
     deviceFlowRegistry,
@@ -779,7 +802,9 @@ export function createServeApp(
       opts.allowOrigins && opts.allowOrigins.length > 0
         ? parseAllowOriginPatterns(opts.allowOrigins)
         : undefined,
+    hostname: opts.hostname,
     sessionShellCommandEnabled,
+    workspaceRememberLane,
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
