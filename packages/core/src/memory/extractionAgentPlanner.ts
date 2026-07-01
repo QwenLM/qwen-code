@@ -9,11 +9,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
-import type { PermissionManager } from '../permissions/permission-manager.js';
-import type {
-  PermissionCheckContext,
-  PermissionDecision,
-} from '../permissions/types.js';
 import {
   MEMORY_FRONTMATTER_EXAMPLE,
   TYPES_SECTION_INDIVIDUAL,
@@ -22,9 +17,7 @@ import {
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
-  getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
-  isAnyAutoMemPath,
 } from './paths.js';
 import type { AutoMemoryType } from './types.js';
 import {
@@ -32,133 +25,11 @@ import {
   scanUserAutoMemoryTopicDocuments,
 } from './scan.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACTION_AGENT');
-
-type MemoryScopedPermissionManager = Pick<
-  PermissionManager,
-  | 'evaluate'
-  | 'findMatchingDenyRule'
-  | 'hasMatchingAskRule'
-  | 'hasRelevantRules'
-  | 'isToolEnabled'
->;
-
-function isScopedTool(toolName: string): boolean {
-  return (
-    toolName === ToolNames.SHELL ||
-    toolName === ToolNames.EDIT ||
-    toolName === ToolNames.WRITE_FILE
-  );
-}
-
-function mergePermissionDecision(
-  scopedDecision: PermissionDecision,
-  baseDecision: PermissionDecision,
-): PermissionDecision {
-  const priority: Record<PermissionDecision, number> = {
-    deny: 4,
-    ask: 3,
-    allow: 2,
-    default: 1,
-  };
-  return priority[baseDecision] > priority[scopedDecision]
-    ? baseDecision
-    : scopedDecision;
-}
-
-async function evaluateScopedDecision(
-  ctx: PermissionCheckContext,
-  projectRoot: string,
-): Promise<PermissionDecision> {
-  switch (ctx.toolName) {
-    case ToolNames.SHELL: {
-      if (!ctx.command) {
-        return 'deny';
-      }
-      const isReadOnly = await isShellCommandReadOnlyAST(
-        stripShellWrapper(ctx.command),
-      );
-      return isReadOnly ? 'allow' : 'deny';
-    }
-    case ToolNames.EDIT:
-    case ToolNames.WRITE_FILE:
-      return ctx.filePath && isAnyAutoMemPath(ctx.filePath, projectRoot)
-        ? 'allow'
-        : 'deny';
-    default:
-      return 'default';
-  }
-}
-
-function getScopedDenyRule(
-  ctx: PermissionCheckContext,
-  projectRoot: string,
-): string | undefined {
-  switch (ctx.toolName) {
-    case ToolNames.SHELL:
-      return 'ManagedAutoMemory(run_shell_command: read-only only)';
-    case ToolNames.EDIT:
-      return `ManagedAutoMemory(edit: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()}; team memory ${getTeamAutoMemoryRoot(projectRoot)} is not auto-writable)`;
-    case ToolNames.WRITE_FILE:
-      return `ManagedAutoMemory(write_file: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()}; team memory ${getTeamAutoMemoryRoot(projectRoot)} is not auto-writable)`;
-    default:
-      return undefined;
-  }
-}
-
-function createMemoryScopedAgentConfig(
-  config: Config,
-  projectRoot: string,
-): Config {
-  const basePm = config.getPermissionManager?.();
-  const scopedPm: MemoryScopedPermissionManager = {
-    hasRelevantRules(ctx: PermissionCheckContext): boolean {
-      return isScopedTool(ctx.toolName) || !!basePm?.hasRelevantRules(ctx);
-    },
-    hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
-      return basePm?.hasMatchingAskRule(ctx) ?? false;
-    },
-    findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
-      const scoped = getScopedDenyRule(ctx, projectRoot);
-      if (scoped) {
-        return scoped;
-      }
-      return basePm?.findMatchingDenyRule(ctx);
-    },
-    async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
-      const scopedDecision = await evaluateScopedDecision(ctx, projectRoot);
-      if (!basePm) {
-        return scopedDecision;
-      }
-      const baseDecision = basePm.hasRelevantRules(ctx)
-        ? await basePm.evaluate(ctx)
-        : 'default';
-      return mergePermissionDecision(scopedDecision, baseDecision);
-    },
-    async isToolEnabled(toolName: string): Promise<boolean> {
-      // Registry-level check: is this tool type allowed at all?
-      // Scoped tools (SHELL/EDIT/WRITE_FILE) are enabled — per-invocation
-      // restrictions are enforced in evaluate().
-      if (isScopedTool(toolName)) {
-        return true;
-      }
-      if (basePm) {
-        return basePm.isToolEnabled(toolName);
-      }
-      return true;
-    },
-  };
-
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
-}
 
 const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   'You are now acting as the managed memory extraction subagent for an AI coding assistant.',
@@ -385,7 +256,9 @@ export async function runAutoMemoryExtractionByAgent(
   const topicSummaries = await buildTopicSummaryBlock(projectRoot);
   const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
   const userMemoryRoot = getUserAutoMemoryRoot();
-  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot);
+  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
+    allowShell: true,
+  });
 
   const result = await runForkedAgent({
     name: 'managed-auto-memory-extractor',

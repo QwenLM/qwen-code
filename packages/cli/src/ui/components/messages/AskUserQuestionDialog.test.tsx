@@ -228,6 +228,25 @@ describe('<AskUserQuestionDialog />', () => {
       unmount();
     });
 
+    it('does not auto-submit pasted numeric prefixes as option numbers', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails();
+
+      const { stdin, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('\u001B[200~2x\u001B[201~');
+      await wait();
+
+      expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('does not auto-submit when pressing number key for "Other" custom input', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails();

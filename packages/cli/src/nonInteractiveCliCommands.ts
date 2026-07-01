@@ -61,6 +61,8 @@ export type NonInteractiveSlashCommandResult =
       type: 'submit_prompt';
       content: PartListUnion;
       outputHistoryItems?: HistoryItemWithoutId[];
+      /** Per-turn model id (e.g. inline `/model <id> <prompt>`); no session change. */
+      modelOverride?: string;
     }
   | {
       type: 'message';
@@ -107,6 +109,9 @@ function handleCommandResult(
       return {
         type: 'submit_prompt',
         content: result.content,
+        ...(result.modelOverride
+          ? { modelOverride: result.modelOverride }
+          : {}),
         ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 

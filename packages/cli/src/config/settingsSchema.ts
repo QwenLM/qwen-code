@@ -1021,7 +1021,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
       shellOutputMaxLines: {
@@ -2044,6 +2044,19 @@ const SETTINGS_SCHEMA = {
             showInDialog: false,
             mergeStrategy: MergeStrategy.UNION,
           },
+          classifyAllShell: {
+            type: 'boolean',
+            label: 'Classify All Shell Commands',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Route ALL shell commands through the auto-mode classifier, ' +
+              'including read-only commands that would otherwise be ' +
+              'auto-approved. Provides defense-in-depth for production ' +
+              'environments.',
+            showInDialog: false,
+          },
         },
       },
     },
@@ -2444,6 +2457,18 @@ const SETTINGS_SCHEMA = {
           'A list of MCP servers to exclude. Supports glob patterns (e.g. "*puppeteer*"). Takes precedence over mcp.allowed.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+      },
+      toolIdleTimeoutMs: {
+        type: 'number',
+        label: 'MCP Tool Idle Timeout (ms)',
+        category: 'MCP',
+        requiresRestart: false,
+        default: 300000,
+        minimum: 10000,
+        maximum: 3600000,
+        description:
+          'Idle timeout in milliseconds for MCP tool calls. If the MCP server does not produce any response or progress update within this time, the call is aborted. Default: 300000 (5 minutes). Can be overridden via QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.',
+        showInDialog: false,
       },
     },
   },

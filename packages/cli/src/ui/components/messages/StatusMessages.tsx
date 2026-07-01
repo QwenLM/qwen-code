@@ -125,14 +125,14 @@ export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (
   />
 );
 
-// Dim, tip-style notice for the vision bridge. The 🔎 sits in the gutter as the
+// Dim, tip-style notice for the vision bridge. The ◎ sits in the gutter as the
 // sole prefix (the message text no longer carries its own glyph), and the body
 // is rendered in secondary color so the disclosure reads as a hint rather than
 // a primary INFO line.
 export const VisionNoticeMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
     text={text}
-    prefix="🔎"
+    prefix="◎"
     prefixColor={theme.text.secondary}
     textColor={theme.text.secondary}
   />

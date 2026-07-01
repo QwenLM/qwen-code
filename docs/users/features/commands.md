@@ -127,12 +127,12 @@ Commands for managing AI tools and models.
 
 These commands invoke bundled skills that provide specialized workflows.
 
-| Command      | Description                                                         | Usage Examples                                    |
-| ------------ | ------------------------------------------------------------------- | ------------------------------------------------- |
-| `/review`    | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
-| `/loop`      | Run a prompt on a recurring schedule                                | `/loop 5m check the build`                        |
-| `/simplify`  | Review recent changes and apply safe cleanup edits directly         | `/simplify`, `/simplify focus on duplication`     |
-| `/qc-helper` | Answer questions about Qwen Code usage and configuration            | `/qc-helper how do I configure MCP?`              |
+| Command      | Description                                                 | Usage Examples                                    |
+| ------------ | ----------------------------------------------------------- | ------------------------------------------------- |
+| `/review`    | Review code changes with 9 parallel review agents           | `/review`, `/review 123`, `/review 123 --comment` |
+| `/loop`      | Run a prompt on a recurring schedule                        | `/loop 5m check the build`                        |
+| `/simplify`  | Review recent changes and apply safe cleanup edits directly | `/simplify`, `/simplify focus on duplication`     |
+| `/qc-helper` | Answer questions about Qwen Code usage and configuration    | `/qc-helper how do I configure MCP?`              |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
 

@@ -97,7 +97,7 @@ export function useContextualTips({
       addItem(
         {
           type: MessageType.INFO,
-          text: `💡 ${t(tip.content)}`,
+          text: `★ ${t(tip.content)}`,
         },
         Date.now(),
       );

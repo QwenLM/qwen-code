@@ -16,6 +16,7 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
 import { AcpDispatcher } from './dispatch.js';
+import type { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import {
   ConnectionRegistry,
   type AcpConnection,
@@ -23,6 +24,7 @@ import {
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import {
   RPC,
   error as rpcError,
@@ -144,6 +146,7 @@ const WS_READ_METHODS = new Set([
   '_qwen/workspace/agents/list',
   '_qwen/workspace/agents/get',
   '_qwen/workspace/memory',
+  '_qwen/workspace/memory/remember/get',
   '_qwen/workspace/auth/status',
   '_qwen/workspace/auth/device_flow/get',
   '_qwen/file/read',
@@ -191,6 +194,9 @@ export interface MountAcpHttpOptions {
   allowedOrigins?: ParsedAllowOriginPatterns;
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
+  archiveCoordinator?: SessionArchiveCoordinator;
+  /** Shared lane for sessionless workspace remember tasks. */
+  workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
   checkRate?: (key: string, tier: RateLimitTier) => boolean;
   /**
@@ -280,18 +286,24 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const path = opts.path ?? '/acp';
-  const dispatcher = new AcpDispatcher(
-    bridge,
-    opts.boundWorkspace,
-    opts.workspace,
-    opts.fsFactory,
-    opts.deviceFlowRegistry,
-    opts.sessionShellCommandEnabled === true,
-  );
+  const dispatcherRef: { current?: AcpDispatcher } = {};
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.
   const registry = new ConnectionRegistry(
-    (req, clientId) => dispatcher.cancelAbandonedPermission(req, clientId),
+    (req, clientId) => {
+      // Defensive, matching the `detachClient` callback below: if a future
+      // refactor introduces async work between registry and dispatcher
+      // creation, a teardown racing in here must not crash
+      // `abandonPendingForSession`. Log and report "not cancelled" instead of
+      // throwing through the teardown path.
+      if (!dispatcherRef.current) {
+        writeStderrLine(
+          'qwen serve: /acp abandonPending called before dispatcher initialized (skipped)',
+        );
+        return false;
+      }
+      return dispatcherRef.current.cancelAbandonedPermission(req, clientId);
+    },
     // Best-effort bridge detach so a torn-down connection's bridge-stamped
     // client ids don't linger in the bridge's voter/known-client sets.
     (sessionId, clientId) => {
@@ -305,6 +317,18 @@ export function mountAcpHttp(
     },
     opts.maxConnections,
   );
+  const dispatcher = new AcpDispatcher(
+    bridge,
+    opts.boundWorkspace,
+    opts.workspace,
+    opts.workspaceRememberLane,
+    opts.fsFactory,
+    opts.deviceFlowRegistry,
+    opts.sessionShellCommandEnabled === true,
+    registry,
+    opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+  );
+  dispatcherRef.current = dispatcher;
 
   // ── POST /acp ──────────────────────────────────────────────────────
   app.post(path, async (req: Request, res: Response) => {

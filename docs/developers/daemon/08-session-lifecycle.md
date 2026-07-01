@@ -205,8 +205,26 @@ attach or subscriber remains, the session is reaped. The endpoint returns 204.
 ### Batch Session Delete
 
 `POST /sessions/delete` accepts `{ sessionIds: string[] }` (up to 100 ids),
-closes bridge sessions, and deletes transcript files. It uses
-`Promise.allSettled` for resilience and returns `{ removed, notFound, errors }`.
+closes bridge sessions, and deletes active or archived transcript files. If both
+active and archived JSONL files exist for the same id, hard delete removes both
+so operators can clear the conflict. It cleans active and archived worktree
+sidecars, but leaves file-history snapshots, subagent transcripts, and runtime
+sidecars intact. It uses `Promise.allSettled` for resilience and returns
+`{ removed, notFound, errors }`.
+
+### Session Archive
+
+`POST /sessions/archive` moves inactive session JSONL files from `chats/` into
+`chats/archive/`. If the target session is live, the daemon first enters a
+per-session archive gate and performs a strict close that requires the ACP child
+to flush `ChatRecordingService`; archive leaves the JSONL in place if close or
+flush fails.
+
+`POST /sessions/unarchive` moves archived JSONL files back to `chats/`. This is
+only a storage-state transition; clients must call `session/load` or
+`session/resume` afterward. Archived sessions return `409 session_archived` for
+load/resume, and mutations racing an archive transition return
+`409 session_archiving`.
 
 ### Context Usage (`session_context_usage` capability tag)
 
