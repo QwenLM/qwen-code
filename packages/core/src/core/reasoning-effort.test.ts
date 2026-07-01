@@ -46,6 +46,15 @@ describe('normalizeReasoningEffort', () => {
     expect(normalizeReasoningEffort(undefined)).toBeUndefined();
     expect(normalizeReasoningEffort(null)).toBeUndefined();
   });
+
+  it('returns undefined for non-string input without throwing', () => {
+    // A hand-edited settings.json can hold a non-string reasoningEffort
+    // (e.g. `true` or `123`); the runtime call site forwards the raw value,
+    // so normalize must not call `.trim()` on it and crash at startup.
+    expect(normalizeReasoningEffort(true as unknown as string)).toBeUndefined();
+    expect(normalizeReasoningEffort(123 as unknown as string)).toBeUndefined();
+    expect(normalizeReasoningEffort({} as unknown as string)).toBeUndefined();
+  });
 });
 
 describe('clampReasoningEffort', () => {

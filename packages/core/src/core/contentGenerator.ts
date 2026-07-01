@@ -112,11 +112,12 @@ export type ContentGeneratorConfig = {
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
         //   - The default OpenAI-compatible pipeline forwards the tier verbatim
         //     (no 'max' clamp); Gemini caps at 'high'.
-        //   - Real Anthropic clamps unsupported 'xhigh'/'max' down to 'high'
-        //     (logged once per generator via debugLogger.warn) when the baseURL
-        //     doesn't look like a DeepSeek-compatible endpoint, so configs
-        //     targeting DeepSeek don't 400 when the same auth profile is reused
-        //     against api.anthropic.com.
+        //   - Real Anthropic clamps each tier to the active model's supported
+        //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
+        //     'max'; older models cap at 'high'), logged once per generator via
+        //     debugLogger.warn, when the baseURL doesn't look like a
+        //     DeepSeek-compatible endpoint, so configs targeting DeepSeek don't
+        //     400 when the same auth profile is reused against api.anthropic.com.
         effort?: ReasoningEffort;
         budget_tokens?: number;
       };

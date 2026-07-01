@@ -46,7 +46,7 @@ export const REASONING_EFFORT_RANKS: Record<ReasoningEffort, number> = {
 export function normalizeReasoningEffort(
   raw?: string | null,
 ): ReasoningEffort | undefined {
-  if (!raw) {
+  if (!raw || typeof raw !== 'string') {
     return undefined;
   }
   const key = raw
