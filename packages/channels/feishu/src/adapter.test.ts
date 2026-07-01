@@ -1181,14 +1181,17 @@ describe('FeishuChannel', () => {
         messageId: 'inbound_1',
         identity: { id: 'channel:feishu', displayName: 'feishu' },
         memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
-      };
+      } as const;
 
-      lifecycle.call(channel, { ...baseEvent, type: 'completed' });
+      lifecycle.call(channel, {
+        ...baseEvent,
+        type: 'completed',
+      } satisfies ChannelTaskLifecycleEvent);
       lifecycle.call(channel, {
         ...baseEvent,
         type: 'cancelled',
         reason: 'cancel_command',
-      });
+      } satisfies ChannelTaskLifecycleEvent);
 
       await getPrivateMethod<
         (chatId: string, sessionId: string, messageId?: string) => Promise<void>

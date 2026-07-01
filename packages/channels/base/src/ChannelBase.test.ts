@@ -4849,6 +4849,56 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('suppresses lifecycle activity while adapter cancellation is pending', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-stop' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const cancel = ch.cancelPromptForTest(sessionId);
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'late part',
+      );
+      (bridge as unknown as EventEmitter).emit('toolCall', {
+        sessionId,
+        toolCallId: 'tool-pending-adapter-cancel',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+      });
+
+      expect(ch.responseChunks).toEqual([]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-stop',
+        }),
+      ]);
+      resolveCancel();
+      await expect(cancel).resolves.toBe(true);
+      resolvePrompt('late');
+      await prompt;
+    });
+
     it('does not emit tool call lifecycle events after cancellation', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {

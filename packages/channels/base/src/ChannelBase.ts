@@ -786,14 +786,19 @@ export abstract class ChannelBase {
           },
         );
     active.cancelRequested = cancelRequested;
-    return cancelRequested.then((cancelSucceeded) => {
-      if (cancelSucceeded) {
-        active.cancelled = true;
-        this.stopActiveStreaming(active, sessionId, reason);
-        this.emitTaskCancellation(active, sessionId, reason);
-      }
-      return cancelSucceeded;
-    });
+    active.cancelPending = true;
+    return cancelRequested
+      .finally(() => {
+        active.cancelPending = false;
+      })
+      .then((cancelSucceeded) => {
+        if (cancelSucceeded) {
+          active.cancelled = true;
+          this.stopActiveStreaming(active, sessionId, reason);
+          this.emitTaskCancellation(active, sessionId, reason);
+        }
+        return cancelSucceeded;
+      });
   }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}

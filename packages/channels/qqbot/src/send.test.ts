@@ -888,11 +888,14 @@ describe('lifecycle status hooks', () => {
 
     expect(() => {
       chp.onTaskLifecycle({
+        type: 'started',
+        channelName: 'qqbot',
         chatId: 'test-chat-id',
         sessionId: 'session-1',
-        taskId: 'task-1',
-        status: 'running',
-      } as ChannelTaskLifecycleEvent);
+        messageId: 'msg-1',
+        identity: { id: 'channel:qqbot', displayName: 'qqbot' },
+        memoryScope: { namespace: 'channel:qqbot', mode: 'metadata-only' },
+      } satisfies ChannelTaskLifecycleEvent);
     }).not.toThrow();
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
