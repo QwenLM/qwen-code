@@ -561,14 +561,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function formatModelAuthType(authType: string): string {
-  const normalized = authType.trim();
-  if (normalized.startsWith('USE_')) {
-    return normalized.slice(4).toLowerCase().replace(/_/g, '-');
-  }
-  return normalized.toLowerCase();
-}
-
 function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
   if (!isRecord(result)) return null;
   const meta = result._meta;
@@ -599,12 +591,7 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
 }
 
 function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
-  return (
-    `AuthType: ${formatModelAuthType(summary.authType)}` +
-    `\nUsing ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}` +
-    `\nBase URL: ${summary.baseUrl}` +
-    `\nAPI key: ${summary.apiKey}`
-  );
+  return `Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}`;
 }
 
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -1383,7 +1370,7 @@ export function App({
       message: {
         id: messageId,
         role: 'system',
-        content: `※ recap: ${t('recap.loading')}`,
+        content: `※ ${t('recap.label')}: ${t('recap.loading')}`,
         variant: 'info',
         source: 'recap',
       },
@@ -1398,7 +1385,7 @@ export function App({
             id: messageId,
             role: 'system',
             content: result.recap
-              ? `※ recap: ${result.recap}`
+              ? `※ ${t('recap.label')}: ${result.recap}`
               : t('recap.empty'),
             variant: 'info',
             source: 'recap',
@@ -1840,7 +1827,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                text: `※ recap: ${result.recap}`,
+                text: `※ ${t('recap.label')}: ${result.recap}`,
                 source: 'recap',
               },
             ]);
@@ -1854,7 +1841,7 @@ export function App({
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () =>
       document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [connection.sessionId, sessionActions, store]);
+  }, [connection.sessionId, sessionActions, store, t]);
 
   const handleCycleMode = useCallback(() => {
     const idx = isDaemonApprovalMode(currentMode)
