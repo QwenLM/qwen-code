@@ -24,7 +24,10 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
+  SessionService,
+} from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -125,7 +128,7 @@ describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
         'ws://127.0.0.1:4170/cdp',
       ],
       alwaysLoadTools: true,
-      __qwenRuntimeMcpIfAbsent: true,
+      [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
     });
   });
 
@@ -5919,6 +5922,57 @@ describe('ACP WebSocket transport security', () => {
     first.close();
     await new Promise<void>((resolve) => first.once('close', () => resolve()));
   });
+
+  it('retries chrome-devtools MCP registration while the ACP channel is unavailable', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
+      data: { errorKind: 'acp_channel_unavailable' },
+    });
+
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(2), {
+      timeout: 1_500,
+    });
+    bridge.runtimeMcpAddError = undefined;
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(3), {
+      timeout: 1_500,
+    });
+    expect(stdioMocks.writeStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('failed to add chrome-devtools runtime MCP'),
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+  });
+
+  it('stops retrying chrome-devtools MCP registration after ACP channel retry exhaustion', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
+      data: { errorKind: 'acp_channel_unavailable' },
+    });
+
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(
+      () => {
+        expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+          'qwen serve: failed to add chrome-devtools runtime MCP: no channel',
+        );
+      },
+      { timeout: 7_000 },
+    );
+    expect(bridge.runtimeMcpAdds).toHaveLength(21);
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  }, 10_000);
 
   it('skips chrome-devtools MCP registration when /cdp requires auth', async () => {
     stdioMocks.writeStderrLine.mockClear();

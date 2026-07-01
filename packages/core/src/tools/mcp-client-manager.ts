@@ -40,7 +40,7 @@ import {
 } from './mcp-errors.js';
 
 const debugLogger = createDebugLogger('MCP');
-const RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG = '__qwenRuntimeMcpIfAbsent';
+export const RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG = '__qwenRuntimeMcpIfAbsent';
 
 /**
  * Configuration for MCP health monitoring

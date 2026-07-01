@@ -12,6 +12,7 @@ import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
@@ -63,7 +64,6 @@ const CDP_PATH = '/cdp';
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
-const RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG = '__qwenRuntimeMcpIfAbsent';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
 const requireFromHere = createRequire(import.meta.url);
