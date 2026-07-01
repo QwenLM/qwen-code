@@ -19,15 +19,8 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
-// Global compact mode was removed (#5666). Type-based tool rendering no longer
-// consumes a compact-mode context, so these tests use a local no-op provider
-// (its `value` is ignored) to keep the existing render scaffolding intact.
-const CompactModeProvider = ({
-  children,
-}: {
-  children?: React.ReactNode;
-  value?: unknown;
-}) => <>{children}</>;
+// Global compact mode was removed (#5666); type-based tool rendering no longer
+// consumes a compact-mode context.
 
 // Mock child components to isolate ToolGroupMessage behavior
 vi.mock('./ToolMessage.js', () => ({
@@ -1054,12 +1047,10 @@ describe('<ToolGroupMessage />', () => {
     // ToolMessage path and `SubagentScrollbackSummary` would never
     // surface in scrollback. The committed-summary handoff promised
     // by the LiveAgentPanel design depends on this.
-    const renderCompact = (component: React.ReactElement, compactMode = true) =>
+    const renderCompact = (component: React.ReactElement) =>
       render(
         <ConfigContext.Provider value={mockConfig}>
-          <CompactModeProvider value={{ compactMode, compactInline: false }}>
-            {component}
-          </CompactModeProvider>
+          {component}
         </ConfigContext.Provider>,
       );
 

@@ -19,15 +19,8 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 
-// Global compact mode was removed (#5666). Type-based tool rendering no longer
-// consumes a compact-mode context, so these tests use a local no-op provider
-// (its `value` is ignored) to keep the existing render scaffolding intact.
-const CompactModeProvider = ({
-  children,
-}: {
-  children?: React.ReactNode;
-  value?: unknown;
-}) => <>{children}</>;
+// Global compact mode was removed (#5666); type-based tool rendering no longer
+// consumes a compact-mode context.
 
 vi.mock('../TerminalOutput.js', () => ({
   TerminalOutput: function MockTerminalOutput({
@@ -127,21 +120,18 @@ const mockSettings: LoadedSettings = {
   },
 } as LoadedSettings;
 
-// Helper to render with context (compactMode=false by default to show tool output)
+// Helper to render with context.
 const renderWithContext = (
   ui: React.ReactElement,
   streamingState: StreamingState,
-  compactMode = false,
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <CompactModeProvider value={{ compactMode, compactInline: false }}>
-      <SettingsContext.Provider value={mockSettings}>
-        <StreamingContext.Provider value={contextValue}>
-          {ui}
-        </StreamingContext.Provider>
-      </SettingsContext.Provider>
-    </CompactModeProvider>,
+    <SettingsContext.Provider value={mockSettings}>
+      <StreamingContext.Provider value={contextValue}>
+        {ui}
+      </StreamingContext.Provider>
+    </SettingsContext.Provider>,
   );
 };
 
@@ -243,29 +233,26 @@ describe('<ToolMessage />', () => {
     expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
   });
 
-  it('shows result for Error status in compact mode', () => {
+  it('shows result for Error status', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} status={ToolCallStatus.Error} />,
       StreamingState.Idle,
-      true,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
-  it('shows result for Executing status in compact mode', () => {
+  it('shows result for Executing status', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} status={ToolCallStatus.Executing} />,
       StreamingState.Idle,
-      true,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
-  it('shows result for Pending status in compact mode', () => {
+  it('shows result for Pending status', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} status={ToolCallStatus.Pending} />,
       StreamingState.Idle,
-      true,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
@@ -911,19 +898,17 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: 0 } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <SettingsContext.Provider value={settingsWithDisabledCap}>
-          <StreamingContext.Provider value={StreamingState.Idle}>
-            <ToolMessage
-              {...baseProps}
-              name="Shell"
-              status={ToolCallStatus.Executing}
-              resultDisplay={ansiOutputDisplay}
-              availableTerminalHeight={100}
-            />
-          </StreamingContext.Provider>
-        </SettingsContext.Provider>
-      </CompactModeProvider>,
+      <SettingsContext.Provider value={settingsWithDisabledCap}>
+        <StreamingContext.Provider value={StreamingState.Idle}>
+          <ToolMessage
+            {...baseProps}
+            name="Shell"
+            status={ToolCallStatus.Executing}
+            resultDisplay={ansiOutputDisplay}
+            availableTerminalHeight={100}
+          />
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>,
     );
     const output = lastFrame()!;
     expect(output).toContain('height=94');
@@ -951,19 +936,17 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: 12 } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <SettingsContext.Provider value={settingsWithCustomCap}>
-          <StreamingContext.Provider value={StreamingState.Idle}>
-            <ToolMessage
-              {...baseProps}
-              name="Shell"
-              status={ToolCallStatus.Executing}
-              resultDisplay={ansiOutputDisplay}
-              availableTerminalHeight={100}
-            />
-          </StreamingContext.Provider>
-        </SettingsContext.Provider>
-      </CompactModeProvider>,
+      <SettingsContext.Provider value={settingsWithCustomCap}>
+        <StreamingContext.Provider value={StreamingState.Idle}>
+          <ToolMessage
+            {...baseProps}
+            name="Shell"
+            status={ToolCallStatus.Executing}
+            resultDisplay={ansiOutputDisplay}
+            availableTerminalHeight={100}
+          />
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>,
     );
     const output = lastFrame()!;
     expect(output).toContain('height=12');
@@ -1100,19 +1083,17 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: badValue } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <SettingsContext.Provider value={settingsWithBadCap}>
-          <StreamingContext.Provider value={StreamingState.Idle}>
-            <ToolMessage
-              {...baseProps}
-              name="Shell"
-              status={ToolCallStatus.Executing}
-              resultDisplay={ansiOutputDisplay}
-              availableTerminalHeight={100}
-            />
-          </StreamingContext.Provider>
-        </SettingsContext.Provider>
-      </CompactModeProvider>,
+      <SettingsContext.Provider value={settingsWithBadCap}>
+        <StreamingContext.Provider value={StreamingState.Idle}>
+          <ToolMessage
+            {...baseProps}
+            name="Shell"
+            status={ToolCallStatus.Executing}
+            resultDisplay={ansiOutputDisplay}
+            availableTerminalHeight={100}
+          />
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>,
     );
     const output = lastFrame()!;
     // -1 → 0 → cap disabled (height=94)
