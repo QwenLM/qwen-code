@@ -553,18 +553,16 @@ const runCommand: CommandModule = {
     const startedAt = new Date();
     const child = spawn(qwenBinary, args, {
       cwd: definition.cwd,
-      stdio: 'inherit',
+      stdio: ['ignore', 'pipe', 'inherit'],
       env: { ...process.env },
       shell: false,
     });
 
     let stdout = '';
-    if (child.stdout) {
-      child.stdout.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString('utf-8');
-        if (stdout.length > 500) stdout = stdout.slice(0, 500);
-      });
-    }
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf-8');
+      if (stdout.length > 500) stdout = stdout.slice(0, 500);
+    });
 
     const exitCode: number | null = await new Promise((resolve) => {
       child.on('exit', (code) => resolve(code));

@@ -188,6 +188,14 @@ export class ScheduleDaemon {
         this.jobToTaskId.delete(jobId);
       }
     }
+
+    // Clear fireAt timer if this was a one-shot task
+    const timer = this.fireAtTimers.get(taskId);
+    if (timer) {
+      clearTimeout(timer);
+      this.fireAtTimers.delete(taskId);
+    }
+
     this.loadedTasks.delete(taskId);
   }
 
