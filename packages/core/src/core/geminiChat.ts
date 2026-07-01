@@ -61,8 +61,7 @@ import {
   resolveSlimmingConfig,
 } from '../services/compactionInputSlimming.js';
 import {
-  FileSystemImagePayloadStore,
-  getImagePayloadCacheDir,
+  InMemoryImagePayloadStore,
   prepareImagePayloadsForRequest,
 } from '../services/image-payload-references.js';
 import {
@@ -1499,21 +1498,17 @@ export class GeminiChat {
    * Public history readers still use {@link getHistory}, which returns a
    * defensive deep copy for caller mutation safety.
    */
-  private getRequestHistory(): Content[] {
+  private getRequestHistory(currentUserPartCount = 0): Content[] {
     const requestHistory = extractCuratedHistory(this.history).map(
       copyContentContainer,
     );
     const { maxRecentImages } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
-    const imageStore = new FileSystemImagePayloadStore(
-      getImagePayloadCacheDir(
-        this.config.storage.getProjectTempDir(),
-        this.config.getSessionId(),
-      ),
-    );
+    const imageStore = new InMemoryImagePayloadStore();
     return prepareImagePayloadsForRequest(requestHistory, {
       maxRecentImages,
+      preserveLastUserImagePartCount: currentUserPartCount,
       store: imageStore,
     });
   }
@@ -1802,7 +1797,7 @@ export class GeminiChat {
           parsedEnvMaxTokensForThreshold ??
           0)
         : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
-
+    let currentUserPartCount = 0;
     try {
       // The send-lock above is held but the generator's `finally` (which
       // resolves it) has not run yet. Any setup error before returning the
@@ -2007,7 +2002,8 @@ export class GeminiChat {
               .join(', '),
         );
       }
-      requestContents = this.getRequestHistory();
+      currentUserPartCount = userContent.parts?.length ?? 0;
+      requestContents = this.getRequestHistory(currentUserPartCount);
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
@@ -2310,7 +2306,8 @@ export class GeminiChat {
                     // other retry branches in case a future in-place
                     // tryCompress stops resetting it.
                     popPartialIfPushed();
-                    requestContents = self.getRequestHistory();
+                    requestContents =
+                      self.getRequestHistory(currentUserPartCount);
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
                         `${reactiveInfo.originalTokenCount} -> ` +
@@ -2553,7 +2550,8 @@ export class GeminiChat {
             // model's continuation appends to the previous partial output.
             yield { type: StreamEventType.RETRY, isContinuation: true };
             // Re-send with the updated history (includes partial + recovery)
-            const recoveryContents = self.getRequestHistory();
+            const recoveryContents =
+              self.getRequestHistory(currentUserPartCount);
             escalatedFinishReason = undefined;
             try {
               const recoveryStream = await self.makeApiCallAndProcessStream(

@@ -7,8 +7,6 @@
 import type { Content } from '@google/genai';
 import type { Part } from '@google/genai';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import path from 'node:path';
 import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
@@ -18,7 +16,6 @@ export interface StoredImagePayload {
   data: string;
   bytes: number;
   displayName?: string;
-  path?: string;
 }
 
 export interface ImagePayloadStore {
@@ -44,65 +41,39 @@ export class InMemoryImagePayloadStore implements ImagePayloadStore {
   }
 }
 
-export class FileSystemImagePayloadStore implements ImagePayloadStore {
-  private readonly images = new Map<string, StoredImagePayload>();
-
-  constructor(private readonly cacheDir: string) {}
-
-  put(part: Part): StoredImagePayload {
-    const stored = imagePartToStoredPayload(part);
-    const cached = this.images.get(stored.id);
-    if (cached) return cached;
-
-    try {
-      mkdirSync(this.cacheDir, { recursive: true, mode: 0o700 });
-      const filePath = path.join(
-        this.cacheDir,
-        `${stored.id}.${extensionForMime(stored.mimeType)}`,
-      );
-      if (!existsSync(filePath)) {
-        writeFileSync(filePath, stored.data, {
-          encoding: 'base64',
-          mode: 0o600,
-        });
-      }
-      const withPath = { ...stored, path: filePath };
-      this.images.set(withPath.id, withPath);
-      return withPath;
-    } catch {
-      this.images.set(stored.id, stored);
-      return stored;
-    }
-  }
-
-  get(id: string): StoredImagePayload | undefined {
-    return this.images.get(id);
-  }
-}
-
-export function getImagePayloadCacheDir(
-  projectTempDir: string,
-  sessionId: string,
-): string {
-  const safeSessionId = sessionId.replace(/[^a-zA-Z0-9._-]/g, '_') || '_';
-  return path.join(projectTempDir, 'image-cache', safeSessionId);
-}
-
 export function prepareImagePayloadsForRequest(
   contents: Content[],
   options: {
     maxRecentImages: number;
+    preserveLastUserImagePartCount?: number;
     store: ImagePayloadStore;
   },
 ): Content[] {
   const referencedIds = collectReferencedImageIds(contents.at(-1));
   const collected: CollectedImage[] = [];
-  const transformed = contents.map((content) => ({
-    ...content,
-    parts: content.parts?.map((part) =>
-      transformPart(part, options.store, collected),
-    ),
-  }));
+  const transformed = contents.map((content, index) => {
+    if (index === contents.length - 1 && content.role === 'user') {
+      const preserveCount = options.preserveLastUserImagePartCount ?? 0;
+      const preserveFrom = Math.max(
+        0,
+        (content.parts?.length ?? 0) - preserveCount,
+      );
+      return {
+        ...content,
+        parts: content.parts?.map((part, partIndex) =>
+          partIndex >= preserveFrom
+            ? part
+            : transformPart(part, options.store, collected),
+        ),
+      };
+    }
+    return {
+      ...content,
+      parts: content.parts?.map((part) =>
+        transformPart(part, options.store, collected),
+      ),
+    };
+  });
 
   const reattachById = new Map<string, StoredImagePayload>();
   const recent =
@@ -211,10 +182,4 @@ function storedImageToPart(stored: StoredImagePayload): Part {
       displayName: stored.displayName,
     },
   };
-}
-
-function extensionForMime(mimeType: string): string {
-  const subtype = mimeType.split('/')[1]?.toLowerCase() || 'bin';
-  const cleaned = subtype.replace(/[^a-z0-9_-]/g, '') || 'bin';
-  return cleaned.slice(0, 16);
 }

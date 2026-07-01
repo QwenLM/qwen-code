@@ -7,16 +7,6 @@
 import type { Content, Part } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import {
-  FileSystemImagePayloadStore,
   InMemoryImagePayloadStore,
   prepareImagePayloadsForRequest,
 } from './image-payload-references.js';
@@ -88,10 +78,13 @@ describe('prepareImagePayloadsForRequest', () => {
   it('reattaches an older image when the current request explicitly references its stable id', () => {
     const store = new InMemoryImagePayloadStore();
     const oldImage = toolImageTurn('old-shot');
-    const firstPass = prepareImagePayloadsForRequest([oldImage], {
-      maxRecentImages: 0,
-      store,
-    });
+    const firstPass = prepareImagePayloadsForRequest(
+      [oldImage, { role: 'model', parts: [{ text: 'ok' }] }],
+      {
+        maxRecentImages: 0,
+        store,
+      },
+    );
     const id = JSON.stringify(firstPass).match(/Image #([a-f0-9]{12})/)?.[1];
     expect(id).toBeDefined();
 
@@ -112,59 +105,30 @@ describe('prepareImagePayloadsForRequest', () => {
     ]);
   });
 
-  it('stores image payloads in a session cache directory by stable id', () => {
-    const cacheDir = mkdtempSync(path.join(tmpdir(), 'qwen-image-cache-'));
-    try {
-      const store = new FileSystemImagePayloadStore(cacheDir);
-      const data = Buffer.from('shot').toString('base64');
-
-      const stored = store.put({
-        inlineData: { mimeType: 'image/png', data },
-      });
-
-      expect(stored.path).toBeDefined();
-      expect(stored.path).toContain(stored.id);
-      expect(existsSync(stored.path!)).toBe(true);
-      expect(readFileSync(stored.path!).toString('base64')).toBe(data);
-      expect(store.get(stored.id)).toEqual(stored);
-    } finally {
-      rmSync(cacheDir, { recursive: true, force: true });
-    }
-  });
-
-  it('falls back to in-memory storage when the cache directory cannot be written', () => {
-    const cacheDir = path.join(
-      mkdtempSync(path.join(tmpdir(), 'qwen-image-cache-parent-')),
-      'not-a-directory',
+  it('preserves images in the current user request when maxRecentImages is zero', () => {
+    const store = new InMemoryImagePayloadStore();
+    const prepared = prepareImagePayloadsForRequest(
+      [
+        toolImageTurn('old-shot'),
+        {
+          role: 'user',
+          parts: [
+            { text: 'inspect this' },
+            { inlineData: { mimeType: 'image/png', data: 'current-shot' } },
+          ],
+        },
+      ],
+      {
+        maxRecentImages: 0,
+        preserveLastUserImagePartCount: 2,
+        store,
+      },
     );
-    writeFileSync(cacheDir, '');
-    try {
-      const store = new FileSystemImagePayloadStore(cacheDir);
 
-      const stored = store.put({
-        inlineData: { mimeType: 'image/png', data: 'shot' },
-      });
-
-      expect(stored.path).toBeUndefined();
-      expect(store.get(stored.id)).toEqual(stored);
-    } finally {
-      rmSync(path.dirname(cacheDir), { recursive: true, force: true });
-    }
-  });
-
-  it('caps filesystem extensions derived from malformed MIME subtypes', () => {
-    const cacheDir = mkdtempSync(path.join(tmpdir(), 'qwen-image-cache-'));
-    try {
-      const store = new FileSystemImagePayloadStore(cacheDir);
-
-      const stored = store.put({
-        inlineData: { mimeType: `image/${'x'.repeat(300)}`, data: 'shot' },
-      });
-
-      expect(path.extname(stored.path!).slice(1)).toHaveLength(16);
-      expect(existsSync(stored.path!)).toBe(true);
-    } finally {
-      rmSync(cacheDir, { recursive: true, force: true });
-    }
+    const serialized = JSON.stringify(prepared);
+    expect(serialized).not.toContain('"data":"old-shot"');
+    expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
+      'current-shot',
+    ]);
   });
 });
