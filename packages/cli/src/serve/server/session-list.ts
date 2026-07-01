@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  SessionService,
+  type SessionArchiveState,
+} from '@qwen-code/qwen-code-core';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -16,6 +19,7 @@ const MAX_SESSION_PAGE_SIZE = 100;
 export interface ListWorkspaceSessionsOptions {
   cursor?: string;
   size?: number;
+  archiveState?: SessionArchiveState;
 }
 
 export interface ListWorkspaceSessionsResult {
@@ -64,9 +68,11 @@ export async function listWorkspaceSessionsForResponse(
   const isFirstPage = numericCursor === undefined;
 
   const sessionService = new SessionService(workspaceCwd);
+  const archiveState = options?.archiveState ?? 'active';
   const persisted = await sessionService.listSessions({
     cursor: numericCursor,
     size: pageSize,
+    archiveState,
   });
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
@@ -79,7 +85,15 @@ export async function listWorkspaceSessionsForResponse(
       displayName: item.customTitle || item.prompt,
       clientCount: 0,
       hasActivePrompt: false,
+      isArchived: item.isArchived === true,
     });
+  }
+
+  if (archiveState === 'archived') {
+    const sessions = [...bySessionId.values()];
+    const nextCursor =
+      persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
+    return { sessions, nextCursor };
   }
 
   const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
@@ -94,6 +108,7 @@ export async function listWorkspaceSessionsForResponse(
         updatedAt: live.updatedAt ?? existing.updatedAt,
         clientCount: live.clientCount,
         hasActivePrompt: live.hasActivePrompt,
+        isArchived: false,
       });
     } else if (
       isFirstPage &&
@@ -104,6 +119,7 @@ export async function listWorkspaceSessionsForResponse(
         createdAt: live.createdAt,
         clientCount: live.clientCount,
         hasActivePrompt: live.hasActivePrompt,
+        isArchived: false,
       });
     }
   }

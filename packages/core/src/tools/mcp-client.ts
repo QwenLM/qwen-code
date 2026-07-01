@@ -1031,6 +1031,7 @@ export async function discoverTools(
             cliConfig,
             mcpClient, // raw MCP Client for direct callTool with progress
             mcpTimeout,
+            cliConfig?.getMcpToolIdleTimeoutMs(),
             annotationsMap.get(funcDecl.name!),
             mcpServerConfig.alwaysLoadTools === true,
           ),

@@ -339,6 +339,12 @@ export interface AutoModeSettings {
   };
   /** Environment / context lines injected into the classifier's system prompt. */
   environment?: string[];
+  /**
+   * When true, ALL shell commands are routed through the auto-mode
+   * classifier, including read-only commands that would otherwise be
+   * auto-approved. Default false.
+   */
+  classifyAllShell?: boolean;
 }
 
 export interface AccessibilitySettings {
@@ -958,6 +964,13 @@ export interface ConfigParameters {
   cliAllowedMcpServerNames?: string[];
   excludedMcpServers?: string[];
   /**
+   * Idle timeout in milliseconds for MCP tool calls. If the MCP server does
+   * not produce any response or progress update within this time, the call
+   * is aborted. Default: 300000 (5 minutes). Can be overridden via
+   * QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.
+   */
+  mcpToolIdleTimeoutMs?: number;
+  /**
    * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
    * (pending or rejected). These are loaded so they can be listed, but the
    * discovery layer must not connect them. See issue #4615.
@@ -1387,6 +1400,7 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
    * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
@@ -1612,6 +1626,11 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
+    const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
+    this.mcpToolIdleTimeoutMs =
+      params.mcpToolIdleTimeoutMs ??
+      (Number.isFinite(parsedEnv) && parsedEnv >= 0 ? parsedEnv : 300000); // 5 minutes default
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -3823,6 +3842,10 @@ export class Config {
 
   setExcludedMcpServers(excluded: string[]): void {
     this.excludedMcpServers = excluded;
+  }
+
+  getMcpToolIdleTimeoutMs(): number {
+    return this.mcpToolIdleTimeoutMs;
   }
 
   isMcpServerDisabled(serverName: string): boolean {

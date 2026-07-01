@@ -381,12 +381,14 @@ The `mcp` object in your `settings.json` defines global rules for all MCP server
 - `mcp.allowed`: allow-list of MCP server names (keys in `mcpServers`)
 - `mcp.excluded`: deny-list of MCP server names
 
+Both lists support glob patterns: `*` matches any sequence of characters and `?` matches a single character (for example, `"*puppeteer*"` matches every server whose name contains `puppeteer`). Entries without glob characters are matched exactly. When a server matches both lists, `mcp.excluded` takes precedence.
+
 Example:
 
 ```json
 {
   "mcp": {
-    "allowed": ["my-trusted-server"],
+    "allowed": ["my-trusted-server", "*-internal"],
     "excluded": ["experimental-server"]
   }
 }
