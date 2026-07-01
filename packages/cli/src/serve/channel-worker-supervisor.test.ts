@@ -244,21 +244,25 @@ describe('createChannelWorkerSupervisor', () => {
   });
 
   it('sanitizes the pre-ready error when the worker exits after an error', async () => {
+    vi.stubEnv('TELEGRAM_BOT_TOKEN', 'telegram-secret');
     const child = new FakeChild();
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
       daemonUrl: 'http://127.0.0.1:4170',
+      daemonToken: 'secret-token',
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram'] },
       spawnWorker: vi.fn(() => child),
     });
 
     const started = supervisor.start();
-    const unsafeMessage = `spawn error\nfake log line\r${'\u001b'}[31m${'x'.repeat(600)}`;
+    const unsafeMessage =
+      `spawn error secret-token https://proxy-user:telegram-secret@proxy.example:8080\n` +
+      `fake log line\r${'\u001b'}[31m${'x'.repeat(600)}`;
     child.emit('error', new Error(unsafeMessage));
     child.emit('exit', 1, null);
 
-    await expect(started).rejects.toThrow('spawn error\\nfake log line');
+    await expect(started).rejects.toThrow('spawn error');
     const snapshot = supervisor.snapshot();
     expect(snapshot).toMatchObject({
       enabled: true,
@@ -270,6 +274,10 @@ describe('createChannelWorkerSupervisor', () => {
     expect(snapshot.error).not.toContain('\n');
     expect(snapshot.error).not.toContain('\r');
     expect(snapshot.error).not.toContain('\u001b');
+    expect(snapshot.error).not.toContain('secret-token');
+    expect(snapshot.error).not.toContain('telegram-secret');
+    expect(snapshot.error).not.toContain('proxy-user');
+    expect(snapshot.error).toContain('https://<redacted>@proxy.example:8080');
     expect(snapshot.error!.length).toBeLessThanOrEqual(512);
   });
 
@@ -497,6 +505,7 @@ describe('createChannelWorkerSupervisor', () => {
       enabled: true,
       state: 'failed',
       restartCount: 1,
+      error: 'Channel worker restart budget exhausted.',
     });
   });
 
@@ -982,7 +991,8 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
-  it('ignores heartbeats from a mismatched pid', async () => {
+  it('ignores heartbeats from a mismatched pid without rearming stale detection', async () => {
+    vi.useFakeTimers();
     const child = new FakeChild();
     const supervisor = createChannelWorkerSupervisor({
       cliEntryPath: '/repo/dist/index.js',
@@ -990,7 +1000,43 @@ describe('createChannelWorkerSupervisor', () => {
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram'] },
       spawnWorker: vi.fn(() => child),
-      heartbeatTimeoutMs: 0,
+      heartbeatTimeoutMs: 20,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+    await vi.advanceTimersByTimeAsync(10);
+
+    child.emit('message', {
+      type: 'heartbeat',
+      pid: 22222,
+      at: '2026-07-01T00:00:00.000Z',
+    });
+
+    expect(supervisor.snapshot()).not.toHaveProperty('lastHeartbeatAt');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('keeps the worker running and heartbeat-armed when onReady throws', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      onReady: () => {
+        throw new Error('pidfile write failed');
+      },
+      heartbeatTimeoutMs: 20,
     });
 
     const started = supervisor.start();
@@ -1002,23 +1048,13 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
 
-    child.emit('message', {
-      type: 'heartbeat',
-      pid: 22222,
-      at: '2026-07-01T00:00:00.000Z',
-    });
-
-    expect(supervisor.snapshot()).not.toHaveProperty('lastHeartbeatAt');
-
-    child.emit('message', {
-      type: 'heartbeat',
-      pid: 11111,
-      at: '2026-07-01T00:00:01.000Z',
-    });
-
     expect(supervisor.snapshot()).toMatchObject({
-      lastHeartbeatAt: '2026-07-01T00:00:01.000Z',
+      enabled: true,
+      state: 'running',
+      pid: 11111,
     });
+    await vi.advanceTimersByTimeAsync(20);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
   it('cancels stale heartbeat detection when stopped intentionally', async () => {

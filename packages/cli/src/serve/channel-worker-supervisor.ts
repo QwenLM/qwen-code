@@ -108,6 +108,11 @@ export interface WorkerLogStream {
   on(event: 'error', listener: (err: Error) => void): unknown;
 }
 
+interface WorkerLogRedactionOptions {
+  daemonToken?: string;
+  workerEnv: NodeJS.ProcessEnv;
+}
+
 export interface CreateChannelWorkerSupervisorOptions {
   cliEntryPath: string;
   daemonUrl: string;
@@ -179,8 +184,25 @@ function requestedChannelNames(
   return selection.mode === 'names' ? [...selection.names] : undefined;
 }
 
-function sanitizeWorkerError(error: string): string {
-  return Array.from(sanitizeLogText(error, 512)).slice(0, 512).join('');
+function workerLogRedactionOptions(
+  daemonToken: string | undefined,
+  workerEnv: NodeJS.ProcessEnv,
+): WorkerLogRedactionOptions {
+  return {
+    ...(daemonToken ? { daemonToken } : {}),
+    workerEnv,
+  };
+}
+
+function sanitizeWorkerError(
+  error: string,
+  redaction?: WorkerLogRedactionOptions,
+): string {
+  const normalized = normalizeWorkerLogLineForRedaction(error);
+  const redacted = redaction
+    ? redactWorkerLogLine(normalized, redaction)
+    : normalized;
+  return Array.from(sanitizeLogText(redacted, 512)).slice(0, 512).join('');
 }
 
 function notifyExit(
@@ -455,7 +477,7 @@ export function createChannelWorkerSupervisor(
       snapshot = {
         ...snapshot,
         state: 'failed',
-        error: snapshot.error ?? 'Channel worker restart budget exhausted.',
+        error: 'Channel worker restart budget exhausted.',
         nextRestartAt: undefined,
       };
       return false;
@@ -477,11 +499,14 @@ export function createChannelWorkerSupervisor(
     return true;
   };
 
-  const handleRestartFailure = (error: string) => {
+  const handleRestartFailure = (
+    error: string,
+    redaction?: WorkerLogRedactionOptions,
+  ) => {
     snapshot = {
       ...snapshot,
       state: 'failed',
-      error: sanitizeWorkerError(error),
+      error: sanitizeWorkerError(error, redaction),
     };
     scheduleRestart();
     notifyExit(opts.onExit, snapshotCopy());
@@ -515,6 +540,7 @@ export function createChannelWorkerSupervisor(
       workspace: opts.workspace,
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     });
+    const redaction = workerLogRedactionOptions(opts.daemonToken, env);
     const requestedChannels = requestedChannelNames(opts.selection);
     const startedAt = new Date().toISOString();
     snapshot = {
@@ -552,26 +578,24 @@ export function createChannelWorkerSupervisor(
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const error = sanitizeWorkerError(message);
+      const error = sanitizeWorkerError(message, redaction);
       snapshot = {
         ...snapshot,
         state: 'failed',
         error,
       };
       if (kind === 'initial') throw new Error(error);
-      handleRestartFailure(message);
+      handleRestartFailure(message, redaction);
       return;
     }
 
     child = startedChild;
     attachWorkerLogStream(startedChild.stdout, 'stdout', {
-      ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
-      workerEnv: env,
+      ...redaction,
       onLog: opts.onLog,
     });
     attachWorkerLogStream(startedChild.stderr, 'stderr', {
-      ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
-      workerEnv: env,
+      ...redaction,
       onLog: opts.onLog,
     });
     if (startedChild.pid !== undefined) {
@@ -680,7 +704,8 @@ export function createChannelWorkerSupervisor(
           state,
           code,
           signal,
-          snapshot.error ?? (ready ? undefined : sanitizeWorkerError(message)),
+          snapshot.error ??
+            (ready ? undefined : sanitizeWorkerError(message, redaction)),
         );
         child = undefined;
         if (ready && !stopping) {
@@ -703,7 +728,7 @@ export function createChannelWorkerSupervisor(
         snapshot = {
           ...snapshot,
           state: 'failed',
-          error: sanitizeWorkerError(err.message),
+          error: sanitizeWorkerError(err.message, redaction),
         };
         terminateBeforeReady();
         if (!settled) {
@@ -717,7 +742,7 @@ export function createChannelWorkerSupervisor(
         snapshot = {
           ...snapshot,
           state: 'failed',
-          error: sanitizeWorkerError(error),
+          error: sanitizeWorkerError(error, redaction),
         };
         failBeforeReady(new Error(error));
         if (child === startedChild) {
