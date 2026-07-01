@@ -423,6 +423,33 @@ describe('SessionArtifactStore', () => {
     expect(repeated.changes).toEqual([]);
   });
 
+  it('ignores metadata key order when detecting updates', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-metadata-order',
+      workspaceCwd: workspace,
+    });
+
+    const created = await store.upsertMany([
+      {
+        title: 'Link',
+        url: 'https://example.com/resource',
+        metadata: { a: 1, b: 2 },
+      },
+    ]);
+    const firstUpdatedAt = created.changes[0]?.artifact?.updatedAt;
+
+    const repeated = await store.upsertMany([
+      {
+        title: 'Ignored later title',
+        url: 'https://example.com/resource',
+        metadata: { b: 2, a: 1 },
+      },
+    ]);
+
+    expect(repeated.changes).toEqual([]);
+    expect((await store.list()).artifacts[0]?.updatedAt).toBe(firstUpdatedAt);
+  });
+
   it('rejects existing workspace symlinks that escape the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's6',
@@ -493,6 +520,7 @@ describe('SessionArtifactStore', () => {
       const artifact = (await store.list()).artifacts[0];
       expect(artifact).toMatchObject({ status: 'missing' });
       expect(artifact).not.toHaveProperty('sizeBytes');
+      expect(artifact).not.toHaveProperty('workspacePath');
     } finally {
       vi.useRealTimers();
       await fs.rm(outside, { recursive: true, force: true });

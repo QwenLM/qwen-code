@@ -406,6 +406,9 @@ export class SessionArtifactStore {
       );
       artifact.status = status.status;
       artifact.sizeBytes = status.sizeBytes;
+      if (status.escaped) {
+        delete artifact.workspacePath;
+      }
       artifact.lastStatAt = options.now ?? Date.now();
     } catch {
       if (options.onError === 'preserve') {
@@ -589,13 +592,53 @@ function mergeArtifact(
     delete next.workspacePath;
   }
 
-  const changed =
-    JSON.stringify(toPublicArtifact(existing)) !==
-    JSON.stringify(toPublicArtifact(next));
+  const changed = !publicArtifactsEqual(
+    toPublicArtifact(existing),
+    toPublicArtifact(next),
+  );
   if (changed) {
     next.updatedAt = now;
   }
   return { artifact: changed ? next : existing, changed };
+}
+
+function publicArtifactsEqual(
+  a: DaemonSessionArtifact,
+  b: DaemonSessionArtifact,
+): boolean {
+  return (
+    a.id === b.id &&
+    a.kind === b.kind &&
+    a.storage === b.storage &&
+    a.source === b.source &&
+    a.status === b.status &&
+    a.title === b.title &&
+    a.description === b.description &&
+    a.workspacePath === b.workspacePath &&
+    a.managedId === b.managedId &&
+    a.url === b.url &&
+    a.mimeType === b.mimeType &&
+    a.sizeBytes === b.sizeBytes &&
+    metadataEqual(a.metadata, b.metadata) &&
+    a.clientRetained === b.clientRetained &&
+    a.createdAt === b.createdAt &&
+    a.toolCallId === b.toolCallId &&
+    a.toolName === b.toolName &&
+    a.hookEventName === b.hookEventName &&
+    a.clientId === b.clientId
+  );
+}
+
+function metadataEqual(
+  a: Record<string, string | number | boolean | null> | undefined,
+  b: Record<string, string | number | boolean | null> | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((key) => Object.hasOwn(b, key) && a[key] === b[key]);
 }
 
 function mergeSizeBytes(
