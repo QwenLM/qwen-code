@@ -111,6 +111,30 @@ Attaches to existing sessions are NOT counted toward the cap, so an idle daemon'
 
 Fired when a `session/load` is issued for an id that already has a `session/resume` in flight (or vice versa). Wait at least `Retry-After` seconds and retry — the underlying restore completes within `initTimeoutMs` (default 10s). Same-action races (`load` vs `load`, `resume` vs `resume`) coalesce instead of erroring.
 
+`SessionArchivedError` is emitted when a caller tries to load or resume a session whose JSONL is under `chats/archive/`:
+
+```json
+{
+  "error": "Session \"<sid>\" is archived. Unarchive it before loading.",
+  "code": "session_archived",
+  "sessionId": "<sid>"
+}
+```
+
+with status `409`.
+
+`SessionArchivingError` is emitted when a session archive or unarchive transition is already in flight for the same id:
+
+```json
+{
+  "error": "Session \"<sid>\" is being archived or unarchived; retry later.",
+  "code": "session_archiving",
+  "sessionId": "<sid>"
+}
+```
+
+with status `409` and `Retry-After: 5`.
+
 ## Capabilities
 
 The daemon advertises its supported feature tags from the serve capability
@@ -130,7 +154,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_preflight', 'session_context', 'session_context_usage',
  'session_supported_commands', 'session_tasks', 'session_stats',
  'session_lsp', 'session_status',
- 'session_close', 'session_metadata', 'mcp_guardrails',
+ 'session_close', 'session_metadata', 'session_archive', 'mcp_guardrails',
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
@@ -158,6 +182,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `client_heartbeat` advertises `POST /session/:id/heartbeat`. Older daemons return `404`; pre-flight this tag before issuing periodic heartbeats.
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
+
+`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
 
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
 
@@ -277,6 +303,11 @@ Response shape:
     "sessions": { "active": 0 },
     "permissions": { "pending": 0, "policy": "first-responder" },
     "channel": { "live": false },
+    "channelWorker": {
+      "enabled": false,
+      "state": "disabled",
+      "channels": []
+    },
     "transport": {
       "restSseActive": 0,
       "acp": {
@@ -297,11 +328,42 @@ Response shape:
 warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
-`mcp_budget_exhausted`, `rate_limit_hits`, and
-`workspace_status_unavailable`. During the short window after the listener is
-ready but before the full runtime is mounted, `/daemon/status` may report
-`daemon_runtime_starting`; if the async runtime mount fails, it reports
-`daemon_runtime_failed` while non-status runtime routes return `503`.
+`mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`, and
+`channel_worker_partial_connect`, and `workspace_status_unavailable`. During
+the short window after the listener is ready but before the full runtime is
+mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
+runtime mount fails, it reports `daemon_runtime_failed` while non-status
+runtime routes return `503`.
+
+`runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
+not the channel-adapter worker. Daemon-managed channels use
+`runtime.channelWorker`, whose `state` is one of `disabled`, `starting`,
+`running`, `exited`, `failed`, or `stopped`. When a worker reaches `running`
+and then exits, `/daemon/status` keeps the daemon online and reports warning
+issue code `channel_worker_exited`.
+
+Daemon-managed channel worker startup remains fail-fast: if `qwen serve
+--channel ...` cannot start a worker that reaches ready, serve startup fails.
+After a worker has reached ready, unexpected exits are restarted by the serve
+supervisor within a bounded policy: up to 3 restart attempts in a 5 minute
+window, with 1s, 5s, then 15s backoff. The worker sends IPC heartbeats every
+15s; if no heartbeat is observed for 45s, the supervisor treats the worker as
+stale, kills it, records `staleHeartbeatAt`, and uses the same restart path.
+
+`runtime.channelWorker` may include additive operational fields:
+`requestedChannels`, `pid`, `startedAt`, `exitCode`, `signal`, `error`,
+`restartCount`, `lastExitAt`, `lastRestartAt`, `nextRestartAt`,
+`lastHeartbeatAt`, and `staleHeartbeatAt`. `restartCount` is the lifetime
+number of restart attempts made by this serve process; a running worker with
+`restartCount > 0` is healthy unless another issue applies. A running worker
+whose `requestedChannels` include names missing from `channels` reports
+`channel_worker_partial_connect`.
+
+`qwen channel status` continues to read pidfile metadata. During a restart
+window the serve-owned pidfile remains reserved, but `workerPid` is omitted so
+clients do not display a stale worker process. Worker stdout/stderr are
+forwarded into the daemon log with bearer tokens, sensitive worker environment
+values, and proxy URL credentials redacted.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. `summary` omits
@@ -1139,6 +1201,9 @@ Response:
 - `400` — `workspace_mismatch` (same shape as `POST /session`).
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
 - `409` — `restore_in_progress` (a `session/resume` for the same id is already in flight). `Retry-After: 5`. Same-action races (two concurrent `session/load` for the same id) coalesce — exactly one returns `attached: false`, the rest return `attached: true` with the same `state`.
+- `409` — `session_archived` when the id exists only under `chats/archive/`; call `POST /sessions/unarchive` before `load` or `resume`.
+- `409` — `session_archiving` when archive or unarchive is in flight for the same id. `Retry-After: 5`.
+- `409` — `session_conflict` when the id exists in both `chats/` and `chats/archive/`; delete the session with `POST /sessions/delete` before loading.
 
 ### `POST /session/:id/resume`
 
@@ -1152,11 +1217,20 @@ Use `/load` when the client has no history rendered (cold reconnect, picker → 
 
 ### `GET /workspace/:id/sessions`
 
-List all live sessions whose canonical workspace matches `:id` (URL-encoded absolute cwd).
+List persisted sessions whose canonical workspace matches `:id` (URL-encoded absolute cwd). The default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. `archiveState=all` is not supported in v1.
 
 ```bash
 curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions
+curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions?archiveState=archived
 ```
+
+Query parameters:
+
+| Field          | Required | Notes                                                                                                   |
+| -------------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `archiveState` | no       | `active` (default) or `archived`. Any other value returns `400 { code: "invalid_archive_state" }`.      |
+| `cursor`       | no       | Pagination cursor from the previous response.                                                           |
+| `size`         | no       | Page size. Invalid values return `400 { code: "invalid_cursor" }` or the existing page-size validation. |
 
 Response:
 
@@ -1169,13 +1243,85 @@ Response:
       "createdAt": "2026-05-17T08:30:00.000Z",
       "displayName": "My Session",
       "clientCount": 2,
-      "hasActivePrompt": false
+      "hasActivePrompt": false,
+      "isArchived": false
     }
-  ]
+  ],
+  "nextCursor": 1772251200000
 }
 ```
 
-Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+Active lists include live daemon overlay fields such as `clientCount` and `hasActivePrompt`. Archived lists are storage-only: `isArchived` is `true`, and live overlay fields remain absent or false. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+
+### `POST /sessions/delete`
+
+Hard-delete one or more persisted session JSONL files. The daemon first best-effort closes live sessions, then removes the active or archived JSONL. If both active and archived copies exist for the same id, both are removed. Worktree sidecars on both sides are cleaned; file history, subagent transcripts, and runtime sidecars are intentionally preserved.
+
+Request:
+
+```json
+{ "sessionIds": ["<uuid>"] }
+```
+
+Response:
+
+```json
+{
+  "removed": ["<uuid>"],
+  "notFound": [],
+  "errors": []
+}
+```
+
+### `POST /sessions/archive`
+
+Archive one or more sessions. Archive is a state transition, not deletion: the JSONL moves from `chats/<id>.jsonl` to `chats/archive/<id>.jsonl`. File history, subagent transcripts, and runtime sidecars stay in place. If a session is live, the daemon first performs a strict close and requires the ACP agent's close handler to flush the chat recording; if close or flush fails, the JSONL is not moved. Pre-flight `caps.features.session_archive`.
+
+Request:
+
+```json
+{ "sessionIds": ["<uuid>"] }
+```
+
+`sessionIds` must be a non-empty string array with at most 100 ids. Duplicates are collapsed.
+
+Response:
+
+```json
+{
+  "archived": ["<uuid>"],
+  "alreadyArchived": [],
+  "notFound": [],
+  "errors": []
+}
+```
+
+`errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`. Active and archived files with the same id are treated as a conflict and reported in `errors`; no file is overwritten.
+
+### `POST /sessions/unarchive`
+
+Restore archived sessions to the active directory. This does not resume the session by itself; it only moves `chats/archive/<id>.jsonl` back to `chats/<id>.jsonl`. After unarchive succeeds, clients may call `POST /session/:id/load` or `POST /session/:id/resume`.
+
+Request:
+
+```json
+{ "sessionIds": ["<uuid>"] }
+```
+
+Response:
+
+```json
+{
+  "unarchived": ["<uuid>"],
+  "alreadyActive": [],
+  "notFound": [],
+  "errors": []
+}
+```
+
+If an active JSONL already exists for the id, unarchive reports a conflict in `errors` and does not overwrite it. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
+
+ACP-over-HTTP uses the same request and response bodies through vendor methods `_qwen/sessions/archive` and `_qwen/sessions/unarchive`. The REST route table maps `POST /sessions/archive` and `POST /sessions/unarchive` to those methods for ACP transports.
 
 ### `POST /session/:id/prompt`
 

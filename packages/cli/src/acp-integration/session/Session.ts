@@ -31,6 +31,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   LoopTickResult,
+  VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -94,6 +95,7 @@ import {
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
@@ -117,6 +119,11 @@ import {
   getProviderToolCallId,
   parsePositiveIntegerEnv,
   DEFAULT_TOKEN_LIMIT,
+  hasImageParts,
+  normalizeParts,
+  runVisionBridge,
+  shouldRunVisionBridge,
+  splitImageParts,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -226,6 +233,10 @@ const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
   'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.';
+const LOOP_DETECTED_SKIP_MESSAGE =
+  'Skipped because loop detection stopped the current turn before this tool call could run.';
+const LOOP_DETECTED_CONTEXT_MESSAGE =
+  'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
 
 function createDaemonToolLoopState(): DaemonToolLoopState {
   return {
@@ -278,7 +289,9 @@ function recordDaemonInvalidToolParams(
 ): boolean {
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
-  const key = `${toolName}\0${error.message}`;
+  // Intentionally bucket by tool name only: repeated parameter errors for the
+  // same tool mean the model is stuck on that tool's schema.
+  const key = toolName;
   const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
   loopState.invalidToolParamErrors.set(key, count);
   if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
@@ -540,6 +553,24 @@ interface CronQueueItem {
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
+
+export function resolveHomeLoopResolverRoots({
+  homeQwenDir = Storage.getGlobalQwenDir(),
+  homeDir = os.homedir(),
+  qwenHome = process.env['QWEN_HOME'],
+}: {
+  homeQwenDir?: string;
+  homeDir?: string;
+  qwenHome?: string;
+} = {}): { homeConfineRoot: string; homeQwenDir: string } {
+  // qwenHome truthy → QWEN_HOME is itself the global dir, so confine within
+  // homeQwenDir; the homeDir param is only consulted when qwenHome is unset.
+  return {
+    homeConfineRoot:
+      (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
+    homeQwenDir,
+  };
+}
 
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
@@ -1901,7 +1932,7 @@ export class Session implements SessionContext {
                     toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
-                    await this.#preserveCancelledPermissionToolRun(
+                    await this.#preserveStoppedToolRun(
                       toolRun,
                       pendingSend.signal,
                     );
@@ -1911,6 +1942,13 @@ export class Session implements SessionContext {
                     toolRun,
                     pendingSend.signal,
                   );
+                  if (toolRun.loopDetected) {
+                    await this.#preserveStoppedToolRun(
+                      toolRun,
+                      pendingSend.signal,
+                    );
+                    return { stopReason: 'end_turn' };
+                  }
                 }
               }
 
@@ -2179,16 +2217,17 @@ export class Session implements SessionContext {
               toolLoopState,
             );
             if (toolRun.stopAfterPermissionCancel) {
-              await this.#preserveCancelledPermissionToolRun(
-                toolRun,
-                pendingSend.signal,
-              );
+              await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
               return { stopReason: 'end_turn' };
             }
             nextMessage = await this.#buildNextMessageAfterToolRun(
               toolRun,
               pendingSend.signal,
             );
+            if (toolRun.loopDetected) {
+              await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+              return { stopReason: 'end_turn' };
+            }
           }
         }
 
@@ -2353,7 +2392,7 @@ export class Session implements SessionContext {
     }
   }
 
-  async #preserveCancelledPermissionToolRun(
+  async #preserveStoppedToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
@@ -2362,6 +2401,9 @@ export class Session implements SessionContext {
         role: 'user',
         parts: [
           ...toolRun.parts,
+          ...(toolRun.loopDetected
+            ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
+            : []),
           ...(await this.#drainMidTurnUserMessages(abortSignal)),
         ],
       },
@@ -2780,18 +2822,7 @@ export class Session implements SessionContext {
       // Resolve the home/global loop.md from the QWEN_HOME-aware global dir (the
       // rest of Qwen honors QWEN_HOME for `.qwen`); reading raw os.homedir() here
       // would always hit the real `~/.qwen` and ignore a relocated config home.
-      const homeQwenDir = Storage.getGlobalQwenDir();
-      // Confinement root for the home candidate's resolved target: $QWEN_HOME
-      // when set (it IS the global dir), else $HOME — keeps the earlier
-      // confinement (an in-root dotfile symlink resolves; an escape is refused).
-      // The `|| path.dirname(homeQwenDir)` guards an empty os.homedir() (minimal
-      // containers with no HOME): an empty root makes isWithin('', target) always
-      // true, trivially bypassing the symlink confinement. homeQwenDir
-      // (Storage.getGlobalQwenDir()) is always non-empty, so its parent is a
-      // sound non-empty fallback root.
-      const homeConfineRoot =
-        (process.env['QWEN_HOME'] ? homeQwenDir : os.homedir()) ||
-        path.dirname(homeQwenDir);
+      const { homeConfineRoot, homeQwenDir } = resolveHomeLoopResolverRoots();
       this.loopTickResolver = new LoopTickResolver({
         projectRoot: root,
         homeDir: homeConfineRoot,
@@ -3071,16 +3102,17 @@ export class Session implements SessionContext {
                     toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
-                    await this.#preserveCancelledPermissionToolRun(
-                      toolRun,
-                      ac.signal,
-                    );
+                    await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
                   nextMessage = await this.#buildNextMessageAfterToolRun(
                     toolRun,
                     ac.signal,
                   );
+                  if (toolRun.loopDetected) {
+                    await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                    return;
+                  }
                 }
               }
             } catch (error) {
@@ -3388,10 +3420,7 @@ export class Session implements SessionContext {
                 toolLoopState,
               );
               if (toolRun.stopAfterPermissionCancel) {
-                await this.#preserveCancelledPermissionToolRun(
-                  toolRun,
-                  ac.signal,
-                );
+                await this.#preserveStoppedToolRun(toolRun, ac.signal);
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
               }
@@ -3399,6 +3428,11 @@ export class Session implements SessionContext {
                 toolRun,
                 ac.signal,
               );
+              if (toolRun.loopDetected) {
+                await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                return;
+              }
             }
           }
 
@@ -3741,22 +3775,65 @@ export class Session implements SessionContext {
     functionCalls: FunctionCall[],
     toolLoopState?: DaemonToolLoopState,
   ): Promise<RunToolResult> {
+    const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
+    let skippedToolCallCounter = 0;
+    const recordSkippedToolCall = async (
+      fc: FunctionCall,
+      message = PERMISSION_CANCEL_SKIP_MESSAGE,
+      emitStart = true,
+    ): Promise<Part> => {
+      const toolName = fc.name ?? 'unknown_tool';
+      const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
+      const part: Part = {
+        functionResponse: {
+          id: callId,
+          name: toolName,
+          response: { error: message },
+        },
+      };
+      const error = new Error(message);
+      try {
+        this.config.getChatRecordingService()?.recordToolResult([part], {
+          callId,
+          status: 'error',
+          resultDisplay: undefined,
+          error,
+          errorType: undefined,
+        });
+        if (emitStart) {
+          await this.toolCallEmitter.emitStart({
+            callId,
+            toolName,
+            args: (fc.args ?? {}) as Record<string, unknown>,
+            status: 'pending',
+          });
+        }
+        await this.toolCallEmitter.emitError(callId, toolName, error);
+      } catch (recordError) {
+        debugLogger.error('Failed to record skipped tool call:', recordError);
+      }
+      return part;
+    };
+
     if (
       recordDaemonToolCalls(
         this.config,
         promptId,
         toolLoopState,
-        functionCalls.length,
+        dedupedFunctionCalls.length,
       )
     ) {
       return {
-        parts: [],
+        parts: await Promise.all(
+          dedupedFunctionCalls.map((fc) =>
+            recordSkippedToolCall(fc, LOOP_DETECTED_SKIP_MESSAGE, false),
+          ),
+        ),
         stopAfterPermissionCancel: false,
         loopDetected: true,
       };
     }
 
-    const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
     type ExecutableBatch = {
       kind: 'execute';
       concurrent: boolean;
@@ -3881,43 +3958,14 @@ export class Session implements SessionContext {
       }
     }
 
-    let skippedToolCallCounter = 0;
-    const recordSkippedToolCall = async (fc: FunctionCall): Promise<Part> => {
-      const toolName = fc.name ?? 'unknown_tool';
-      const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
-      const part: Part = {
-        functionResponse: {
-          id: callId,
-          name: toolName,
-          response: { error: PERMISSION_CANCEL_SKIP_MESSAGE },
-        },
-      };
-      const error = new Error(PERMISSION_CANCEL_SKIP_MESSAGE);
-      try {
-        this.config.getChatRecordingService()?.recordToolResult([part], {
-          callId,
-          status: 'error',
-          resultDisplay: undefined,
-          error,
-          errorType: undefined,
-        });
-        await this.toolCallEmitter.emitStart({
-          callId,
-          toolName,
-          args: (fc.args ?? {}) as Record<string, unknown>,
-          status: 'pending',
-        });
-        await this.toolCallEmitter.emitError(callId, toolName, error);
-      } catch (recordError) {
-        debugLogger.error('Failed to record skipped tool call:', recordError);
-      }
-      return part;
-    };
-
-    const appendSkippedAfter = async (parts: Part[], fc: FunctionCall) => {
+    const appendSkippedAfter = async (
+      parts: Part[],
+      fc: FunctionCall,
+      message = PERMISSION_CANCEL_SKIP_MESSAGE,
+    ) => {
       const startIndex = dedupedFunctionCalls.indexOf(fc) + 1;
       for (const remainingCall of dedupedFunctionCalls.slice(startIndex)) {
-        parts.push(await recordSkippedToolCall(remainingCall));
+        parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
 
@@ -3929,16 +3977,81 @@ export class Session implements SessionContext {
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
       onStopAfterPermissionCancel?: () => void,
+      onStopAfterLoopDetected?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
-      const maxConcurrency = parsePositiveIntegerEnv(
+      const configuredMaxConcurrency = parsePositiveIntegerEnv(
         process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
         10,
       );
+      const maxConcurrency = toolLoopState
+        ? Math.min(
+            configuredMaxConcurrency,
+            DAEMON_INVALID_TOOL_PARAMS_THRESHOLD,
+          )
+        : configuredMaxConcurrency;
       const results: RunToolResult[] = new Array(calls.length);
       const executing = new Set<Promise<void>>();
-      for (let i = 0; i < calls.length; i++) {
+      const fillLoopSkippedFrom = async (startIndex: number) => {
+        for (let i = startIndex; i < calls.length; i++) {
+          if (results[i]) continue;
+          results[i] = {
+            parts: [
+              await recordSkippedToolCall(calls[i], LOOP_DETECTED_SKIP_MESSAGE),
+            ],
+            stopAfterPermissionCancel: false,
+            loopDetected: true,
+          };
+        }
+      };
+      const fillPermissionSkippedFrom = async (startIndex: number) => {
+        for (let i = startIndex; i < calls.length; i++) {
+          if (results[i]) continue;
+          results[i] = {
+            parts: [await recordSkippedToolCall(calls[i])],
+            stopAfterPermissionCancel: false,
+          };
+        }
+      };
+      let startIndex = 0;
+      if (
+        toolLoopState &&
+        calls.length > DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+      ) {
+        startIndex = DAEMON_INVALID_TOOL_PARAMS_THRESHOLD;
+        for (let i = 0; i < startIndex; i++) {
+          if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
+            results[i] = {
+              parts: [await recordSkippedToolCall(calls[i])],
+              stopAfterPermissionCancel: false,
+            };
+            continue;
+          }
+          const r = await this.runTool(
+            runAbortSignal,
+            promptId,
+            calls[i],
+            onStopAfterPermissionCancel,
+            toolLoopState,
+            recordSkippedToolCall,
+          );
+          results[i] = r;
+          if (r.loopDetected) {
+            await fillLoopSkippedFrom(i + 1);
+            return results;
+          }
+          if (r.stopAfterPermissionCancel) {
+            await fillPermissionSkippedFrom(i + 1);
+            return results;
+          }
+        }
+      }
+      for (let i = startIndex; i < calls.length; i++) {
         const idx = i;
+        if (toolLoopState?.loopDetected) {
+          await fillLoopSkippedFrom(idx);
+          return results;
+        }
         if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
           results[idx] = {
             parts: [await recordSkippedToolCall(calls[idx])],
@@ -3952,6 +4065,7 @@ export class Session implements SessionContext {
           calls[idx],
           onStopAfterPermissionCancel,
           toolLoopState,
+          recordSkippedToolCall,
         )
           .then((r) => {
             results[idx] = r;
@@ -3962,6 +4076,25 @@ export class Session implements SessionContext {
         executing.add(p);
         if (executing.size >= maxConcurrency) {
           await Promise.race(executing);
+          if (results.some((result) => result?.loopDetected)) {
+            onStopAfterLoopDetected?.();
+            await Promise.all(executing);
+            await fillLoopSkippedFrom(idx + 1);
+            return results;
+          }
+          const invalidToolErrorNearThreshold =
+            toolLoopState &&
+            [...toolLoopState.invalidToolParamErrors.values()].some(
+              (count) => count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD - 1,
+            );
+          if (invalidToolErrorNearThreshold && executing.size > 0) {
+            await Promise.all(executing);
+            if (results.some((result) => result?.loopDetected)) {
+              onStopAfterLoopDetected?.();
+              await fillLoopSkippedFrom(idx + 1);
+              return results;
+            }
+          }
         }
       }
       await Promise.all(executing);
@@ -3998,6 +4131,7 @@ export class Session implements SessionContext {
             batch.calls,
             batchAbortController.signal,
             stopBatchAfterPermissionCancel,
+            () => batchAbortController.abort('loop_detected'),
             () => batchStopAfterPermissionCancel,
           );
         } finally {
@@ -4011,6 +4145,11 @@ export class Session implements SessionContext {
           shouldStopForLoop ||= r.loopDetected === true;
         }
         if (shouldStopForLoop) {
+          await appendSkippedAfter(
+            parts,
+            batch.calls[batch.calls.length - 1],
+            LOOP_DETECTED_SKIP_MESSAGE,
+          );
           return {
             parts,
             stopAfterPermissionCancel: false,
@@ -4033,9 +4172,11 @@ export class Session implements SessionContext {
             fc,
             undefined,
             toolLoopState,
+            recordSkippedToolCall,
           );
           parts.push(...r.parts);
           if (r.loopDetected) {
+            await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
             return {
               parts,
               stopAfterPermissionCancel: false,
@@ -4101,9 +4242,31 @@ export class Session implements SessionContext {
     fc: FunctionCall,
     onStopAfterPermissionCancel?: () => void,
     toolLoopState?: DaemonToolLoopState,
+    recordSkippedToolCall?: (
+      fc: FunctionCall,
+      message?: string,
+      emitStart?: boolean,
+    ) => Promise<Part>,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
+    if (toolLoopState?.loopDetected) {
+      return {
+        parts: [
+          recordSkippedToolCall
+            ? await recordSkippedToolCall(fc, LOOP_DETECTED_SKIP_MESSAGE, false)
+            : {
+                functionResponse: {
+                  id: callId,
+                  name: fc.name ?? 'unknown_tool',
+                  response: { error: LOOP_DETECTED_SKIP_MESSAGE },
+                },
+              },
+        ],
+        stopAfterPermissionCancel: false,
+        loopDetected: true,
+      };
+    }
 
     const startTime = Date.now();
     let spanError: string | undefined;
@@ -4153,7 +4316,10 @@ export class Session implements SessionContext {
     const earlyErrorResponse = async (
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
-      opts?: { stopAfterPermissionCancel?: boolean },
+      opts?: {
+        recordInvalidToolParams?: boolean;
+        stopAfterPermissionCancel?: boolean;
+      },
     ) => {
       spanError = error.message;
       cleanupAgentToolResources();
@@ -4169,14 +4335,28 @@ export class Session implements SessionContext {
         error,
         errorType: undefined,
       });
+      const loopDetected =
+        opts?.recordInvalidToolParams === true &&
+        !activeToolAbortSignal.aborted &&
+        !opts?.stopAfterPermissionCancel &&
+        recordDaemonInvalidToolParams(
+          this.config,
+          promptId,
+          toolLoopState,
+          toolName,
+          error,
+        );
       return {
         parts: errorParts,
         stopAfterPermissionCancel: opts?.stopAfterPermissionCancel ?? false,
+        loopDetected,
       };
     };
 
     if (!fc.name) {
-      return earlyErrorResponse(new Error('Missing function name'));
+      return earlyErrorResponse(new Error('Missing function name'), undefined, {
+        recordInvalidToolParams: true,
+      });
     }
 
     const toolName = fc.name;
@@ -4186,6 +4366,8 @@ export class Session implements SessionContext {
     if (!tool) {
       return earlyErrorResponse(
         new Error(`Tool "${toolName}" not found in registry.`),
+        toolName,
+        { recordInvalidToolParams: true },
       );
     }
 
@@ -4322,7 +4504,8 @@ export class Session implements SessionContext {
           // prompt right after an allow-rule call just worked.
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+              shouldClassifyAllShellForAutoMode(toolName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -5190,6 +5373,9 @@ export class Session implements SessionContext {
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
+    const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
+      this.config,
+    );
 
     const parts = message.map((part) => {
       switch (part.type) {
@@ -5197,6 +5383,20 @@ export class Session implements SessionContext {
           collectExtensionMentionRefs(part.text, extensionMentions);
           return { text: part.text };
         case 'image':
+          if (preserveUnsupportedImageForBridge) {
+            return {
+              inlineData: {
+                mimeType: part.mimeType,
+                data: part.data,
+              },
+            };
+          }
+          return clampInlineMediaPart({
+            inlineData: {
+              mimeType: part.mimeType,
+              data: part.data,
+            },
+          });
         case 'audio':
           return clampInlineMediaPart({
             inlineData: {
@@ -5239,11 +5439,14 @@ export class Session implements SessionContext {
       embeddedContext.length === 0 &&
       extensionParts.length === 0
     ) {
-      return parts;
+      return this.#applyVisionBridgeIfNeeded(parts, abortSignal);
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
-      return [...parts, ...extensionParts];
+      return this.#applyVisionBridgeIfNeeded(
+        [...parts, ...extensionParts],
+        abortSignal,
+      );
     }
 
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
@@ -5278,6 +5481,9 @@ export class Session implements SessionContext {
       const readResult = await readManyFiles(this.config, {
         paths: pathSpecsToRead,
         signal: abortSignal,
+        ...(preserveUnsupportedImageForBridge
+          ? { preserveUnsupportedImageForBridge }
+          : {}),
       });
 
       const contentParts = Array.isArray(readResult.contentParts)
@@ -5292,6 +5498,8 @@ export class Session implements SessionContext {
       for (const part of contentParts) {
         if (typeof part === 'string') {
           processedQueryParts.push({ text: part });
+        } else if (preserveUnsupportedImageForBridge && hasImageParts([part])) {
+          processedQueryParts.push(part);
         } else {
           processedQueryParts.push(clampInlineMediaPart(part));
         }
@@ -5311,18 +5519,102 @@ export class Session implements SessionContext {
       }
       // Type guard for blob resources
       if ('blob' in contextPart && contextPart.blob) {
+        const inlinePart = {
+          inlineData: {
+            mimeType: contextPart.mimeType ?? 'application/octet-stream',
+            data: contextPart.blob,
+          },
+        };
         processedQueryParts.push(
-          clampInlineMediaPart({
-            inlineData: {
-              mimeType: contextPart.mimeType ?? 'application/octet-stream',
-              data: contextPart.blob,
-            },
-          }),
+          preserveUnsupportedImageForBridge && hasImageParts([inlinePart])
+            ? inlinePart
+            : clampInlineMediaPart(inlinePart),
         );
       }
     }
 
-    return processedQueryParts;
+    return this.#applyVisionBridgeIfNeeded(processedQueryParts, abortSignal);
+  }
+
+  async #applyVisionBridgeIfNeeded(
+    parts: Part[],
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
+      return parts;
+    }
+
+    let bridgeResult: VisionBridgeResult;
+    try {
+      debugLogger.debug('vision bridge: gate matched, running conversion');
+      bridgeResult = await runVisionBridge({
+        config: this.config,
+        parts,
+        signal: abortSignal,
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `vision bridge: failed before replacement; falling back to text-only parts error=${String(error instanceof Error ? error.message : error)}`,
+      );
+      return splitImageParts(parts).nonImageParts;
+    }
+    debugLogger.debug(
+      `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}${bridgeResult.error ? ` error=${bridgeResult.error}` : ''}`,
+    );
+
+    if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
+      try {
+        await this.messageEmitter.emitAgentMessage(
+          this.#formatVisionBridgeNotice(bridgeResult),
+        );
+      } catch (error) {
+        debugLogger.debug(
+          `vision bridge: failed to emit notice; continuing with bridge result error=${String(error instanceof Error ? error.message : error)}`,
+        );
+      }
+    }
+
+    if (abortSignal.aborted) {
+      debugLogger.debug('vision bridge: turn aborted after bridge returned');
+      return splitImageParts(parts).nonImageParts;
+    }
+
+    if (bridgeResult.applied && bridgeResult.parts != null) {
+      return normalizeParts(bridgeResult.parts);
+    }
+
+    // Bridge did not apply (e.g. skipped after cancel). Strip images before
+    // forwarding to the text-only primary model — never send raw inlineData to
+    // a model that cannot interpret it.
+    return splitImageParts(parts).nonImageParts;
+  }
+
+  #formatVisionBridgeNotice(result: VisionBridgeResult): string {
+    const modelName = result.modelId ?? 'vision model';
+    const target = result.modelEndpoint
+      ? `${modelName} (${result.modelEndpoint})`
+      : modelName;
+    const egressNote = result.egressOccurred
+      ? ` Your image and prompt/context were sent to ${target}.`
+      : '';
+
+    if (result.status === 'failed') {
+      const reason = result.egressOccurred
+        ? 'the vision model request failed'
+        : 'the vision bridge could not run';
+      return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+    }
+
+    if (result.status === 'skipped') {
+      return `Vision bridge cancelled.${egressNote}`;
+    }
+
+    // On success the image was always sent, so disclose egress unconditionally.
+    const omitted =
+      result.omittedCount > 0
+        ? ` (${result.omittedCount} image(s) omitted)`
+        : '';
+    return `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   }
 
   async #resolveExtensionMentionParts(

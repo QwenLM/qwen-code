@@ -560,8 +560,9 @@ describe('AgentTool', () => {
         // AgentTool execute() in a unit test would require mocking
         // most of the agent runtime; the isolation check itself is
         // what the test is guarding.)
-        const { GitWorktreeService } =
-          await import('../../services/gitWorktreeService.js');
+        const { GitWorktreeService } = await import(
+          '../../services/gitWorktreeService.js'
+        );
         const svc = new GitWorktreeService(repo);
         const dirty = await svc.hasWorktreeChanges(repo);
         expect(dirty).toBe(true);
@@ -592,8 +593,9 @@ describe('AgentTool', () => {
         execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
           cwd: repo,
         });
-        const { GitWorktreeService } =
-          await import('../../services/gitWorktreeService.js');
+        const { GitWorktreeService } = await import(
+          '../../services/gitWorktreeService.js'
+        );
         const svc = new GitWorktreeService(repo);
         expect(await svc.hasWorktreeChanges(repo)).toBe(false);
       } finally {
@@ -2504,7 +2506,8 @@ describe('AgentTool', () => {
 
     it('should clear pendingConfirmation via onConfirm callback (terminal UI path)', async () => {
       let capturedOnConfirm:
-        ((outcome: ToolConfirmationOutcome) => Promise<void>) | undefined;
+        | ((outcome: ToolConfirmationOutcome) => Promise<void>)
+        | undefined;
       const snapshots: Array<{ hasPendingConfirmation: boolean }> = [];
 
       const invocation = createInvocationWithEventDrivenAgent((emitter) => {
@@ -2756,7 +2759,8 @@ describe('AgentTool', () => {
         monitorRegistry.setAgentNotificationCallback.mock.calls.find(
           ([id, cb]) => id === agentId && typeof cb === 'function',
         )?.[1] as
-          ((displayText: string, modelText: string) => void) | undefined;
+          | ((displayText: string, modelText: string) => void)
+          | undefined;
       expect(callback).toBeDefined();
 
       callback?.('Monitor "logs" event #1: ready', '<task-notification />');
@@ -3083,7 +3087,8 @@ describe('AgentTool', () => {
         monitorRegistry.setAgentNotificationCallback.mock.calls.find(
           ([id, cb]) => id === agentId && typeof cb === 'function',
         )?.[1] as
-          ((displayText: string, modelText: string) => void) | undefined;
+          | ((displayText: string, modelText: string) => void)
+          | undefined;
       expect(callback).toBeDefined();
 
       callback?.('Monitor "logs" event #1: ready', '<task-notification />');

@@ -35,7 +35,7 @@ function splitGraphemes(value: string): string[] {
   return Array.from(graphemeSegmenter.segment(value), ({ segment }) => segment);
 }
 
-function removeLastGrapheme(value: string): string {
+export function removeLastGrapheme(value: string): string {
   const graphemes = splitGraphemes(value);
   graphemes.pop();
   return graphemes.join('');
@@ -52,7 +52,7 @@ function removeLastGrapheme(value: string): string {
  * Ctrl+H (`name: 'h'`, `ctrl: true`, `sequence: '\b'`) is not
  * misidentified as a deletion key.
  */
-const isDeletionKey = (key: Key): boolean =>
+export const isDeletionKey = (key: Key): boolean =>
   DELETION_KEY_NAMES.has(key.name) ||
   (!key.ctrl &&
     !key.meta &&
