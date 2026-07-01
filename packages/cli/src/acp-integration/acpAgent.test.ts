@@ -7967,6 +7967,9 @@ describe('deliverClientMcpMessage — reverse tool channel (#5626)', () => {
       server: 'srv',
       payload: message,
     });
+  });
+});
+
 describe('sessionRuntimeContext handler', () => {
   let capturedAgentFactory:
     | ((conn: { closed: Promise<void> }) => {
@@ -7995,9 +7998,7 @@ describe('sessionRuntimeContext handler', () => {
 
   const runtimeCtxMap = new Map<string, string>();
 
-  function makeRuntimeCtxConfig(
-    overrides: Record<string, unknown> = {},
-  ) {
+  function makeRuntimeCtxConfig(overrides: Record<string, unknown> = {}) {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -8030,13 +8031,15 @@ describe('sessionRuntimeContext handler', () => {
       getWorkspaceContext: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
       getRuntimeContext: vi.fn().mockReturnValue(runtimeCtxMap),
-      setRuntimeContextEntry: vi.fn().mockImplementation((key: string, value: string) => {
-        if (!/^[a-zA-Z0-9_-]{1,64}$/.test(key)) return false;
-        if (Buffer.byteLength(value, 'utf8') > 32 * 1024) return false;
-        if (!runtimeCtxMap.has(key) && runtimeCtxMap.size >= 16) return false;
-        runtimeCtxMap.set(key, value);
-        return true;
-      }),
+      setRuntimeContextEntry: vi
+        .fn()
+        .mockImplementation((key: string, value: string) => {
+          if (!/^[a-zA-Z0-9_-]{1,64}$/.test(key)) return false;
+          if (Buffer.byteLength(value, 'utf8') > 32 * 1024) return false;
+          if (!runtimeCtxMap.has(key) && runtimeCtxMap.size >= 16) return false;
+          runtimeCtxMap.set(key, value);
+          return true;
+        }),
       removeRuntimeContextEntry: vi.fn().mockImplementation((key: string) => {
         runtimeCtxMap.delete(key);
       }),
@@ -8086,9 +8089,7 @@ describe('sessionRuntimeContext handler', () => {
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
 
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      cfg as unknown as Config,
-    );
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
 
     vi.mocked(Session).mockImplementation(
       () =>
@@ -8154,7 +8155,9 @@ describe('sessionRuntimeContext handler', () => {
       { sessionId: 'rt-sid', entries: { bad: 123 } },
     );
     expect(result['keys']).toEqual([]);
-    expect((result['rejected'] as Array<{ key: string; reason: string }>)[0]).toEqual({
+    expect(
+      (result['rejected'] as Array<{ key: string; reason: string }>)[0],
+    ).toEqual({
       key: 'bad',
       reason: 'value_not_string',
     });
@@ -8167,9 +8170,9 @@ describe('sessionRuntimeContext handler', () => {
       { sessionId: 'rt-sid', entries: { 'invalid key!': 'value' } },
     );
     expect(result['keys']).toEqual([]);
-    expect((result['rejected'] as Array<{ key: string; reason: string }>)[0]?.reason).toBe(
-      'invalid_key',
-    );
+    expect(
+      (result['rejected'] as Array<{ key: string; reason: string }>)[0]?.reason,
+    ).toBe('invalid_key');
   });
 
   it('throws on missing sessionId', async () => {
