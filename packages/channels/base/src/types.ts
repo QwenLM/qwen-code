@@ -129,6 +129,7 @@ export interface SessionTarget {
   senderId: string;
   chatId: string;
   threadId?: string;
+  isGroup?: boolean;
 }
 
 interface ChannelTaskLifecycleBase {
