@@ -321,6 +321,20 @@ describe('generateContentResponseUtilities', () => {
       );
     });
 
+    it('sanitizes control chars and angle brackets in media placeholders', () => {
+      const parts = [
+        frPart(TOOL_SUCCEEDED_OUTPUT, [
+          { inlineData: { mimeType: 'image/png\x1b[31m<b>', data: 'AAAA' } },
+          { fileData: { fileUri: 'file:///x\x07<script>' } },
+        ]),
+      ];
+      // Control bytes and `<`/`>` are stripped so the placeholder stays
+      // well-formed and can't inject terminal codes or forge markup.
+      expect(getToolResponseDisplayText(parts)).toBe(
+        '<media: image/png[31mb>\n<media: file:///xscript>',
+      );
+    });
+
     it('concatenates output and nested media, keeping nested text', () => {
       const parts = [
         frPart('main output', [

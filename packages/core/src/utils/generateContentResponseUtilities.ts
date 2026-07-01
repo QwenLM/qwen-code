@@ -57,6 +57,22 @@ export const TOOL_SUCCEEDED_OUTPUT = 'Tool execution succeeded.';
  * Does NOT apply any character cap — the bound is whatever core already applied
  * (truncateToolOutput / per-tool paging). Full-detail semantics, §4.9.
  */
+/**
+ * Sanitize a MIME type / file URI before interpolating it into a
+ * `<media: …>` placeholder: strip control characters and the angle brackets
+ * that delimit the placeholder, so a crafted tool response can't inject control
+ * codes or forge/mangle the placeholder markup. Returns undefined for
+ * non-strings or once emptied, so callers fall back to their default label.
+ */
+function sanitizeMediaLabel(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  // eslint-disable-next-line no-control-regex
+  const cleaned = value.replace(/[\x00-\x1f\x7f-\x9f<>]/g, '').trim();
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
 export function getToolResponseDisplayText(
   parts: Part[] | undefined,
 ): string | undefined {
@@ -89,10 +105,16 @@ export function getToolResponseDisplayText(
     if (Array.isArray(fr.parts)) {
       for (const nested of fr.parts) {
         if (nested.inlineData) {
-          segments.push(`<media: ${nested.inlineData.mimeType ?? 'inline'}>`);
+          segments.push(
+            `<media: ${sanitizeMediaLabel(nested.inlineData.mimeType) ?? 'inline'}>`,
+          );
         } else if (nested.fileData) {
           segments.push(
-            `<media: ${nested.fileData.mimeType ?? nested.fileData.fileUri ?? 'file'}>`,
+            `<media: ${
+              sanitizeMediaLabel(nested.fileData.mimeType) ??
+              sanitizeMediaLabel(nested.fileData.fileUri) ??
+              'file'
+            }>`,
           );
         } else if (typeof nested.text === 'string' && nested.text.length > 0) {
           segments.push(nested.text);
