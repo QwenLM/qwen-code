@@ -88,6 +88,21 @@ describe('Feishu markdown utilities', () => {
       expect(panel).toBeDefined();
     });
 
+    it('keeps terminal status label in long collapsible content', () => {
+      const longText = 'a '.repeat(320);
+      const card = buildCardContent(longText, {
+        collapsible: true,
+        collapsibleThreshold: 500,
+        statusLabel: '已完成',
+      }) as unknown as CardStructure;
+      const panel = card.body.elements.find(
+        (e) => e.tag === 'collapsible_panel',
+      );
+
+      expect(panel).toBeDefined();
+      expect(panel?.elements?.[0]?.content).toContain('已完成');
+    });
+
     it('does not use collapsible for short content', () => {
       const card = buildCardContent('short', {
         collapsible: true,

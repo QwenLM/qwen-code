@@ -92,31 +92,31 @@ export function buildCardContent(
   if (
     options?.collapsible &&
     !options?.isStreaming &&
-    markdown.length > threshold
+    contentMd.length > threshold
   ) {
     // Find a split point near position 200 that doesn't break code fences
-    const previewEnd = markdown.indexOf('\n', 200);
+    const previewEnd = contentMd.indexOf('\n', 200);
     const rawSplit = previewEnd > 0 ? previewEnd : 200;
-    const safeSplit = markdown.lastIndexOf(' ', rawSplit);
+    const safeSplit = contentMd.lastIndexOf(' ', rawSplit);
     let splitAt = safeSplit > 100 ? safeSplit : rawSplit;
     // Verify fence parity at split point — if preview has odd fences,
     // move split to the nearest newline before/after where fences balance
-    const previewCandidate = markdown.slice(0, splitAt);
+    const previewCandidate = contentMd.slice(0, splitAt);
     let fenceCount = 0;
     for (const line of previewCandidate.split('\n')) {
       if ((line.match(/```/g) || []).length % 2 === 1) fenceCount++;
     }
     if (fenceCount % 2 === 1) {
       // Inside a code block — find the closing fence and split after it
-      const fenceStart = markdown.indexOf('\n```', splitAt);
+      const fenceStart = contentMd.indexOf('\n```', splitAt);
       if (fenceStart > 0 && fenceStart < rawSplit + 500) {
-        const fenceLineEnd = markdown.indexOf('\n', fenceStart + 1);
+        const fenceLineEnd = contentMd.indexOf('\n', fenceStart + 1);
         splitAt = fenceLineEnd > 0 ? fenceLineEnd : fenceStart + 4;
       }
       // else: no nearby closing fence, accept the split as-is
     }
-    const preview = markdown.slice(0, splitAt);
-    const rest = markdown.slice(splitAt);
+    const preview = contentMd.slice(0, splitAt);
+    const rest = contentMd.slice(splitAt);
 
     elements.push({
       tag: 'markdown',
