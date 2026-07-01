@@ -1033,6 +1033,7 @@ export async function discoverTools(
             mcpTimeout,
             cliConfig?.getMcpToolIdleTimeoutMs(),
             annotationsMap.get(funcDecl.name!),
+            mcpServerConfig.alwaysLoadTools === true,
           ),
         );
       } catch (error) {

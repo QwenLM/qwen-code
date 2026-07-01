@@ -11,7 +11,7 @@ import {
 } from './mcp-client-manager.js';
 import { McpClient } from './mcp-client.js';
 import type { ToolRegistry } from './tool-registry.js';
-import type { Config } from '../config/config.js';
+import { MCPServerConfig, type Config } from '../config/config.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { connectionIdOf } from './mcp-pool-key.js';
@@ -3798,6 +3798,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
   function mkRuntimeConfig(
     opts: {
       settingsServers?: Record<string, unknown>;
+      runtimeServers?: Record<string, MCPServerConfig>;
       runtimeAddSpy?: ReturnType<typeof vi.fn>;
       runtimeRemoveSpy?: ReturnType<typeof vi.fn>;
     } = {},
@@ -3815,6 +3816,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       getSessionId: () => 'test-session-1',
       isMcpServerDisabled: () => false,
       getSettingsMcpServers: () => opts.settingsServers ?? {},
+      getRuntimeMcpServers: () => opts.runtimeServers ?? {},
       addRuntimeMcpServer: addSpy,
       removeRuntimeMcpServer: removeSpy,
     } as unknown as Config;
@@ -4016,6 +4018,70 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       name: 'shadow-srv',
       shadowedSettings: true,
     });
+  });
+
+  it('case 5b: ifAbsent skips before replacing a different runtime server', async () => {
+    const acquireSpy = vi.fn();
+    const addSpy = vi.fn();
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const config = mkRuntimeConfig({
+      runtimeServers: { 'runtime-srv': new MCPServerConfig('old-cmd') },
+      runtimeAddSpy: addSpy,
+    });
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    const result = await manager.addRuntimeMcpServer(
+      'runtime-srv',
+      {
+        command: 'new-cmd',
+        __qwenRuntimeMcpIfAbsent: true,
+      } as unknown as MCPServerConfig,
+      'client-5b',
+    );
+
+    expect(result).toEqual({
+      name: 'runtime-srv',
+      skipped: true,
+      reason: 'runtime_name_conflict',
+    });
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(acquireSpy).not.toHaveBeenCalled();
+  });
+
+  it('case 5c: ifAbsent skips before reusing an unowned runtime server', async () => {
+    const acquireSpy = vi.fn();
+    const addSpy = vi.fn();
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const config = mkRuntimeConfig({
+      runtimeServers: { 'runtime-srv': new MCPServerConfig('new-cmd') },
+      runtimeAddSpy: addSpy,
+    });
+    const manager = mkManager({ config, options: { pool: fakePool } });
+
+    const result = await manager.addRuntimeMcpServer(
+      'runtime-srv',
+      {
+        command: 'new-cmd',
+        __qwenRuntimeMcpIfAbsent: true,
+      } as unknown as MCPServerConfig,
+      'client-5c',
+    );
+
+    expect(result).toEqual({
+      name: 'runtime-srv',
+      skipped: true,
+      reason: 'runtime_name_conflict',
+    });
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(acquireSpy).not.toHaveBeenCalled();
   });
 
   // ───── REMOVE cases ───────────────────────────────────────────────
