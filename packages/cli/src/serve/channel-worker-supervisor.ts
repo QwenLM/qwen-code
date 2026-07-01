@@ -287,8 +287,8 @@ function redactWorkerLogLine(
 }
 
 function normalizeWorkerLogLineForRedaction(line: string): string {
-  // eslint-disable-next-line no-control-regex
   return line.replace(
+    // eslint-disable-next-line no-control-regex
     /[\u0000-\u001f\u007f-\u009f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g,
     '',
   );

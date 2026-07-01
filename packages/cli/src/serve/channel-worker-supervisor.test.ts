@@ -686,6 +686,43 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('does not clobber restart spawn failure state on force shutdown', async () => {
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const spawnWorker = vi.fn().mockReturnValueOnce(firstChild);
+    spawnWorker.mockImplementationOnce(() => {
+      throw new Error('fork failed');
+    });
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker,
+      restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10] },
+    });
+
+    const started = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+    firstChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+
+    supervisor.killAllSync();
+
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'failed',
+      error: 'fork failed',
+    });
+  });
+
   it('does not count expired restart attempts against the restart budget', async () => {
     vi.useFakeTimers();
     const firstChild = new FakeChild(false);
@@ -878,6 +915,45 @@ describe('createChannelWorkerSupervisor', () => {
       pid: 22222,
       restartCount: 1,
       lastHeartbeatAt: expect.any(String),
+    });
+  });
+
+  it('ignores heartbeats from a mismatched pid', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      heartbeatTimeoutMs: 0,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    child.emit('message', {
+      type: 'heartbeat',
+      pid: 22222,
+      at: '2026-07-01T00:00:00.000Z',
+    });
+
+    expect(supervisor.snapshot()).not.toHaveProperty('lastHeartbeatAt');
+
+    child.emit('message', {
+      type: 'heartbeat',
+      pid: 11111,
+      at: '2026-07-01T00:00:01.000Z',
+    });
+
+    expect(supervisor.snapshot()).toMatchObject({
+      lastHeartbeatAt: '2026-07-01T00:00:01.000Z',
     });
   });
 
@@ -1390,6 +1466,31 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'failed',
       exitCode: 1,
       error: expect.stringContaining('Channel worker exited before ready'),
+    });
+  });
+
+  it('does not clobber failed startup state before exit on force shutdown', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('error', new Error('ipc setup failed'));
+    await expect(started).rejects.toThrow('ipc setup failed');
+
+    supervisor.killAllSync();
+
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(supervisor.snapshot()).toMatchObject({
+      enabled: true,
+      state: 'failed',
+      error: 'ipc setup failed',
     });
   });
 
