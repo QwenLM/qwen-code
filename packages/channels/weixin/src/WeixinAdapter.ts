@@ -293,6 +293,7 @@ export class WeixinChannel extends ChannelBase {
       this.abortController.abort();
       this.abortController = null;
     }
+    this.activeTypingChats.clear();
   }
 
   private startTyping(chatId: string): void {

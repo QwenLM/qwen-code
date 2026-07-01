@@ -375,6 +375,7 @@ export class DingtalkChannel extends ChannelBase {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    this.activeReactionKeys.clear();
     this.client.disconnect();
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }

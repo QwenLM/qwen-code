@@ -21,6 +21,11 @@ import type {
   ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 
+type LifecycleBase = Omit<
+  Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
+  'type'
+>;
+
 class TestWeixinChannel extends WeixinChannel {
   emitLifecycle(event: ChannelTaskLifecycleEvent): void {
     this.onTaskLifecycle(event);
@@ -57,7 +62,12 @@ function createChannel(
 }
 
 function deferredPromise<T>() {
-  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
   return { promise, resolve, reject };
 }
 
@@ -80,7 +90,7 @@ describe('WeixinChannel', () => {
       messageId: 'message-1',
       identity: { id: 'channel:weixin', displayName: 'weixin' },
       memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
-    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+    } satisfies LifecycleBase;
 
     channel.emitLifecycle({ ...baseEvent, type: 'started' });
     channel.emitLifecycle({ ...baseEvent, type: 'started' });
@@ -111,7 +121,7 @@ describe('WeixinChannel', () => {
       messageId: 'message-2',
       identity: { id: 'channel:weixin', displayName: 'weixin' },
       memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
-    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+    } satisfies LifecycleBase;
 
     channel.emitLifecycle({ ...baseEvent, type: 'started' });
 
@@ -145,7 +155,7 @@ describe('WeixinChannel', () => {
       messageId: 'message-3',
       identity: { id: 'channel:weixin', displayName: 'weixin' },
       memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
-    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+    } satisfies LifecycleBase;
 
     channel.emitLifecycle({ ...baseEvent, type: 'started' });
     channel.emitLifecycle({ ...baseEvent, type: 'completed' });
@@ -159,5 +169,30 @@ describe('WeixinChannel', () => {
       expect(setTyping).toHaveBeenNthCalledWith(3, 'user-late-start', false);
       expect(setTyping).toHaveBeenCalledTimes(3);
     });
+  });
+
+  it('clears active typing state on disconnect', () => {
+    const channel = createChannel();
+    const setTyping = vi.fn().mockResolvedValue(true);
+    (channel as unknown as { setTyping: typeof setTyping }).setTyping =
+      setTyping;
+    const activeTypingChats = (
+      channel as unknown as { activeTypingChats: Set<string> }
+    ).activeTypingChats;
+
+    channel.emitLifecycle({
+      type: 'started',
+      channelName: 'weixin',
+      chatId: 'user-disconnect',
+      sessionId: 'session-4',
+      messageId: 'message-4',
+      identity: { id: 'channel:weixin', displayName: 'weixin' },
+      memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
+    });
+    expect(activeTypingChats.has('user-disconnect')).toBe(true);
+
+    channel.disconnect();
+
+    expect(activeTypingChats.has('user-disconnect')).toBe(false);
   });
 });

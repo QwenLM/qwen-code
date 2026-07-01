@@ -7,6 +7,11 @@ import type {
   Envelope,
 } from '@qwen-code/channel-base';
 
+type LifecycleBase = Omit<
+  Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
+  'type'
+>;
+
 type TestTelegramMessage = {
   from: { id: number; first_name: string; last_name?: string };
   chat: { id: number; type: string };
@@ -164,7 +169,7 @@ describe('TelegramChannel', () => {
       messageId: 'message-1',
       identity: { id: 'channel:telegram', displayName: 'telegram' },
       memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
-    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+    } satisfies LifecycleBase;
 
     channel.emitLifecycle({ ...baseEvent, type: 'started' });
     channel.emitLifecycle({ ...baseEvent, type: 'started' });
