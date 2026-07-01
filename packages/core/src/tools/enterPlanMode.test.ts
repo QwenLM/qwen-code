@@ -7,6 +7,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 describe('EnterPlanModeTool', () => {
   let tool: EnterPlanModeTool;
@@ -156,6 +158,42 @@ describe('EnterPlanModeTool', () => {
 
       expect(result.llmContent).toContain('Failed to enter plan mode');
       expect(result.llmContent).toContain('trust gate');
+    });
+
+    it('rejects inside subagent context without changing approval mode', async () => {
+      approvalMode = ApprovalMode.DEFAULT;
+      const invocation = tool.build({});
+
+      const result = await runWithAgentContext('agent-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('not available inside subagents');
+      expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('rejects inside teammate context without changing approval mode', async () => {
+      approvalMode = ApprovalMode.AUTO_EDIT;
+      const invocation = tool.build({});
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'agent@test',
+          agentName: 'agent',
+          teamName: 'test',
+          isTeamLead: false,
+        },
+        () => invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('not available inside subagents');
+      expect(result.llmContent).toContain('return your plan');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
     });
   });
 });

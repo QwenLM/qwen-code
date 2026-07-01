@@ -37,7 +37,7 @@ describe('resolvePath', () => {
 
   it('expands USERPROFILE references case-insensitively', () => {
     expect(resolvePath('%USERPROFILE%\\schemas\\input.json')).toBe(
-      path.normalize(`${os.homedir()}\\schemas\\input.json`),
+      path.join(os.homedir(), 'schemas', 'input.json'),
     );
   });
 

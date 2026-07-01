@@ -859,4 +859,49 @@ describe('ConnectionRegistry.getSnapshot', () => {
       registry.dispose();
     }
   });
+
+  it('finds pending permissions across connections', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const connA = registry.create(false);
+      const connB = registry.create(false);
+      expect(connA).toBeDefined();
+      expect(connB).toBeDefined();
+      if (!connA || !connB) return;
+
+      const idA = connA.nextId();
+      const idB = connB.nextId();
+      expect(idA).not.toBe(idB);
+      // Pin the connection-qualified format `_qwen_perm_<connectionId>_<N>` —
+      // it's the collision-prevention guarantee of this change, so a
+      // regression to the old `_qwen_perm_<N>` format must fail here, not just
+      // an "ids differ" check that the old format would also pass.
+      expect(idA).toMatch(/^_qwen_perm_.+_1$/);
+      expect(idA).toContain(connA.connectionId);
+      expect(idB).toContain(connB.connectionId);
+
+      connA.pending.set(idA, {
+        sessionId: 'sess-1',
+        bridgeRequestId: 'perm-1',
+        kind: 'permission',
+      });
+
+      expect(registry.findPendingClientRequest(idA)?.conn).toBe(connA);
+      expect(registry.findPendingPermission('perm-1', 'sess-1')?.id).toBe(idA);
+      // The `sessionId === undefined` branch (relied on by dispatch's
+      // `session/permission` handler when no sessionId is supplied) matches on
+      // requestId alone, while a mismatched sessionId must not match.
+      expect(registry.findPendingPermission('perm-1')?.id).toBe(idA);
+      expect(
+        registry.findPendingPermission('perm-1', 'wrong-session'),
+      ).toBeUndefined();
+
+      // findPendingPermission is a read-only locator; deletion is done by the
+      // owning connection on its own map key (AcpDispatcher.dropOwnPendingPermission).
+      connA.pending.delete(idA);
+      expect(registry.findPendingClientRequest(idA)).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
 });
