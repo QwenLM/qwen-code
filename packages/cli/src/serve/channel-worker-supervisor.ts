@@ -256,7 +256,7 @@ function escapeRegExp(value: string): string {
 
 function sensitiveEnvValues(env: NodeJS.ProcessEnv): string[] {
   const sensitiveKey =
-    /TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL/i;
+    /TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|PASSWORD|PASSWD|PASSPHRASE|AUTH|SESSION|DSN|CONNECTION_STRING/i;
   return Object.entries(env)
     .filter(([key, value]) => sensitiveKey.test(key) && value !== undefined)
     .map(([, value]) => value!)
@@ -268,8 +268,8 @@ function redactWorkerLogLine(
   opts: { daemonToken?: string; workerEnv: NodeJS.ProcessEnv },
 ): string {
   let redacted = line.replace(
-    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s@]+)@([^\s]+)/gi,
-    '$1<redacted>@$3',
+    /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/]*@)([^\s/]+)([^\s]*)/gi,
+    '$1<redacted>@$3$4',
   );
   const secrets = new Set([
     ...(opts.daemonToken && opts.daemonToken.length >= 4
@@ -476,7 +476,6 @@ export function createChannelWorkerSupervisor(
       if (child !== startedChild || stopping) return;
       snapshot = {
         ...snapshot,
-        state: snapshot.state === 'running' ? 'running' : snapshot.state,
         error: 'Channel worker heartbeat timed out.',
         staleHeartbeatAt: new Date().toISOString(),
       };
@@ -547,20 +546,16 @@ export function createChannelWorkerSupervisor(
     }
 
     child = startedChild;
-    const flushStdout = attachWorkerLogStream(startedChild.stdout, 'stdout', {
+    attachWorkerLogStream(startedChild.stdout, 'stdout', {
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
       workerEnv: env,
       onLog: opts.onLog,
     });
-    const flushStderr = attachWorkerLogStream(startedChild.stderr, 'stderr', {
+    attachWorkerLogStream(startedChild.stderr, 'stderr', {
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
       workerEnv: env,
       onLog: opts.onLog,
     });
-    const flushLogs = () => {
-      flushStdout();
-      flushStderr();
-    };
     if (startedChild.pid !== undefined) {
       snapshot = { ...snapshot, pid: startedChild.pid };
     }
@@ -569,6 +564,7 @@ export function createChannelWorkerSupervisor(
       let settled = false;
       let ready = false;
       let exitObserved = false;
+      let terminatingBeforeReady = false;
       let startupTimer: NodeJS.Timeout | undefined;
       const cleanupStartupTimer = () => {
         if (!startupTimer) return;
@@ -579,7 +575,18 @@ export function createChannelWorkerSupervisor(
         cleanupStartupTimer();
         startedChild.removeListener('message', handleMessage);
         clearStaleHeartbeatTimer();
-        flushLogs();
+      };
+      const terminateBeforeReady = () => {
+        cleanupLaunch();
+        if (terminatingBeforeReady) return;
+        terminatingBeforeReady = true;
+        const exited = waitForExit(startedChild, 2_000);
+        startedChild.kill('SIGTERM');
+        void exited.then((didExit) => {
+          if (!didExit && child === startedChild && !exitObserved) {
+            startedChild.kill('SIGKILL');
+          }
+        });
       };
       const failBeforeReady = (err: Error) => {
         if (settled) return;
@@ -669,13 +676,7 @@ export function createChannelWorkerSupervisor(
           state: 'failed',
           error: sanitizeWorkerError(err.message),
         };
-        if (kind === 'restart') {
-          cleanupLaunch();
-          child = undefined;
-          startedChild.kill('SIGTERM');
-          scheduleRestart();
-          notifyExit(opts.onExit, snapshotCopy());
-        }
+        terminateBeforeReady();
         if (!settled) {
           failBeforeReady(new Error(snapshot.error));
         }
@@ -691,15 +692,7 @@ export function createChannelWorkerSupervisor(
         };
         failBeforeReady(new Error(error));
         if (child === startedChild) {
-          if (kind === 'restart' && !stopping) {
-            cleanupLaunch();
-            child = undefined;
-            scheduleRestart();
-            notifyExit(opts.onExit, snapshotCopy());
-            startedChild.kill('SIGTERM');
-          } else {
-            child.kill('SIGTERM');
-          }
+          terminateBeforeReady();
         }
       }, opts.startupTimeoutMs ?? DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS);
       startupTimer.unref();

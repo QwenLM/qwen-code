@@ -2295,7 +2295,7 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('forwards channel worker log lines into the daemon log', async () => {
+  it('forwards channel worker log and exit details into the daemon log', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-log-')),
     );
@@ -2308,6 +2308,7 @@ describe('runQwenServe channel worker supervisor', () => {
       channels: ['telegram'],
     });
     let onLog: CreateChannelWorkerSupervisorOptions['onLog'];
+    let onExit: CreateChannelWorkerSupervisorOptions['onExit'];
 
     try {
       const handle = await runQwenServe(
@@ -2323,6 +2324,7 @@ describe('runQwenServe channel worker supervisor', () => {
           bridge: makeFakeBridge(),
           channelWorkerSupervisorFactory: vi.fn((opts) => {
             onLog = opts.onLog;
+            onExit = opts.onExit;
             return worker;
           }),
           channelServicePidfile: makePidfileDeps(),
@@ -2331,6 +2333,18 @@ describe('runQwenServe channel worker supervisor', () => {
 
       try {
         onLog?.({ stream: 'stderr', line: 'adapter failed with <redacted>' });
+        onExit?.({
+          enabled: true,
+          state: 'exited',
+          pid: 1234,
+          channels: ['telegram'],
+          exitCode: 1,
+          signal: null,
+          error: 'ipc failed',
+          restartCount: 2,
+          nextRestartAt: '2026-07-01T01:00:05.000Z',
+          staleHeartbeatAt: '2026-07-01T01:00:00.000Z',
+        });
       } finally {
         await handle.close();
       }
@@ -2344,6 +2358,9 @@ describe('runQwenServe channel worker supervisor', () => {
 
       expect(logContent).toContain(
         'channel worker stderr: adapter failed with <redacted>',
+      );
+      expect(logContent).toContain(
+        'channel worker exited (state=exited, pid=1234, code=1, signal=null, error=ipc failed, restartCount=2, nextRestartAt=2026-07-01T01:00:05.000Z, staleHeartbeatAt=2026-07-01T01:00:00.000Z)',
       );
       expect(logContent).not.toContain('secret-token');
     } finally {

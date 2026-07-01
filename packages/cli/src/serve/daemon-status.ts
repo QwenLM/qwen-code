@@ -520,6 +520,9 @@ function pushRuntimeIssues(
       channelWorker.lastExitAt
         ? `lastExitAt=${channelWorker.lastExitAt}`
         : undefined,
+      channelWorker.lastRestartAt
+        ? `lastRestartAt=${channelWorker.lastRestartAt}`
+        : undefined,
       channelWorker.nextRestartAt
         ? `nextRestartAt=${channelWorker.nextRestartAt}`
         : undefined,

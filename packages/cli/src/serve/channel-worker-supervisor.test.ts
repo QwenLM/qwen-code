@@ -263,8 +263,8 @@ describe('createChannelWorkerSupervisor', () => {
     expect(snapshot).toMatchObject({
       enabled: true,
       state: 'failed',
-      exitCode: 1,
-      signal: null,
+      exitCode: null,
+      signal: 'SIGTERM',
     });
     expect(snapshot.error).toContain('spawn error');
     expect(snapshot.error).not.toContain('\n');
@@ -535,9 +535,10 @@ describe('createChannelWorkerSupervisor', () => {
 
     await vi.advanceTimersByTimeAsync(5);
     expect(secondChild.kill).toHaveBeenCalledWith('SIGTERM');
-    expect(onExit).toHaveBeenCalledTimes(2);
+    expect(onExit).toHaveBeenCalledTimes(1);
 
     secondChild.emit('exit', null, 'SIGTERM');
+    expect(onExit).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(10);
     thirdChild.emit('message', {
       type: 'ready',
@@ -848,10 +849,9 @@ describe('createChannelWorkerSupervisor', () => {
 
   it('forwards worker stdout and stderr lines with secrets redacted', async () => {
     vi.stubEnv('TELEGRAM_BOT_TOKEN', 'telegram-secret');
-    vi.stubEnv(
-      'HTTPS_PROXY',
-      'http://proxy-user:proxy-pass@proxy.example:8080',
-    );
+    vi.stubEnv('REDIS_PASSWORD', 'redis-secret');
+    vi.stubEnv('BASIC_AUTH', 'basic-auth-secret');
+    vi.stubEnv('HTTPS_PROXY', 'http://proxy-user:p@ssword@proxy.example:8080');
     const child = new FakeChild();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -869,10 +869,12 @@ describe('createChannelWorkerSupervisor', () => {
     const started = supervisor.start();
     child.stderr.emit('data', Buffer.from('failed with secret-token\n'));
     child.stdout.emit('data', Buffer.from('adapter token telegram-secret'));
+    child.stdout.emit('data', Buffer.from('\nredis redis-secret\n'));
+    child.stdout.emit('data', Buffer.from('auth basic-auth-secret\n'));
     child.stdout.emit('end');
     child.stderr.emit(
       'data',
-      Buffer.from('proxy http://proxy-user:proxy-pass@proxy.example:8080\n'),
+      Buffer.from('proxy http://proxy-user:p@ssword@proxy.example:8080/path\n'),
     );
     child.emit('message', {
       type: 'ready',
@@ -891,9 +893,20 @@ describe('createChannelWorkerSupervisor', () => {
       line: 'adapter token <redacted>',
     });
     expect(onLog).toHaveBeenCalledWith({
-      stream: 'stderr',
-      line: 'proxy http://<redacted>@proxy.example:8080',
+      stream: 'stdout',
+      line: 'redis <redacted>',
     });
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stdout',
+      line: 'auth <redacted>',
+    });
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stderr',
+      line: 'proxy http://<redacted>@proxy.example:8080/path',
+    });
+    expect(
+      onLog.mock.calls.flatMap((call) => call[0].line).join('\n'),
+    ).not.toContain('ssword');
   });
 
   it('flushes oversized worker log buffers without waiting for a newline', async () => {

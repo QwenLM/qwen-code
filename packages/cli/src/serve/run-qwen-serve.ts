@@ -2324,7 +2324,9 @@ export async function runQwenServe(
               daemonLog.warn(
                 `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
                   `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
-                  `error=${snapshot.error ?? 'none'})`,
+                  `error=${snapshot.error ?? 'none'}, restartCount=${snapshot.restartCount ?? 0}, ` +
+                  `nextRestartAt=${snapshot.nextRestartAt ?? 'none'}, ` +
+                  `staleHeartbeatAt=${snapshot.staleHeartbeatAt ?? 'none'})`,
               );
               writeChannelWorkerPidfile(snapshot, { clearWorkerPid: true });
             },
