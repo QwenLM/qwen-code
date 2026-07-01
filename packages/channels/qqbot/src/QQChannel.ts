@@ -436,6 +436,9 @@ export class QQChannel extends ChannelBase {
           );
           // If 429 on active retry, don't fall through to plain-text
           if (activeResp.status === 429) {
+            process.stderr.write(
+              `[QQ:${this.name}] Active retry rate-limited (HTTP 429), giving up on fallback\n`,
+            );
             if (msgId) this.saveQQState();
             return;
           }
