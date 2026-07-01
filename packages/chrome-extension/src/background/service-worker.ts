@@ -124,7 +124,7 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
   // chrome.debugger and pushes results/events back over the active socket.
   if (isCdpBridgeFrame(msg['type'])) {
     handleCdpFrame(msg as { type?: unknown }, (frame) =>
-      sendRaw(socket ?? ws, frame),
+      sendRaw(ws, frame),
     );
     return;
   }
