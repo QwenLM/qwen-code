@@ -1436,6 +1436,8 @@ export class GeminiChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  private readonly imagePayloadStore = new InMemoryImagePayloadStore();
+
   /**
    * Monotonically counts user-content pushes that survived into history.
    * Incremented when `sendMessageStream` pushes the user content and decremented
@@ -1505,11 +1507,10 @@ export class GeminiChat {
     const { maxRecentImages } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
-    const imageStore = new InMemoryImagePayloadStore();
     return prepareImagePayloadsForRequest(requestHistory, {
       maxRecentImages,
       preserveLastUserImagePartCount: currentUserPartCount,
-      store: imageStore,
+      store: this.imagePayloadStore,
     });
   }
 

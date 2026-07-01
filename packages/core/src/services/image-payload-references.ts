@@ -91,6 +91,12 @@ export function prepareImagePayloadsForRequest(
       reattachById.set(image.stored.id, image.stored);
     }
   }
+  for (const id of referencedIds) {
+    const stored = options.store.get(id);
+    if (stored) {
+      reattachById.set(stored.id, stored);
+    }
+  }
 
   if (reattachById.size === 0) {
     return transformed;
@@ -192,8 +198,13 @@ function imagePartToStoredPayload(part: Part): StoredImagePayload {
 }
 
 function imageReferenceText(stored: StoredImagePayload): string {
-  const displayName = stored.displayName ? `, ${stored.displayName}` : '';
-  return `[Image #${stored.id}: ${stored.mimeType}, ${stored.bytes} bytes${displayName}]`;
+  return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${stored.bytes} bytes]`;
+}
+
+function safeImageMimeType(mimeType: string): string {
+  return /^image\/[a-z0-9.+-]{1,64}$/i.test(mimeType)
+    ? mimeType.toLowerCase()
+    : 'image/unknown';
 }
 
 function storedImageToPart(stored: StoredImagePayload): Part {
